@@ -163,37 +163,69 @@ class Editor(TextArea):
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
         super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
-        # A SOLID caret, ALWAYS — not "solid while the buffer is empty".
-        #
-        # Textual draws the caret onto the PLACEHOLDER: with no text, the
+        # The caret is SOLID, never blinking, and is NOT DRAWN AT ALL while the
+        # buffer is empty. Two rules, one root cause: Textual has nowhere to put
+        # a caret in a cell grid except ON a character, so with no text the
         # placeholder branch of `TextArea.render_line` inverts cell 0 of
-        # `Message Local Operator…` whenever `_draw_cursor` is true. With blink
-        # on, `_draw_cursor` flips twice a second, so the first letter of the
-        # placeholder strobes — and on the boot splash, where nothing else
-        # moves, that 2 Hz invert next to a static logo WAS the startup
-        # animation users read as obnoxious. Nothing else was repainting.
+        # `Message Local Operator…` whenever `_draw_cursor` is true.
         #
-        # Gating blink on "buffer is empty" or "boot layout is active" would fix
-        # exactly that frame and leave the identical 2 Hz invert running for the
-        # rest of the session, now with the caret silently changing behaviour at
-        # the first keystroke for a reason the user cannot see. Discoverability
-        # points the same way: a blinking caret is INVISIBLE half the time,
-        # while this one — inverted `fg` on `surface` via the
-        # `text-area--cursor` component class — is a full-contrast block that is
-        # never absent. Blink earns its keep in a dense form where the caret has
-        # to be FOUND; this is one always-focused field whose caret sits exactly
-        # where the user last typed.
+        # Blinking made that cell flip twice a second, and on the boot splash —
+        # where nothing else repaints — that 2 Hz invert beside a static logo
+        # WAS the startup animation users called obnoxious. Turning blink off
+        # alone only froze it: measured on the boot frame, the inverted cell
+        # sits at 13.76:1 against the panel, roughly 2.6x the mark's 3.71-5.35:1,
+        # so the loudest thing on the identity screen became a white block
+        # covering a letter, and the copy read `▉essage Local Operator…` (D-05).
+        # A caret that eats a word is a worse bug than a caret that flickers.
         #
-        # It also retires a timer: stock blink runs `refresh_lines` every 500 ms
-        # for the life of the app, so a completely idle session was repainting a
-        # row forever — twice a second of terminal writes down an ssh pipe for a
-        # caret that had not moved.
+        # So: no caret while there is nothing to point at. The placeholder is
+        # PROSE and has to survive as words, and the composer still announces
+        # itself — `#input-dock:focus-within #prompt-chevron` turns the chevron
+        # accent on focus, which is a product affordance rather than a raster
+        # artefact sitting on top of one. The instant the buffer holds anything,
+        # the caret appears and stays put: that is where a caret earns its keep,
+        # marking an insertion point among characters, and a first-time user
+        # meets it on their first keystroke.
+        #
+        # This is NOT the "off while the buffer is empty" that an earlier pass
+        # rejected. That variant was about BLINK — solid while empty, blinking
+        # once you type — which keeps the 500 ms repaint for the whole session
+        # and changes the caret's behaviour mid-typing for a reason the user
+        # cannot see. Here blink is off unconditionally and what is conditional
+        # is whether a caret is DRAWN, in the one state where drawing it
+        # destroys a word. Neither state animates, which is also what keeps the
+        # splash reproducible for the SVG snapshot harness.
+        #
+        # Blink-off pays a second time: stock blink runs `refresh_lines` every
+        # 500 ms for the life of the app, so a completely idle session was
+        # writing a row down the ssh pipe twice a second for a caret that had
+        # not moved.
         self.cursor_blink = False
         self._history: list[str] = []
         self._history_index: int | None = None  # None = not navigating
         self._draft: str = ""  # buffer text saved when history nav starts
         self._on_model_chosen: Callable[[ModelRow], None] | None = None
         self.set_commands(commands or [])
+
+    @property
+    def _draw_cursor(self) -> bool:
+        """Suppress the caret while the placeholder is the only thing on the row.
+
+        The hook is Textual's, and it is the ONLY one that reaches the
+        placeholder: ``render_line`` consults it before inverting cell 0 of the
+        placeholder, and ``_render_line`` consults it for a real document row.
+        With an empty buffer and a placeholder set, the first path is the only
+        one that runs, so gating on emptiness here removes the block from the
+        placeholder and touches nothing else. See :meth:`__init__` for why the
+        caret is unwelcome on prose.
+
+        ``document.end`` rather than ``self.text``: this is called once per
+        rendered line, and ``text`` joins the whole buffer to answer a question
+        about its first cell.
+        """
+        if self.document.end == (0, 0):
+            return False
+        return bool(super()._draw_cursor)
 
     # -- public API ---------------------------------------------------------
     @property

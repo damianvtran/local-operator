@@ -208,6 +208,12 @@ async def test_run_tui_installs_file_logging_around_the_app(
             logging.getLogger("local_operator.stub").warning("inside the run")
             observed["handlers"] = list(logging.getLogger().handlers)
 
+        def resume_hint(self) -> str:
+            # run_tui prints this AFTER the app releases the terminal. Empty
+            # here: the stub has no session, and a stub that invented an id
+            # would put a fake resume command in this test's output.
+            return ""
+
     monkeypatch.setattr("local_operator.tui.app.OperatorApp", StubApp)
 
     code = await run_tui(lambda: _factory(FakeSession()))

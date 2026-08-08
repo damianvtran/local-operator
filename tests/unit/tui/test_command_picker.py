@@ -260,20 +260,26 @@ def test_wide_character_descriptions_never_overflow(width: int) -> None:
 
 
 def test_overflow_marker_shows_the_hidden_rows() -> None:
+    # Derived from the registry, not transcribed from it: this test is about the
+    # WINDOWING maths, and a hardcoded census broke it every time a command was
+    # added — which is not a windowing regression.
+    total_commands = len(SLASH_COMMANDS)
     picker = _picker(SLASH_COMMANDS)
     picker.sync("/")
     start, end, total = picker.visible_window()
-    assert (start, end, total) == (0, 8, 15)
+    visible = end - start
+    assert (start, total) == (0, total_commands)
+    assert visible < total_commands, "the fixture must overflow for this to mean anything"
     marker = picker._overflow_row(80)
     assert marker is not None
-    assert "… 7 more" in marker.plain
+    assert f"… {total_commands - visible} more" in marker.plain
     assert cell_len(marker.plain) == 80
 
     # At the bottom of the list the window hides rows at BOTH ends.
     picker._selected = total - 1
     picker._scroll_to_selection()
     start, end, _ = picker.visible_window()
-    assert (start, end) == (7, 15)
+    assert (start, end) == (total_commands - visible, total_commands)
 
     # Once everything fits the marker disappears.
     picker.sync("/clear")

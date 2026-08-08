@@ -48,6 +48,11 @@ from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
 from local_operator.paths import config_dir
 
+# `local_operator.resume` is deliberately tiny (pathlib only): importing the
+# session factory here for the same constant dragged the harness and asyncio
+# onto the CLI startup path, which test_import_graph exists to prevent.
+from local_operator.resume import RESUME_LATEST
+
 if TYPE_CHECKING:
     from local_operator.agents import AgentRegistry
 
@@ -98,6 +103,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         " saved to the agent's directory after each completed task.  This allows the agent to"
         " learn from its experiences and improve its performance over time.  Omit this flag to"
         " have the agent not store the conversation history, thus resetting it after each session.",
+    )
+    parent_parser.add_argument(
+        "--resume",
+        nargs="?",
+        const=RESUME_LATEST,
+        default=None,
+        metavar="SESSION_ID",
+        dest="resume",
+        help="Resume a previous session by id, replaying its transcript. The id is the one"
+        " printed when a session is stopped with Ctrl+C twice, and is the directory name under"
+        " ~/.local-operator/sessions. Pass --resume with no id to reopen the most recent"
+        " session.",
     )
 
     # Main parser
@@ -1177,6 +1194,30 @@ def main() -> int:
 
         # Set up the subprocess environment early
         setup_cross_platform_environment()
+
+        # Resolve `--resume` HERE, before anything is started. Left to the
+        # session factory it surfaces inside the TUI as "session failed to
+        # start" — a full-screen app launched, painted, and torn down to report a
+        # typo — and the generic handler below would render it as a traceback
+        # panel and still exit 0. A bad session id is ordinary user error, so it
+        # gets a one-line message, the ids that DO exist, and a non-zero status.
+        if getattr(args, "resume", None) is not None:
+            from local_operator.resume import (
+                ResumeNotFound,
+                recent_session_ids,
+                resolve_resume_id,
+            )
+
+            try:
+                args.resume = resolve_resume_id(config_dir(), str(args.resume))
+            except ResumeNotFound as error:
+                print(f"\033[31m{error}\033[0m", file=sys.stderr)
+                available = recent_session_ids(config_dir())
+                if available:
+                    print("recent sessions:", file=sys.stderr)
+                    for session_id in available:
+                        print(f"  {session_id}", file=sys.stderr)
+                return 1
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"
         # (CL-12) No env_config binding here: the scheduler wrapper resolves its

@@ -742,9 +742,10 @@ def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) ->
     taken only when the listing actually has it. ``local_operator.model.discovery``
     has already merged the listing over the static registry and applied the rules
     that make a listing trustworthy — a zero price is unknown rather than free, a
-    ``max_tokens`` of exactly 4096 is a lying OpenAI-compat default, capabilities
-    are OR-ed so a terse listing cannot downgrade a model — so this function is
-    only the projection of that answer onto the legacy ``ModelInfo`` shape.
+    ``max_tokens`` of exactly 4096 is a lying OpenAI-compat default, an UNSTATED
+    capability defers to the registry while a stated one (including a ``false``)
+    is the provider's own answer — so this function is only the projection of that
+    answer onto the legacy ``ModelInfo`` shape.
 
     Imported lazily. The discovery module pulls httpx and the provider registry,
     and this branch is only reached for a model the registry does not describe;
@@ -794,7 +795,13 @@ def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) ->
         # from reading as free rather than inventing a number.
         if not info.cache_writes_price:
             info.cache_writes_price = info.input_price
-    info.supports_images = info.supports_images or row.supports_images
+    if row.supports_images is not None:
+        # The provider's own statement, including a ``false``: ``DiscoveredModel``
+        # spells "the listing did not say" as ``None``, so the only thing an
+        # OR would add here is the ability to ignore a denial. ``ModelInfo``
+        # already carries ``Optional[bool]`` with the same meaning, and
+        # ``build_model_spec`` reads ``is not None`` before trusting it.
+        info.supports_images = row.supports_images
     info.supports_prompt_cache = info.supports_prompt_cache or row.supports_prompt_cache
     return info
 

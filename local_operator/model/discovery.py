@@ -85,14 +85,16 @@ GEMINI_MAX_PAGES = 25
 LYING_MAX_TOKENS = 4096
 
 #: Stamped into every cached listing document and required when one is read back.
-#: Bump it whenever a transport starts capturing a FIELD it used to leave at zero.
+#: Bump it whenever a transport starts capturing a FIELD, or a MEANING, that the
+#: previous writer could not express.
 #:
 #: Version 2 is ``_fetch_anthropic`` reading ``max_input_tokens``, ``max_tokens``
-#: and ``capabilities.image_input``. Without the stamp, a document written by
-#: version 1 has a perfectly valid shape full of zeros, is served as a fresh cache
-#: hit for the rest of its 24h TTL, and the upgrade that fixed the numbers appears
-#: to have done nothing — which is precisely the state the reported
-#: ``1.8%/200k`` install was left in.
+#: and ``capabilities.image_input``, and ``supports_images`` becoming three-state
+#: (``null`` = the listing did not say, distinct from ``false``). Without the
+#: stamp, a document written by version 1 has a perfectly valid shape full of
+#: zeros, is served as a fresh cache hit for the rest of its 24h TTL, and the
+#: upgrade that fixed the numbers appears to have done nothing — which is
+#: precisely the state the reported ``1.8%/200k`` install was left in.
 LISTING_CAPTURE_VERSION = 2
 
 #: Providers whose MODEL LISTING is public even though inference is not.
@@ -122,6 +124,21 @@ class DiscoveredModel:
     bug: they survive arithmetic and produce a plausible-looking compaction
     threshold, whereas a zero is falsy and so is caught by the merge's fallback
     at the first read.
+
+    ``supports_images`` is the exception, and deliberately THREE-state: ``None``
+    means the listing said nothing, which is a different answer from ``False``
+    ("this model does not accept images"). A boolean cannot express the
+    difference, and collapsing them costs the distinction in the direction that
+    matters: the merge falls back to the registry for an unknown, so an explicit
+    ``false`` on the wire would be overruled by a hand-transcribed ``True`` and a
+    text-only model would keep advertising vision forever. The provider is the
+    authority on its own capabilities; only a silent listing defers to us.
+
+    ``supports_prompt_cache`` stays a plain boolean because NO listing in the tree
+    states it: Anthropic's ``capabilities`` object has no prompt-caching key at
+    all, and the OpenAI-compatible wires only imply it through a priced cache-read
+    leg. There is no explicit ``false`` to preserve, so there is nothing for a
+    third state to carry.
     """
 
     id: str
@@ -131,7 +148,7 @@ class DiscoveredModel:
     input_price: float = 0.0
     output_price: float = 0.0
     cache_read_price: float = 0.0
-    supports_images: bool = False
+    supports_images: bool | None = None
     supports_prompt_cache: bool = False
 
 
@@ -240,6 +257,18 @@ def _first_positive_int(*values: object) -> int:
     return 0
 
 
+def _stated_bool(value: object) -> bool | None:
+    """``value`` as a capability the listing STATED, or ``None`` when it did not.
+
+    Only a real boolean counts as a statement. A listing that sends ``null``, omits
+    the key, or answers with an object where a flag belongs has not said anything,
+    and the difference matters: a stated ``False`` overrules the registry while an
+    absent one defers to it. ``bool(value)`` cannot express that, and it also reads
+    ``{}`` as False, which would turn "the key exists but is empty" into a denial.
+    """
+    return value if isinstance(value, bool) else None
+
+
 def _mapping(value: object) -> Mapping[str, object]:
     """``value`` when it is a mapping, else an empty one.
 
@@ -308,24 +337,29 @@ def _entry_list(body: object, *keys: str) -> list[Mapping[str, object]] | None:
 # -- transports --------------------------------------------------------------
 
 
-def _has_image_input(architecture: Mapping[str, object]) -> bool:
-    """Image support from either OpenRouter modality encoding.
+def _has_image_input(architecture: Mapping[str, object]) -> bool | None:
+    """Image support from either OpenRouter modality encoding, or ``None``.
 
     The current listing exposes ``input_modalities: ["text", "image"]``; the
     older one packs the same fact into ``modality: "text+image->text"``. Both are
     still in the wild across gateways that mirror OpenRouter's schema, and
     reading only one silently marks vision models as text-only.
+
+    A gateway that describes modalities and does not list ``image`` has SAID the
+    model is text-only, and that answer beats the registry. One that describes no
+    modalities at all — every lean OpenAI-compatible endpoint, which sends an id
+    and little else — has said nothing, and returning ``False`` for it would
+    downgrade every bundled vision model the moment such a gateway is listed.
     """
     modalities = architecture.get("input_modalities")
     if isinstance(modalities, (list, tuple)):
-        if any(isinstance(item, str) and item.strip().lower() == "image" for item in modalities):
-            return True
+        return any(isinstance(item, str) and item.strip().lower() == "image" for item in modalities)
     modality = architecture.get("modality")
     if isinstance(modality, str):
         # Only the left of the arrow is INPUT. A model that GENERATES images is
         # not a model you can send an image to.
         return "image" in modality.split("->")[0].lower()
-    return False
+    return None
 
 
 def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | None:
@@ -402,8 +436,8 @@ def _anthropic_models_url(base_url: str) -> str:
     return f"{base_url}/v1/models"
 
 
-def _capability_supported(capabilities: Mapping[str, object], name: str) -> bool:
-    """True when Anthropic's ``capabilities`` object advertises ``name``.
+def _capability_supported(capabilities: Mapping[str, object], name: str) -> bool | None:
+    """What Anthropic's ``capabilities`` object says about ``name``, or ``None``.
 
     Each capability is an OBJECT with its own ``supported`` boolean rather than a
     bare flag (``{"image_input": {"supported": true}}``), because several of them
@@ -412,11 +446,13 @@ def _capability_supported(capabilities: Mapping[str, object], name: str) -> bool
     report every listed capability as supported, including the ones explicitly
     marked ``false``.
 
-    Absent or malformed reads as False, and the merge then ORs the registry's own
-    flag back on top, so an older wire that omits ``capabilities`` entirely cannot
-    downgrade a vision model to text-only.
+    All three answers are distinct and all three occur on this wire: the live
+    listing marks ``effort.xhigh`` supported on Opus 4.8 and NOT supported on
+    Sonnet 4.6, while an older API version omits ``capabilities`` entirely. A
+    stated ``false`` overrules the registry; an absent one lets the registry
+    answer, so a terse wire cannot downgrade a vision model to text-only.
     """
-    return bool(_mapping(capabilities.get(name)).get("supported"))
+    return _stated_bool(_mapping(capabilities.get(name)).get("supported"))
 
 
 def _fetch_anthropic(ctx: _FetchContext) -> list[DiscoveredModel] | None:
@@ -751,6 +787,11 @@ def _from_static(model_id: str, info: ModelInfo) -> DiscoveredModel:
     The registry spells "unknown" as ``-1`` in some rows and ``None`` in others;
     both become ``0`` here so downstream code has one unknown-marker to check
     instead of three.
+
+    ``supports_images`` is carried across unchanged, including ``None``: a bundled
+    row that never stated the capability has not denied it, and this row is what a
+    registry-only model is resolved from. Collapsing it to ``False`` here would
+    hand such a model a denial nothing ever wrote down.
     """
     return DiscoveredModel(
         id=model_id,
@@ -760,7 +801,7 @@ def _from_static(model_id: str, info: ModelInfo) -> DiscoveredModel:
         input_price=_positive_float(info.input_price),
         output_price=_positive_float(info.output_price),
         cache_read_price=_positive_float(info.cache_reads_price),
-        supports_images=bool(info.supports_images),
+        supports_images=_stated_bool(info.supports_images),
         supports_prompt_cache=bool(info.supports_prompt_cache),
     )
 
@@ -804,10 +845,21 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
         cache_read_price=(
             _positive_float(row.cache_read_price) or _positive_float(info.cache_reads_price)
         ),
-        # OR rather than overwrite: a terse listing carries no capability fields
-        # at all, and letting it win would downgrade a vision model to text-only
-        # and disable prompt caching on a model that supports it.
-        supports_images=bool(row.supports_images or info.supports_images),
+        # The provider decides its own capabilities WHEN IT SPEAKS: a stated
+        # ``false`` is an answer, and OR-ing it against the registry made it
+        # unreachable — every bundled Anthropic row carries
+        # ``supports_images=True``, so a live ``image_input.supported: false``
+        # merged back to True and a text-only model went on advertising vision.
+        # A listing that says NOTHING still defers to the registry, which is what
+        # keeps a terse wire from downgrading a vision model.
+        supports_images=(
+            row.supports_images
+            if row.supports_images is not None
+            else _stated_bool(info.supports_images)
+        ),
+        # OR, not three-state: no listing in the tree states prompt caching, so
+        # there is no explicit denial to respect — only silence, and silence must
+        # not disable ``cache_control`` on the most expensive models we ship.
         supports_prompt_cache=bool(row.supports_prompt_cache or info.supports_prompt_cache),
     )
 
@@ -878,7 +930,11 @@ def _rows_from_payload(payload: Mapping[str, object] | None) -> list[DiscoveredM
                 input_price=_positive_float(entry.get("input_price")),
                 output_price=_positive_float(entry.get("output_price")),
                 cache_read_price=_positive_float(entry.get("cache_read_price")),
-                supports_images=bool(entry.get("supports_images")),
+                # ``null`` in the document is the listing's silence, faithfully
+                # stored by ``dataclasses.asdict``. Reading it as False would let
+                # a cache round-trip turn "unstated" into a denial, so the same
+                # model would resolve differently live than from disk.
+                supports_images=_stated_bool(entry.get("supports_images")),
                 supports_prompt_cache=bool(entry.get("supports_prompt_cache")),
             )
         )

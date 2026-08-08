@@ -22,6 +22,7 @@ error`` status and can be retried with ``/reload`` (TUI-012).
 from __future__ import annotations
 
 import os
+import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol
 
 from rich.console import Group
@@ -61,7 +62,7 @@ from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
 )
-from local_operator.tui.widgets.approval import ApprovalAnswered, ApprovalBlock
+from local_operator.tui.widgets.approval import ApprovalBlock
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import (
     Editor,
@@ -108,6 +109,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("goal", "Show, set, or clear the session goal"),
     SlashCommand("loop", "Iterate autonomously toward the goal"),
     SlashCommand("compact", "Explain context compaction"),
+    SlashCommand("approvals", "Show or set tool approval mode (ask | auto)"),
     SlashCommand("skills", "List loaded skills"),
     SlashCommand("mcp", "List MCP servers"),
     SlashCommand("login", "Authenticate a provider"),
@@ -136,6 +138,14 @@ LOOP_PROMPT = (
 #: dozen rows is the cheaper of those two costs. The band is only repainted
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
+
+#: How long the second Ctrl+C counts as a DOUBLE press. Short on purpose: this
+#: is a deliberate double-tap, not a mode. Long enough and a user interrupting
+#: two turns in a row would quit the app by accident, which is the one outcome a
+#: stop key must never produce. (omp uses 500 ms for the same gesture; this is a
+#: little longer because our first press also has to be READ — it prints the
+#: resume command — where omp's only clears the editor.)
+DOUBLE_INTERRUPT_WINDOW_S = 1.5
 
 #: Class the Screen carries while the session has no content. It selects the
 #: boot layout in the stylesheet (centred, clamped input card) and is flipped in
@@ -274,9 +284,22 @@ class OperatorApp(App[None]):
         # The one pending tool-approval prompt, if any. The TUI owns approvals
         # (see widgets/approval.py) because the default stdin gate deadlocks
         # under a full-screen app; `_approve_all` is the session-scoped "allow
-        # all" the prompt's `a` answer latches.
+        # all" the prompt's `a` answer latches, and `_approvals_denied` is the
+        # TURN-scoped latch that drains the asks belonging to a turn the user
+        # stopped (a queued asker wakes when the front prompt settles, and
+        # without the latch it would mount a fresh question for a dead turn).
         self._approval: ApprovalBlock | None = None
         self._approve_all: bool = False
+        self._approvals_denied: bool = False
+        # Tool cards the last turn boundary marked interrupted. Read once, by
+        # `on_turn_ended`, to decide whether an abort still owes the user a
+        # standalone notice or has already said it on the rows themselves.
+        self._interrupted_cards: int = 0
+        # Ctrl+C ladder: one press interrupts, a second within
+        # DOUBLE_INTERRUPT_WINDOW_S exits, and a third while the exit is under
+        # way ends the process outright.
+        self._last_interrupt_at: float = 0.0
+        self._exiting: bool = False
 
     # -- composition --------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -675,15 +698,65 @@ class OperatorApp(App[None]):
         self.exit()
 
     def on_interrupt_requested(self, message: InterruptRequested) -> None:
-        self._interrupt()
+        """Ctrl+C from the composer — the NORMAL path, since it holds focus.
+
+        Routed through the action rather than straight to ``_interrupt`` so the
+        double-press ladder applies here too; going direct meant the app-level
+        binding had the ladder and the key people actually press did not.
+        """
+        self.action_interrupt()
 
     def on_stop_requested(self, message: StopRequested) -> None:
         """Esc from the composer (the editor consumes the key so it never blurs)."""
         self.action_stop()
 
     def action_interrupt(self) -> None:
-        """App-level Ctrl+C: interrupt the turn, never exit."""
+        """Ctrl+C: interrupt the turn. Twice in quick succession: leave.
+
+        A single Ctrl+C must never exit — the whole point of the first press is
+        to stop the agent and keep the session. But a user who wants OUT should
+        not have to find ``/exit``, so the second press within
+        :data:`DOUBLE_INTERRUPT_WINDOW_S` quits and prints the command that
+        brings this exact session back (see :meth:`resume_hint`).
+
+        Third press ladder: once the quit is under way, a further Ctrl+C is the
+        user saying teardown has taken long enough, so the process is ended
+        outright with the conventional SIGINT status. Session state is already on
+        disk — the transcript is appended per turn, not at exit — so a hard exit
+        loses nothing but the teardown niceties.
+        """
+        now = time.monotonic()
+        if self._exiting:
+            os._exit(130)  # 128 + SIGINT
+        if now - self._last_interrupt_at < DOUBLE_INTERRUPT_WINDOW_S:
+            self._exiting = True
+            self._interrupt()  # stop the work before dropping the terminal
+            self.exit()
+            return
+        self._last_interrupt_at = now
         self._interrupt()
+        # Only advertise the second press when there is a session to come back
+        # to; on a failed boot there is no id and no history worth resuming.
+        hint = self.resume_hint()
+        self._append_block(
+            NoticeBlock(
+                f"ctrl+c again to exit — resume with {hint}" if hint else "ctrl+c again to exit",
+                "info",
+            )
+        )
+
+    def resume_hint(self) -> str:
+        """``local-operator --resume <id>`` for this session, or "" when there is none.
+
+        Read by :func:`run_tui` after the app has released the terminal, so the
+        command lands in the user's scrollback where they can copy it, rather
+        than in a frame that is about to be torn down.
+        """
+        session = self._session
+        if session is None:
+            return ""
+        session_id = getattr(session, "session_id", "")
+        return f"local-operator --resume {session_id}" if session_id else ""
 
     def _interrupt(self) -> None:
         """Abort the running turn AND stop any ``/loop`` in flight.
@@ -697,23 +770,29 @@ class OperatorApp(App[None]):
         # A turn parked on an approval cannot see the abort signal until the
         # callback returns, so the prompt is denied first: aborting alone would
         # leave the engine waiting on a future nobody is going to answer.
-        self._cancel_pending_approval()
+        self._deny_queued_approvals()
         if self._session is not None:
             self._session.abort("interrupted")
 
     def action_stop(self) -> None:
-        """Esc: answer a pending approval with "no", otherwise stop the turn.
+        """Esc: stop. One press, one meaning, wherever focus happens to be.
 
-        The pending prompt takes precedence because that is the thing the user
-        is looking at, and "stop" applied to a question means "don't do it".
-        With nothing running Esc does nothing — it must not clear the composer,
-        which would throw away typed text on the key people press to cancel.
+        A pending approval is NOT answered here and left at that. Esc used to
+        deny just the front prompt and return, which meant that with two
+        approval-gated tools in one batch the user had to press it once per
+        prompt before it finally meant "stop" — and each press looked like it
+        had done nothing to the run. Stopping denies every queued prompt (via
+        the latch in :meth:`_deny_queued_approvals`) and aborts the turn.
+
+        ``n`` remains the answer that refuses ONE tool and lets the turn carry
+        on; that is the distinction Esc should not have been carrying.
+
+        With nothing running Esc does nothing — in particular it must not clear
+        the composer, which would throw away typed text on the key people press
+        to cancel.
         """
-        approval = self._approval
-        if approval is not None and not approval.answered:
-            self._answer_approval(approval, False)
-            return
-        if self._session is not None and self._session.is_streaming:
+        pending = self._approval is not None and not self._approval.answered
+        if pending or (self._session is not None and self._session.is_streaming):
             self._interrupt()
 
     # -- tool approvals -------------------------------------------------------
@@ -729,14 +808,26 @@ class OperatorApp(App[None]):
         twice concurrently, and two cards competing for focus would leave the
         second unanswerable; the later ask waits for the earlier card to settle
         and is then asked in turn.
+
+        The deny latch is re-read after every await, and that is what makes the
+        stop paths correct. Settling only the FRONT prompt was not enough: the
+        queued asker woke, saw no live prompt, and mounted a BRAND NEW question
+        — after Ctrl+C had already aborted the turn. Worse, write/exec tier
+        tools are not interruptible, so the runner parked on this callback is
+        settled by nothing but this future; the post-abort question was genuinely
+        live, and on teardown it mounted into a screen that was going away.
         """
+        if self._approvals_denied:
+            return False
         if self._approve_all:
             return True
         while self._approval is not None and not self._approval.answered:
             await self._approval.wait()
+            if self._approvals_denied:
+                return False
             if self._approve_all:
                 return True
-        block = ApprovalBlock(tool_name, description)
+        block = ApprovalBlock(tool_name, description, on_answer=self._latch_approval_answer)
         self._approval = block
         self._append_block(block)
         try:
@@ -746,32 +837,83 @@ class OperatorApp(App[None]):
             if self._approval is block:
                 self._approval = None
 
-    def _answer_approval(self, block: ApprovalBlock, approved: bool) -> None:
-        """Settle a prompt from outside the widget (Esc, abort, teardown)."""
-        block.resolve(approved)
-        block.restore_focus()
-        if self._approval is block:
-            self._approval = None
+    def _latch_approval_answer(self, answer: str) -> None:
+        """What an answer means beyond the one call. Runs BEFORE the future.
 
-    def _cancel_pending_approval(self) -> None:
-        """Deny any live prompt so the awaiting turn is never left hanging."""
+        Called synchronously from :meth:`ApprovalBlock.resolve` rather than off a
+        posted message: a queued asker wakes the instant the future resolves, and
+        a flag latched a few pump hops later was read stale — so the user pressed
+        "allow all" and was immediately asked again for the next tool of the same
+        batch.
+        """
+        if answer == "a":
+            self._approve_all = True
+            self._append_block(
+                NoticeBlock(
+                    "every tool is auto-approved for the rest of this session — "
+                    "/approvals ask restores prompting",
+                    "warning",
+                )
+            )
+            if self._status is not None:
+                self._status.update(approvals_auto=True)
+
+    def _deny_queued_approvals(self) -> None:
+        """Refuse the live prompt AND every ask still queued behind it.
+
+        The latch is the load-bearing part: the queued asker is parked on the
+        front prompt's future, so settling that future WAKES it, and without a
+        latch it would go on to mount a fresh question for a turn that is being
+        stopped or an app that is being torn down.
+        """
+        self._approvals_denied = True
         approval = self._approval
         if approval is not None and not approval.answered:
-            self._answer_approval(approval, False)
+            approval.resolve(False)
+            approval.restore_focus()
         self._approval = None
 
-    def on_approval_answered(self, message: ApprovalAnswered) -> None:
-        """The prompt was answered by keystroke: latch "allow all" and tidy up."""
-        if message.answer == "a":
-            self._approve_all = True
-            self._append_block(NoticeBlock("approving every tool for this session", "warning"))
-        block = self._approval
-        if block is not None and block.answered:
-            block.restore_focus()
-            self._approval = None
+    def _allow_approvals_again(self) -> None:
+        """Clear the deny latch so the NEXT turn can ask questions again.
+
+        Scoped to a turn, not to the session: the latch exists to drain the asks
+        belonging to a turn the user stopped, and a session that could never ask
+        again would silently deny every future tool.
+        """
+        self._approvals_denied = False
 
     def action_clear_transcript(self) -> None:
         self._clear_transcript()
+
+    def _cmd_approvals(self, arg: str, notice: NoticeFn) -> None:
+        """``/approvals [ask|auto]`` — the way BACK from "allow all".
+
+        "Allow all" disarms a safety gate for the whole session, so it needs a
+        stated mode and a route back; a one-way switch answered by a single
+        keystroke is the part that made it a footgun rather than a shortcut.
+        Bare ``/approvals`` reports, which is also how a user who cannot
+        remember what they pressed finds out.
+        """
+        mode = arg.strip().lower()
+        if mode in ("ask", "on", "prompt"):
+            self._approve_all = False
+            if self._status is not None:
+                self._status.update(approvals_auto=False)
+            notice("tool approvals: ask — write and command tools will prompt again")
+            return
+        if mode in ("auto", "off", "yolo"):
+            self._approve_all = True
+            if self._status is not None:
+                self._status.update(approvals_auto=True)
+            notice("tool approvals: auto — every tool runs without asking", "warning")
+            return
+        if mode:
+            notice(f"unknown approval mode {mode!r} — use ask or auto", "warning")
+            return
+        if self._approve_all:
+            notice("tool approvals: auto — /approvals ask restores prompting", "warning")
+        else:
+            notice("tool approvals: ask — write and command tools prompt before running")
 
     def _clear_transcript(self) -> None:
         transcript = self.query_one(TranscriptView)
@@ -785,7 +927,7 @@ class OperatorApp(App[None]):
             self._working_block = None
         # The prompt's widget is about to be removed with the rest of the
         # transcript, so the turn awaiting it is denied rather than orphaned.
-        self._cancel_pending_approval()
+        self._deny_queued_approvals()
         self._streaming_block = None
         self._tool_cards = {}
         # An empty transcript is the welcome view's whole precondition, so the
@@ -822,7 +964,7 @@ class OperatorApp(App[None]):
     async def on_unmount(self) -> None:
         # Before disposing the session: dispose awaits teardown, and a turn
         # parked on an unanswered approval would never reach it.
-        self._cancel_pending_approval()
+        self._deny_queued_approvals()
         if self._status is not None:
             self._status.dispose()
         if self._controller is not None:
@@ -845,7 +987,12 @@ class OperatorApp(App[None]):
         # boundary, which is exactly "send it after the current step finishes".
         if session.is_streaming:
             session.steer(text)
-            self._append_block(NoticeBlock("queued — sent at the next boundary", "info"))
+            # "boundary" is engine vocabulary the UI never defines, and this is
+            # the line answering "did my text just get thrown away?" — so it says
+            # when it will be sent, in the tense it will be sent in, and at
+            # `warning` weight rather than `info` (which maps to the quietest ink
+            # in the app, a step below a settled tool summary).
+            self._append_block(NoticeBlock("queued — sends when this step finishes", "warning"))
             # Still worth a title: the steering message can be the first thing
             # in the conversation that actually says what the task is.
             self._maybe_name_conversation(text)
@@ -1019,6 +1166,8 @@ class OperatorApp(App[None]):
             self._cmd_loop(arg, notice)
         elif command == "/compact":
             notice("compaction runs automatically when the context fills up.")
+        elif command == "/approvals":
+            self._cmd_approvals(arg, notice)
         elif command == "/skills":
             block = self._skills_block()
             if block is not None:
@@ -1967,6 +2116,9 @@ class OperatorApp(App[None]):
     def on_turn_started(self, message: TurnStarted) -> None:
         assert self._status is not None
         self._status.update(streaming=True)
+        # A new turn may ask questions again: the deny latch belongs to the turn
+        # the user stopped, not to the session.
+        self._allow_approvals_again()
         # D25: the ONE aggregate working line appears for the turn.
         if self._working_block is None:
             self._working_block = WorkingBlock()
@@ -1998,8 +2150,14 @@ class OperatorApp(App[None]):
         )
         if message.error:
             self._append_block(NoticeBlock(message.error, "error"))
-        elif message.aborted:
+        elif message.aborted and not self._interrupted_cards:
+            # Only when NOTHING was in flight. A stopped turn already says so on
+            # each card it stopped (`⊘ interrupted`), and that per-card mark is
+            # the more useful of the two because it names WHICH tool stopped;
+            # adding a standalone notice spent a row and a gap restating it, and
+            # N+1 rows when several tools were running.
             self._append_block(NoticeBlock("interrupted", "warning"))
+        self._interrupted_cards = 0
 
     def _dismiss_working_block(self) -> None:
         """Stop and remove the aggregate working line at turn end (D25)."""
@@ -2039,8 +2197,15 @@ class OperatorApp(App[None]):
         """turn_start: the spinner is already carried by the status band."""
 
     def on_turn_boundary_end(self, message: TurnBoundaryEnd) -> None:
-        """turn_end: reconcile orphaned RUNNING tool cards (TUI-008/019)."""
-        for card in list(self._tool_cards.values()):
+        """turn_end: reconcile orphaned RUNNING tool cards (TUI-008/019).
+
+        The count is kept because it decides whether an aborted turn ALSO needs a
+        standalone "interrupted" notice: each card it marks already says so, and
+        naming the tool that stopped is the more useful of the two statements.
+        """
+        cards = list(self._tool_cards.values())
+        self._interrupted_cards = len(cards)
+        for card in cards:
             card.mark_interrupted()
         self._tool_cards.clear()
 
@@ -2077,9 +2242,17 @@ class OperatorApp(App[None]):
         self._ensure_streaming_block().update_text(message.text)
 
     def on_assistant_message_end(self, message: AssistantMessageEnd) -> None:
-        # A message that carried no text never mounted a block, and must not
-        # mount one now just to finalize it as empty.
-        if not message.text and self._streaming_block is None:
+        # An empty authoritative text is not an instruction to erase what
+        # streamed. Adopting it unconditionally destroyed the prose the deltas
+        # had already painted and left an empty block mounted in its place; the
+        # controller only falls back to its own buffer when the text is None, so
+        # a provider or abort path reporting "" reaches here. Keep whatever the
+        # block has, and mount nothing when nothing streamed.
+        if not message.text:
+            block = self._streaming_block
+            self._streaming_block = None
+            if block is not None:
+                block.finalize_text()
             return
         block = self._ensure_streaming_block()
         # TUI-020: adopt the authoritative text carried by the event.

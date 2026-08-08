@@ -39,6 +39,7 @@ from local_operator.tui.glyphs import (
     PLAIN_ICON_DEFAULT,
     PLAIN_ICON_MCP,
     PLAIN_TOOL_ICONS,
+    display_name,
     nerd_icons_enabled,
     tool_icon,
 )
@@ -48,6 +49,9 @@ from local_operator.tui.widgets.tool_card import (
     COLLAPSE_HINT,
     EXPAND_HINT,
     EXPAND_MAX_LINES,
+    ICON_ERROR,
+    ICON_INTERRUPTED,
+    ICON_SUCCESS,
     NO_OUTPUT_NOTICE,
     RUNNING_NOTICE,
     ToolCard,
@@ -376,6 +380,47 @@ def test_hovered_hint_uses_the_dim_ramp_step() -> None:
     assert _triplet(lit.color) == _triplet(Style(color=theme_mod.semantic_color("dim")).color)
 
 
+def test_the_trailing_slot_is_a_column_not_a_suffix() -> None:
+    """Both things that can occupy the slot end at the same cell.
+
+    Appended straight after the summary, the offer landed at a different
+    column on every row and slid as the summary truncated — jogging left and
+    right under the eye while the outcome beside it was pinned precisely so
+    that would not happen. Measured on its RIGHT edge, which is the edge it
+    shares with the status column.
+    """
+    right_edges = set()
+    for command in ("ls", "pytest tests/unit/tui -q -x --lf", "make"):
+        card = ToolCard("t", "bash", {"command": command})
+        card.mark_done("one\ntwo")
+        card._set_hovered(True)
+        plain = card._build_row(80).plain
+        right_edges.add(plain.index(EXPAND_HINT) + cell_len(EXPAND_HINT))
+
+    # A notice is the same slot, so it lands on the same edge despite being
+    # a different width.
+    inert = ToolCard("t", "todo", {"x": "a"})
+    inert.mark_done("")
+    inert.activate()
+    plain = inert._build_row(80).plain
+    right_edges.add(plain.index(NO_OUTPUT_NOTICE) + cell_len(NO_OUTPUT_NOTICE))
+
+    assert len(right_edges) == 1, right_edges
+
+
+def test_the_notice_wears_the_apps_bracket_idiom() -> None:
+    """Bare, the feedback reads as summary text: ``todo     a no output`` is
+    one space and one colour step from the argument beside it, and with no
+    colour at all it is just ``a no output``. This slot is the direct remedy
+    for "nothing happens when I click", so it has to be the least ambiguous
+    thing on the row — and the app already owns a bracket for chrome."""
+    for notice in (NO_OUTPUT_NOTICE, RUNNING_NOTICE):
+        assert notice.startswith("⟨") and notice.endswith("⟩"), notice
+    # Same idiom as the affordance they stand in for, so the slot reads as
+    # one slot rather than as two unrelated things sharing a cell range.
+    assert EXPAND_HINT.startswith("⟨") and COLLAPSE_HINT.startswith("⟨")
+
+
 # --- icons -----------------------------------------------------------------
 #
 # The icon is the one part of the row whose whole value is being recognisable
@@ -459,6 +504,53 @@ def test_unknown_and_mcp_tools_resolve_to_their_own_fallbacks(monkeypatch) -> No
     assert tool_icon("  read  ") == PLAIN_TOOL_ICONS["read"]
 
 
+def test_no_tool_icon_collides_with_the_outcome_vocabulary() -> None:
+    """The head of the row and the tail of the row must not speak the same
+    word. ``todo`` used to carry a check-square, the same mark the status
+    column prints for "succeeded", so a todo row opened and closed with a
+    check and a colourless frame could not tell the two apart. Every glyph in
+    the set is a noun; a verdict belongs only at the right edge."""
+    verdicts = {ICON_SUCCESS, ICON_ERROR, ICON_INTERRUPTED}
+    for table in (NERD_TOOL_ICONS, PLAIN_TOOL_ICONS):
+        for name, glyph in table.items():
+            assert glyph not in verdicts, (name, glyph)
+    assert PLAIN_ICON_MCP not in verdicts
+    assert PLAIN_ICON_DEFAULT not in verdicts
+
+
+def test_an_mcp_row_is_named_for_the_call_not_for_the_prefix() -> None:
+    """``mcp__`` is a constant, and a constant in an 8-cell column is five
+    wasted cells. Three tools from one server all rendered ``mcp__lin``,
+    which is scan-by-shape failing for the tool class a user is most likely
+    to have a dozen of. The plug icon already says "from a server"."""
+    assert display_name("mcp__linear_create_issue") == "create_issue"
+    assert display_name("mcp__linear_list_issues") == "list_issues"
+    assert display_name("bash") == "bash"  # builtins pass straight through
+
+    names = [
+        # [1], not [0]: the icon is the row's first token.
+        ToolCard("t", raw, {})._build_row(100).plain.split()[1]
+        for raw in (
+            "mcp__linear_create_issue",
+            "mcp__linear_list_issues",
+            "mcp__linear_get_issue",
+        )
+    ]
+    assert len(set(names)) == 3, names
+    assert not any(name.startswith("mcp") for name in names), names
+
+
+def test_a_degenerate_mcp_name_keeps_whatever_it_has() -> None:
+    """A blank name column is worse than a repetitive one, so the stripping
+    never runs the string out. The server/tool boundary is genuinely not
+    recoverable when the server's own name contains an underscore, so only
+    the first segment is taken — the remainder is still the call's own
+    identifier rather than the constant prefix."""
+    assert display_name("mcp__") == "mcp__"
+    assert display_name("mcp__slack") == "slack"
+    assert display_name("mcp__my_server_do_thing") == "server_do_thing"
+
+
 def test_the_icon_leads_the_row_and_displaces_neither_name_nor_summary() -> None:
     """The icon is added TO the row, not instead of part of it."""
     card = ToolCard("t", "grep", {"pattern": "needle"})
@@ -535,6 +627,72 @@ def test_the_outcome_glyph_holds_one_column_whatever_the_duration() -> None:
         plain = card._build_row(80).plain.rstrip()
         offsets.append(len(plain) - plain.rindex("✓"))
     assert len(set(offsets)) == 1, offsets
+
+
+def test_all_three_settled_outcomes_share_the_glyph_column() -> None:
+    """The column has to hold across STATES, not just across durations.
+
+    Interrupted was the exception: it rendered ``⊘ interrupted`` with no
+    duration and sat six cells left of its neighbours. That is the worst row
+    to leave out of the column — one Esc marks every tool still in flight, so
+    the hole opened across a whole run of rows exactly where an operator
+    scans to find where work stopped.
+    """
+    ok = ToolCard("a", "bash", {"command": "pytest -q"})
+    bad = ToolCard("b", "bash", {"command": "pytest -q"})
+    stopped = ToolCard("c", "bash", {"command": "pytest -q"})
+    ok.mark_done("66 passed")
+    bad.mark_failed("1 failed")
+    stopped.mark_interrupted()
+
+    columns = set()
+    for card, mark in ((ok, "✓"), (bad, "✗"), (stopped, "⊘")):
+        plain = card._build_row(80).plain
+        assert mark in plain, (card._state, plain)
+        columns.add(plain.index(mark))
+    assert len(columns) == 1, columns
+
+    # The reason still rides in front of the glyph, so the row says WHY
+    # without moving the answer.
+    assert "interrupted ⊘" in stopped._build_row(80).plain
+
+
+def test_a_narrow_row_sheds_its_message_before_its_identity() -> None:
+    """Which tool failed outranks what it said about failing.
+
+    The failing row used to be the only row in a narrow ledger to lose its
+    name: neighbours kept three cells of identity while it rendered
+    ``<icon>  … ✗ 0.0s`` — a cell spent on an ellipsis that says nothing, and
+    the one fact worth keeping thrown away to pay for it.
+    """
+    for width in (20, 24, 30):
+        ok = ToolCard("a", "bash", {"command": "pytest"})
+        bad = ToolCard("b", "bash", {"command": "pytest"})
+        ok.mark_done("passed")
+        bad.mark_failed("ModuleNotFoundError: no module named pygame")
+        ok_row = ok._build_row(width).plain
+        bad_row = bad._build_row(width).plain
+        assert "bas" in bad_row, (width, bad_row)
+        # Both rows give the name the same room: the failure is not penalised
+        # for having something extra to say.
+        assert ok_row.index("bas") == bad_row.index("bas"), (width, ok_row, bad_row)
+        # And no bare ellipsis survives as a "message".
+        assert " … " not in bad_row, (width, bad_row)
+
+
+def test_a_message_reduced_to_an_ellipsis_is_dropped_not_printed() -> None:
+    """One cell that says "there were words here" is one cell wasted.
+
+    A message TRUNCATED to an ellipsis (``Mod…``) is fine and wanted — it
+    still names the failure. What must never ship is a message that is
+    nothing BUT the ellipsis, standing alone in front of the glyph.
+    """
+    card = ToolCard("t", "bash", {"command": "pytest"})
+    card.mark_failed("ModuleNotFoundError: no module named pygame")
+    for width in WIDTHS:
+        row = card._build_row(width).plain
+        assert " … ✗" not in row, (width, row)
+        assert not row.strip().startswith("…"), (width, row)
 
 
 def test_a_result_that_only_repeats_the_summary_is_not_expandable() -> None:

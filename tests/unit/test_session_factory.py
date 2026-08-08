@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import os
 import sqlite3
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -17,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from local_operator import resume as resume_mod
 from local_operator import session_factory
 from local_operator.session.session import Session
 from local_operator.session_factory import (
@@ -705,3 +707,68 @@ async def test_approval_gate_still_prompts_without_a_fullscreen_app(
 def test_fullscreen_probe_is_false_without_a_running_app() -> None:
     """No app running: the probe must not claim the terminal is taken."""
     assert session_factory._fullscreen_app_owns_terminal() is False
+
+
+def test_resume_reuses_the_named_session_directory(tmp_path: Path) -> None:
+    """``--resume <id>`` points the session at an existing transcript.
+
+    Reusing the directory IS the resume mechanism: the transcript replays from
+    whatever the directory already holds, which is the same path ``--train`` takes
+    for an agent directory.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "abc123").mkdir(parents=True)
+    (sessions / "abc123" / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    registry = FakeRegistry(tmp_path)
+
+    directory, agent_id = session_factory._transcript_dir_and_agent_id(
+        None, _args(resume="abc123"), cast("AgentRegistry", registry)
+    )
+    assert directory == sessions / "abc123"
+    assert agent_id == "main"
+
+
+def test_resume_latest_picks_the_newest_transcript(tmp_path: Path) -> None:
+    """Bare ``--resume`` reopens the most recent session.
+
+    Ordered by the TRANSCRIPT's mtime, not the directory's: a retention sweep
+    touches the directory for reasons that are not turns.
+    """
+    sessions = tmp_path / "sessions"
+    for name, when in (("older", 1_000_000), ("newer", 2_000_000)):
+        (sessions / name).mkdir(parents=True)
+        transcript = sessions / name / "transcript.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        os.utime(transcript, (when, when))
+    registry = FakeRegistry(tmp_path)
+
+    directory, _ = session_factory._transcript_dir_and_agent_id(
+        None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
+    )
+    assert directory == sessions / "newer"
+
+
+@pytest.mark.parametrize("requested", ["nope", "..", "../../etc", "sub/dir", ""])
+def test_resume_refuses_a_session_it_cannot_verify(tmp_path: Path, requested: str) -> None:
+    """A typo must FAIL, not start an empty session that looks resumed.
+
+    Left to the transcript reader, an unknown id would simply create the
+    directory and open a session with no history — the one failure a resume must
+    never have. The traversal shapes are refused for the obvious reason: the id
+    arrives straight from argv and is used to build a path.
+    """
+    (tmp_path / "sessions").mkdir(parents=True)
+    registry = FakeRegistry(tmp_path)
+    with pytest.raises(resume_mod.ResumeNotFound):
+        session_factory._transcript_dir_and_agent_id(
+            None, _args(resume=requested), cast("AgentRegistry", registry)
+        )
+
+
+def test_resume_latest_with_no_sessions_is_an_honest_error(tmp_path: Path) -> None:
+    (tmp_path / "sessions").mkdir(parents=True)
+    registry = FakeRegistry(tmp_path)
+    with pytest.raises(resume_mod.ResumeNotFound, match="no previous session"):
+        session_factory._transcript_dir_and_agent_id(
+            None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
+        )

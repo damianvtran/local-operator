@@ -276,36 +276,88 @@ def test_anthropic_maps_the_window_output_cap_and_image_support() -> None:
     assert client.calls[0][2]["limit"] == 1000
 
 
-def test_anthropic_reports_zero_for_limits_the_listing_omits() -> None:
+def test_anthropic_reports_unknown_for_everything_the_listing_omits() -> None:
     """An older API version, or a proxy that strips fields, must cost the session
-    nothing: zero means "unknown" and the merge restores the bundled numbers.
-    Inventing a default here is what produced a session at `context_window = -1`."""
+    nothing: the numbers come back as the zero that means "unknown" and the
+    capability as ``None`` — "not stated", which the merge fills from the registry.
+    Inventing a default here is what produced a session at `context_window = -1`,
+    and reading the silence as ``False`` would deny image input no one denied."""
     client = _StubClient([_Response(200, _ANTHROPIC_TERSE_BODY)])
     rows = fetch_models("anthropic", api_key="sk-ant", client=client)
 
     assert rows is not None
     assert rows[0].context_window == 0
     assert rows[0].max_tokens == 0
-    assert rows[0].supports_images is False
+    assert rows[0].supports_images is None
 
 
-def test_anthropic_reads_each_capabilitys_own_supported_flag() -> None:
-    """Capabilities are objects, not flags: `{"image_input": {"supported": false}}`
-    is a text-only model advertising the key. Reading the object's truthiness would
-    report every listed capability as supported."""
-    body = {
-        "data": [
-            {
-                "id": "claude-textonly-9",
-                "display_name": "Claude Textonly 9",
-                "capabilities": {"image_input": {"supported": False}},
-            }
-        ]
-    }
+@pytest.mark.parametrize(
+    "capabilities, stated, merged",
+    [
+        # Stated denial: the provider's answer, and it must survive a registry row
+        # that says otherwise (review finding C-07).
+        ({"image_input": {"supported": False}}, False, False),
+        # Stated support.
+        ({"image_input": {"supported": True}}, True, True),
+        # The key exists but says nothing, which is not a denial.
+        ({"image_input": {}}, None, True),
+        # No capabilities object at all — an older API version, a stripping proxy.
+        (None, None, True),
+    ],
+)
+def test_anthropic_capability_states_survive_the_merge(
+    tmp_path, capabilities, stated, merged
+) -> None:
+    """All three states, from the wire to the row a session resolves from.
+
+    Capabilities are objects, not flags: `{"image_input": {"supported": false}}` is
+    a text-only model advertising the key, and reading the object's truthiness
+    would report every listed capability as supported. That precision only means
+    something if it reaches the merge, which is what this pins end to end — the
+    shipped `claude-opus-5` row carries `supports_images=True`, so an OR made the
+    stated `false` unreachable.
+    """
+    entry: dict[str, Any] = {"id": "claude-opus-5", "display_name": "Claude Opus 5"}
+    if capabilities is not None:
+        entry["capabilities"] = capabilities
+    body = {"data": [entry]}
+
     rows = fetch_models("anthropic", api_key="k", client=_StubClient([_Response(200, body)]))
-
     assert rows is not None
-    assert rows[0].supports_images is False
+    assert rows[0].supports_images is stated
+
+    resolved, status = available_models(
+        "anthropic",
+        api_key="k",
+        client=_StubClient([_Response(200, body)]),
+        cache_dir=tmp_path,
+    )
+    assert status == "ok"
+    by_id = {row.id: row for row in resolved}
+    assert static_models("anthropic")["claude-opus-5"].supports_images is True, "fixture drifted"
+    assert by_id["claude-opus-5"].supports_images is merged
+
+
+def test_a_cache_round_trip_does_not_turn_unstated_into_denied(tmp_path) -> None:
+    """`dataclasses.asdict` stores the unstated capability as `null`, and reading
+    that back as False would make the same model resolve differently from disk than
+    live — the second open of a picker disagreeing with the first."""
+    body = {"data": [{"id": "claude-opus-5", "display_name": "Claude Opus 5"}]}
+    client = _StubClient([_Response(200, body)])
+
+    live, live_status = available_models(
+        "anthropic", api_key="k", client=client, cache_dir=tmp_path
+    )
+    cached, cached_status = available_models(
+        "anthropic", api_key="k", client=client, cache_dir=tmp_path
+    )
+
+    assert (live_status, cached_status) == ("ok", "cached")
+    assert len(client.calls) == 1
+    stored = json.loads((tmp_path / "anthropic.listing.json").read_text())
+    assert stored["payload"]["models"][0]["supports_images"] is None
+    for rows in (live, cached):
+        assert {row.id: row.supports_images for row in rows}["claude-opus-5"] is True
 
 
 def test_anthropic_authenticates_an_api_key_with_x_api_key() -> None:
@@ -771,20 +823,43 @@ def test_merge_prefers_live_prices_when_they_are_present() -> None:
     assert merged[0].cache_read_price == pytest.approx(0.3)
 
 
-def test_merge_ors_capability_flags_so_a_terse_listing_cannot_downgrade() -> None:
+def test_an_unstated_capability_defers_to_the_registry() -> None:
+    """Silence is not a denial. Every lean OpenAI-compatible gateway sends an id
+    and nothing else, and reading that as "no images, no caching" would downgrade
+    every bundled vision model and drop `cache_control` on the priciest ones."""
     static = {"m": _info("m", supports_images=True, supports_prompt_cache=True)}
-    merged = merge_models(static, [DiscoveredModel(id="m")])
+    live = [DiscoveredModel(id="m")]
+    assert live[0].supports_images is None, "the unstated default must be None, not False"
+    merged = merge_models(static, live)
 
     assert merged[0].supports_images is True
     assert merged[0].supports_prompt_cache is True
 
 
-def test_merge_ors_capability_flags_so_a_listing_can_upgrade() -> None:
+def test_a_stated_capability_can_upgrade_the_registry() -> None:
     static = {"m": _info("m", supports_images=False, supports_prompt_cache=False)}
     live = [DiscoveredModel(id="m", supports_images=True, supports_prompt_cache=True)]
     merged = merge_models(static, live)
 
     assert merged[0].supports_images is True
+    assert merged[0].supports_prompt_cache is True
+
+
+def test_an_explicit_false_from_the_provider_beats_a_true_registry_row() -> None:
+    """Review finding C-07. An OR made this state unreachable: every shipped
+    Anthropic row carries `supports_images=True`, so a live
+    `image_input.supported: false` merged straight back to True and a text-only
+    model went on advertising vision — the provider's own denial, overruled by a
+    hand-transcribed row it was meant to correct.
+
+    Only `supports_images` gets the third state, and only because a wire states it.
+    `supports_prompt_cache` has no such field anywhere, so its silence still ORs.
+    """
+    static = {"m": _info("m", supports_images=True, supports_prompt_cache=True)}
+    live = [DiscoveredModel(id="m", supports_images=False)]
+    merged = merge_models(static, live)
+
+    assert merged[0].supports_images is False
     assert merged[0].supports_prompt_cache is True
 
 
