@@ -51,9 +51,13 @@ def resume_dir(config_dir: Path, requested: str) -> Path:
         if not candidates:
             raise ResumeNotFound("no previous session to resume")
         return max(candidates, key=lambda path: (path / TRANSCRIPT_NAME).stat().st_mtime)
-    # Reject anything that could escape the sessions directory: the id arrives
-    # straight from argv and is used to build a path.
-    if requested in ("", ".", "..") or "/" in requested or "\\" in requested:
+    # A session id must be ONE path component and nothing else. Enumerating the
+    # ways to escape (`/`, `\`, `..`, and on Windows the drive-relative `C:x`
+    # form) is a list that is never finished; asking the path library whether the
+    # string survives as its own basename is the same question asked once. The
+    # empty/dot cases are named because `Path("").name` is `""`, which would pass
+    # a bare equality check.
+    if requested in ("", ".", "..") or Path(requested).name != requested:
         raise ResumeNotFound(f"not a session id: {requested!r}")
     candidate = sessions / requested
     if not (candidate / TRANSCRIPT_NAME).is_file():
@@ -71,18 +75,34 @@ def resolve_resume_id(config_dir: Path, requested: str) -> str:
     return resume_dir(config_dir, requested).name
 
 
-def recent_session_ids(config_dir: Path, limit: int = 10) -> list[str]:
-    """Resumable session ids, newest first — what to offer after a bad ``--resume``.
+def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]]:
+    """``(id, mtime)`` for resumable sessions, newest first.
+
+    The mtime is RETURNED rather than used and dropped: the sort already reads
+    it, and it is the one fact that makes a list of 12-hex ids pickable instead
+    of a wall of hashes.
 
     Best-effort: a directory that vanishes mid-scan (retention sweeps run
     concurrently) is skipped rather than raising out of an error path whose whole
     job is to be helpful.
     """
-    rows: list[tuple[float, str]] = []
+    rows: list[tuple[str, float]] = []
     for path in (config_dir / "sessions").glob("*"):
         try:
-            rows.append(((path / TRANSCRIPT_NAME).stat().st_mtime, path.name))
+            rows.append((path.name, (path / TRANSCRIPT_NAME).stat().st_mtime))
         except OSError:
             continue
-    rows.sort(reverse=True)
-    return [name for _, name in rows[:limit]]
+    rows.sort(key=lambda row: row[1], reverse=True)
+    return rows[:limit]
+
+
+def format_age(seconds: float) -> str:
+    """A coarse "how long ago" for the recovery list: ``2h ago``, ``3d ago``.
+
+    Coarse on purpose — the list exists to let someone recognise WHICH session,
+    and a timestamp to the second is harder to scan than a rough age.
+    """
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{int(seconds // size)}{unit} ago"
+    return "just now"

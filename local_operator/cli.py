@@ -36,6 +36,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 import traceback
 from importlib.metadata import version
 from pathlib import Path
@@ -1204,7 +1205,8 @@ def main() -> int:
         if getattr(args, "resume", None) is not None:
             from local_operator.resume import (
                 ResumeNotFound,
-                recent_session_ids,
+                format_age,
+                recent_sessions,
                 resolve_resume_id,
             )
 
@@ -1212,11 +1214,15 @@ def main() -> int:
                 args.resume = resolve_resume_id(config_dir(), str(args.resume))
             except ResumeNotFound as error:
                 print(f"\033[31m{error}\033[0m", file=sys.stderr)
-                available = recent_session_ids(config_dir())
+                # With the age: a column of bare 12-hex ids gives the reader
+                # nothing to choose between, and the recency the listing already
+                # sorted by is the one fact that makes them recognisable.
+                available = recent_sessions(config_dir())
                 if available:
-                    print("recent sessions:", file=sys.stderr)
-                    for session_id in available:
-                        print(f"  {session_id}", file=sys.stderr)
+                    now = time.time()
+                    print("recent sessions (newest first):", file=sys.stderr)
+                    for session_id, mtime in available:
+                        print(f"  {session_id}   {format_age(now - mtime)}", file=sys.stderr)
                 return 1
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"

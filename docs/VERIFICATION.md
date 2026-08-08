@@ -985,3 +985,85 @@ respect — only silence, which must not drop `cache_control` on the priciest mo
 | Explicit `true` sets `True` | over a `False` row → `True` |
 | Cache round-trip | stored document holds `"supports_images": null`; live and cached opens both resolve `True` |
 | No shipped id changed | all 18 `anthropic_models` rows audited against the live listing: the ten new ids are stated `true` on the wire (match), the eight older ids are no longer served so the wire says nothing and the row stands — including `claude-3-5-haiku-20241022`, which stays `False`. Rows whose resolved `supports_images` differs from the shipped row: **0** |
+
+## The frozen agent: approvals under a full-screen UI
+
+A reported freeze — two `bash` cards stuck on "running" while the working line
+kept animating, 4m47s on the clock, no progress. Not a TUI hang: the frame was
+still repainting.
+
+The harness gates write/exec tier tools behind `ToolContext.request_approval`,
+and the factory's gate is `await asyncio.to_thread(input, ...)`. Under the TUI
+`sys.stdin.isatty()` is true, so that branch is taken — but Textual holds the
+terminal in raw mode and consumes every keystroke, so the thread waits for a
+line **nobody can type**, and the turn awaiting the callback never resumes.
+Write/exec tools are `interruptible=False`, so the runner parked on that
+callback is settled by nothing but its own future: not even Ctrl+C reached it.
+
+Three changes, because one was not enough:
+
+| Change | Why it is load-bearing |
+|---|---|
+| `SessionProtocol.set_approval_handler` + `ApprovalBlock` | the front end that OWNS the terminal answers approvals on screen |
+| The stdin gate refuses when `textual.app.active_app` is set | the net for the window before a UI installs its handler; denying is the only safe answer, since the alternative is the hang |
+| A turn-scoped deny latch, re-read after every `await` | settling only the FRONT prompt woke the asker queued behind it, which mounted a fresh question **after** Ctrl+C had aborted — and on teardown, into a closing screen |
+
+`a` for "allow all" became `A`: the block takes focus, `a` is the most common
+letter in English, and the mode disarms a safety gate for the whole session. Any
+non-answer printable now passes through to the composer instead of vanishing,
+clicking the prompt takes focus back, `/approvals ask` restores prompting, and
+the band carries `! auto-approve` while it is disarmed.
+
+| Claim | Proof (live, Anthropic OAuth, `claude-opus-5`, `yolo=False`) |
+|---|---|
+| The prompt appears where the hang was | `? allow bash  bash({"command": "printf 'alpha\nbeta\ngamma\n'"})` / `y allow · n deny · A allow all · esc stop` |
+| Answering runs the tool | `y` → `tools: [('bash', True)]`, output contains the printed lines, `turn completed (no hang): True` |
+| The decision is kept | `✓ allowed bash  …` receipt row survives in the transcript |
+| Esc refuses and stops | `agent_end aborted=True`, card `aborted ✗`, focus still in the composer |
+| A queued ask is not re-asked | two concurrent asks, one Ctrl+C → both futures False, still exactly one prompt widget mounted |
+| Allow-all is seen by a waiter | two concurrent asks, `A` → both True, no second prompt (fails if the flag is latched off a posted message) |
+
+## Steering, Esc, and the double Ctrl+C
+
+Typing during a turn used to be thrown away: `prompt()` rejects a concurrent
+call while a turn holds the session lock, so the TUI surfaced "session is
+already streaming" as an error. Mid-turn submits now `steer()`.
+
+Esc could not simply be bound. `TextArea` binds it to `blur`, so the first press
+silently moved focus out of the composer — every keystroke after it went nowhere
+— and only a LATER press reached the app:
+
+```
+after esc1 -> picker closed, focused: Editor,        aborts: []
+after esc2 -> focused: TranscriptView,               aborts: []   <- focus left
+after esc3 ->                                        aborts: ['interrupted']
+```
+
+A `priority=True` binding was tried and rejected: it is matched before the
+focused widget sees the key, which made the pickers undismissable. The editor
+consumes Escape when no picker is open and posts `StopRequested`.
+
+| Claim | Proof (live, mid-`sleep`, so the agent is really busy) |
+|---|---|
+| The steer rides the queue | `streaming while typing: True`, `! queued — sends when this step finishes`, `steer queued in session: 1` |
+| The steer changes the OUTCOME | asked for BANANA, steered to ORANGE mid-tool, final text: `ORANGE` |
+| Esc stops a running tool | `stopped by esc: True`, `agent_end aborted flag: [True]`, focus still the composer |
+| One Ctrl+C never exits | `app.is_running` true, `ctrl+c again to exit — resume with local-operator --resume <id>` |
+| Two exits | second press within 1.5 s → app stopped; `session ended — resume with:` printed after the terminal is released |
+| Two slow presses do NOT exit | first press aged past the window → two interrupts, app still running |
+
+## `--resume`: the session comes back, not just the directory
+
+Resuming reuses the session's transcript directory, which is what makes the
+transcript replay — the same mechanism `--train` uses for an agent directory.
+The policy lives in `local_operator/resume.py`, which imports **only** `pathlib`:
+importing `session_factory` for it dragged `local_operator.harness` and `asyncio`
+onto every `local-operator --help`, which `test_import_graph` exists to prevent.
+
+| Claim | Proof (live, two real sessions) |
+|---|---|
+| A session persists | session 1 told the agent `ZEBRA-47`; `transcript.jsonl` 538 bytes on disk |
+| The hint names it | `local-operator --resume fd5a66ef8ce2` |
+| Resume replays HISTORY | session 2 built through the production `--resume` path, asked for the word back: `ZEBRA-47` |
+| Bare `--resume` takes the newest | `resolve_resume_id('@latest') -> fd5a66ef8ce2`, ordered by the transcript's mtime (a directory's own mtime moves for reasons that are not turns) |
+| A typo fails honestly | `no session 'nonexistent123' to resume`, exit status 1, the real ids listed — resolved before anything starts, so no full-screen app launches to report it |

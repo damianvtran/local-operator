@@ -299,7 +299,9 @@ class OperatorApp(App[None]):
         # DOUBLE_INTERRUPT_WINDOW_S exits, and a third while the exit is under
         # way ends the process outright.
         self._last_interrupt_at: float = 0.0
-        self._exiting: bool = False
+        # The one live "ctrl+c again to exit" hint, replaced rather than
+        # repeated so a run of interrupts leaves one row instead of N.
+        self._exit_hint: NoticeBlock | None = None
 
     # -- composition --------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -719,31 +721,38 @@ class OperatorApp(App[None]):
         :data:`DOUBLE_INTERRUPT_WINDOW_S` quits and prints the command that
         brings this exact session back (see :meth:`resume_hint`).
 
-        Third press ladder: once the quit is under way, a further Ctrl+C is the
-        user saying teardown has taken long enough, so the process is ended
-        outright with the conventional SIGINT status. Session state is already on
-        disk — the transcript is appended per turn, not at exit — so a hard exit
-        loses nothing but the teardown niceties.
+        There is deliberately NO third "hard exit" rung. omp has one because its
+        teardown can hang on an extension's IPC; ours cannot outlive
+        ``Session.dispose``, which bounds its own wait at 5 s. And it could not
+        work anyway: Textual stops dispatching input once ``exit()`` is called,
+        so a further Ctrl+C never reaches this method — a rung that cannot fire
+        is worse than no rung, because the docstring promises an escape the user
+        does not have.
         """
         now = time.monotonic()
-        if self._exiting:
-            os._exit(130)  # 128 + SIGINT
         if now - self._last_interrupt_at < DOUBLE_INTERRUPT_WINDOW_S:
-            self._exiting = True
             self._interrupt()  # stop the work before dropping the terminal
             self.exit()
             return
         self._last_interrupt_at = now
         self._interrupt()
-        # Only advertise the second press when there is a session to come back
-        # to; on a failed boot there is no id and no history worth resuming.
-        hint = self.resume_hint()
-        self._append_block(
-            NoticeBlock(
-                f"ctrl+c again to exit — resume with {hint}" if hint else "ctrl+c again to exit",
-                "info",
-            )
-        )
+        # Short, and WITHOUT the command. The full `local-operator --resume <id>`
+        # belongs in the exit block printed to the terminal, where it can be
+        # copied; in a transcript line it is the unreachable copy (the alt screen
+        # is discarded on exit), it wrapped at 60 columns and split across rows at
+        # 30, and every interrupt added another identical row. What this line owes
+        # the user is that a second press exits and that doing so is recoverable.
+        #
+        # `warning`, not `info`: it says the app is one keystroke from closing,
+        # which is the loudest thing on the frame when it appears.
+        #
+        # Replaced rather than repeated, so three interrupts leave one hint.
+        resumable = bool(self.resume_hint())
+        text = "ctrl+c again to exit" + (" — the session can be resumed" if resumable else "")
+        if self._exit_hint is not None:
+            self.query_one(TranscriptView).remove_block(self._exit_hint)
+        self._exit_hint = NoticeBlock(text, "warning")
+        self._append_block(self._exit_hint)
 
     def resume_hint(self) -> str:
         """``local-operator --resume <id>`` for this session, or "" when there is none.
@@ -751,12 +760,26 @@ class OperatorApp(App[None]):
         Read by :func:`run_tui` after the app has released the terminal, so the
         command lands in the user's scrollback where they can copy it, rather
         than in a frame that is about to be torn down.
+
+        Gated on the transcript EXISTING, not merely on having a session id:
+        ``--resume`` refuses an id whose transcript is not on disk (a typo must
+        fail rather than open an empty session that looks resumed), so quitting
+        before the first turn persisted would otherwise advertise a command that
+        is guaranteed to be rejected.
         """
         session = self._session
         if session is None:
             return ""
         session_id = getattr(session, "session_id", "")
-        return f"local-operator --resume {session_id}" if session_id else ""
+        if not session_id:
+            return ""
+        from local_operator.paths import config_dir
+        from local_operator.resume import TRANSCRIPT_NAME
+
+        transcript = config_dir() / "sessions" / session_id / TRANSCRIPT_NAME
+        if not transcript.is_file():
+            return ""
+        return f"local-operator --resume {session_id}"
 
     def _interrupt(self) -> None:
         """Abort the running turn AND stop any ``/loop`` in flight.
@@ -848,10 +871,13 @@ class OperatorApp(App[None]):
         """
         if answer == "a":
             self._approve_all = True
+            # States the CHANGE, not its duration: "for the rest of this
+            # session" stays in the transcript at full warning after
+            # `/approvals ask` has re-armed the gate, leaving the loudest ink on
+            # screen asserting something no longer true.
             self._append_block(
                 NoticeBlock(
-                    "every tool is auto-approved for the rest of this session — "
-                    "/approvals ask restores prompting",
+                    "tool approvals: auto — /approvals ask restores prompting",
                     "warning",
                 )
             )
@@ -865,8 +891,22 @@ class OperatorApp(App[None]):
         front prompt's future, so settling that future WAKES it, and without a
         latch it would go on to mount a fresh question for a turn that is being
         stopped or an app that is being torn down.
+
+        Only for paths that END the turn (stop, teardown). A path that merely
+        clears the screen must use :meth:`_settle_live_approval`, because the
+        turn is still running and its remaining tools still deserve to ask.
         """
         self._approvals_denied = True
+        self._settle_live_approval()
+
+    def _settle_live_approval(self) -> None:
+        """Refuse the VISIBLE prompt only, leaving later asks free to ask.
+
+        Used by ``/clear``: the widget holding the future is about to be removed,
+        so the question cannot be left pending — but the turn was not stopped, and
+        latching the deny flag here denied every later write/exec tool of the run
+        with no prompt at all, while ``/approvals`` reported the opposite.
+        """
         approval = self._approval
         if approval is not None and not approval.answered:
             approval.resolve(False)
@@ -897,6 +937,10 @@ class OperatorApp(App[None]):
         mode = arg.strip().lower()
         if mode in ("ask", "on", "prompt"):
             self._approve_all = False
+            # Also clears the turn-scoped deny latch: this command's whole
+            # promise is "tools will prompt again", and a latch left armed
+            # would make that statement false for the rest of the run.
+            self._allow_approvals_again()
             if self._status is not None:
                 self._status.update(approvals_auto=False)
             notice("tool approvals: ask — write and command tools will prompt again")
@@ -926,8 +970,11 @@ class OperatorApp(App[None]):
             self._working_block.stop()
             self._working_block = None
         # The prompt's widget is about to be removed with the rest of the
-        # transcript, so the turn awaiting it is denied rather than orphaned.
-        self._deny_queued_approvals()
+        # transcript, so the turn awaiting it is denied rather than orphaned —
+        # but NOT latched: /clear does not stop the turn, and latching here
+        # denied every later write/exec tool of the run with no prompt.
+        self._settle_live_approval()
+        self._exit_hint = None  # its widget went with the transcript
         self._streaming_block = None
         self._tool_cards = {}
         # An empty transcript is the welcome view's whole precondition, so the
@@ -989,10 +1036,12 @@ class OperatorApp(App[None]):
             session.steer(text)
             # "boundary" is engine vocabulary the UI never defines, and this is
             # the line answering "did my text just get thrown away?" — so it says
-            # when it will be sent, in the tense it will be sent in, and at
-            # `warning` weight rather than `info` (which maps to the quietest ink
-            # in the app, a step below a settled tool summary).
-            self._append_block(NoticeBlock("queued — sends when this step finishes", "warning"))
+            # when it will be sent, in the tense it will be sent in, at the
+            # `note` weight: above `info`/dim, which is too quiet for an answer
+            # the user is waiting for, and below `warning`, which is an alarm this
+            # is not. Three warning-tinted rows on one frame for routine receipts
+            # is how the loudest ink in the palette stops meaning anything.
+            self._append_block(NoticeBlock("queued — sends when this step finishes", "note"))
             # Still worth a title: the steering message can be the first thing
             # in the conversation that actually says what the task is.
             self._maybe_name_conversation(text)

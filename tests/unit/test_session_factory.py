@@ -772,3 +772,23 @@ def test_resume_latest_with_no_sessions_is_an_honest_error(tmp_path: Path) -> No
         session_factory._transcript_dir_and_agent_id(
             None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
         )
+
+
+@pytest.mark.parametrize(
+    "requested",
+    ["nope", "..", "../../etc", "sub/dir", "", ".", "C:", "C:sessions", "a\\b", "/etc/passwd"],
+)
+def test_resume_id_must_be_a_single_path_component(tmp_path: Path, requested: str) -> None:
+    """The id comes straight from argv and is used to build a path.
+
+    Enumerating escape spellings is a list that is never finished (`/`, `\\`,
+    `..`, and on Windows the drive-relative `C:x` form), so the guard asks the
+    path library one question instead: does the string survive as its own
+    basename?
+    """
+    (tmp_path / "sessions").mkdir(parents=True)
+    registry = FakeRegistry(tmp_path)
+    with pytest.raises(resume_mod.ResumeNotFound):
+        session_factory._transcript_dir_and_agent_id(
+            None, _args(resume=requested), cast("AgentRegistry", registry)
+        )

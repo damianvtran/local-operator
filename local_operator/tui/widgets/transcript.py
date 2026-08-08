@@ -163,6 +163,10 @@ class UserBlock(TranscriptBlock):
 #: Notice kind glyphs (D14): structure from symbols, not prefixes.
 NOTICE_GLYPHS: dict[str, str] = {
     "info": "·",
+    # Same glyph as `info` on purpose: `note` is the same KIND of statement
+    # (a receipt), one weight up. A second symbol would claim a distinction
+    # of meaning where the only difference is how much it wants reading.
+    "note": "·",
     "warning": "!",
     "error": "✗",
 }
@@ -173,8 +177,16 @@ class NoticeBlock(TranscriptBlock):
 
     SPACING_KIND = "notice"
 
+    #: Four tiers, not three. ``info`` is `dim` — the quietest ink in the app, a
+    #: step below a settled tool summary — which is right for a receipt nobody
+    #: needs to read and wrong for one that answers a question the user is
+    #: actively asking ("did my text just get thrown away?"). ``note`` is that
+    #: middle weight: readable at a glance, not an alarm. Reaching for `warning`
+    #: instead is what inverted the frame's colour budget, putting routine
+    #: receipts in the loudest ink in the palette.
     _KIND_TOKENS: ClassVar[dict[str, str]] = {
         "info": "dim",
+        "note": "muted",
         "warning": "warning",
         "error": "danger",
     }

@@ -41,6 +41,13 @@ across::
   column — otherwise ``✓ 0.4s`` and ``✓ 12.3s`` put the glyph one cell
   apart, and the pass/fail scan that right-alignment exists to serve has to
   hunt for the answer.
+- the reason in front of the glyph shortens differently per state. An error
+  message is CONTENT and truncates — ``internal error: worker di…`` still
+  names the failure. ``interrupted`` is a constant restating ``⊘``, so it is
+  all-or-nothing: truncated to ``inte…`` it was byte-identical to a real
+  failure truncated to ``inte…``, in the leftmost and longest column, which
+  is the one the eye reaches first. Below the width that holds it whole the
+  word goes and the glyph carries the state alone.
 - the outcome glyph is what a still, COLOURLESS frame reads: ``✓``/``✗``/
   ``⊘`` separate success, failure and interruption without a single colour,
   and their absence is what says "still running". Tint is a second channel
@@ -53,10 +60,16 @@ across::
   to ``⟨collapse⟩`` when open, so a settled transcript reads as content
   rather than as a wall of controls.
 - a row with NOTHING to reveal answers anyway: activating it flashes
-  :data:`NO_OUTPUT_NOTICE` (or :data:`RUNNING_NOTICE`) in the hint slot for
+  :data:`NO_OUTPUT_NOTICE` (or :data:`RUNNING_NOTICE`) in the same slot for
   :data:`NOTICE_SECONDS`. Silence was read in the field as the app being
   broken — "when I click to expand these lines, nothing happens" — and an
   affordance that sometimes does nothing has to say which time this is.
+- the two share a slot but NOT a priority. The hint is an offer: chrome,
+  dropped at the D8 summary floor. The notice is the answer to a keystroke
+  the user just pressed, so it outranks the summary and shortens along
+  :data:`NOTICE_LADDER` — phrase, then ``⟨∅⟩``/``⟨⋯⟩`` — rather than
+  vanishing. Shedding them together is how the reported bug came back at 46
+  columns, where activating an inert row repainted identical bytes.
 
 State also reaches the ground: the card's background is ``raised`` while
 running, ``surface`` once it settles, and the warm ``tint-danger`` ground
@@ -115,6 +128,24 @@ COLLAPSE_HINT = "⟨collapse⟩"
 #: row, and the app already owns a bracket for "this is chrome, not content".
 NO_OUTPUT_NOTICE = "⟨no output⟩"
 RUNNING_NOTICE = "⟨still running⟩"
+
+#: The same two answers at three cells, for a row too narrow to spell them.
+#: The feedback has to survive FURTHER DOWN the width ladder than the expand
+#: affordance does, and the reason is the whole point of the slot: the offer
+#: is decoration a tight row can drop, but an activation that leaves a
+#: byte-identical frame IS the reported bug ("when I click to expand these
+#: lines, nothing happens") reappearing at 46 columns. So the phrase shortens
+#: to its glyph rather than vanishing: ∅ for "there is nothing here", ⋯ for
+#: "not yet". Brackets are kept at every rung so the slot never reads as
+#: content, and both inner glyphs are measured single-width below.
+TERSE_NO_OUTPUT_NOTICE = "⟨∅⟩"
+TERSE_RUNNING_NOTICE = "⟨⋯⟩"
+#: Full phrase -> glyph -> nothing, per notice. The row walks this in order
+#: and takes the first rung that fits.
+NOTICE_LADDER: dict[str, tuple[str, ...]] = {
+    NO_OUTPUT_NOTICE: (NO_OUTPUT_NOTICE, TERSE_NO_OUTPUT_NOTICE),
+    RUNNING_NOTICE: (RUNNING_NOTICE, TERSE_RUNNING_NOTICE),
+}
 #: How long that answer stays on the row. Long enough to read at a glance,
 #: short enough that it is gone before the eye returns — it is feedback for
 #: a keystroke, not a state the row is in.
@@ -813,34 +844,42 @@ class ToolCard(TranscriptBlock):
         # when the user activated a row that has none. They are mutually
         # exclusive by construction — a notice is only ever set on a row that
         # cannot expand — so they share a budget and a column.
-        hint = ""
-        hint_token = "dim"
+        #
+        # They do NOT share a priority. The affordance is an OFFER: chrome,
+        # and the D8 floor drops it before it may eat into the summary. The
+        # notice is an ANSWER to a keystroke the user just pressed, and it
+        # outranks the summary — which on a no-output row is the least
+        # interesting thing present, has not changed, and is still readable
+        # underneath. Treating the two the same is how the ORIGINAL bug came
+        # back: at 46 columns the floor dropped the notice too, so activating
+        # an inert row left a byte-identical frame.
+        slot = ""
+        slot_token = "dim"
+        remaining = max(0, width - prefix_cells - status_cells - 2)
         if self.can_expand():
-            hint = COLLAPSE_HINT if self._expanded else EXPAND_HINT
             # Offered under the pointer or under keyboard focus, silent at
             # rest. A settled transcript is content, not a wall of controls:
             # printing ⟨expand⟩ on every row costs ~9 cells of permanent
             # chrome on the common 80-column terminal, and the row's ground
             # already lifts on :hover and :focus to say it is a target.
-            if not (self._hovered or self._focused):
-                hint = ""
+            if self._hovered or self._focused:
+                offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
+                if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
+                    slot = offer
         elif self._notice:
-            hint = self._notice
-            # `muted`, one step brighter than the hint's `dim`: this is not an
-            # offer the eye may skip, it is the answer to something the user
-            # just did, and it is on screen for two seconds.
-            hint_token = "muted"
-        hint_cells = cell_len(hint) + 1 if hint else 0
-        budget = max(0, width - prefix_cells - status_cells - hint_cells - 2)
-        if hint and budget < _SUMMARY_FLOOR:
-            # D8 floor: the summary is the row's content and the trailing slot
-            # is chrome, so the slot goes first. A notice loses its column too
-            # — an answer that pushes the command off the row answers the
-            # wrong question.
-            hint = ""
-            hint_cells = 0
-            budget = max(0, width - prefix_cells - status_cells - 2)
-        summary = truncate_cells(self._summary, budget)
+            # `muted`, one step brighter than the offer's `dim`: this is not
+            # something the eye may skip. Walk the ladder — full phrase, then
+            # the three-cell glyph — and take the first rung the row can hold
+            # with nothing reserved for the summary. Only when even ⟨∅⟩ will
+            # not fit does the answer go unsaid, and by then the row is down
+            # to its icon and its outcome anyway.
+            slot_token = "muted"
+            for rung in NOTICE_LADDER.get(self._notice, (self._notice,)):
+                if cell_len(rung) + 1 <= remaining:
+                    slot = rung
+                    break
+        slot_cells = cell_len(slot) + 1 if slot else 0
+        summary = truncate_cells(self._summary, max(0, remaining - slot_cells))
 
         row = _row_text()
         # The icon carries the running state: accent while live (D26 — a still
@@ -852,18 +891,18 @@ class ToolCard(TranscriptBlock):
         row.append(" ", style=dim)
         row.append(summary, style=summary_style)
 
-        # ONE right-aligned tail: the hint and the status share a single pad,
-        # so the hint gets a COLUMN instead of trailing the summary wherever
+        # ONE right-aligned tail: the slot and the status share a single pad,
+        # so the slot is a COLUMN instead of trailing the summary wherever
         # that happens to end. Appended after the summary it landed at a
         # different cell on every row and slid as the summary truncated —
         # jogging left and right under the eye while the outcome beside it
         # was pinned precisely so that would not happen (D27).
-        tail_cells = hint_cells + status_cells
+        tail_cells = slot_cells + status_cells
         if tail_cells:
             used = cell_len(row.plain)
             row.append(" " * max(1, width - used - tail_cells), style=dim)
-            if hint:
-                row.append(hint, style=Style(color=theme_mod.semantic_color(hint_token)))
+            if slot:
+                row.append(slot, style=Style(color=theme_mod.semantic_color(slot_token)))
                 row.append(" ", style=dim)
             for text, style in status_runs:
                 row.append(text, style=style)
@@ -936,18 +975,35 @@ class ToolCard(TranscriptBlock):
         # message moved the failed row's glyph ~25 cells left of the `✓` on every
         # neighbouring row — so the scan found a hole exactly where the answer
         # should be. The reason keeps the space to the glyph's left.
+        #
+        # `abbreviates` is what separates the two failing states. An error
+        # message is CONTENT: `internal error: worker di…` still carries the
+        # failure even cut short, so it truncates. "interrupted" is not — it
+        # is a constant restating what ⊘ already means, so truncating it buys
+        # nothing and costs discrimination: at 46 columns a real failure and
+        # a user stop both painted `inte…`, identical in the leftmost and
+        # longest column, which is the one the eye lands on first. Below the
+        # width that holds the word whole it is dropped, and the glyph column
+        # carries the state alone — which it can, being distinguishable from
+        # ✓ and ✗ with no colour at all.
         if self._state == "interrupted":
             glyph, reason, tint = ICON_INTERRUPTED, "interrupted", dim
+            abbreviates = False
         else:
             danger = Style(color=theme_mod.semantic_color("danger"))
             glyph, reason, tint = ICON_ERROR, self._error, danger
+            abbreviates = True
 
         runs: list[tuple[str, Style]] = []
         if not terse and reason:
             if cap:
-                reason = truncate_cells(
-                    reason, max(0, cap - cell_len(f"{glyph}  ") - cell_len(duration))
-                )
+                # Uncapped, the caller clamps downstream and the reason rides
+                # whole; capped, it has to fit in front of the glyph.
+                room = max(0, cap - cell_len(f"{glyph}  ") - cell_len(duration))
+                if abbreviates:
+                    reason = truncate_cells(reason, room)
+                elif cell_len(reason) > room:
+                    reason = ""
             # A reason cut down to a bare ellipsis is a cell spent saying
             # "there were words here". Drop it and give the cell back to the
             # columns that still mean something.
