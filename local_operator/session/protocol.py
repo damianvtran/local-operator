@@ -88,6 +88,17 @@ class SessionProtocol(Protocol):
         """
         ...
 
+    def history(self) -> list[Message]:
+        """The conversation as replayed into LLM context.
+
+        Read-only for RENDERING (a resumed session's transcript back on
+        screen): returns the messages the loop sees, in order — user prompts,
+        assistant replies, tool results. A front end mounts them as blocks;
+        it must NOT mutate them. Empty before the first prompt on a fresh
+        session; on ``--resume`` it carries the prior conversation.
+        """
+        ...
+
     # --- driving turns ----------------------------------------------------
     async def prompt(self, text: str) -> None:
         """Run one user turn to completion (awaitable) or raise."""

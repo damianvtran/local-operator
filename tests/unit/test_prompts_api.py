@@ -45,6 +45,19 @@ class _FakeSchedulerForBlocks:
         pass
 
 
+class _FakeJobsForBlocks:
+    """Minimal job manager so create_tools includes task/wait/jobs."""
+
+    def get(self, job_id: str, *, owner_id: str | None = None) -> Any:
+        return None
+
+    def list(self, *, owner_id: str | None = None) -> list[Any]:
+        return []
+
+    async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # render_string / render_template engine
 # ---------------------------------------------------------------------------
@@ -223,7 +236,14 @@ def test_inventory_block_matches_default_tool_order() -> None:
     # inventory byte-stable against provider tool-array ordering.
     from local_operator.tools.registry import DEFAULT_TOOL_NAMES, create_tools
 
-    tools = create_tools(ToolContext(cwd=".", wake_scheduler=_FakeSchedulerForBlocks()))
+    tools = create_tools(
+        ToolContext(
+            cwd=".",
+            wake_scheduler=_FakeSchedulerForBlocks(),
+            subagent_launcher=lambda label, prompt: "job-x",
+            jobs=_FakeJobsForBlocks(),
+        )
+    )
     blocks = build_system_blocks(tools, "", ENV, DATE)
     lines = [line for line in blocks[1].splitlines() if line.startswith("- ")]
     expected = list(DEFAULT_TOOL_NAMES)  # scheduler attached -> wake included

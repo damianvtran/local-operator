@@ -30,6 +30,7 @@ Example Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import functools
 import math
 import os
@@ -1555,6 +1556,29 @@ def main() -> int:
                 # starts cleanly. functools.partial pins it by name so a future
                 # signature change cannot re-introduce that silent failure.
                 tui_entry = functools.partial(run_tui, provider_controller=tui_controller)
+
+                # ``/resume <id>`` in the TUI needs a factory that boots an
+                # ARBITRARY session, not just the one the launch args named.
+                # Building it here closes over the same managers the boot
+                # factory used and swaps ``args.resume`` to the requested id,
+                # so a mid-session resume is exactly a relaunch onto that
+                # transcript — no second shell call, no new process. A shallow
+                # copy of the args namespace keeps the user's interactive
+                # ``args`` object untouched (``--resume`` is read once, at
+                # startup; mutating the original here would confuse the exit
+                # hint's "resume with:" line).
+                async def resume_factory(resume_id: str):
+                    resume_args = copy.copy(args)
+                    resume_args.resume = resume_id
+                    return await create_session(
+                        resume_args,
+                        config_manager,
+                        credential_manager,
+                        agent_registry,
+                        has_ui=True,
+                    )
+
+                tui_entry = functools.partial(tui_entry, resume_factory=resume_factory)
                 # The silence starts HERE, not inside ``run_tui``. The
                 # scheduler is started by the wrapper below and logs
                 # "Scheduler started" at INFO before the app has painted a

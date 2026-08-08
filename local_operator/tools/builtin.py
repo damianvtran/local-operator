@@ -610,6 +610,19 @@ def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
     return f"{head} — {message}" if message else head
 
 
+def _describe_task_approval(args: dict[str, Any], cwd: str) -> str:
+    """``subagent: <label>`` — the label names the child being started.
+
+    Only the label can practically be shown: spawning a subagent runs a fresh
+    child session whose whole prompt is the value of ``prompt``, and dumping
+    that into the approval row would make the decision to start the child
+    hinge on prose the user is not going to read from a gate line. The label
+    is a short name the caller chose precisely to stand in for the work.
+    """
+    label = " ".join(str(args.get("label") or "").split())
+    return f"subagent: {label}" if label else "subagent"
+
+
 #: Browser actions whose whole effect is "go somewhere". Everything else acts on
 #: the page that is already open, and says so.
 NAVIGATING_BROWSER_ACTIONS = frozenset({"open", "goto", "navigate"})
@@ -1618,6 +1631,40 @@ def _line_delta(before: str, after: str) -> tuple[int, int]:
     return added, removed
 
 
+#: The unified-diff payload cap. The diff rides the tool result's ``details``,
+#: which the transcript PERSISTS — a runaway file write must not let one tool
+#: result grow the transcript without bound. A typical edit is a handful of
+#: hunks; this admits a large one while keeping the stored payload sane. The
+#: TUI's expanded card has its own display cap; the stored cap is about the
+#: ledger, not the screen.
+_DIFF_DETAILS_CAP_LINES = 200
+
+
+def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
+    """The write/edit tool-result details: line counts + a rendered unified diff.
+
+    Both write and edit funnel their before/after states through a real
+    sequence match, so the UI's ``+N/-N`` counters and the expanded card's
+    diff view describe the SAME change and can never disagree about what
+    happened. The diff itself powers the TUI's expanded view; it is capped
+    (see ``_DIFF_DETAILS_CAP_LINES``) so the persisted details stay bounded.
+    """
+    added, removed = _line_delta(before, after)
+    if not added and not removed:
+        return {"path": str(path), "added": 0, "removed": 0}
+    diff = list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            lineterm="",
+            n=2,
+        )
+    )
+    if len(diff) > _DIFF_DETAILS_CAP_LINES:
+        diff = diff[: _DIFF_DETAILS_CAP_LINES] + ["…"]
+    return {"path": str(path), "added": added, "removed": removed, "diff": diff}
+
+
 @_guard("write")
 async def execute_write(
     tool_call_id: str,
@@ -1648,12 +1695,12 @@ async def execute_write(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(params.content, encoding="utf-8")
     verb = "Overwrote" if existed else "Created"
-    added, removed = _line_delta(previous, params.content)
+    details = _diff_details(str(path), previous, params.content)
     return _text(
         tool_call_id,
         "write",
         f"{verb} {path} ({len(params.content)} chars).",
-        details={"path": str(path), "added": added, "removed": removed},
+        details=details,
     )
 
 
@@ -1741,12 +1788,12 @@ async def execute_edit(
         updated = content.replace(params.old_text, params.new_text, 1)
     path.write_text(updated, encoding="utf-8")
     replaced = occurrences if params.replace_all else 1
-    added, removed = _line_delta(content, updated)
+    details = _diff_details(str(path), content, updated)
     return _text(
         tool_call_id,
         "edit",
         f"Edited {path}: replaced {replaced} occurrence(s) of old_text.",
-        details={"path": str(path), "added": added, "removed": removed},
+        details=details,
     )
 
 
@@ -3562,4 +3609,236 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         concurrency="shared",
         interruptible=False,
         execute=execute_browser,
+    )
+
+
+# ---------------------------------------------------------------------------
+# task / wait / jobs — background subagent engine tools
+# ---------------------------------------------------------------------------
+# These three tools are the model-facing surface of the background job
+# engine. They are createIf-gated exactly like ``wake``: the ``task`` builder
+# returns None unless the ToolContext carries a ``subagent_launcher`` (the
+# session's ``Session._launch_subagent``), and ``wait``/``jobs`` return None
+# unless the context carries a job manager. A session without the engine must
+# never advertise tools that can only error.
+
+
+class TaskParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(description="Short label for the subagent (shown in the jobs list).")
+    prompt: str = Field(
+        description="The full instructions the subagent runs in a fresh child session."
+    )
+
+
+class WaitParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(
+        description="Job id returned by the 'task' tool (or listed by 'jobs')."
+    )
+    wait_ms: int = Field(
+        default=30_000,
+        gt=0,
+        le=300_000,
+        description="Max ms to block for the job to settle (capped at 300000).",
+    )
+
+
+class JobsParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+#: Formatted status text shared by ``wait``'s settled return and the machine
+#: detail payload.
+def _job_summary(job: Any) -> str:
+    text = f"job {job.id} ({job.label}) [{job.status}]"
+    if job.status == "completed" and job.result_text:
+        text += f"\n{job.result_text}"
+    if job.status == "failed" and job.error_text:
+        text += f"\n{job.error_text}"
+    return text
+
+
+@_guard("task")
+async def execute_task(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Launch a one-shot subagent as a background job; return its job id."""
+    try:
+        params = TaskParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "task", exc)
+
+    launcher = context.subagent_launcher if context else None
+    if launcher is None:
+        return _error(
+            tool_call_id,
+            "task",
+            "subagent launching is not available in this session (no engine attached).",
+        )
+    try:
+        job_id = launcher(params.label, params.prompt)
+    except Exception as exc:  # noqa: BLE001 — engine failure surfaces as an error result
+        return _error(tool_call_id, "task", f"could not launch subagent: {exc}")
+    return _text(
+        tool_call_id,
+        "task",
+        f"launched subagent job {job_id} ({params.label}); use 'wait' with "
+        f"job_id={job_id} to await it, or 'jobs' to list running work.",
+        details={"job_id": job_id, "label": params.label},
+    )
+
+
+def build_task_tool(context: ToolContext) -> AgentTool | None:
+    if context.subagent_launcher is None:
+        return None
+    return AgentTool(
+        name="task",
+        label="Subagent task",
+        describe_approval=_describe_task_approval,
+        description=(
+            "Launch a one-shot subagent in a fresh child session, running "
+            "in the background; returns a job id to await with 'wait'."
+        ),
+        parameters=TaskParams.model_json_schema(),
+        # Spawns autonomous child work, so it rides the write gate just like
+        # scheduling a wake: the user approves starting the child.
+        approval_tier="write",
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_task,
+    )
+
+
+@_guard("wait")
+async def execute_wait(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Block until a background job settles or ``wait_ms`` elapses."""
+    try:
+        params = WaitParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "wait", exc)
+
+    jobs = context.jobs if context else None
+    if jobs is None:
+        return _error(
+            tool_call_id,
+            "wait",
+            "job tracking is not available in this session (no job manager attached).",
+        )
+    job = jobs.get(params.job_id)
+    if job is None:
+        return _error(tool_call_id, "wait", f"unknown job {params.job_id}")
+
+    deadline = time.monotonic() + params.wait_ms / 1000.0
+    while job.status == "running":
+        if signal is not None and signal.aborted:
+            return _text(
+                tool_call_id,
+                "wait",
+                f"job {params.job_id} still running (wait aborted)",
+                details={"job_id": params.job_id, "status": "running"},
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _text(
+                tool_call_id,
+                "wait",
+                f"job {params.job_id} still running after {params.wait_ms}ms",
+                details={"job_id": params.job_id, "status": "running"},
+            )
+        await asyncio.sleep(min(0.05, remaining))
+        job = jobs.get(params.job_id)
+        if job is None:
+            return _error(tool_call_id, "wait", f"job {params.job_id} disappeared")
+    return _text(
+        tool_call_id,
+        "wait",
+        _job_summary(job),
+        details={"job_id": job.id, "status": job.status},
+    )
+
+
+def build_wait_tool(context: ToolContext) -> AgentTool | None:
+    if context.jobs is None:
+        return None
+    return AgentTool(
+        name="wait",
+        label="Wait for job",
+        description=(
+            "Block up to wait_ms for a background job to settle, returning its "
+            "final output/status. Times out if still running."
+        ),
+        parameters=WaitParams.model_json_schema(),
+        # read-only observation of job state; blocks the turn but changes nothing.
+        approval_tier="read",
+        concurrency="exclusive",
+        interruptible=True,
+        execute=execute_wait,
+    )
+
+
+@_guard("jobs")
+async def execute_jobs(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """List running and recently-settled background jobs."""
+    try:
+        JobsParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "jobs", exc)
+
+    jobs = context.jobs if context else None
+    if jobs is None:
+        return _error(
+            tool_call_id,
+            "jobs",
+            "job tracking is not available in this session (no job manager attached).",
+        )
+    rows = jobs.list()
+    if not rows:
+        return _text(tool_call_id, "jobs", "no background jobs", details={"count": 0})
+    now = time.time()
+    lines = []
+    for job in rows:
+        elapsed = job.settled_at if job.status != "running" and job.settled_at else now
+        lines.append(f"{job.id}  {job.status:<9}  {now - job.start_time:6.1f}s  {job.label}")
+    return _text(
+        tool_call_id,
+        "jobs",
+        "\n".join(lines),
+        details={"count": len(rows)},
+    )
+
+
+def build_jobs_tool(context: ToolContext) -> AgentTool | None:
+    if context.jobs is None:
+        return None
+    return AgentTool(
+        name="jobs",
+        label="List jobs",
+        description=(
+            "List running and recently-settled background jobs (task/bash) "
+            "with their id, status and elapsed time."
+        ),
+        parameters=JobsParams.model_json_schema(),
+        approval_tier="read",
+        concurrency="shared",
+        interruptible=False,
+        execute=execute_jobs,
     )

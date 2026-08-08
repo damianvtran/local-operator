@@ -118,6 +118,9 @@ class FakeSession:
     async def seed_history(self, messages: list[Any]) -> None:
         pass
 
+    def history(self) -> list[Any]:
+        return getattr(self, "_history", [])
+
     def steer(self, text: str) -> None:
         pass
 

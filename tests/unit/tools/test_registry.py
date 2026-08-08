@@ -24,6 +24,36 @@ class _FakeScheduler:
         pass
 
 
+class _FakeJobs:
+    """Just enough surface for the job-tracking tools' capability check."""
+
+    def get(self, job_id: str, *, owner_id: str | None = None) -> Any:
+        return None
+
+    def list(self, *, owner_id: str | None = None) -> list[Any]:
+        return []
+
+    async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool:
+        return False
+
+
+def _launcher(label: str, prompt: str) -> str:
+    return "job-fake"
+
+
+def _engine_context(**kwargs) -> ToolContext:
+    """A context carrying every capability the default surface reads, so the
+    whole table can build: the wake scheduler, the subagent launcher and the
+    job manager."""
+    base: dict[str, Any] = dict(
+        wake_scheduler=_FakeScheduler(),
+        subagent_launcher=_launcher,
+        jobs=_FakeJobs(),
+    )
+    base.update(kwargs)
+    return ToolContext(cwd=".", **base)
+
+
 @pytest.fixture(autouse=True)
 def _force_browser_available(monkeypatch):
     """The default-surface assertions include ``browser``, whose builder is
@@ -33,8 +63,8 @@ def _force_browser_available(monkeypatch):
 
 
 def test_default_set_builds_all_builtin_tools() -> None:
-    # With a wake scheduler attached, the default surface is the whole table.
-    context = ToolContext(cwd=".", wake_scheduler=_FakeScheduler())
+    # With every capability attached, the default surface is the whole table.
+    context = _engine_context()
     tools = create_tools(context)
     names = [tool.name for tool in tools]
     assert names == DEFAULT_TOOL_NAMES
@@ -43,19 +73,19 @@ def test_default_set_builds_all_builtin_tools() -> None:
 
 def test_default_set_drops_wake_without_scheduler() -> None:
     # createIf: no scheduler -> no wake tool (never a tool that can only error).
-    tools = create_tools(ToolContext(cwd="."))
+    tools = create_tools(_engine_context(wake_scheduler=None))
     names = [tool.name for tool in tools]
     assert names == [name for name in DEFAULT_TOOL_NAMES if name != "wake"]
 
 
 def test_every_tool_has_schema_and_metadata() -> None:
-    for tool in create_tools(ToolContext(cwd=".", wake_scheduler=_FakeScheduler())):
+    for tool in create_tools(_engine_context()):
         # JSON Schema derived from the pydantic params model
         assert tool.parameters.get("type") == "object"
         assert "properties" in tool.parameters
-        # A zero-arg tool (e.g. list_variables) legitimately has no params.
+        # A zero-arg tool (e.g. list_variables, jobs) legitimately has no params.
         if tool.parameters["properties"] == {}:
-            assert tool.name == "list_variables"
+            assert tool.name in ("list_variables", "jobs")
         else:
             assert tool.parameters.get("properties")
         # presentation + scheduling metadata are populated
@@ -135,6 +165,31 @@ def test_line_delta_distinguishes_insert_delete_and_rewrite() -> None:
     assert _line_delta("a\n", "a\n") == (0, 0)
     assert _line_delta("", "a\nb\n") == (2, 0)
     assert _line_delta("a\nb\n", "") == (0, 2)
+
+
+def test_diff_details_carries_a_rendered_diff_and_honours_the_cap() -> None:
+    """write/edit report a rendered unified diff under ``details["diff"]``.
+
+    The TUI's expanded card is powered by this payload (it has no file access
+    of its own at render time), so the details must carry the actual safe diff,
+    and the list must be bounded on the STORED payload (the transcript
+    persists these details, so an unbounded diff would grow the ledger).
+    """
+    from local_operator.tools import builtin
+
+    details = builtin._diff_details("f.txt", "a\nb\nc\n", "a\nX\nc\nd\n")
+    assert details["added"] == 2
+    assert details["removed"] == 1
+    diff = details["diff"]
+    assert isinstance(diff, list) and diff
+    assert any(line.startswith("+") for line in diff)
+    assert any(line.startswith("-") for line in diff)
+    # An unchanged file reports no diff at all (nothing to render).
+    unchanged = builtin._diff_details("f.txt", "a\nb\n", "a\nb\n")
+    assert "diff" not in unchanged
+    # The cap bounds the stored list even for a pathological write.
+    big = builtin._diff_details("f.txt", "\n".join(f"line{i}" for i in range(500)), "")
+    assert len(big["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES + 1
 
 
 def test_write_reports_diff_counts_for_new_and_overwritten_files(tmp_path) -> None:

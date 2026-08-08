@@ -198,8 +198,8 @@ class SubagentPanel(Container):
     def on_unmount(self) -> None:
         self._stop_spinner()
 
-    # -- refresh -------------------------------------------------------------
-    def refresh(self, session: Any) -> None:
+    # -- sync -------------------------------------------------------------
+    def sync(self, session: Any) -> None:
         """Re-read ``session.jobs`` and repaint the rows.
 
         Called on every Subagent* event (immediate) and on the 1 Hz poll (the

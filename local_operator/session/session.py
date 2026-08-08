@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.loop import AgentLoop, LoopContext
+from local_operator.harness.subagent import run_subagent
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -392,6 +393,20 @@ class Session:
     def model(self) -> ModelSpec:
         """The spec every provider call is built from."""
         return self._model
+
+    def history(self) -> list[Message]:
+        """The conversation as replayed into LLM context, in order.
+
+        Read-only for rendering: a front end that boots against a resumed
+        session wants the prior conversation back on screen, and the source of
+        truth for what the model sees is ``self._context.messages`` (populated
+        at construction from ``transcript.build_llm_history()``). Returning the
+        live list is cheap and always in sync with what the loop will act on.
+        Callers must treat it as immutable — mutating a message here would
+        corrupt the compaction token cache for the same object (see the
+        ``Message`` docstring).
+        """
+        return list(self._context.messages)
 
     def set_model(self, model: ModelSpec) -> None:
         """Swap the model spec mid-session.
@@ -788,6 +803,25 @@ class Session:
             request_approval=None if self._yolo else self._request_approval,
             wake_scheduler=self._wake,
             browser=self._browser,
+            subagent_launcher=self._launch_subagent,
+            jobs=self.jobs,
+        )
+
+    def _launch_subagent(self, label: str, prompt: str) -> str:
+        """Register one one-shot child run on this session's job manager.
+
+        The production caller of :func:`run_subagent`: spawn the child against
+        ``self.jobs`` (so its lifecycle lands in this session's job manager and
+        the parent's dispose cancels it), reusing this session's own bit of
+        the child wiring. Installed on the ``ToolContext`` as
+        ``subagent_launcher`` every turn so the ``task`` tool can start a
+        child. Returns the job id.
+        """
+        return run_subagent(
+            label=label,
+            prompt=prompt,
+            parent_session=self,
+            jobs_manager=self.jobs,
         )
 
     async def _drain_steering(self) -> list[AgentMessage]:

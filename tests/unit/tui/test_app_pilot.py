@@ -11,7 +11,9 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+from pathlib import Path
 
+from local_operator.harness.types import Message
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.tui.app import BOOT_LAYOUT_CLASS, SLASH_COMMANDS, OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice
@@ -106,6 +108,9 @@ class FakeSession:
 
     async def dispose(self) -> None:
         self.disposed = True
+
+    def history(self) -> list[Any]:
+        return getattr(self, "_history", [])
 
     def emit(self, event: Any) -> None:
         for handler in list(self._handlers):
@@ -2084,3 +2089,76 @@ async def test_a_failing_turn_shows_the_providers_own_error() -> None:
         await pilot.pause()
         text = _transcript_text(app)
     assert "HTTP 400: `temperature` is deprecated for this model." in text, text
+
+# --- /resume ---------------------------------------------------------------
+
+
+def _resume_factory(boots: list[str]):
+    """A resume factory that records the id it was asked to boot."""
+    async def resume_factory(resume_id: str):
+        boots.append(resume_id)
+        session = FakeSession()
+        session._history = ["dummy history entry"]
+        return session
+    return resume_factory
+
+
+def _seed_session(tmp_path: Path, session_id: str) -> None:
+    """Lay down one resumable session transcript under a temp config dir.
+
+    ``recent_sessions`` globs ``<config_dir>/sessions/*`` for transcripts, so
+    a real file is the only honest way to make the listing and the resume
+    both resolve — same convention the ``--resume`` CLI path trusts.
+    """
+    sess_dir = tmp_path / "sessions" / session_id
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    (sess_dir / "transcript.jsonl").write_text("")
+
+
+@pytest.mark.asyncio
+async def test_resume_lists_recent_sessions_without_a_boot(tmp_path, monkeypatch) -> None:
+    """A bare ``/resume`` lists resumable sessions rather than resuming one."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "aabbcc")
+
+    session = FakeSession()
+    boots: list[str] = []
+    app = OperatorApp(
+        lambda: _factory(session),
+        resume_factory=_resume_factory(boots),
+    )
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert boots == [], "a bare /resume must not boot a session"
+        text = _transcript_text(app)
+        assert "aabbcc" in text, text
+        assert "recent sessions" in text, text
+
+
+@pytest.mark.asyncio
+async def test_resume_id_rebinds_and_reloads(tmp_path, monkeypatch) -> None:
+    """``/resume <id>`` swaps the factory to that id and reboots the app."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "cafe01")
+
+    session = FakeSession()
+    boots: list[str] = []
+    app = OperatorApp(
+        lambda: _factory(session),
+        resume_factory=_resume_factory(boots),
+    )
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press(
+            "/", "r", "e", "s", "u", "m", "e", " ", "c", "a", "f", "e", "0", "1", "enter"
+        )
+        await pilot.pause()
+        await pilot.pause()
+        assert boots == ["cafe01"], boots
