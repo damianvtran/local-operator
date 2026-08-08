@@ -605,11 +605,11 @@ async def test_approvals_ask_clears_a_latched_deny() -> None:
         await pilot.pause(0.25)
         session.streaming = True
         app._deny_queued_approvals()  # what a stop leaves behind
-        assert app._approvals_denied is True
+        assert app._approvals_are_denied(app._turn_epoch) is True
 
         app._run_slash_command("/approvals ask")
         await pilot.pause(0.1)
-        assert app._approvals_denied is False
+        assert app._approvals_are_denied(app._turn_epoch) is False
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: x"))
         await pilot.pause(0.3)
         assert app.query(ApprovalBlock)
@@ -689,7 +689,11 @@ async def test_the_answered_receipt_stays_on_one_row(width: int) -> None:
         await pilot.pause(0.2)
         painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
 
-        assert len([row for row in painted if "allowed" in row]) == 1
+        # Found by the outcome GLYPH, not by the word: below ~32 columns the
+        # receipt sheds `allowed` to keep the hazard clause, which is the same
+        # trade the live ask makes with `allow` and is the behaviour under test
+        # two rows up. What must never change is that it stays on ONE row.
+        assert len([row for row in painted if row.strip().startswith("✓")]) == 1
         assert not [row for row in painted if cell_len(row) > width]
         assert block.spans_multiple_rows() is False
 
@@ -790,3 +794,59 @@ async def test_a_narrow_prompt_keeps_the_end_of_the_path(detail: str, expected_t
         painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
         ask = next(row for row in painted if "write_file" in row)
         assert expected_tail in ask, ask
+
+
+@pytest.mark.asyncio
+async def test_a_turn_start_racing_the_stop_cannot_revive_a_denied_ask() -> None:
+    """The deny latch belongs to the turn that armed it, not to a wall clock.
+
+    The latch used to be a bare flag cleared by the next `TurnStarted`. A
+    `TurnStarted` already sitting in the message pump when the stop landed was
+    therefore dispatched BEFORE the parked asker woke, so the asker re-read a
+    cleared latch and mounted a fresh question for the turn the user had just
+    stopped — and answering it ran the tool. Epochs make the ordering
+    irrelevant: the asker compares against the turn it entered in.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.25)
+        session.streaming = True
+        first = asyncio.ensure_future(_approval_gate(session)("bash", "run: one"))
+        await pilot.pause(0.25)
+        second = asyncio.ensure_future(_approval_gate(session)("execute", "run: rm -rf /"))
+        await pilot.pause(0.15)
+
+        # The race: a turn boundary is already queued when the stop lands.
+        app.post_message(TurnStarted())
+        app.action_interrupt()
+        await pilot.pause(0.4)
+
+        assert await asyncio.wait_for(first, 2) is False
+        assert await asyncio.wait_for(second, 2) is False
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert not [row for row in painted if "rm -rf /" in row and "?" in row]
+
+
+@pytest.mark.asyncio
+async def test_approvals_auto_answers_the_question_on_screen() -> None:
+    """ "Every tool runs without asking" must include the one already asking.
+
+    Setting the mode without settling the live prompt left the loudest notice in
+    the app next to a question still waiting, with the tool behind it parked on
+    a future nothing would settle.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.25)
+        session.streaming = True
+        pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: make"))
+        await pilot.pause(0.3)
+        assert app.query(ApprovalBlock)
+
+        app._run_slash_command("/approvals auto")
+        await pilot.pause(0.2)
+        assert await asyncio.wait_for(pending, 2) is True
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert [row for row in painted if "allowed" in row]

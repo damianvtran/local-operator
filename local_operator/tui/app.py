@@ -291,7 +291,13 @@ class OperatorApp(App[None]):
         # without the latch it would mount a fresh question for a dead turn).
         self._approval: ApprovalBlock | None = None
         self._approve_all: bool = False
-        self._approvals_denied: bool = False
+        # Which TURN a stop belongs to, rather than a flag someone has to clear.
+        # `_turn_epoch` counts turn boundaries; `_approvals_denied_epoch` records
+        # the epoch a stop/teardown armed the deny latch in. An asker captures the
+        # epoch it entered in and denies if the latch covers that epoch, so a
+        # `TurnStarted` racing the wake cannot un-deny a stopped turn's tools.
+        self._turn_epoch: int = 0
+        self._approvals_denied_epoch: int | None = None
         # Tool cards the last turn boundary marked interrupted. Read once, by
         # `on_turn_ended`, to decide whether an abort still owes the user a
         # standalone notice or has already said it on the rows themselves.
@@ -752,7 +758,7 @@ class OperatorApp(App[None]):
         text = "ctrl+c again to exit" + (" — the session can be resumed" if resumable else "")
         if self._exit_hint is not None:
             self.query_one(TranscriptView).remove_block(self._exit_hint)
-        self._exit_hint = NoticeBlock(text, "warning")
+        self._exit_hint = NoticeBlock(text, "note")
         self._append_block(self._exit_hint)
 
     def resume_hint(self) -> str:
@@ -841,13 +847,16 @@ class OperatorApp(App[None]):
         settled by nothing but this future; the post-abort question was genuinely
         live, and on teardown it mounted into a screen that was going away.
         """
-        if self._approvals_denied:
+        # Captured BEFORE the first await: this asker belongs to the turn that was
+        # running when the engine called it, and no later turn's start can move it.
+        epoch = self._turn_epoch
+        if self._approvals_are_denied(epoch):
             return False
         if self._approve_all:
             return True
         while self._approval is not None and not self._approval.answered:
             await self._approval.wait()
-            if self._approvals_denied:
+            if self._approvals_are_denied(epoch):
                 return False
             if self._approve_all:
                 return True
@@ -896,8 +905,17 @@ class OperatorApp(App[None]):
         Only for paths that END the turn (stop, teardown). A path that merely
         clears the screen must use :meth:`_settle_live_approval`, because the
         turn is still running and its remaining tools still deserve to ask.
+
+        Recorded as the EPOCH it was armed in rather than as a bare flag. A bare
+        flag has to be cleared by someone, the only available someone was the
+        next ``TurnStarted``, and that put a security gate's correctness on the
+        order of an asyncio future callback against the Textual message pump: a
+        ``TurnStarted`` already in the queue when the stop lands cleared the latch
+        before the parked asker re-read it, and the stopped turn's tool got a
+        fresh question. An epoch cannot be cleared early because it is not
+        cleared at all — a later turn simply carries a higher number.
         """
-        self._approvals_denied = True
+        self._approvals_denied_epoch = self._turn_epoch
         self._settle_live_approval()
 
     def _settle_live_approval(self) -> None:
@@ -914,14 +932,39 @@ class OperatorApp(App[None]):
             approval.restore_focus()
         self._approval = None
 
-    def _allow_approvals_again(self) -> None:
-        """Clear the deny latch so the NEXT turn can ask questions again.
+    def _approvals_are_denied(self, epoch: int) -> bool:
+        """Is an ask from ``epoch`` refused by a stop that has already happened?
 
-        Scoped to a turn, not to the session: the latch exists to drain the asks
-        belonging to a turn the user stopped, and a session that could never ask
-        again would silently deny every future tool.
+        ``<=`` and not ``==``: a stop in epoch 4 refuses the asks of epoch 4 and,
+        on teardown, anything still parked from earlier. A strict equality check
+        would let an asker that entered before the stop mount its question after.
         """
-        self._approvals_denied = False
+        armed = self._approvals_denied_epoch
+        return armed is not None and epoch <= armed
+
+    def _answer_live_approval_as_allowed(self) -> None:
+        """Answer the visible prompt with YES, the way the ``A`` key does.
+
+        Through the widget rather than around it, so the row repaints as a
+        receipt (`✓ allowed ...`) instead of vanishing with no record of what the
+        user just authorised.
+        """
+        approval = self._approval
+        if approval is not None and not approval.answered:
+            approval.resolve(True, answer="a")
+            approval.restore_focus()
+        self._approval = None
+
+    def _allow_approvals_again(self) -> None:
+        """Retire the deny latch so tools can ask questions again.
+
+        Only for ``/approvals ask``, whose whole promise is "tools will prompt
+        again"; a latch left armed would make that statement false for the rest
+        of the run. The turn boundary deliberately does NOT call this — a turn
+        that starts simply carries a higher epoch than the latch, so the drain
+        cannot be cut short by message ordering.
+        """
+        self._approvals_denied_epoch = None
 
     def action_clear_transcript(self) -> None:
         self._clear_transcript()
@@ -948,6 +991,12 @@ class OperatorApp(App[None]):
             return
         if mode in ("auto", "off", "yolo"):
             self._approve_all = True
+            # The prompt ON SCREEN is part of "every tool runs without asking".
+            # Setting the mode and leaving it pending printed the loudest notice
+            # in the app next to a question still waiting for an answer, with the
+            # tool behind it parked on a future nothing was going to settle — the
+            # `A` key never had this gap because it answers through the widget.
+            self._answer_live_approval_as_allowed()
             if self._status is not None:
                 self._status.update(approvals_auto=True)
             notice("tool approvals: auto — every tool runs without asking", "warning")
@@ -2166,9 +2215,12 @@ class OperatorApp(App[None]):
     def on_turn_started(self, message: TurnStarted) -> None:
         assert self._status is not None
         self._status.update(streaming=True)
-        # A new turn may ask questions again: the deny latch belongs to the turn
-        # the user stopped, not to the session.
-        self._allow_approvals_again()
+        # A new turn may ask questions again — expressed by MOVING PAST the latch
+        # rather than by clearing it. Clearing raced the drain: a `TurnStarted`
+        # already in the message queue when the stop landed ran before the parked
+        # asker woke, so the stopped turn's write/exec tool got a fresh question.
+        # An epoch bump cannot arrive early for an asker that captured the old one.
+        self._turn_epoch += 1
         # D25: the ONE aggregate working line appears for the turn.
         if self._working_block is None:
             self._working_block = WorkingBlock()

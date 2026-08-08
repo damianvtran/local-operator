@@ -71,6 +71,14 @@ def wrap_cells(text: str, width: int) -> list[str]:
                 if cell_len(head) + cell_len(char) > width:
                     break
                 head += char
+            if not head:
+                # A single character WIDER than the row (any CJK ideograph or
+                # emoji at width 1). Taking nothing appended "" forever and grew
+                # the row list without bound — a hung UI thread instead of a
+                # mis-wrap, on exactly the inputs this function exists to handle.
+                # One overhanging cell is the honest outcome: the caller's width
+                # cannot hold this character at all.
+                head = word[0]
             rows.append(head)
             word = word[len(head) :]
         current = word
@@ -78,6 +86,13 @@ def wrap_cells(text: str, width: int) -> list[str]:
         rows.append(current)
     return rows
 
+
+#: Tool-ledger name column: the floor every card agrees on, and the ceiling it
+#: may grow to when the frame has room. Defined here rather than in the card
+#: because the transcript owns the shared value (`tool_card` imports from this
+#: module, so the constant cannot live there without a cycle).
+TOOL_NAME_COL = 8
+TOOL_NAME_COL_MAX = 24
 
 #: CSS class opening exactly one blank row above a block. Applied by the
 #: container, never by a block itself: only the container knows what came
@@ -133,9 +148,18 @@ class TranscriptBlock(Static):
         if self._finalized:
             return
         self._content = renderable
-        self._settled_rows_cache = None  # invalidate the lazy count
-        self._multirow_cache = None
+        self.invalidate_row_measurements()
         self.update(renderable)
+
+    def invalidate_row_measurements(self) -> None:
+        """Drop the memoized row counts (content or WIDTH changed).
+
+        Width matters as much as content: the same renderable is one row at 90
+        columns and three at 40, and the spacing rule asks this question of a
+        block whose width may have been unknown when it first answered.
+        """
+        self._settled_rows_cache = None
+        self._multirow_cache = None
 
     @property
     def renderable(self) -> RenderableType | None:
@@ -239,7 +263,14 @@ class NoticeBlock(TranscriptBlock):
     _KIND_TOKENS: ClassVar[dict[NoticeKind, str]] = {
         "info": "dim",
         "note": "muted",
-        "success": "success",
+        # NOT the theme's green. `success` #57c785 is already spent two rows up
+        # on a diff's added lines, and the composer's caret carries the accent
+        # #38c96a five cells below that — three greens on one surface, two of
+        # them 5 dE2000 apart, none of them meaning what the others mean. The
+        # completed action is carried by the ✓ GLYPH and the brightest plain ink,
+        # which is the same trade the band already made when it moved its healthy
+        # rung off this colour.
+        "success": "fg",
         "warning": "warning",
         "error": "danger",
     }
@@ -254,13 +285,21 @@ class NoticeBlock(TranscriptBlock):
         self.finalize()
 
     def on_resize(self, event: object) -> None:
-        """Re-wrap at the new width (the same discipline as the tool row)."""
+        """Re-wrap at the new width (the same discipline as the tool row).
+
+        A re-wrap is a HEIGHT change, so the spacing rule has to be asked again:
+        the same notice is one row at 90 columns and three at 40, and adaptive
+        spacing gaps a multi-row block where it packs single-row ones.
+        """
         was_finalized = self._finalized
         self._finalized = False
         try:
             self.set_content(self._build())
         finally:
             self._finalized = was_finalized
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.refresh_gap_around(self)
 
     def _build(self) -> RenderableType:
         """Glyph + text on the spine, WRAPPED with a hanging indent.
@@ -422,6 +461,10 @@ class TranscriptView(ScrollableContainer):
         super().__init__()
         self._blocks: list[TranscriptBlock] = []
         self._on_clear: Callable[[], None] | None = None
+        # The ledger's shared name column, recomputed lazily. Cached because it
+        # is read once per card per repaint and only changes when the set of tool
+        # names on screen does.
+        self._name_col_cache: int | None = None
 
     def set_on_clear(self, hook: Callable[[], None] | None) -> None:
         """Install the hook fired after every :meth:`clear_blocks`."""
@@ -437,8 +480,17 @@ class TranscriptView(ScrollableContainer):
         """
         self._apply_gap(self._anchor_before(len(self._blocks)), block)
         self._blocks.append(block)
+        if hasattr(block, "tool_name"):
+            self._invalidate_name_col()
         stick_to_bottom = self._is_near_bottom()
         self.mount(block)
+        # The gap above was decided while the block was still UNMOUNTED, where
+        # `spans_multiple_rows()` has no width to measure against and falls back
+        # to 80 columns. That answer is right for most blocks and wrong for every
+        # wrapping one in a narrow terminal, so the decision is retaken once the
+        # block has a real width. Idempotent: the common case re-applies the same
+        # class and nothing repaints.
+        self.call_after_refresh(self._settle_gap, block)
         self._remeasure_empty_state()
         if stick_to_bottom:
             self.call_after_refresh(self.scroll_end, animate=False)
@@ -458,6 +510,62 @@ class TranscriptView(ScrollableContainer):
                 # `layout=True`: a measured height is cached per container size, so
                 # a plain repaint would redraw the new block into the old count.
                 self.call_after_refresh(child.refresh, layout=True)
+
+    def _settle_gap(self, block: TranscriptBlock) -> None:
+        """Re-decide ``block``'s gap now that it has been laid out."""
+        if block.parent is not self:
+            return
+        block.invalidate_row_measurements()
+        self.refresh_gap_around(block)
+
+    def refresh_gap_around(self, block: TranscriptBlock) -> None:
+        """Re-decide the gaps ABOVE and BELOW ``block`` after it changed height.
+
+        ``refresh_gap_after`` alone stopped being enough once notices began
+        wrapping: the spacing rule reads the multi-row state of BOTH neighbours,
+        so a block that grows from one row to three changes the answer for its
+        own gap as well as for its follower's. Looking only downward left a
+        wrapped notice flush against whatever it followed.
+        """
+        try:
+            index = self._blocks.index(block)
+        except ValueError:
+            return
+        self._apply_gap(self._anchor_before(index), block)
+        self.refresh_gap_after(block)
+
+    @property
+    def tool_name_col(self) -> int:
+        """Cells the tool ledger gives its name column, shared by every card.
+
+        Grown to the longest name currently on screen, floored at ``NAME_COL`` and
+        capped so the column stays a spine. Recomputed on demand and cached until
+        the ledger changes, because it is read once per card per repaint.
+        """
+        if self._name_col_cache is None:
+            from local_operator.tui.glyphs import display_name
+
+            longest = 0
+            for block in self._blocks:
+                name = getattr(block, "tool_name", None)
+                if isinstance(name, str) and name:
+                    longest = max(longest, cell_len(display_name(name)))
+            self._name_col_cache = max(TOOL_NAME_COL, min(longest, TOOL_NAME_COL_MAX))
+        return self._name_col_cache
+
+    def _invalidate_name_col(self) -> None:
+        """Forget the cached column and repaint the ledger if it moved.
+
+        Only the cards repaint, and only when the number actually changed: a
+        ledger that reflowed on every append would undo the point of a spine.
+        """
+        previous = self._name_col_cache
+        self._name_col_cache = None
+        if previous is not None and previous != self.tool_name_col:
+            for block in self._blocks:
+                repaint = getattr(block, "refresh_row", None)
+                if callable(repaint):
+                    repaint()
 
     def refresh_gap_after(self, block: TranscriptBlock) -> None:
         """Re-decide the gap for the first real block below ``block``.

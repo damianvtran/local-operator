@@ -563,7 +563,7 @@ class AgentLoop:
             and tool_context is not None
             and tool_context.request_approval is not None
         ):
-            summary = f"{call.name}({call.raw_arguments or json.dumps(call.arguments)})"
+            summary = self._approval_summary(tool, call, tool_context.cwd)
             try:
                 approved = await tool_context.request_approval(call.name, summary[:500])
             except asyncio.CancelledError:
@@ -732,6 +732,30 @@ class AgentLoop:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _approval_summary(tool: AgentTool, call: ToolCall, cwd: str) -> str:
+        """The sentence the approval prompt shows for ``call``.
+
+        The tool's own ``describe_approval`` when it has one, because only the
+        tool knows which argument IS the decision — `bash`'s command, `write`'s
+        resolved path, `browser`'s URL. The JSON fallback is for third-party and
+        MCP tools the harness cannot introspect; it is honest but unranked, so a
+        narrow terminal shows whichever field the serialiser happened to put
+        first rather than the one that matters.
+        """
+        describe = tool.describe_approval
+        if describe is not None:
+            try:
+                described = describe(call.arguments, cwd)
+            except Exception:
+                # A description is never worth failing a call over: fall through
+                # to the dump, which is always renderable.
+                logger.warning("approval description failed for %s", call.name, exc_info=True)
+            else:
+                if described:
+                    return described
+        return f"{call.name}({call.raw_arguments or json.dumps(call.arguments)})"
 
     @staticmethod
     def _synthetic_result(call: ToolCall, text: str) -> ToolResult:
