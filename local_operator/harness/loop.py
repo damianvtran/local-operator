@@ -753,7 +753,10 @@ class AgentLoop:
                 # to the dump, which is always renderable.
                 logger.warning("approval description failed for %s", call.name, exc_info=True)
             else:
-                if described:
+                # `isinstance`, not truthiness: a describer that returns a dict or
+                # a Path is a bug in that tool, and letting it through raised deep
+                # in the renderer where the failure reads as "approval denied".
+                if isinstance(described, str) and described.strip():
                     return described
         return f"{call.name}({call.raw_arguments or json.dumps(call.arguments)})"
 

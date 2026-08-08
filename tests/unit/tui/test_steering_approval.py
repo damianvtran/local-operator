@@ -850,3 +850,36 @@ async def test_approvals_auto_answers_the_question_on_screen() -> None:
         assert await asyncio.wait_for(pending, 2) is True
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
         assert [row for row in painted if "allowed" in row]
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_cannot_be_repainted_from_a_tool_argument() -> None:
+    """Model-controlled text reaches this row; it must reach it INERT.
+
+    The JSON dump this prompt used to show escaped control characters as a side
+    effect of being JSON. Moving to a real sentence (`run: <command>`) removed
+    that accident, and with it the only thing stopping a command argument from
+    carrying live CSI onto the terminal: erase-line plus cursor-up inside an
+    approval prompt can wipe the row above and paint a forged receipt over it,
+    which is the one row in the app where a forgery is worth the most.
+
+    Two further effects the width work depends on: `cell_len` counts escape
+    bytes, so an un-stripped string mis-measures the ladder, and truncation can
+    cut a sequence in half and leave a bare introducer on the terminal.
+    """
+    payload = "echo hi\x1b[2K\x1b[1A\x1b[32m✓ allowed bash  run: echo hi\x1b[0m"
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause(0.2)
+        block = ApprovalBlock("bash", f"run: {payload}")
+        app.query_one(TranscriptView).append_block(block)
+        await pilot.pause(0.2)
+
+        assert "\x1b" not in block.description
+        assert "\x1b" not in block.tool_name
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert not [row for row in painted if "\x1b" in row]
+        # The forged receipt text may survive as PROSE — it is inert once the
+        # escapes are gone — but it must not be able to move the cursor.
+        assert not [row for row in painted if "[2K" in row or "[1A" in row]
