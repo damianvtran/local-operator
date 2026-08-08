@@ -835,7 +835,7 @@ class ToolCard(TranscriptBlock):
             return row
 
         name_col = min(NAME_COL, name_budget)
-        name = truncate_cells(label, name_col, ellipsis="")
+        name = truncate_cells(label, name_col)
         name = name + " " * max(0, name_col - cell_len(name))
         prefix_cells = 2 + name_col + 1
 

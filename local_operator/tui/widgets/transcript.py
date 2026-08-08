@@ -25,7 +25,7 @@ everything else indents two cells so the turn spine reads at a glance.
 
 from __future__ import annotations
 
-from typing import Callable, ClassVar
+from typing import Callable, ClassVar, Literal
 
 from rich.cells import cell_len
 from rich.console import Console, RenderableType
@@ -39,6 +39,45 @@ from local_operator.tui import theme as theme_mod
 #: The turn spine (D20): user prompts sit at the gutter; everything else
 #: indents two cells so the ``❯`` column reads at a glance.
 SPINE_INDENT = 2
+
+
+def wrap_cells(text: str, width: int) -> list[str]:
+    """Word-wrap ``text`` into rows of at most ``width`` CELLS.
+
+    The wrapping sibling of :func:`truncate_cells`, and for the same reason:
+    every measurement in this app goes through ``rich.cells.cell_len``, so a
+    caller that needs rows instead of one clipped row must not fall back to
+    ``textwrap`` (which counts codepoints and mis-wraps CJK by a factor of two).
+
+    A word longer than the row — a URL, a resolved path, a session id — is broken
+    rather than allowed to overhang, because the caller's whole reason for
+    wrapping is that the overhang lands in another widget's column.
+    """
+    if width <= 0:
+        return [text]
+    rows: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        candidate = f"{current} {word}" if current else word
+        if cell_len(candidate) <= width:
+            current = candidate
+            continue
+        if current:
+            rows.append(current)
+            current = ""
+        while cell_len(word) > width:
+            head = ""
+            for char in word:
+                if cell_len(head) + cell_len(char) > width:
+                    break
+                head += char
+            rows.append(head)
+            word = word[len(head) :]
+        current = word
+    if current or not rows:
+        rows.append(current)
+    return rows
+
 
 #: CSS class opening exactly one blank row above a block. Applied by the
 #: container, never by a block itself: only the container knows what came
@@ -160,13 +199,21 @@ class UserBlock(TranscriptBlock):
         self.finalize()
 
 
+#: The notice kinds, by ROLE rather than by volume. A typed alias, not a bare
+#: ``str``, because the old signature let a wrong kind through silently: the app
+#: passed ``"success"`` after a login and ``_KIND_TOKENS.get(kind, "dim")``
+#: rendered it byte-identically to a nonsense kind, while the theme carried an
+#: unused `success` green. A `Literal` makes that a type error at the call site.
+NoticeKind = Literal["info", "note", "success", "warning", "error"]
+
 #: Notice kind glyphs (D14): structure from symbols, not prefixes.
 NOTICE_GLYPHS: dict[str, str] = {
     "info": "·",
-    # Same glyph as `info` on purpose: `note` is the same KIND of statement
-    # (a receipt), one weight up. A second symbol would claim a distinction
-    # of meaning where the only difference is how much it wants reading.
+    # Same glyph as `info` on purpose: `note` is the same KIND of statement (a
+    # receipt), one weight up. A second symbol would claim a distinction of
+    # meaning where the only difference is how much it wants reading.
     "note": "·",
+    "success": "✓",
     "warning": "!",
     "error": "✗",
 }
@@ -177,32 +224,72 @@ class NoticeBlock(TranscriptBlock):
 
     SPACING_KIND = "notice"
 
-    #: Four tiers, not three. ``info`` is `dim` — the quietest ink in the app, a
-    #: step below a settled tool summary — which is right for a receipt nobody
-    #: needs to read and wrong for one that answers a question the user is
-    #: actively asking ("did my text just get thrown away?"). ``note`` is that
-    #: middle weight: readable at a glance, not an alarm. Reaching for `warning`
-    #: instead is what inverted the frame's colour budget, putting routine
-    #: receipts in the loudest ink in the palette.
-    _KIND_TOKENS: ClassVar[dict[str, str]] = {
+    #: Five tiers. ``info`` is `dim` — the quietest ink in the app, a step below a
+    #: settled tool summary — which is right for a receipt nobody needs to read
+    #: and wrong for one that answers a question the user is actively asking
+    #: ("did my text just get thrown away?"). ``note`` is that middle weight:
+    #: readable at a glance, not an alarm. Reaching for `warning` instead is what
+    #: inverted the frame's colour budget, putting routine receipts in the
+    #: loudest ink in the palette.
+    #:
+    #: Choose by ROLE, which is what makes the choice repeatable: ``info`` for a
+    #: receipt nobody has to read, ``note`` for the answer to something the user
+    #: just did, ``success`` for a completed action worth confirming, ``warning``
+    #: for a state they must act on or know about, ``error`` for a failure.
+    _KIND_TOKENS: ClassVar[dict[NoticeKind, str]] = {
         "info": "dim",
         "note": "muted",
+        "success": "success",
         "warning": "warning",
         "error": "danger",
     }
 
-    def __init__(self, text: str, kind: str = "info") -> None:
+    def __init__(self, text: str, kind: NoticeKind = "info") -> None:
         super().__init__()
         self.add_class("notice-block")
-        token = self._KIND_TOKENS.get(kind, "dim")
-        glyph = NOTICE_GLYPHS.get(kind, "·")
-        style = Style(color=theme_mod.semantic_color(token))
-        line = Text()
-        line.append(" " * SPINE_INDENT, style=style)
-        line.append(f"{glyph} ", style=style)
-        line.append(text, style=style)
-        self.set_content(line)
+        self._text = text
+        self._token = self._KIND_TOKENS.get(kind, "dim")
+        self._glyph = NOTICE_GLYPHS.get(kind, "·")
+        self.set_content(self._build())
         self.finalize()
+
+    def on_resize(self, event: object) -> None:
+        """Re-wrap at the new width (the same discipline as the tool row)."""
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build())
+        finally:
+            self._finalized = was_finalized
+
+    def _build(self) -> RenderableType:
+        """Glyph + text on the spine, WRAPPED with a hanging indent.
+
+        A notice is the one block whose text can exceed its row and whose author
+        cannot know that in advance ("ctrl+c again to exit - resume with: …" grows
+        with the session id). Left to Rich's own fold it wrapped to column ZERO —
+        the gutter the composer's own ``❯`` lives in — so the app's two loudest
+        rows (one keystroke from exit, and a disarmed approval gate) were also the
+        two that broke the spine. Wrapping here keeps every continuation row under
+        the first character of the text, which is what makes a long notice read as
+        one statement instead of as several.
+        """
+        style = Style(color=theme_mod.semantic_color(self._token))
+        indent = " " * SPINE_INDENT
+        hanging = " " * (SPINE_INDENT + 2)
+        width = max((self.size.width or 80) - 2, 12)
+        body = max(width - cell_len(hanging), 8)
+        rows = wrap_cells(self._text, body)
+        line = Text(no_wrap=True, overflow="ellipsis")
+        for index, row in enumerate(rows):
+            if index:
+                line.append("\n")
+                line.append(hanging, style=style)
+            else:
+                line.append(indent, style=style)
+                line.append(f"{self._glyph} ", style=style)
+            line.append(row, style=style)
+        return line
 
 
 class RichBlock(TranscriptBlock):

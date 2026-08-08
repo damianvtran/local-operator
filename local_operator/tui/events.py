@@ -56,6 +56,7 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
+from local_operator.tui.widgets.transcript import NoticeKind
 
 #: Streaming updates flush at ~30 fps (the coalesced cadence).
 FLUSH_INTERVAL_S = 1.0 / 30.0
@@ -146,10 +147,13 @@ class ToolUpdated(Message):
 class NoticePosted(Message):
     """A notice to surface in the transcript."""
 
-    def __init__(self, text: str, kind: str) -> None:
+    def __init__(self, text: str, kind: NoticeKind) -> None:
         super().__init__()
         self.text = text
-        self.kind = kind
+        # Annotated, not inferred: pyright WIDENS a literal to ``str`` when it
+        # infers an attribute's type from an assignment, which silently undid the
+        # typing at the one hop that carries a kind across a thread boundary.
+        self.kind: NoticeKind = kind
 
 
 class CompactionStarted(Message):

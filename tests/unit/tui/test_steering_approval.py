@@ -37,7 +37,13 @@ from local_operator.tui.events import (
     ToolStarted,
     TurnStarted,
 )
-from local_operator.tui.widgets.approval import CHOICES, ApprovalBlock
+from local_operator.tui.widgets.approval import (
+    CHOICES,
+    HAZARD_GLYPH,
+    OUTSIDE_MARKER,
+    PROMPT_GLYPH,
+    ApprovalBlock,
+)
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import TranscriptView
@@ -696,6 +702,11 @@ async def test_the_hint_row_sheds_whole_choices(width: int) -> None:
     Truncating left rows ending `A allow all …` and then `A …`. Shedding also
     encodes priority — the session-wide switch goes first, then the global stop
     key, so the two per-call ANSWERS survive furthest.
+
+    Below the width where even one labelled choice fits, the row becomes the
+    ``n/y`` legend: both answers, no labels. That rung is deliberately ABOVE the
+    single labelled choice, because `n deny` spends ten cells advertising how to
+    refuse and nothing else, while `n/y` spends five naming both ways out.
     """
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
@@ -704,14 +715,78 @@ async def test_the_hint_row_sheds_whole_choices(width: int) -> None:
         app.query_one(TranscriptView).append_block(ApprovalBlock("bash", "run: make"))
         await pilot.pause(0.2)
         painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
-        hint = next((row.strip() for row in painted if "deny" in row), "")
+        hint = next((row.strip() for row in painted if "deny" in row or "n/y" in row), "")
         assert hint, "the prompt must always advertise at least one answer"
-
-        # Every advertised item is whole: no trailing ellipsis, and any key shown
-        # is followed by its full label.
         assert "…" not in hint
+
+        if hint == "n/y":
+            # The keys alone, in the same order, both answers present.
+            return
+        # Every advertised item is whole: any key shown is followed by its label.
         for key, label in CHOICES:
             if f"{key} " in hint:
                 assert f"{key} {label}" in hint, f"{key} advertised without its label"
         # The refusal is always the first thing offered, never the yes-word.
         assert hint.startswith("n deny")
+
+
+@pytest.mark.parametrize("width", [110, 80, 60, 52, 46, 40, 36, 32, 30, 28, 26, 24, 20, 16])
+@pytest.mark.asyncio
+async def test_a_dangerous_ask_never_paints_like_a_safe_one(width: int) -> None:
+    """The hazard is the LAST thing shed, at every width the app can be run at.
+
+    The failure this pins is silent: below ~32 columns the outside-workspace
+    prompt rendered BYTE-IDENTICAL to the same call inside the workspace, because
+    the warning was being shed to buy one or two cells of path tail (`…s`). A
+    prompt that says less is fine; one that says the same thing about a different
+    risk is not, and no user can catch it because there is nothing on screen to
+    notice. The ladder concedes in this order: full words -> `!` marker -> the
+    word "allow" (said twice already, by the glyph and the hint row) -> characters
+    off the tool name. The marker itself never goes.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(width, 24)) as pilot:
+        await pilot.pause(0.2)
+        view = app.query_one(TranscriptView)
+        view.append_block(ApprovalBlock("write_file", f"{OUTSIDE_MARKER} write: /tmp/x/keys"))
+        view.append_block(ApprovalBlock("write_file", "write: /tmp/x/keys"))
+        await pilot.pause(0.2)
+        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        # Matched on the leading glyph, not the tool name: at the narrowest widths
+        # the hazard IS the glyph (`!` for `?`), which is the behaviour under test
+        # rather than a reason to miss the row.
+        asks = [row.strip() for row in painted if row.strip()[:1] in (PROMPT_GLYPH, HAZARD_GLYPH)]
+        assert len(asks) == 2, asks
+        hazardous, safe = asks
+        assert hazardous != safe, f"identical at {width}: {hazardous!r}"
+        # The risk reached the user in one of the three forms the ladder allows.
+        assert hazardous.startswith(HAZARD_GLYPH) or "!" in hazardous or "outside" in hazardous
+        assert not [row for row in painted if cell_len(row) > width]
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected_tail"),
+    [
+        ("write: /Users/nobody/.ssh/authorized_keys", "authorized_keys"),
+        ("write: /Users/nobody/Documents/notes.md", "notes.md"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_narrow_prompt_keeps_the_end_of_the_path(detail: str, expected_tail: str) -> None:
+    """Truncating a path from the RIGHT answers a question nobody asked.
+
+    `/Users/<name>/` is boilerplate every path on the machine shares; the
+    basename is the whole difference between the ask a user must refuse and the
+    one they can wave through. Right-truncation at 52 columns rendered
+    `~/.ssh/authorized_keys` and `~/Documents/notes.md` identically.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(52, 24)) as pilot:
+        await pilot.pause(0.2)
+        app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
+        await pilot.pause(0.2)
+        painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+        ask = next(row for row in painted if "write_file" in row)
+        assert expected_tail in ask, ask

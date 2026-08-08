@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from pathlib import Path
 
 from rich.cells import cell_len
 from rich.console import Group, RenderableType
@@ -40,7 +41,6 @@ from rich.text import Text
 from textual.events import Key
 
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import SPINE_INDENT, TranscriptBlock
 
 #: What each key does, in the order the row prints them. Kept as data so the
@@ -74,8 +74,19 @@ HAZARD_WORDS = "outside the workspace — "
 #: Its narrow-width form. The hazard must never be what costs the row its target,
 #: so below the width where both fit it degrades to this and the path survives.
 HAZARD_MARKER = "! "
+#: The prompt glyph a LIVE hazardous ask uses when no clause fits (the ladder's
+#: floor). Deliberately the same character as the marker and as the transcript's
+#: warning notice: one symbol for "this needs your attention", wherever it lands.
+HAZARD_GLYPH = "!"
 #: Cells of target that must still fit for the full words to be worth their room.
 HAZARD_MIN_TARGET = 12
+#: The two cells between the tool name and the detail. Named because the hazard
+#: has to reserve its room BEFORE this is spent, not out of what it leaves.
+_SEPARATOR_CELLS = 2
+#: Cells below which the target says nothing worth its room. `…s` is not a
+#: shorter answer to "which file", it is a different question; the row is more
+#: honest ending after the tool name than ending on a one-character stub.
+TARGET_MIN_USEFUL = 4
 
 #: Marker prefix the builtin tools put on a description whose target sits
 #: outside the workspace. Surfaced as its own tinted clause because "outside
@@ -90,6 +101,41 @@ PROMPT_GLYPH = "?"
 def fg_style() -> Style:
     """The key ink. A function, not a constant: the theme can change at runtime."""
     return Style(color=theme_mod.semantic_color("fg"))
+
+
+def fit_tail(text: str, width: int) -> str:
+    """``text`` reduced to ``width`` cells, keeping its TAIL and shortening $HOME.
+
+    The opposite end from :func:`truncate_cells`, because the two are used on
+    different kinds of string. A tool summary's meaning is front-loaded; a PATH's
+    is at the end — the basename is what distinguishes `~/.ssh/authorized_keys`
+    from `~/Documents/notes.md`, and both share a leading `/Users/<name>/` that a
+    right-truncation spends the whole budget on.
+
+    ``$HOME`` collapses to ``~`` first, which is free legibility: the shell's own
+    shorthand, and it buys back the cells the prefix was costing. The same two
+    moves the welcome view already makes for a path that matters less.
+    """
+    shortened = _shorten_home(text)
+    if cell_len(shortened) <= width:
+        return shortened
+    if width <= 1:
+        return "…"[:width]
+    kept: list[str] = []
+    used = 1  # the leading ellipsis
+    for char in reversed(shortened):
+        size = cell_len(char)
+        if used + size > width:
+            break
+        kept.append(char)
+        used += size
+    return "…" + "".join(reversed(kept))
+
+
+def _shorten_home(text: str) -> str:
+    """Collapse the home directory to ``~`` (the shell's own shorthand)."""
+    home = str(Path.home())
+    return text.replace(home, "~") if home and home != "/" else text
 
 
 class ApprovalBlock(TranscriptBlock):
@@ -273,59 +319,23 @@ class ApprovalBlock(TranscriptBlock):
         self._refresh_row()
 
     def _build(self) -> RenderableType:
-        warning = Style(color=theme_mod.semantic_color("warning"))
-        fg = Style(color=theme_mod.semantic_color("fg"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        danger = Style(color=theme_mod.semantic_color("danger"))
-        # The kit's one-cell inner padding pair, subtracted the way the tool row
-        # does it. Taking the box raw let the answered receipt wrap onto column
-        # zero — the gutter the user's own ❯ lives in.
         width = max((self.size.width or 80) - 2, 10)
-
-        question = Text(" " * SPINE_INDENT, no_wrap=True, overflow="ellipsis")
-        if self._answer is None:
-            # The question glyph is the ONE place the prompt spends warning ink
-            # while it is live, so the hazard clause below can outrank it.
-            question.append(f"{PROMPT_GLYPH} ", style=warning)
-            question.append("allow ", style=muted)
-        else:
-            allowed = self._answer in ("y", "a")
-            question.append("✓ " if allowed else "✗ ", style=fg if allowed else danger)
-            question.append("allowed " if allowed else "denied ", style=muted)
-        # The RAW tool name, deliberately, where the ledger row two lines below
-        # shows the shortened `display_name`. The divergence is intended and is
-        # not a consistency bug to fix: a security prompt must name exactly what
-        # is being authorised (`mcp__linear_create_issue`, server and all), while
-        # the ledger optimises for scanning a column of settled actions.
-        question.append(self.tool_name, style=fg)
-
-        detail, outside = self._detail()
-        if detail:
-            question.append("  ", style=dim)
-            if outside:
-                # The hazard is spent out of ITS OWN budget, never out of the
-                # target's. Appending the words first and computing the detail
-                # budget from what was left made the row say LESS the more
-                # dangerous the ask was: at 52 columns an outside-workspace prompt
-                # dropped the path entirely and ended on a dangling em dash, while
-                # the same prompt without a hazard truncated gracefully. The
-                # target is what the answer is about, so below the width where
-                # both fit the clause degrades to a marker rather than the path
-                # disappearing.
-                #
-                # On a settled receipt it drops to plain dim: the decision is
-                # made, and a permanent alarm in the transcript trains the eye to
-                # ignore the live one.
-                style = warning + Style(bold=True) if self._answer is None else dim
-                spare = width - question.cell_len
-                if spare - cell_len(HAZARD_WORDS) >= HAZARD_MIN_TARGET:
-                    question.append(HAZARD_WORDS, style=style)
-                elif spare > cell_len(HAZARD_MARKER):
-                    question.append(HAZARD_MARKER, style=style)
-            budget = width - question.cell_len
-            if budget > 0:
-                question.append(truncate_cells(detail, budget), style=dim)
+        # Three rungs of concession, each cheaper than the next thing it protects.
+        # The word `allow` goes first because it is the one token on the row said
+        # twice already (the `?` asks the question and the hint row answers it,
+        # `n deny · y allow`). Below that the hazard moves INTO the glyph: `!` in
+        # place of `?` costs nothing, so the narrowest terminal still tells the two
+        # asks apart instead of clipping the tool name — which is the one string a
+        # security prompt may never abbreviate.
+        question, hazard_shown = self._compose_question(width, verb=True, glyph_hazard=False)
+        if not hazard_shown and self._answer is None and self._detail()[1]:
+            for verb, glyph_hazard in ((False, False), (False, True)):
+                candidate, shown = self._compose_question(
+                    width, verb=verb, glyph_hazard=glyph_hazard
+                )
+                question = candidate
+                if shown:
+                    break
 
         if self._answer is not None:
             # A Group even with one child: rich honours ``Text.no_wrap`` for a
@@ -334,6 +344,90 @@ class ApprovalBlock(TranscriptBlock):
             # gutter — at narrow widths while the pending two-row form did not.
             return Group(question)
         return Group(question, self._hint_row(width))
+
+    def _compose_question(self, width: int, *, verb: bool, glyph_hazard: bool) -> tuple[Text, bool]:
+        """The question row, and whether the hazard reached the user at all.
+
+        ``glyph_hazard`` moves the warning from a clause into the prompt glyph, for
+        the widths where no clause fits. It is the ladder's floor because it is
+        free: the glyph cell is already spent and already carries warning ink.
+        """
+        warning = Style(color=theme_mod.semantic_color("warning"))
+        fg = Style(color=theme_mod.semantic_color("fg"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        danger = Style(color=theme_mod.semantic_color("danger"))
+
+        question = Text(" " * SPINE_INDENT, no_wrap=True, overflow="ellipsis")
+        hazard_shown = False
+        if self._answer is None:
+            # The question glyph is the ONE place the prompt spends warning ink
+            # while it is live, so the hazard clause below can outrank it — unless
+            # the glyph IS the hazard, in which case it takes the bold weight the
+            # clause would have had.
+            if glyph_hazard:
+                question.append(f"{HAZARD_GLYPH} ", style=warning + Style(bold=True))
+                hazard_shown = True
+            else:
+                question.append(f"{PROMPT_GLYPH} ", style=warning)
+            if verb:
+                question.append("allow ", style=muted)
+        else:
+            allowed = self._answer in ("y", "a")
+            question.append("✓ " if allowed else "✗ ", style=fg if allowed else danger)
+            # Never shed on a receipt: `allowed`/`denied` IS the outcome, which is
+            # the only reason the settled row is still on screen.
+            question.append("allowed " if allowed else "denied ", style=muted)
+        # The RAW tool name, always whole, where the ledger row two lines below
+        # shows the shortened `display_name`. The divergence is intended and is
+        # not a consistency bug to fix: a security prompt must name exactly what
+        # is being authorised (`mcp__linear_create_issue`, server and all), while
+        # the ledger optimises for scanning a column of settled actions.
+        question.append(self.tool_name, style=fg)
+
+        detail, outside = self._detail()
+        hazard_shown = False
+        if detail:
+            # The hazard's room is reserved BEFORE anything else is spent, and it
+            # is the LAST thing shed. Below ~32 columns the two cells carrying
+            # `!` and the two cells carrying the tail of a path are competing for
+            # the same room, and a one-character path stub (`…s`) tells the user
+            # nothing that helps them answer, while `!` tells them the one fact
+            # that changes the answer. Shedding in the other order made the
+            # dangerous prompt paint BYTE-IDENTICAL to the safe one, which is the
+            # version of "says less when it matters more" the eye cannot catch.
+            #
+            # On a settled receipt the hazard drops to plain dim: the decision is
+            # made, and a permanent alarm in the transcript trains the eye to
+            # ignore the live one.
+            hazard_style = warning + Style(bold=True) if self._answer is None else dim
+            spare = width - question.cell_len - _SEPARATOR_CELLS
+            hazard = ""
+            if outside:
+                if spare - cell_len(HAZARD_WORDS) >= HAZARD_MIN_TARGET:
+                    hazard = HAZARD_WORDS
+                elif spare >= cell_len(HAZARD_MARKER):
+                    hazard = HAZARD_MARKER
+            question.append("  ", style=dim)
+            if hazard:
+                question.append(hazard, style=hazard_style)
+                hazard_shown = True
+            budget = width - question.cell_len
+            if budget >= TARGET_MIN_USEFUL:
+                target_verb, target = self._split_target(detail)
+                if target_verb and budget > cell_len(target_verb) + TARGET_MIN_USEFUL:
+                    question.append(target_verb, style=dim)
+                    budget = width - question.cell_len
+                else:
+                    target = detail
+                # The target is the string the whole prompt exists to have read,
+                # so it gets the brightest ink and keeps its TAIL. A resolved
+                # absolute path truncated from the right spends the entire narrow
+                # budget on `/Users/<name>/` boilerplate, which made
+                # `~/.ssh/authorized_keys` and `~/Documents/notes.md` render
+                # identically — the two asks a user most needs told apart.
+                question.append(fit_tail(target, budget), style=fg)
+        return question, hazard_shown
 
     def _hint_row(self, width: int) -> Text:
         """The key hints, shedding WHOLE choices rather than truncating one.
@@ -345,13 +439,22 @@ class ApprovalBlock(TranscriptBlock):
         then `A …`, offering a key whose consequence had been cut off.
         """
         indent = " " * (SPINE_INDENT + 2)
-        for count in range(len(CHOICES), 0, -1):
+        for count in range(len(CHOICES), 1, -1):
             row = self._render_hints(indent, CHOICES[:count])
             if cell_len(row.plain) <= width:
                 return row
-        # Narrower than one whole choice (roughly a 12-cell terminal): the keys
-        # alone, still whole tokens, so the row degrades to a legend rather than
-        # to an ellipsis.
+        # Above the single labelled choice, not below it. `n/y` costs 5 cells and
+        # advertises BOTH answers; `n deny` costs 10 and advertises one — so the
+        # labelled rung was winning at widths where the legend fits, leaving a
+        # prompt that only says how to refuse. Placed here the legend is reachable
+        # (24 down to 14) instead of dead code below a rung that always fits.
+        legend = self._render_legend(indent)
+        if cell_len(legend.plain) <= width:
+            return legend
+        return self._render_hints(indent, CHOICES[:1])
+
+    def _render_legend(self, indent: str) -> Text:
+        """``n/y`` — the keys alone, both answers, no labels."""
         dim = Style(color=theme_mod.semantic_color("dim"))
         row = Text(indent, no_wrap=True, overflow="ellipsis")
         for index, (key, _) in enumerate(CHOICES[:2]):
@@ -372,6 +475,18 @@ class ApprovalBlock(TranscriptBlock):
             row.append(key, style=fg_style())
             row.append(f" {label}", style=dim)
         return row
+
+    def _split_target(self, detail: str) -> tuple[str, str]:
+        """``("write: ", "/path")`` when the description carries a verb prefix.
+
+        The builtin tools emit ``<action>: <resolved path>``. Splitting lets the
+        verb stay quiet while the target takes the bright ink and the tail-aware
+        truncation; a description with no ``: `` is returned whole as the target.
+        """
+        head, separator, tail = detail.partition(": ")
+        if not separator or not tail:
+            return "", detail
+        return f"{head}: ", tail
 
     def _detail(self) -> tuple[str, bool]:
         """``(description, outside_workspace)`` with the marker lifted out."""

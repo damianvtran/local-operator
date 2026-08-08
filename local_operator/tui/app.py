@@ -80,6 +80,7 @@ from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
     NoticeBlock,
+    NoticeKind,
     RichBlock,
     TranscriptView,
     UserBlock,
@@ -205,7 +206,7 @@ class NoticeFn(Protocol):
     every ``notice("...")`` call site a type error while the code is correct.
     """
 
-    def __call__(self, body: str, kind: str = "info") -> None: ...
+    def __call__(self, body: str, kind: NoticeKind = "info") -> None: ...
 
 
 class _ProviderRows(NamedTuple):
@@ -1158,7 +1159,7 @@ class OperatorApp(App[None]):
         self.query_one(TranscriptView).append_block(block)
 
     # -- slash commands -----------------------------------------------------
-    def _notice(self, body: str, kind: str = "info") -> None:
+    def _notice(self, body: str, kind: NoticeKind = "info") -> None:
         """Append a notice block.
 
         A METHOD rather than the local closure it used to be, because the picker's
@@ -1167,7 +1168,7 @@ class OperatorApp(App[None]):
         """
         self._append_block(NoticeBlock(body, kind))
 
-    def _system_notice(self, body: str, kind: str = "info") -> None:
+    def _system_notice(self, body: str, kind: NoticeKind = "info") -> None:
         """A notice about the HARNESS that leaves the empty state intact.
 
         Separate from :meth:`_notice` because the two answer different questions.
@@ -1544,7 +1545,7 @@ class OperatorApp(App[None]):
     async def _loop_worker(self, iterations: int) -> None:
         """Run up to ``iterations`` goal-advancing turns, sequentially."""
 
-        def notice(body: str, kind: str = "info") -> None:
+        def notice(body: str, kind: NoticeKind = "info") -> None:
             self._append_block(NoticeBlock(body, kind))
 
         session = self._session
@@ -1688,7 +1689,7 @@ class OperatorApp(App[None]):
     async def _fetch_usage_worker(self, provider: str | None) -> None:
         """Worker that fetches usage and posts the result as a block."""
 
-        def notice(body: str, kind: str = "info") -> None:
+        def notice(body: str, kind: NoticeKind = "info") -> None:
             self._append_block(NoticeBlock(body, kind))
 
         try:
@@ -2020,7 +2021,7 @@ class OperatorApp(App[None]):
         serializes concurrent /login commands.
         """
 
-        async def notice(body: str, kind: str = "info") -> None:
+        async def notice(body: str, kind: NoticeKind = "info") -> None:
             self._append_block(NoticeBlock(body, kind))
 
         assert self._providers is not None
@@ -2057,7 +2058,7 @@ class OperatorApp(App[None]):
         self.run_worker(self._logout_worker(provider), thread=False, group="login")
 
     async def _logout_worker(self, provider: str) -> None:
-        def notice(body: str, kind: str = "info") -> None:
+        def notice(body: str, kind: NoticeKind = "info") -> None:
             self._append_block(NoticeBlock(body, kind))
 
         try:
