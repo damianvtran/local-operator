@@ -412,6 +412,23 @@ ToolExecuteFn = Callable[
 ]
 
 
+#: Renders the human sentence an approval prompt shows for one call. Takes the
+#: call's parsed arguments and the session's working directory, and returns
+#: ``"<verb>: <target>"``, optionally led by the outside-workspace marker — the
+#: shape the read-tier tools already use. The cwd is a parameter and not read
+#: from the process because a session can be rooted anywhere (the server and the
+#: scheduler both pass one), and "outside the workspace" is measured against the
+#: session's root or it means nothing.
+#:
+#: This exists because the fallback the loop can build unaided
+#: (``name({...json...})``) is the wrong string to put in front of a human who is
+#: deciding whether to authorise something: the decision-relevant argument is
+#: buried between quoting and irrelevant fields, and no amount of clever
+#: truncation in the UI can recover which end of a JSON blob matters. Only the
+#: tool knows which of its arguments IS the decision.
+ApprovalDescribeFn = Callable[[dict[str, Any], str], str]
+
+
 class AgentTool(BaseModel):
     """A tool the model can call.
 
@@ -419,6 +436,11 @@ class AgentTool(BaseModel):
     ``model_json_schema()`` output). ``concurrency`` controls batch
     scheduling: ``"shared"`` tools run in parallel, ``"exclusive"`` alone.
     ``interruptible`` tools may be aborted mid-run to deliver steering.
+
+    ``describe_approval`` is what the approval prompt says. Every write/exec
+    tier tool should set it; without one the loop falls back to a JSON dump,
+    which is legible to a reviewer of logs and not to a user answering a
+    question under time pressure.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -432,6 +454,7 @@ class AgentTool(BaseModel):
     interruptible: bool = False
     hidden: bool = False
     execute: ToolExecuteFn = Field(exclude=True)
+    describe_approval: ApprovalDescribeFn | None = Field(default=None, exclude=True)
 
 
 # ---------------------------------------------------------------------------

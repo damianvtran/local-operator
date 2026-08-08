@@ -94,7 +94,12 @@ from textual.events import Key
 from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.glyphs import display_name, tool_icon
-from local_operator.tui.widgets.transcript import TranscriptBlock, TranscriptView
+from local_operator.tui.widgets.transcript import (
+    TOOL_NAME_COL,
+    TOOL_NAME_COL_MAX,
+    TranscriptBlock,
+    TranscriptView,
+)
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
 #: headless renderer needs the identical behaviour and must not import a
@@ -151,10 +156,19 @@ NOTICE_LADDER: dict[str, tuple[str, ...]] = {
 #: a keystroke, not a state the row is in.
 NOTICE_SECONDS = 2.0
 
-#: Tool-name column width (D7: a spine for the eye to scan names). Eight,
-#: not ten: the icon column now carries identity, and the two cells it costs
-#: come out of the name rather than out of the summary.
-NAME_COL = 8
+#: Tool-name column FLOOR (D7: a spine for the eye to scan names). Eight, not
+#: ten: the icon column now carries identity, and the two cells it costs come
+#: out of the name rather than out of the summary. The transcript owns the
+#: shared value and may widen it — see :attr:`TranscriptView.tool_name_col`.
+NAME_COL = TOOL_NAME_COL
+#: The ceiling that widening respects. Past roughly this width the eye stops
+#: scanning a column of names and starts reading a list of them.
+NAME_COL_MAX = TOOL_NAME_COL_MAX
+#: Below this frame width the column never grows: at 60 columns the summary
+#: needs those cells more than the name does. Above it, a ledger that renders
+#: `create_…` twice for two different MCP tools is spending 180 idle cells to
+#: make two calls look like one.
+NAME_GROWTH_MIN_WIDTH = 72
 #: Right-justification width for the duration, so the outcome glyph in front
 #: of it lands in the same column whether the tool took 0.4s or 12.3s. Five
 #: cells covers every duration the format produces up to ``9999s``.
@@ -726,6 +740,15 @@ class ToolCard(TranscriptBlock):
         self._refresh_row()
 
     # -- rendering ----------------------------------------------------------
+    def refresh_row(self) -> None:
+        """Repaint at the current width — the ledger's shared column moved.
+
+        Public because the transcript owns the name column and has to be able to
+        say "re-render, the spine changed"; everything else about the row is the
+        card's own business.
+        """
+        self._refresh_row()
+
     def _refresh_row(self) -> None:
         """Rebuild the card at its OWN width (D3).
 
@@ -784,6 +807,20 @@ class ToolCard(TranscriptBlock):
             row.append(truncate_cells(marker, line_width), style=dim)
         return row
 
+    def _name_col(self, width: int) -> int:
+        """The ledger's shared name column, in cells.
+
+        Read from the transcript rather than fixed here, because the column is a
+        SPINE: every card has to agree on it or the ledger stops being a column.
+        The transcript widens it to fit the longest name on screen when the frame
+        can afford it, so two MCP tools sharing a seven-character prefix stay
+        distinguishable at the widths where there is obviously room.
+        """
+        parent = self.parent
+        if isinstance(parent, TranscriptView) and width >= NAME_GROWTH_MIN_WIDTH:
+            return parent.tool_name_col
+        return NAME_COL
+
     def _build_row(self, width: int) -> Text:
         """The single summary row — the ONE-LINE guarantee lives here."""
         dim = Style(color=theme_mod.semantic_color("dim"))
@@ -834,7 +871,7 @@ class ToolCard(TranscriptBlock):
                     row.append(text, style=style)
             return row
 
-        name_col = min(NAME_COL, name_budget)
+        name_col = min(self._name_col(width), name_budget)
         name = truncate_cells(label, name_col)
         name = name + " " * max(0, name_col - cell_len(name))
         prefix_cells = 2 + name_col + 1

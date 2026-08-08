@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.cells import cell_len
@@ -41,6 +42,7 @@ from rich.text import Text
 from textual.events import Key
 
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import SPINE_INDENT, TranscriptBlock
 
 #: What each key does, in the order the row prints them. Kept as data so the
@@ -103,6 +105,26 @@ def fg_style() -> Style:
     return Style(color=theme_mod.semantic_color("fg"))
 
 
+def fit_target(text: str, width: int) -> str:
+    """``text`` reduced to ``width`` cells, keeping the end that carries meaning.
+
+    A PATH's meaning is at its tail: `/Users/<name>/` is boilerplate every path
+    on the machine shares, and the basename is the whole difference between the
+    ask a user must refuse and the one they can wave through. A COMMAND's is at
+    its head: `rm -rf` decides the answer and the flags after it rarely change
+    it, and a command truncated from the left reads as a fragment of something
+    unknown rather than as a shortened version of itself.
+
+    Detected from the string rather than declared by the caller, because the
+    approval description is a rendered sentence by the time the UI sees it. The
+    test is deliberately narrow — an absolute or home-relative path — so anything
+    ambiguous keeps its head, which is the safer default for prose.
+    """
+    if text.startswith("/") or text.startswith("~"):
+        return fit_tail(text, width)
+    return truncate_cells(text, width)
+
+
 def fit_tail(text: str, width: int) -> str:
     """``text`` reduced to ``width`` cells, keeping its TAIL and shortening $HOME.
 
@@ -136,6 +158,34 @@ def _shorten_home(text: str) -> str:
     """Collapse the home directory to ``~`` (the shell's own shorthand)."""
     home = str(Path.home())
     return text.replace(home, "~") if home and home != "/" else text
+
+
+@dataclass(frozen=True)
+class _Row:
+    """One candidate rendering of the question row, with what it managed to say.
+
+    Built so the rungs can be COMPARED rather than ordered by hand: `fits` is
+    whether the tool name survived un-clipped, `hazard` whether the risk reached
+    the user, `target` how many cells of the actual subject are on screen.
+    """
+
+    text: Text
+    hazard: bool
+    target: int
+    prefix: int
+
+    def score(self, width: int) -> tuple[int, int, int, int]:
+        """Higher is better, compared left to right.
+
+        The last term is ZERO for any row that fits, so it can only decide
+        between rows that are all overflowing — a terminal so narrow that even
+        the glyph and the tool name do not fit. There the fewest cells spent
+        before the name is the most name the user gets to read. Left ungated it
+        inverted the whole ladder: at 100 columns, where the detail fits either
+        way, "shorter prefix" quietly outranked "say the word `allowed`".
+        """
+        fits = cell_len(self.text.plain) <= width
+        return (int(fits), int(self.hazard), self.target, 0 if fits else -self.prefix)
 
 
 class ApprovalBlock(TranscriptBlock):
@@ -320,22 +370,31 @@ class ApprovalBlock(TranscriptBlock):
 
     def _build(self) -> RenderableType:
         width = max((self.size.width or 80) - 2, 10)
-        # Three rungs of concession, each cheaper than the next thing it protects.
-        # The word `allow` goes first because it is the one token on the row said
-        # twice already (the `?` asks the question and the hint row answers it,
-        # `n deny · y allow`). Below that the hazard moves INTO the glyph: `!` in
-        # place of `?` costs nothing, so the narrowest terminal still tells the two
-        # asks apart instead of clipping the tool name — which is the one string a
-        # security prompt may never abbreviate.
-        question, hazard_shown = self._compose_question(width, verb=True, glyph_hazard=False)
-        if not hazard_shown and self._answer is None and self._detail()[1]:
-            for verb, glyph_hazard in ((False, False), (False, True)):
-                candidate, shown = self._compose_question(
-                    width, verb=verb, glyph_hazard=glyph_hazard
-                )
-                question = candidate
-                if shown:
-                    break
+        # Every rung is BUILT and the best one is chosen, rather than walking the
+        # ladder until something fits. Walking produced a row that was not
+        # monotonic in the width: between 30 and 33 columns the clause fitted on
+        # the first rung, so the loop never ran, so the row kept six cells of
+        # `allow` and showed no target at all — while the SAME prompt at 29
+        # columns, one rung down, showed the target. A narrower frame that says
+        # more is a bug the user experiences as the UI flickering between two
+        # designs, and no amount of rung ordering fixes it: the rungs are not
+        # totally ordered by width, so the choice has to be made by measuring.
+        #
+        # Preference order, applied to every variant: the row must FIT (the tool
+        # name is the one string this prompt exists to name, and Rich clipping it
+        # is not a concession the ladder chose), then the hazard must be visible,
+        # then as much of the target as possible. Ties go to the earliest rung,
+        # which is the most explicit wording.
+        rungs: list[tuple[bool, bool]] = [(True, False), (False, False)]
+        if self._detail()[1]:
+            rungs.append((False, True))
+        best: _Row | None = None
+        for verb, glyph_hazard in rungs:
+            row = self._compose_question(width, verb=verb, glyph_hazard=glyph_hazard)
+            if best is None or row.score(width) > best.score(width):
+                best = row
+        assert best is not None
+        question = best.text
 
         if self._answer is not None:
             # A Group even with one child: rich honours ``Text.no_wrap`` for a
@@ -345,7 +404,7 @@ class ApprovalBlock(TranscriptBlock):
             return Group(question)
         return Group(question, self._hint_row(width))
 
-    def _compose_question(self, width: int, *, verb: bool, glyph_hazard: bool) -> tuple[Text, bool]:
+    def _compose_question(self, width: int, *, verb: bool, glyph_hazard: bool) -> _Row:
         """The question row, and whether the hazard reached the user at all.
 
         ``glyph_hazard`` moves the warning from a clause into the prompt glyph, for
@@ -374,19 +433,34 @@ class ApprovalBlock(TranscriptBlock):
                 question.append("allow ", style=muted)
         else:
             allowed = self._answer in ("y", "a")
-            question.append("✓ " if allowed else "✗ ", style=fg if allowed else danger)
-            # Never shed on a receipt: `allowed`/`denied` IS the outcome, which is
-            # the only reason the settled row is still on screen.
-            question.append("allowed " if allowed else "denied ", style=muted)
+            question.append("✓" if allowed else "✗", style=fg if allowed else danger)
+            if glyph_hazard:
+                # The receipt's floor rung. The outcome glyph cannot be given up —
+                # it is the whole reason a settled row is still on screen — so the
+                # hazard rides BESIDE it in the space that was there anyway, for
+                # one cell instead of the clause's three. Outcome first, because
+                # the record answers "what happened" before "how risky was it".
+                question.append(HAZARD_GLYPH, style=warning + Style(bold=True))
+                hazard_shown = True
+            question.append(" ")
+            if verb:
+                # The word repeats the glyph beside it, so it is shed on the same
+                # rung as the live ask's `allow` — and only ever to keep the
+                # hazard, which is the one thing on the row the glyph does NOT
+                # already say. `allowed ` costs 8 cells where `allow ` costs 6,
+                # which is why the receipt used to lose the clause two columns
+                # before the live ask did.
+                question.append("allowed " if allowed else "denied ", style=muted)
         # The RAW tool name, always whole, where the ledger row two lines below
         # shows the shortened `display_name`. The divergence is intended and is
         # not a consistency bug to fix: a security prompt must name exactly what
         # is being authorised (`mcp__linear_create_issue`, server and all), while
         # the ledger optimises for scanning a column of settled actions.
+        prefix_cells = question.cell_len
         question.append(self.tool_name, style=fg)
 
         detail, outside = self._detail()
-        hazard_shown = False
+        target_cells = 0
         if detail:
             # The hazard's room is reserved BEFORE anything else is spent, and it
             # is the LAST thing shed. Below ~32 columns the two cells carrying
@@ -408,26 +482,43 @@ class ApprovalBlock(TranscriptBlock):
                     hazard = HAZARD_WORDS
                 elif spare >= cell_len(HAZARD_MARKER):
                     hazard = HAZARD_MARKER
-            question.append("  ", style=dim)
+
+            # What is left for the subject once the separator and the hazard are
+            # paid for. Computed BEFORE anything is appended, because a separator
+            # spent on nothing is what painted a phantom `…`: Rich clipped two
+            # trailing spaces and the prompt claimed a truncation that never
+            # happened.
+            target_verb, target = self._split_target(detail)
+            budget = width - question.cell_len - _SEPARATOR_CELLS - cell_len(hazard)
+            with_verb = budget - cell_len(target_verb)
+            if target_verb and with_verb >= TARGET_MIN_USEFUL:
+                body, body_budget = target_verb, with_verb
+            else:
+                # The verb is dropped whole rather than fitted: `edit: /etc/…`
+                # shortened to `edi…` names nothing, and the target alone still
+                # says which file — the tool name two words to the left already
+                # says what is being done to it.
+                body, body_budget = "", budget
+
+            if hazard or body_budget >= TARGET_MIN_USEFUL:
+                question.append("  ", style=dim)
             if hazard:
                 question.append(hazard, style=hazard_style)
                 hazard_shown = True
-            budget = width - question.cell_len
-            if budget >= TARGET_MIN_USEFUL:
-                target_verb, target = self._split_target(detail)
-                if target_verb and budget > cell_len(target_verb) + TARGET_MIN_USEFUL:
-                    question.append(target_verb, style=dim)
-                    budget = width - question.cell_len
-                else:
-                    target = detail
-                # The target is the string the whole prompt exists to have read,
-                # so it gets the brightest ink and keeps its TAIL. A resolved
-                # absolute path truncated from the right spends the entire narrow
-                # budget on `/Users/<name>/` boilerplate, which made
-                # `~/.ssh/authorized_keys` and `~/Documents/notes.md` render
-                # identically — the two asks a user most needs told apart.
-                question.append(fit_tail(target, budget), style=fg)
-        return question, hazard_shown
+            if body_budget >= TARGET_MIN_USEFUL:
+                if body:
+                    question.append(body, style=dim)
+                # The subject gets the brightest ink and the end that carries its
+                # meaning — a path keeps its tail, a command keeps its head.
+                shown = fit_target(target, body_budget)
+                question.append(shown, style=fg)
+                # The verb prefix counts as detail too. Scoring only the target
+                # made the wordier rung win at 34 columns — `allow` survived and
+                # bought eight cells of path, where shedding it would have bought
+                # seven cells of path AND the `write:` that says what happens to
+                # it. The comparison is "how much of the SENTENCE is on screen".
+                target_cells = cell_len(body) + cell_len(shown)
+        return _Row(question, hazard_shown, target_cells, prefix_cells)
 
     def _hint_row(self, width: int) -> Text:
         """The key hints, shedding WHOLE choices rather than truncating one.

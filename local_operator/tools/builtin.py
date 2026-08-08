@@ -60,6 +60,7 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
+    ApprovalDescribeFn,
     BrowserSurface,
     BrowserSurfaceProtocol,
     TextContent,
@@ -424,6 +425,67 @@ def _approval_description(path: Path, inside: bool, action: str) -> str:
     approve the exact target, not the raw string the model typed)."""
     marker = "" if inside else f"{OUTSIDE_WORKSPACE_MARKER} "
     return f"{marker}{action}: {path}"
+
+
+def _describe_shell_approval(args: dict[str, Any], cwd: str) -> str:
+    """``run: <command>`` — the command IS the decision for an exec-tier call.
+
+    Kept in the argument's own order and NOT reformatted: a user authorising a
+    shell command needs the text that will actually run, and re-quoting it would
+    make the prompt and the executed string differ.
+    """
+    command = str(args.get("command") or "").strip()
+    return f"run: {command}" if command else ""
+
+
+def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeFn:
+    """``<action>: <resolved path>``, marked when the path leaves the workspace.
+
+    Resolved rather than raw, and marked from the SAME resolver the tool itself
+    uses, so the sentence the user answers names the file the tool will touch —
+    `../../etc/hosts` and `~/x` are the two forms where the raw string and the
+    target genuinely differ.
+    """
+
+    def describe(args: dict[str, Any], cwd: str) -> str:
+        raw = str(args.get(key) or "").strip()
+        if not raw:
+            return ""
+        try:
+            path, inside = _resolve_workspace_path(raw, cwd or ".")
+        except OSError:
+            # An unresolvable path is still worth naming; the tool will fail with
+            # its own error, and a prompt that says nothing is worse than one
+            # that quotes what the model asked for.
+            return f"{action}: {raw}"
+        return _approval_description(path, inside, action)
+
+    return describe
+
+
+def _describe_wake_approval(args: dict[str, Any], cwd: str) -> str:
+    """``schedule: <when> — <prompt>`` (or the action for list/cancel).
+
+    Wake is the one tool that arms an unattended future turn, so the decision is
+    WHEN it will run and WHAT it will be told, not the parameter shape.
+    """
+    action = str(args.get("action") or "create").strip()
+    if action != "create":
+        return f"wake: {action}"
+    when = str(args.get("when") or args.get("every") or "").strip()
+    prompt = " ".join(str(args.get("prompt") or "").split())
+    if when and prompt:
+        return f"schedule: {when} — {prompt}"
+    return f"schedule: {when or prompt}" if (when or prompt) else ""
+
+
+def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
+    """``browse: <url>`` / ``browser: <action>`` — the site, then the verb."""
+    url = str(args.get("url") or "").strip()
+    action = str(args.get("action") or "").strip()
+    if url:
+        return f"browse: {url}"
+    return f"browser: {action}" if action else ""
 
 
 def _error(tool_call_id: str, tool_name: str, message: str) -> ToolResult:
@@ -825,6 +887,7 @@ def build_bash_tool() -> AgentTool:
     return AgentTool(
         name="bash",
         label="Shell",
+        describe_approval=_describe_shell_approval,
         description=("Run a shell command and return its exit code, stdout and stderr."),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
@@ -1299,6 +1362,7 @@ def build_write_tool() -> AgentTool:
     return AgentTool(
         name="write",
         label="Write",
+        describe_approval=_describe_path_approval("write"),
         description="Create or overwrite a file (parents are created automatically).",
         parameters=WriteParams.model_json_schema(),
         approval_tier="write",
@@ -1391,6 +1455,7 @@ def build_edit_tool() -> AgentTool:
     return AgentTool(
         name="edit",
         label="Edit",
+        describe_approval=_describe_path_approval("edit"),
         description="Replace exact text in a file (errors on missing or ambiguous matches).",
         parameters=EditParams.model_json_schema(),
         approval_tier="write",
@@ -1924,6 +1989,7 @@ def build_wake_tool(context: ToolContext) -> AgentTool | None:
     return AgentTool(
         name="wake",
         label="Wake",
+        describe_approval=_describe_wake_approval,
         description="Schedule a future wake (create/list/cancel), e.g. 'in 30m'.",
         parameters=WakeParams.model_json_schema(),
         # write tier: wake create persists schedules and arms unattended
@@ -3184,6 +3250,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     return AgentTool(
         name="browser",
         label="Browser",
+        describe_approval=_describe_browser_approval,
         description=(
             "Drive the CMUX browser: open/goto a URL, read page text, snapshot "
             "the accessibility tree for click refs, click, type, screenshot, close."
