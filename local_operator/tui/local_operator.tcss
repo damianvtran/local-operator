@@ -575,10 +575,16 @@ ApprovalBlock:focus {
  * slot's top padding row is the ONE margin the sheet permits: it separates the
  * band from the transcript, and it is padding on the slot, never a margin, so
  * the element that owns the vertical rhythm is the container. */
+/* The band is a normal-flow child INSIDE the docked input-dock (D-15-01).
+ * `width: auto` (content-sized) so it does NOT consume the dock's full width
+ * and defeat the shell's centering below it — a full-width sibling was the
+ * reason the boot card sat flush-left. The band's own slots stretch to the
+ * input's width via `.band-slot { width: 1fr }`, which resolves against the
+ * band's parent width when the band is content-sized. Zero rows when both
+ * panels are hidden; the height of the todo/subagent rows otherwise (D-01). */
 #band {
-    dock: bottom;
+    width: auto;
     height: auto;
-    align-horizontal: center;
 }
 
 .band-slot {

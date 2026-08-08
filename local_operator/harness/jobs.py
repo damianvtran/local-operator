@@ -371,12 +371,12 @@ class AsyncJobManager:
         """Ids of jobs parked by ``register(..., queued=True)`` that have not
         been promoted yet, oldest first.
 
-        The manager deliberately does NOT auto-start queued jobs: a queued row
-        holds no execution slot and its promotion moment is the registering
-        subsystem's decision (the subagent runner promotes one job each time a
-        child settles). This accessor is the bookkeeping half of that contract
-        — the runner asks "who is waiting" exactly when a slot frees, and an
-        empty list means nothing is owed.
+        A queued row holds no execution slot; promotion is automatic — the
+        manager starts the longest-waiting parked job via
+        ``_promote_oldest_queued`` whenever a running job settles and frees a
+        slot (see ``_run_job``'s finalizer). This accessor is the bookkeeping
+        half of that contract: the caller asks "who is waiting" exactly at a
+        settle, and an empty list means nothing is owed.
         """
         waiting = [
             job

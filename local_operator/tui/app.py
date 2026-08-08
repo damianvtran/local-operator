@@ -367,9 +367,6 @@ class OperatorApp(App[None]):
         # Subagent*/tool-end handlers repaint it without a relookup per tick.
         self._subagent_panel = SubagentPanel(on_open=self._open_subagent_trajectory)
         self._todo_panel = TodoPanel()
-        with Container(id="band"):
-            yield self._subagent_panel
-            yield self._todo_panel
         # Two containers for one panel: the dock is the docked POSITIONER, and
         # the shell is the panel the user sees — the fill, the padding, and the
         # boot layout's clamp. A docked widget cannot be centred by its parent,
@@ -382,6 +379,16 @@ class OperatorApp(App[None]):
         # with the input when the panel becomes a card. One row does double duty
         # — zero extra height (D3/D17).
         with Container(id="input-dock"):
+            # The dock band (subagent + todo) lives INSIDE the same bottom-docked
+            # container as the input shell, ABOVE it (D-15-01). A sibling
+            # `dock: bottom` overlapped the input (Textual anchors same-edge
+            # docks to the bottom edge independently), and a margin to fix that
+            # violates the sheet's one-margin rule. As a child here, the band is
+            # a normal-flow row the dock's vertical layout reserves before the
+            # shell; it collapses to zero when both panels are hidden.
+            with Container(id="band"):
+                yield self._subagent_panel
+                yield self._todo_panel
             with Container(id="input-shell"):
                 yield Static(id="status-band")
                 editor = Editor(commands=SLASH_COMMANDS)
