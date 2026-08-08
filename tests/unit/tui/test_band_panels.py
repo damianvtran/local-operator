@@ -318,9 +318,9 @@ async def test_subagent_band_does_not_crush_the_transcript() -> None:
         # shell), never overlapping it — a sibling bottom-dock previously
         # painted the band's rows blank behind the input. The subagent panel's
         # bottom must end at or above the input shell's top.
-        assert sub.region.bottom <= input_shell.region.y, (
-            f"subagent band ({sub.region}) overlaps input shell ({input_shell.region})"
-        )
+        assert (
+            sub.region.bottom <= input_shell.region.y
+        ), f"subagent band ({sub.region}) overlaps input shell ({input_shell.region})"
         # And the row's text is actually rendered (not blanked).
         row = sub.query("SubagentRow")[0]
         assert "summarize workspace" in str(getattr(row, "content", ""))

@@ -345,6 +345,7 @@ def test_write_diff_expanded_snapshot(snap_compare) -> None:  # type: ignore[no-
     their tint ramp. The band (todo/subagent) stays empty here — this frame is
     about the diff, not the band.
     """
+
     async def expand_then_capture(pilot) -> None:  # type: ignore[no-untyped-def]
         await _populate_and_submit(pilot)
         # Find the write card (the 4th, tool t4) and expand it.

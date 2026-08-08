@@ -68,9 +68,7 @@ def make_session(tmp_path, stream, **kwargs) -> Session:
 
 
 @pytest.mark.asyncio
-async def test_launch_subagent_runs_child_and_emits_lifecycle(
-    tmp_path, monkeypatch
-):
+async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypatch):
     """_launch_subagent registers a task job, the child runs via the parent's
     stream_fn, and subagent_start/end land on the parent stream."""
     # The child writes its transcript under config_dir(); keep it hermetic.
@@ -92,9 +90,7 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(
     assert job.label == "sub"
 
     # Wait for the child run to settle and the parent stream to see the end.
-    await wait_for(
-        lambda: any(e.type == "subagent_end" for e in events)
-    )
+    await wait_for(lambda: any(e.type == "subagent_end" for e in events))
 
     starts = [e for e in events if isinstance(e, SubagentStartEvent)]
     ends = [e for e in events if isinstance(e, SubagentEndEvent)]
@@ -116,9 +112,7 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(
 
 
 @pytest.mark.asyncio
-async def test_launch_subagent_is_wired_as_subagent_launcher(
-    tmp_path, monkeypatch
-):
+async def test_launch_subagent_is_wired_as_subagent_launcher(tmp_path, monkeypatch):
     """The ToolContext built for a turn carries _launch_subagent as the
     subagent_launcher, so the task tool can call it."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))

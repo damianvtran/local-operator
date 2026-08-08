@@ -277,6 +277,7 @@ async def test_a_completion_promotes_the_longest_queued_job():
             await gate[i].wait()
             completed.append(job_id)
             return f"done:{job_id}"
+
         return runner
 
     a = manager.register("task", "a", await gated(0))
