@@ -2401,7 +2401,7 @@ class OperatorApp(App[None]):
         # at the exact moment the call starts running.
         card = self._adopt_composing_card(event.tool_call_id, event.tool_name)
         if card is not None:
-            card.begin_running(event.args, event.intent)
+            card.begin_running(event.tool_name, event.args, event.intent)
         else:
             card = ToolCard(event.tool_call_id, event.tool_name, event.args, event.intent)
             self._append_block(card)

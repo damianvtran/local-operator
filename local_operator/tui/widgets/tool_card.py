@@ -587,7 +587,9 @@ class ToolCard(TranscriptBlock):
             self._compose_timer.stop()
             self._compose_timer = None
 
-    def begin_running(self, args: dict[str, object] | None, intent: str | None) -> None:
+    def begin_running(
+        self, tool_name: str, args: dict[str, object] | None, intent: str | None
+    ) -> None:
         """Adopt a composing row as the real execution of the call it announced.
 
         The same widget rather than a fresh one: the composing row already sits
@@ -596,6 +598,12 @@ class ToolCard(TranscriptBlock):
         call finally starts.
         """
         self._stop_composing()
+        # The name comes from the EXECUTION, not from the announcement. The first
+        # compose event fires on the first name fragment — deliberately, so the
+        # row appears immediately — and a provider that splits `write` into `wr`
+        # and `ite` would otherwise leave `wr` on the settled row forever, in the
+        # ledger, on the icon, and in the summary built from it.
+        self.tool_name = _strip_control_sequences(tool_name)
         self._state = "running"
         # The same construction the constructor uses, so an adopted row is
         # byte-identical to one that had never been a composing row.
