@@ -1,13 +1,20 @@
-"""Tool card behaviour — the one-line guarantee, diff counters, expansion.
+"""Tool card behaviour — the one-line guarantee, icons, expansion, keyboard.
 
-Three contracts are defended here, each of which is a visible promise:
+Five contracts are defended here, each of which is a visible promise:
 
 - a COLLAPSED card is exactly one row, at every width, in every state, with
   or without the extra segments the richer states add
+- the row leads with a per-TOOL icon that is exactly one cell wide, degrades
+  to a plain-unicode set when the terminal is not trusted with Nerd glyphs,
+  and never displaces the name or the summary
 - diff counters appear only when the tool actually reported them, tinted
   success/danger, and never as a misleading ``+0 -0``
-- clicking a card reveals its full output and clicking again puts it back to
-  one row
+- outcome survives a still, COLOURLESS frame: ``✓``/``✗``/``⊘`` and their
+  absence separate the four states with no colour channel at all
+- expansion is reachable by MOUSE and by KEYBOARD and answers either way —
+  a row with nothing to reveal says so instead of ignoring the activation,
+  which is how it was reported ("when I click to expand these lines,
+  nothing happens")
 
 Colours are asserted through ``theme.semantic_color`` rather than literal
 hexes so a ramp change moves one file, not this suite.
@@ -15,6 +22,7 @@ hexes so a ramp change moves one file, not this suite.
 
 from __future__ import annotations
 
+import unicodedata
 from typing import cast
 
 import pytest
@@ -22,18 +30,31 @@ from rich.cells import cell_len
 from rich.color import Color, ColorTriplet
 from rich.style import Style
 from rich.text import Text
+from textual.app import App, ComposeResult
 
+from local_operator.tui import glyphs as glyph_mod
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.glyphs import (
+    NERD_TOOL_ICONS,
+    PLAIN_ICON_DEFAULT,
+    PLAIN_ICON_MCP,
+    PLAIN_TOOL_ICONS,
+    nerd_icons_enabled,
+    tool_icon,
+)
 from local_operator.tui.widgets import tool_card as card_mod
+from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import (
     COLLAPSE_HINT,
     EXPAND_HINT,
     EXPAND_MAX_LINES,
+    NO_OUTPUT_NOTICE,
+    RUNNING_NOTICE,
     ToolCard,
     compact_path,
 )
-from local_operator.tui.widgets.transcript import TranscriptView
-from tests.unit.tui.conftest import StyledTranscriptApp
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from tests.unit.tui.conftest import TCSS_PATH, StyledTranscriptApp
 
 #: Every width the one-line guarantee is checked at: pathological narrow,
 #: narrow, typical split-pane, standard, and ultrawide.
@@ -69,6 +90,31 @@ def _assert_fits(card: ToolCard) -> None:
         row = card._build_row(width)
         assert "\n" not in row.plain
         assert cell_len(row.plain) <= width, (width, row.plain)
+
+
+class _ComposerApp(App[None]):
+    """A transcript AND the real composer, in the shipped DOM order.
+
+    The order matters to what is being checked: the transcript is above the
+    input, so the screen's tab ring runs cards → composer, and Shift+Tab out
+    of the composer lands on the LAST action — the one that just ran, which
+    is the one a user reaching backwards wants.
+
+    It is also the only harness in which the typing passthrough is REAL: with
+    no composer to escape to, a key the row should have forwarded merely falls
+    through to the bindings and every assertion still passes.
+    """
+
+    CSS_PATH = TCSS_PATH
+
+    def get_css_variables(self) -> dict[str, str]:
+        variables = super().get_css_variables()
+        variables.update(theme_mod.tcss_variable_map())
+        return variables
+
+    def compose(self) -> ComposeResult:
+        yield TranscriptView()
+        yield Editor()
 
 
 # --- diff counters ---------------------------------------------------------
@@ -224,8 +270,16 @@ def test_on_click_drives_the_toggle() -> None:
     assert card.expanded is False
 
 
-def test_click_on_an_inert_card_does_nothing_and_stays_clickable_elsewhere() -> None:
-    """No output means no expansion — and the click is NOT swallowed."""
+def test_activating_an_inert_card_answers_instead_of_ignoring_the_click() -> None:
+    """No output means no expansion — but never silence, and never a swallow.
+
+    Silence is what the field report was: "when I click to expand these
+    lines, nothing happens". A row that offers itself as a target and then
+    absorbs the click is indistinguishable from a frozen app, so the row
+    answers in the hint slot. The event still bubbles, because the row did
+    not consume the click for a toggle and the transcript's own click
+    handling must not be starved by a row that had nothing to do.
+    """
 
     class _Click:
         def __init__(self) -> None:
@@ -242,14 +296,40 @@ def test_click_on_an_inert_card_does_nothing_and_stays_clickable_elsewhere() -> 
     card.on_click(event)
     assert card.expanded is False
     assert event.stopped is False
+    assert NO_OUTPUT_NOTICE in card._build_row(80).plain
     assert card.toggle_expanded() is False
 
 
-def test_hint_appears_only_when_hovered_and_expandable() -> None:
-    """Two conditions, both required: something to reveal AND the pointer on
-    the row. At rest the ▸ chevron is the whole affordance — printing the hint
-    on every settled row is ~9 cells of permanent chrome on an 80-column
-    terminal restating what the chevron already says."""
+def test_an_unfinished_card_says_it_is_still_running_not_that_it_is_empty() -> None:
+    """Nothing to show and nothing YET are different answers to one click.
+
+    A running tool has no output *yet*; telling the user there is none is
+    wrong and reads as a failure. This is the state the reported freeze
+    actually left the rows in, so it is the state the answer has to get right.
+    """
+    card = ToolCard("t", "bash", {"command": "sleep 30"})
+    assert card.can_expand() is False
+    assert card.activate() is False
+    row = card._build_row(80).plain
+    assert RUNNING_NOTICE in row and NO_OUTPUT_NOTICE not in row
+
+
+def test_the_notice_is_one_shot_and_leaves_with_the_focus() -> None:
+    """Feedback for a keystroke, not a state the row is now in."""
+    card = ToolCard("t", "bash", {"command": "ls"})
+    card.mark_done("")
+    card._set_focused(True)
+    card.activate()
+    assert NO_OUTPUT_NOTICE in card._build_row(80).plain
+    card._set_focused(False)
+    assert NO_OUTPUT_NOTICE not in card._build_row(80).plain
+
+
+def test_hint_appears_only_when_expandable_and_pointed_at_or_focused() -> None:
+    """Two conditions, both required: something to reveal AND the row being
+    addressed — by the pointer or by the keyboard. At rest the icon and the
+    card's fill are the whole affordance; printing the hint on every settled
+    row is ~9 cells of permanent chrome on an 80-column terminal."""
     inert = ToolCard("t", "bash", {"command": "ls"})
     inert.mark_done("")
     inert._set_hovered(True)
@@ -266,9 +346,24 @@ def test_hint_appears_only_when_hovered_and_expandable() -> None:
     expandable._set_hovered(True)
     assert EXPAND_HINT in expandable._build_row(80).plain  # hovered: offered
 
+    expandable._set_hovered(False)
+    expandable._set_focused(True)
+    assert EXPAND_HINT in expandable._build_row(80).plain  # focused: offered
+
     expandable.toggle_expanded()
     row = expandable._build_row(80).plain
     assert COLLAPSE_HINT in row and EXPAND_HINT not in row
+
+
+def test_the_pointer_leaving_does_not_put_out_a_focused_rows_hint() -> None:
+    """Two pointers, one slot. The mouse wanders; the keyboard does not, and
+    the row the keyboard is on has to keep saying what Enter would do."""
+    card = ToolCard("t", "bash", {"command": "ls"})
+    card.mark_done("one\ntwo")
+    card._set_focused(True)
+    card._set_hovered(True)
+    card._set_hovered(False)
+    assert EXPAND_HINT in card._build_row(80).plain
 
 
 def test_hovered_hint_uses_the_dim_ramp_step() -> None:
@@ -279,6 +374,167 @@ def test_hovered_hint_uses_the_dim_ramp_step() -> None:
     card._set_hovered(True)
     lit = _style_at(card._build_row(80), EXPAND_HINT)
     assert _triplet(lit.color) == _triplet(Style(color=theme_mod.semantic_color("dim")).color)
+
+
+# --- icons -----------------------------------------------------------------
+#
+# The icon is the one part of the row whose whole value is being recognisable
+# at a glance, and the one part that can render as a replacement box on a
+# terminal without a patched font. Both halves are pinned.
+
+#: The Nerd Fonts private use area. Codepoints outside it are not glyphs any
+#: patched font agreed to supply, whatever they happen to look like locally.
+_PUA = range(0xE000, 0xF900)
+
+
+def test_every_nerd_glyph_is_one_cell_and_lives_in_the_private_use_area() -> None:
+    """Two invariants the row's arithmetic and the terminal both depend on.
+
+    Width: the row budgets the icon at exactly one cell, so a two-cell glyph
+    would shift the summary budget and push the right-aligned status column
+    off the card. Range: outside the PUA a "Nerd glyph" is just some ordinary
+    codepoint the local font happened to have, which will be a box on the
+    next machine.
+    """
+    for name, glyph in NERD_TOOL_ICONS.items():
+        assert len(glyph) == 1, (name, glyph)
+        assert ord(glyph) in _PUA, (name, hex(ord(glyph)))
+        assert unicodedata.category(glyph) == "Co", (name, glyph)
+        assert cell_len(glyph) == 1, (name, cell_len(glyph))
+    for name, glyph in PLAIN_TOOL_ICONS.items():
+        assert cell_len(glyph) == 1, (name, cell_len(glyph))
+        # The fallback set is the one that has to render WITHOUT a patched
+        # font, so it may not itself reach into the private use area.
+        assert ord(glyph) not in _PUA, (name, hex(ord(glyph)))
+
+
+def test_every_builtin_tool_has_a_glyph_in_both_sets() -> None:
+    """A tool the map has not heard of falls back correctly, but a BUILTIN
+    falling back is a gap in the table, not a graceful degradation."""
+    builtins = {
+        "bash",
+        "read",
+        "write",
+        "edit",
+        "glob",
+        "grep",
+        "todo",
+        "wake",
+        "list_variables",
+        "read_variable",
+        "browser",
+    }
+    assert builtins <= set(NERD_TOOL_ICONS)
+    assert builtins <= set(PLAIN_TOOL_ICONS)
+
+
+def test_the_gate_switches_the_whole_table_not_just_some_of_it(monkeypatch) -> None:
+    """One switch, both directions, no half-Nerd row."""
+    monkeypatch.delenv(glyph_mod._ENV_DISABLE, raising=False)
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: True)
+    assert nerd_icons_enabled() is True
+    assert tool_icon("bash") == NERD_TOOL_ICONS["bash"]
+
+    monkeypatch.setenv(glyph_mod._ENV_DISABLE, "1")
+    assert nerd_icons_enabled() is False
+    assert tool_icon("bash") == PLAIN_TOOL_ICONS["bash"]
+
+    # The settings flag gates it identically with no env var in play.
+    monkeypatch.delenv(glyph_mod._ENV_DISABLE, raising=False)
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: False)
+    assert nerd_icons_enabled() is False
+    assert tool_icon("grep") == PLAIN_TOOL_ICONS["grep"]
+
+
+def test_unknown_and_mcp_tools_resolve_to_their_own_fallbacks(monkeypatch) -> None:
+    """An MCP tool is not a wrench: the row is reporting that the action came
+    from a plugged-in server, which is the only thing knowable about a tool
+    whose name was minted from a config file."""
+    monkeypatch.setenv(glyph_mod._ENV_DISABLE, "1")
+    assert tool_icon("mcp__slack_send_message") == PLAIN_ICON_MCP
+    assert tool_icon("something_invented") == PLAIN_ICON_DEFAULT
+    # tool_name is MODEL-controlled: a provider echoing a different case back
+    # must not silently drop every row to the generic glyph.
+    assert tool_icon("BASH") == PLAIN_TOOL_ICONS["bash"]
+    assert tool_icon("  read  ") == PLAIN_TOOL_ICONS["read"]
+
+
+def test_the_icon_leads_the_row_and_displaces_neither_name_nor_summary() -> None:
+    """The icon is added TO the row, not instead of part of it."""
+    card = ToolCard("t", "grep", {"pattern": "needle"})
+    row = card._build_row(80).plain
+    assert row.startswith(tool_icon("grep") + " ")
+    assert "grep" in row and "needle" in row
+    _assert_fits(card)
+
+
+def test_two_different_tools_do_not_share_a_row_prefix() -> None:
+    """The whole point of the icon: a run of rows is told apart by shape."""
+    prefixes = {
+        name: ToolCard("t", name, {})._build_row(80).plain[0]
+        for name in ("bash", "read", "write", "grep", "browser")
+    }
+    assert len(set(prefixes.values())) == len(prefixes), prefixes
+
+
+def test_the_running_icon_is_the_accent_and_settles_to_dim() -> None:
+    """One of the five places the accent green is spent: a still frame has to
+    read "live" without the shimmer (D26)."""
+    card = ToolCard("t", "bash", {"command": "sleep 5"})
+    icon = tool_icon("bash")
+    live = _style_at(card._build_row(80), icon)
+    assert _triplet(live.color) == _triplet(Style(color=theme_mod.semantic_color("accent")).color)
+
+    card.mark_done("ok")
+    settled = _style_at(card._build_row(80), icon)
+    assert _triplet(settled.color) == _triplet(Style(color=theme_mod.semantic_color("dim")).color)
+
+
+# --- the still, colourless frame -------------------------------------------
+
+
+def test_the_four_states_are_told_apart_with_no_colour_at_all() -> None:
+    """A screenshot, a colour-blind reader, a NO_COLOR terminal, a copied
+    transcript: none of them get the tint, so none of them may need it.
+
+    Failure and "still running" are the pair that must never collapse — the
+    reported freeze was two rows the user could not tell from finished ones.
+    """
+    running = ToolCard("a", "bash", {"command": "pytest -q"})
+    ok = ToolCard("b", "bash", {"command": "pytest -q"})
+    bad = ToolCard("c", "bash", {"command": "pytest -q"})
+    stopped = ToolCard("d", "bash", {"command": "pytest -q"})
+    ok.mark_done("66 passed")
+    bad.mark_failed("1 failed")
+    stopped.mark_interrupted()
+
+    plains = {
+        "running": running._build_row(80).plain,
+        "success": ok._build_row(80).plain,
+        "error": bad._build_row(80).plain,
+        "interrupted": stopped._build_row(80).plain,
+    }
+    assert len(set(plains.values())) == 4, plains
+    assert "✓" in plains["success"]
+    assert "✗" in plains["error"] and "1 failed" in plains["error"]
+    assert "⊘" in plains["interrupted"] and "interrupted" in plains["interrupted"]
+    # D28: the running row's status column is EMPTY, and that absence is the
+    # signal. It must not accidentally carry another state's glyph.
+    assert not any(mark in plains["running"] for mark in ("✓", "✗", "⊘"))
+
+
+def test_the_outcome_glyph_holds_one_column_whatever_the_duration() -> None:
+    """A pass/fail column that wobbles by a cell per row is a column the eye
+    reads instead of scans, which defeats right-aligning it in the first
+    place. Measured from the RIGHT edge, where the column actually lives."""
+    offsets = []
+    for elapsed in (0.4, 9.9, 12.3, 125.0):
+        card = ToolCard("t", "bash", {"command": "pytest -q"})
+        card.mark_done("66 passed")
+        card._duration = elapsed
+        plain = card._build_row(80).plain.rstrip()
+        offsets.append(len(plain) - plain.rindex("✓"))
+    assert len(set(offsets)) == 1, offsets
 
 
 def test_a_result_that_only_repeats_the_summary_is_not_expandable() -> None:
@@ -461,6 +717,219 @@ async def test_outcome_reaches_the_ground_not_just_the_glyph() -> None:
         assert running.styles.background.rgb == expected("raised")
         assert ok.styles.background.rgb == expected("surface")
         assert bad.styles.background.rgb == expected("tint-danger")
+
+
+# --- the keyboard path -----------------------------------------------------
+#
+# Expansion used to be mouse-only. That made it invisible to anyone driving
+# the app from the keyboard and unreachable in a terminal with mouse
+# reporting off, and it is half of what "nothing happens when I click these"
+# turned out to mean. These run through a real Pilot with real keystrokes,
+# because bindings only resolve against a focused widget in a live screen.
+
+
+@pytest.mark.asyncio
+async def test_a_focused_row_expands_and_collapses_on_enter_and_space() -> None:
+    """Run against the composer harness on purpose: Space is printable, and
+    without a text input in the DOM the typing passthrough cannot misroute it
+    — which is exactly the configuration that hid the bug once already."""
+    app = _ComposerApp()
+    async with app.run_test(size=(90, 16)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("a", "bash", {"command": "ls -la"})
+        view.append_block(card)
+        card.mark_done("total 8\nfile-a\nfile-b")
+        await pilot.pause()
+
+        card.focus()
+        await pilot.pause()
+        assert app.focused is card
+        # Focus alone states the offer — the row says what Enter will do
+        # before Enter is pressed.
+        assert EXPAND_HINT in _card_text(card).plain
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert card.expanded is True
+        assert card.size.height == 4
+        assert COLLAPSE_HINT in _card_text(card).plain
+
+        await pilot.press("space")
+        await pilot.pause()
+        assert card.expanded is False
+        assert card.size.height == 1
+
+
+@pytest.mark.asyncio
+async def test_up_and_down_walk_the_ledger_and_step_out_at_its_ends() -> None:
+    """The arrows address ACTIONS, and the ledger is passable, not a trap.
+
+    Non-focusable blocks between two cards are stepped OVER rather than
+    stopped at: what the keys traverse is the list of things Enter can act
+    on, and a stop on an inert paragraph reads as the key having failed.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(90, 20)) as pilot:
+        view = app.query_one(TranscriptView)
+        first = ToolCard("a", "read", {"path": "one.py"})
+        prose = NoticeBlock("a line of prose between two actions", "info")
+        second = ToolCard("b", "read", {"path": "two.py"})
+        for block in (first, prose, second):
+            view.append_block(block)
+        first.mark_done("alpha\nbeta")
+        second.mark_done("gamma\ndelta")
+        await pilot.pause()
+
+        first.focus()
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.focused is second  # the notice was stepped over
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert app.focused is first
+
+        # Off the top there is no earlier action: focus leaves the ledger
+        # rather than sticking, so the scroll keys become reachable again.
+        await pilot.press("up")
+        await pilot.pause()
+        assert app.focused is not first
+
+
+@pytest.mark.asyncio
+async def test_enter_on_an_inert_focused_row_answers_on_the_row() -> None:
+    """The keyboard gets the same answer the mouse gets, from the same path."""
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(90, 12)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("a", "bash", {"command": "true"})
+        view.append_block(card)
+        card.mark_done("")  # returned nothing at all
+        await pilot.pause()
+
+        card.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert card.expanded is False
+        assert NO_OUTPUT_NOTICE in _card_text(card).plain
+        # And it is on the painted frame, not merely in the widget's content.
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert NO_OUTPUT_NOTICE in painted
+
+
+@pytest.mark.asyncio
+async def test_a_focused_row_is_marked_on_the_ground_distinctly_from_hover() -> None:
+    """Two pointers need two marks: the mouse is where the hand is, focus is
+    where the keyboard is, and only one of them survives the hand leaving."""
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(90, 12)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("a", "read", {"path": "one.py"})
+        other = ToolCard("b", "read", {"path": "two.py"})
+        view.append_block(card)
+        view.append_block(other)
+        card.mark_done("alpha\nbeta")
+        other.mark_done("gamma")
+        await pilot.pause()
+
+        def ground(widget: ToolCard) -> tuple[int, int, int]:
+            # `Styles.background.rgb` is a plain 3-tuple, not rich's ColorTriplet
+            # (a NamedTuple of the same shape); compared by value against it below.
+            return widget.styles.background.rgb
+
+        def expected(token: str) -> ColorTriplet:
+            return _triplet(Style(bgcolor=theme_mod.semantic_color(token)).bgcolor)
+
+        assert ground(card) == expected("surface")
+        card.focus()
+        await pilot.pause()
+        assert ground(card) == expected("tint-select")
+
+        # The pointer visiting the OTHER row must not take the focus mark off
+        # this one; they are different questions with different answers.
+        await pilot.hover(other)
+        await pilot.pause()
+        assert ground(card) == expected("tint-select")
+        assert ground(other) == expected("overlay")
+
+
+@pytest.mark.asyncio
+async def test_shift_tab_out_of_the_composer_lands_on_the_last_action() -> None:
+    """The keyboard's way IN. Tab is spoken for inside the composer (it
+    indents, TUI-013), so Shift+Tab is the door, and it opens onto the most
+    recent action rather than the oldest."""
+    app = _ComposerApp()
+    async with app.run_test(size=(90, 16)) as pilot:
+        view = app.query_one(TranscriptView)
+        first = ToolCard("a", "read", {"path": "one.py"})
+        last = ToolCard("b", "read", {"path": "two.py"})
+        view.append_block(first)
+        view.append_block(last)
+        first.mark_done("alpha")
+        last.mark_done("beta\ngamma")
+        app.query_one(Editor).focus()
+        await pilot.pause()
+
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert app.focused is last
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert last.expanded is True
+
+
+@pytest.mark.asyncio
+async def test_typing_on_a_focused_row_reaches_the_composer_intact() -> None:
+    """Making rows focusable must not create a place where typing vanishes.
+
+    The app has exactly one text input, so a printable key on a row is never
+    ambiguous. Every character is checked, not just the focus move: dropping
+    the first one to "wake" the composer is the bug this forecloses.
+    """
+    app = _ComposerApp()
+    async with app.run_test(size=(90, 12)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("a", "read", {"path": "one.py"})
+        view.append_block(card)
+        card.mark_done("alpha")
+        card.focus()
+        await pilot.pause()
+        assert app.focused is card
+
+        await pilot.press(*"hello")
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        assert editor.text == "hello"
+        assert app.focused is editor
+
+
+@pytest.mark.asyncio
+async def test_the_rows_own_keys_win_over_the_passthrough() -> None:
+    """The passthrough must not eat the affordance it sits beside.
+
+    Space is both a printable character and this row's toggle, and Textual
+    dispatches ``on_key`` BEFORE it resolves the focused widget's bindings —
+    so the passthrough saw Space first and typed it into the composer. The
+    row now excludes its own keys explicitly, and this pins that: the two
+    features live in the same class and the bug is invisible in any harness
+    that has no composer for the key to escape to.
+    """
+    app = _ComposerApp()
+    async with app.run_test(size=(90, 12)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("a", "read", {"path": "one.py"})
+        view.append_block(card)
+        card.mark_done("alpha\nbeta")
+        card.focus()
+        await pilot.pause()
+
+        await pilot.press("space")
+        await pilot.pause()
+        assert card.expanded is True
+        assert app.focused is card
+        assert app.query_one(Editor).text == ""
 
 
 # --- control-sequence sanitisation ------------------------------------------

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 import uuid
@@ -59,6 +60,8 @@ if TYPE_CHECKING:
     from local_operator.skills.discovery import Skill
     from local_operator.skills.index import SkillIndex
     from local_operator.variables import VariableStore
+
+logger = logging.getLogger("local_operator.session_factory")
 
 
 def coerce_compaction_settings(raw: object) -> CompactionSettings | None:
@@ -198,6 +201,23 @@ def default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     return _default_convert_to_llm(list(messages))
 
 
+def _fullscreen_app_owns_terminal() -> bool:
+    """True when a Textual app currently holds the terminal.
+
+    Reading input from stdin then is not "interactive", it is a DEADLOCK: the
+    app has the terminal in raw mode and consumes every keystroke, so a thread
+    parked on ``input()`` waits for a line nobody can type and the turn awaiting
+    approval never resumes. Probed through Textual's own active-app context var
+    (import-guarded, because the TUI is an optional extra and this module sits on
+    the headless path too).
+    """
+    try:
+        from textual.app import active_app
+    except Exception:  # textual absent: nothing can own the terminal
+        return False
+    return active_app.get(None) is not None
+
+
 def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """Build the tool-approval gate.
 
@@ -206,6 +226,13 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     runs deny, so a background job never hangs waiting for input it will
     never get. A non-tty denial is NEVER silent (CL-04): the user must see
     why the tool was rejected and how to change it (``--yolo``).
+
+    A full-screen front end must REPLACE this gate with its own surface
+    (``SessionProtocol.set_approval_handler``); the check below is the safety
+    net for the window before it does, and for a UI that forgets to. Denying is
+    the only safe answer there — the alternative is the hang described in
+    :func:`_fullscreen_app_owns_terminal`, which looks to the user like the
+    agent froze mid-task.
     """
     if yolo:
 
@@ -220,6 +247,13 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
                 f"approval required but no tty; run with --yolo to auto-approve "
                 f"(tool '{tool_name}')",
                 file=sys.stderr,
+            )
+            return False
+        if _fullscreen_app_owns_terminal():
+            logger.warning(
+                "approval for %r denied: a full-screen UI owns the terminal and "
+                "installed no approval handler",
+                tool_name,
             )
             return False
         try:

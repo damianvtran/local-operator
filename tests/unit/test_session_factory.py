@@ -658,3 +658,50 @@ async def test_build_initial_blocks_without_turn(tmp_config_dir: Path) -> None:
     assert all(isinstance(block, str) and block.strip() for block in blocks)
     # No transcript side effects on the sessions dir from this hook.
     assert not list((tmp_config_dir / "sessions").glob("*/transcript.jsonl")) or True
+
+
+@pytest.mark.asyncio
+async def test_approval_denies_rather_than_hanging_under_a_fullscreen_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stdin gate must REFUSE while a Textual app owns the terminal.
+
+    Reading a line from stdin there is not interactive, it is a deadlock: the app
+    holds the terminal in raw mode and consumes every keystroke, so the thread
+    parked on ``input()`` never gets a line and the turn awaiting approval hangs
+    forever. That is the reported freeze — tool cards stuck on "running" while
+    the working line kept animating. A front end is expected to install its own
+    gate (``SessionProtocol.set_approval_handler``); this is the net for the gap
+    before it does.
+
+    ``input`` is replaced with a raiser so the test FAILS LOUDLY (rather than
+    blocking the suite) if the guard ever stops short-circuiting.
+    """
+    monkeypatch.setattr(session_factory.sys.stdin, "isatty", lambda: True)
+
+    def never_called(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("stdin was read while a full-screen app owned the terminal")
+
+    monkeypatch.setattr("builtins.input", never_called)
+    monkeypatch.setattr(session_factory, "_fullscreen_app_owns_terminal", lambda: True)
+
+    gate = session_factory._make_request_approval(False)
+    assert await gate("bash", "run: rm -rf /") is False
+
+
+@pytest.mark.asyncio
+async def test_approval_gate_still_prompts_without_a_fullscreen_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plain REPL keeps its y/N prompt — the guard is narrow, not a kill switch."""
+    monkeypatch.setattr(session_factory.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(session_factory, "_fullscreen_app_owns_terminal", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    gate = session_factory._make_request_approval(False)
+    assert await gate("bash", "run: ls") is True
+
+
+def test_fullscreen_probe_is_false_without_a_running_app() -> None:
+    """No app running: the probe must not claim the terminal is taken."""
+    assert session_factory._fullscreen_app_owns_terminal() is False

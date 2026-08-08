@@ -18,6 +18,8 @@ Key interception happens in :meth:`_on_key`, which runs BEFORE TextArea's
 document-insert path, so a handled key never reaches the buffer. Unhandled
 keys fall through to the stock editor behavior.
 
+The caret is SOLID and never blinks; see ``cursor_blink`` in :meth:`__init__`.
+
 The editor OWNS its :class:`CommandPicker` (built in ``__init__``, mounted by
 the app as a sibling below the input row, since the picker must draw outside
 the chevron+editor row). One picker always exists, so every completion path —
@@ -61,6 +63,18 @@ class EditorSubmitted(Message):
 
 class InterruptRequested(Message):
     """Posted on Ctrl+C: abort the running turn, never exit the app."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
+class StopRequested(Message):
+    """Posted on Esc with no picker open: stop whatever the agent is doing.
+
+    Separate from :class:`InterruptRequested` (Ctrl+C) because the app answers
+    them differently: Esc first refuses a pending tool-approval prompt, and only
+    aborts when there is a turn to abort, while Ctrl+C always interrupts.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -149,6 +163,32 @@ class Editor(TextArea):
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
         super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
+        # A SOLID caret, ALWAYS — not "solid while the buffer is empty".
+        #
+        # Textual draws the caret onto the PLACEHOLDER: with no text, the
+        # placeholder branch of `TextArea.render_line` inverts cell 0 of
+        # `Message Local Operator…` whenever `_draw_cursor` is true. With blink
+        # on, `_draw_cursor` flips twice a second, so the first letter of the
+        # placeholder strobes — and on the boot splash, where nothing else
+        # moves, that 2 Hz invert next to a static logo WAS the startup
+        # animation users read as obnoxious. Nothing else was repainting.
+        #
+        # Gating blink on "buffer is empty" or "boot layout is active" would fix
+        # exactly that frame and leave the identical 2 Hz invert running for the
+        # rest of the session, now with the caret silently changing behaviour at
+        # the first keystroke for a reason the user cannot see. Discoverability
+        # points the same way: a blinking caret is INVISIBLE half the time,
+        # while this one — inverted `fg` on `surface` via the
+        # `text-area--cursor` component class — is a full-contrast block that is
+        # never absent. Blink earns its keep in a dense form where the caret has
+        # to be FOUND; this is one always-focused field whose caret sits exactly
+        # where the user last typed.
+        #
+        # It also retires a timer: stock blink runs `refresh_lines` every 500 ms
+        # for the life of the app, so a completely idle session was repainting a
+        # row forever — twice a second of terminal writes down an ssh pipe for a
+        # caret that had not moved.
+        self.cursor_blink = False
         self._history: list[str] = []
         self._history_index: int | None = None  # None = not navigating
         self._draft: str = ""  # buffer text saved when history nav starts
@@ -354,6 +394,20 @@ class Editor(TextArea):
                     event.stop()
                     event.prevent_default()
                     return
+        if key == "escape":
+            # LAST escape branch on purpose: every picker case above has already
+            # returned, so this is Esc with nothing on screen to dismiss.
+            #
+            # It has to be handled rather than left to bubble, because
+            # ``TextArea`` binds Escape to ``blur``. That made Esc a silent trap:
+            # the first press moved focus out of the composer (so the user's next
+            # keystrokes went nowhere) and only a LATER press, once focus had
+            # already left, reached the app's stop. Consuming the key here keeps
+            # focus put and gives Esc one meaning — stop what the agent is doing.
+            self.post_message(StopRequested())
+            event.stop()
+            event.prevent_default()
+            return
         if key == "enter":
             self._submit()
             event.stop()

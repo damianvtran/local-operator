@@ -142,9 +142,8 @@ def _row(model_id: str, **kwargs):
     OpenRouter and Radient describe every model they route — window and both
     prices — so these defaults are the truth for them and for any OpenAI-compatible
     gateway that fills in `context_length`/`pricing`. They are NOT the truth for
-    every wire, and defaulting them here once let two tests pin a fiction: the
-    Anthropic listing returns ids and display names and nothing else, so a row
-    carrying a window is a shape `_fetch_anthropic` cannot emit and a test built on
+    every wire, and defaulting them here once let two tests pin a fiction: a row
+    carrying a PRICE is a shape `_fetch_anthropic` cannot emit, and a test built on
     one passes against an enrichment that cannot work in production. Use
     :func:`_anthropic_row` for that wire.
     """
@@ -160,16 +159,27 @@ def _row(model_id: str, **kwargs):
     return DiscoveredModel(**fields)
 
 
-def _anthropic_row(model_id: str, name: str = ""):
-    """One row exactly as `_fetch_anthropic` builds it: an id, a name, zeros.
+def _anthropic_row(model_id: str, name: str = "", **kwargs):
+    """One row exactly as `_fetch_anthropic` builds it from `GET /v1/models`.
 
-    `GET /v1/models` answers with `id`, `display_name`, `created_at` and `type`.
-    No window, no output cap, no prices, no capability flags — so every number a
-    session needs has to come from somewhere other than this listing.
+    That endpoint reports `id`, `display_name`, `max_input_tokens`, `max_tokens`
+    and a `capabilities` object — but never a price and never a prompt-caching
+    flag, so those two stay at the "unknown" zero here no matter what a caller
+    passes for the limits. Defaults are the 5-generation numbers verified live on
+    2026-08-07 (1M in, 128k out); pass `context_window=0, max_tokens=0` for the
+    terse answer an older API version or a stripping proxy still gives.
     """
     from local_operator.model.discovery import DiscoveredModel
 
-    return DiscoveredModel(id=model_id, name=name or model_id)
+    fields = {
+        "id": model_id,
+        "name": name or model_id,
+        "context_window": 1_000_000,
+        "max_tokens": 128_000,
+        "supports_images": True,
+    }
+    fields.update(kwargs)
+    return DiscoveredModel(**fields)
 
 
 def _bare_info(model_id: str):
@@ -209,17 +219,14 @@ def test_a_direct_provider_is_enriched_too_not_just_the_aggregators(monkeypatch,
     """The hole the model picker turned into a routine path, pinned against the
     row Anthropic's wire can ACTUALLY produce.
 
-    `claude-opus-5` is a real model the shipped registry does not describe, and the
-    picker offers it because the listing names it. But that listing names it and
-    nothing more — no window, no output cap, no capability flags — so "enrich from
-    the listing" cannot supply a single number here. An earlier version of this
-    test handed enrichment a 500k window that `_fetch_anthropic` has no field to
-    report, and so passed while the real path still ran at 128k/8192 with prompt
-    caching off: the exact model named in the claim, silently truncated at 8k of
-    output and paying full price on every cached prefix.
+    The reported symptom was a status band reading `1.8%/200k` on
+    `anthropic/claude-opus-5`, whose real window is 1M. Anthropic's listing carries
+    `max_input_tokens` and `max_tokens` per model, so this is not a number that has
+    to be guessed from a family floor — the enrichment path either reads it or the
+    session compacts at 160k on a model with 1M of room, throwing away 84% of it.
 
-    What has to hold instead is that a CONFIRMED-but-undescribed Claude id inherits
-    the family floor rather than the global unknown default.
+    Prices are the other half, and they are still absent from that wire: an invented
+    one renders in the band as fact.
     """
     from local_operator.model import configure as configure_mod
 
@@ -227,16 +234,66 @@ def test_a_direct_provider_is_enriched_too_not_just_the_aggregators(monkeypatch,
     monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
 
     config = configure_mod.configure_model(hosting="anthropic", model_name="claude-opus-5")
-    assert config.spec.context_window == 200_000, "fell back to the 128k unknown default"
-    assert config.spec.max_output_tokens == 64_000, "8192 silently truncates long answers"
+    assert config.spec.context_window == 1_000_000, "the listing's window never reached the spec"
+    assert config.spec.max_output_tokens == 128_000, "64k silently truncates long answers"
     assert config.spec.supports_prompt_cache is True, "no cache_control on the priciest model"
     assert config.spec.supports_images is True
-    # No invented prices: Anthropic's listing quotes none, and a made-up number
-    # renders in the status band as fact.
     assert config.info.input_price == 0.0
     assert config.info.output_price == 0.0
-    # The listing's one real contribution is the display name.
     assert config.info.name == "Claude Opus 5"
+
+
+def test_an_undescribed_claude_snapshot_inherits_its_familys_window(monkeypatch, tmp_path) -> None:
+    """A dated snapshot of a shipped model, listed by a wire that says nothing.
+
+    Anthropic serves undated ids (`claude-opus-5`) and dated snapshots of the same
+    model (`claude-opus-5-20260112`) and adds new ones between releases of this
+    package, so an id absent from the registry is routine rather than exotic. With a
+    terse listing — an older API version, a proxy that strips fields — nothing on
+    the wire can supply the window, and the flat family template answers 200k for
+    the whole vendor. That is the number the user saw. The FAMILY is what the id
+    itself still says, so the snapshot resolves to Opus 5's real 1M.
+
+    The prices stay zero: same model, but this registry has no sourced price for
+    the 5 generation to inherit.
+    """
+    from local_operator.model import configure as configure_mod
+    from local_operator.model.registry import anthropic_models
+
+    snapshot = "claude-opus-5-20260112"
+    assert snapshot not in anthropic_models, "the id this test treats as unshipped now ships"
+    _stub_discovery(
+        monkeypatch,
+        [_anthropic_row(snapshot, "Claude Opus 5", context_window=0, max_tokens=0)],
+    )
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+
+    config = configure_mod.configure_model(hosting="anthropic", model_name=snapshot)
+    assert config.spec.context_window == 1_000_000, "fell back to the 200k family floor"
+    assert config.spec.max_output_tokens == 128_000
+    assert config.spec.supports_prompt_cache is True
+    assert config.info.input_price == 0.0
+    assert config.info.output_price == 0.0
+
+
+def test_an_unknown_claude_generation_does_not_inherit_downward(monkeypatch, tmp_path) -> None:
+    """Inheritance runs FORWARD only, and the asymmetry is the reason.
+
+    Windows have only ever grown within a tier, so a generation newer than anything
+    shipped can safely take the newest known limits. Backwards it is unsafe: the
+    default threshold is `min(0.8 * window, 600k)`, so handing a genuinely-200k
+    model a 1M window puts the trigger at 600k — past the model's real limit — and
+    every turn beyond 200k 400s instead of compacting. An older unshipped id
+    therefore gets the conservative 200k floor, not its tier's newest numbers.
+    """
+    from local_operator.model import configure as configure_mod
+
+    _stub_discovery(monkeypatch, [_anthropic_row("claude-opus-2", context_window=0, max_tokens=0)])
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+
+    config = configure_mod.configure_model(hosting="anthropic", model_name="claude-opus-2")
+    assert config.spec.context_window == 200_000
+    assert config.spec.max_output_tokens == 64_000
 
 
 @pytest.mark.parametrize("break_it", ["discovery-raises", "no-such-model", "empty-listing"])
@@ -992,19 +1049,28 @@ def test_the_resolved_info_is_never_the_registrys_own_object(monkeypatch) -> Non
 def test_the_memo_can_be_dropped_when_the_cause_of_a_bad_answer_is_fixed(monkeypatch) -> None:
     """A resolution that degraded for a FIXABLE reason must not be pinned for a
     full TTL bucket: the user who pastes a key mid-session has removed the cause,
-    and 24h of stale numbers is not an acceptable answer to that."""
+    and 24h of stale numbers is not an acceptable answer to that.
+
+    Uses a generation the registry cannot describe, because the point is a
+    resolution with nothing but the fallback behind it: a shipped id would carry its
+    own name and hide whether the memo ever re-resolved.
+    """
     from local_operator.model import configure as configure_mod
+    from local_operator.model.registry import anthropic_models
+
+    future = "claude-opus-9"
+    assert future not in anthropic_models, "the id this test treats as unshipped now ships"
 
     _stub_discovery(monkeypatch, [])
     configure_mod.invalidate_model_info_cache()
-    degraded = configure_mod.resolve_model_info("anthropic", "claude-opus-5")
-    assert degraded.name == "claude-opus-5", "the listing had nothing to add"
+    degraded = configure_mod.resolve_model_info("anthropic", future)
+    assert degraded.name == future, "the listing had nothing to add"
 
-    _stub_discovery(monkeypatch, [_anthropic_row("claude-opus-5", "Claude Opus 5")])
-    assert configure_mod.resolve_model_info("anthropic", "claude-opus-5").name == "claude-opus-5"
+    _stub_discovery(monkeypatch, [_anthropic_row(future, "Claude Opus 9")])
+    assert configure_mod.resolve_model_info("anthropic", future).name == future
 
     configure_mod.invalidate_model_info_cache()
-    assert configure_mod.resolve_model_info("anthropic", "claude-opus-5").name == "Claude Opus 5"
+    assert configure_mod.resolve_model_info("anthropic", future).name == "Claude Opus 9"
 
 
 @pytest.mark.parametrize(
