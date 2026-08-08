@@ -21,6 +21,7 @@ def test_defaults_match_contract():
     assert s.keep_recent_tokens == 20000
     assert s.threshold_percent == -1.0
     assert s.threshold_tokens == -1
+    assert s.max_threshold_tokens == 600_000  # default cap: never raises §C
     assert s.auto_continue is True
     assert s.mid_turn_enabled is True
 
@@ -42,6 +43,31 @@ def test_resolve_threshold_defaulted_reserve_section_c_default():
     assert resolve_threshold_tokens(200_000, s) == 160_000
     assert resolve_threshold_tokens(1_000_000, s) == 600_000
     assert resolve_threshold_tokens(40_000, s) == 32_000
+
+
+def test_max_threshold_tokens_caps_the_section_c_default():
+    """A provider advertising a huge window (1.05M) whose practical serving
+    ceiling is far lower must still compact before the pain point.
+
+    Regression for the stuck LO-on-LO session: radient advertised gpt-5.4 at
+    1.05M, the §C default resolved to 600k, and the session ran to ~250k
+    where the proxy started returning `aborted` turns — compaction never
+    fired because 250k < 600k. A user-set max_threshold_tokens clamps the
+    resolved default so the session compacts before the ceiling. The default
+    (600k) leaves every existing model's behaviour untouched.
+    """
+    s = CompactionSettings(max_threshold_tokens=250_000)
+    assert resolve_threshold_tokens(1_050_000, s) == 250_000
+    # The cap never RAISES a threshold a small window would choose anyway,
+    # and it applies only to the §C default — an explicit trigger still wins.
+    small = CompactionSettings(max_threshold_tokens=250_000)
+    assert resolve_threshold_tokens(100_000, small) == 80_000
+    explicit = CompactionSettings(threshold_tokens=300_000, max_threshold_tokens=250_000)
+    assert resolve_threshold_tokens(1_000_000, explicit) == 300_000
+    # should_compact honours the capped threshold.
+    capped = CompactionSettings(max_threshold_tokens=250_000)
+    assert should_compact(260_000, 1_050_000, capped) is True
+    assert should_compact(240_000, 1_050_000, capped) is False
 
 
 def test_resolve_threshold_defaulted_reserve_impossible_recovers_15_percent():
