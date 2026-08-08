@@ -72,7 +72,17 @@ def resume_dir(config_dir: Path, requested: str) -> Path:
     if requested in ("", ".", "..") or Path(requested).name != requested:
         raise ResumeNotFound(f"not a session id: {requested!r}")
     candidate = sessions / requested
-    if not (candidate / TRANSCRIPT_NAME).is_file():
+    try:
+        present = (candidate / TRANSCRIPT_NAME).is_file()
+    except OSError:
+        # Same race the `@latest` scan guards, on the path a user reaches by
+        # typing an id: a retention sweep unlinking the directory, or a
+        # permission/ENAMETOOLONG error from the stat. "That session is not
+        # there" is the honest answer, and it is what the caller already knows
+        # how to report — a bare OSError here is a traceback on the way to the
+        # TUI instead.
+        present = False
+    if not present:
         raise ResumeNotFound(f"no session {requested!r} to resume")
     return candidate
 

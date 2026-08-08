@@ -310,9 +310,60 @@ def test_a_malformed_port_does_not_crash_the_prompt() -> None:
     outside the try that exists to keep a malformed URL from taking down the
     prompt the user is being asked to answer.
     """
-    assert _display_url("http://h:99999/x") == "http://h:99999/x"
+    # The port is dropped and the sentence is still built — the earlier version of
+    # this assertion pinned a `return raw` fallback that handed back the
+    # unsanitised URL, which is the defect the test below covers.
+    assert _display_url("http://h:99999/x") == "http! h/x"
     # And an IPv6 literal keeps its brackets, so the row still says where the
     # address ends and the port begins. (`http!` is this renderer's "not
     # encrypted" marker, which a plain `http` URL always carries.)
     assert _display_url("http://[::1]:8080/admin") == "http! [::1]:8080/admin"
     assert _display_url("https://[2001:db8::1]/x") == "[2001:db8::1]/x"
+
+
+def test_a_malformed_port_never_hands_back_the_unsanitised_url() -> None:
+    """Degrading to `raw` returns the exact string this function exists to clean.
+
+    `urlsplit` defers port validation to attribute access, so one extra character
+    reached the fallback — and the fallback printed the URL verbatim. With
+    userinfo intact and the row left-anchored, a narrow prompt affirmatively named
+    `accounts.google…` while the browser went to evil.test, and a homograph host
+    kept its lookalike spelling. The port is the only thing that cannot be
+    trusted here; the host is already parsed and guarded.
+    """
+    leaky = "http://accounts.google.com@evil.test:99999/x"
+    assert _display_url(leaky) == "http! evil.test/x"
+    assert "accounts.google.com" not in _display_url(leaky)
+    assert "@" not in _display_url(leaky)
+
+    # The same URL without the bad port has always been sanitised; the two must
+    # agree, or the port is deciding what the row says about the destination.
+    assert _display_url(leaky) == _display_url("http://accounts.google.com@evil.test/x")
+
+    # A homograph is still punycoded when the port is unreadable.
+    assert _display_url("https://\u0430pple.com:abc/login") == "xn--pple-43d.com/login"
+
+    # And a plain unreadable port simply loses the port, keeping the host.
+    assert _display_url("http://h:99999/x") == "http! h/x"
+
+
+def test_an_unresolvable_home_still_resolves_a_target(monkeypatch) -> None:
+    """`expanduser()` raises RuntimeError when `~user` names nobody.
+
+    This is the second of the two sites the describer fix named, and the one on
+    the path every write/exec approval runs through — so the traceback landed
+    while building the question the user was about to be asked.
+    """
+    from local_operator.tools.builtin import _resolve_workspace_path
+
+    resolved, inside = _resolve_workspace_path("~nosuchuser12345/x", "/tmp")
+    assert resolved.is_absolute()
+    assert inside is True
+
+    # And when the WORKSPACE itself cannot be expanded.
+    def boom(self):  # noqa: ANN001, ANN202
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "expanduser", boom)
+    resolved, _inside = _resolve_workspace_path("notes.md", "/tmp")
+    assert resolved.is_absolute()

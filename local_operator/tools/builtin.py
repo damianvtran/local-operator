@@ -410,8 +410,20 @@ def _resolve_workspace_path(raw: str, cwd: str) -> tuple[Path, bool]:
     prompts always show the resolved path, and ``outside`` targets escalate
     approval even for read-tier tools.
     """
-    root = Path(cwd).expanduser().resolve()
-    candidate = Path(raw).expanduser()
+    # `expanduser()` raises RuntimeError when `~user` names nobody the platform
+    # can resolve — the second of the two sites the describer fix named, and the
+    # one on the path every write/exec approval runs through. Falling back to the
+    # unexpanded string keeps the sentence buildable: an unresolvable `~` is then
+    # treated as a relative path under the workspace, which is where a resolved
+    # target that escapes gets caught anyway.
+    try:
+        root = Path(cwd).expanduser().resolve()
+    except RuntimeError:
+        root = Path(cwd).resolve()
+    try:
+        candidate = Path(raw).expanduser()
+    except RuntimeError:
+        candidate = Path(raw)
     path = candidate if candidate.is_absolute() else root / candidate
     path = path.resolve()
     try:
@@ -657,7 +669,17 @@ def _display_url(raw: str) -> str:
         # `urlsplit` defers port validation to attribute access, so a URL like
         # `http://h:99999/` parses and then raises on `.port` — outside the try
         # that exists to keep a malformed URL from crashing the prompt.
-        return raw
+        #
+        # Dropped, NOT degraded to `raw`. Returning the raw string handed back the
+        # exact input this function exists to sanitise, and one extra character
+        # was enough to reach it: `http://accounts.google.com@evil.test:99999/x`
+        # painted with its userinfo intact, so a left-anchored prompt at 46
+        # columns affirmatively named `accounts.google…` while the browser went to
+        # evil.test — and a homograph host kept its lookalike spelling. Worse than
+        # having no describer at all, which at least reads as raw data rather than
+        # as a confident destination. `parts.hostname` is already parsed and
+        # guarded above, so the sentence can be built without the port.
+        port = None
     host = _punycode_host(parts.hostname)
     if ":" in host:
         # An IPv6 literal needs its brackets back: `::1:8080` does not say where
@@ -669,11 +691,6 @@ def _display_url(raw: str) -> str:
     tail = parts.path or ""
     if parts.query:
         tail += f"?{parts.query}"
-    # The scheme rides at the END for a non-https URL. Led with, it spent eight
-    # of a narrow row's cells before naming anything — at 32 columns the row
-    # said `browse: http…`, which identifies no site at all. Trailing, the host
-    # is what survives truncation and the insecurity is still stated whenever
-    # there is room for it.
     # A non-https scheme LEADS. Trailing it read well and truncated first, so
     # from 47 columns down an http URL and an https one painted identically —
     # and the row spent four widths rendering the stub `(htt…`. Leading, it is
