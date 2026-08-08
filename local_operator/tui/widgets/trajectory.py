@@ -29,7 +29,7 @@ from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding
-from textual.containers import Container, ScrollableContainer, Vertical
+from textual.containers import Container, ScrollableContainer
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
@@ -177,7 +177,7 @@ def render_trajectory(events: Sequence[Any]) -> list[Text]:
     return rows
 
 
-class TrajectoryScreen(ModalScreen):
+class TrajectoryScreen(ModalScreen[None]):
     """The modal replay of one subagent's retained events.
 
     Opened from a band row (click or Enter), closed by Esc. The header names

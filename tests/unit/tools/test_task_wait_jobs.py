@@ -72,6 +72,7 @@ async def test_task_registers_a_job_and_returns_its_id(tmp_path):
     result = await _call(tools, "task", {"label": "summarize", "prompt": "do it"}, context)
 
     assert result.is_error is False
+    assert result.details is not None
     job_id = result.details["job_id"]
     assert job_id not in before  # a NEW job was registered
     assert f"job {job_id}" in result.text
@@ -80,10 +81,16 @@ async def test_task_registers_a_job_and_returns_its_id(tmp_path):
     assert job is not None
     assert job.type == "task"
     assert job.label == "summarize"
+
+    def _completed():
+        job = manager.get(job_id)
+        return job is not None and job.status == "completed"
+
     # The quick runner completes on its own; wait for settlement.
-    await wait_for(lambda: (manager.get(job_id) is not None and
-                            manager.get(job_id).status == "completed"))
-    assert manager.get(job_id).result_text == f"done:{job_id}"
+    await wait_for(_completed)
+    job = manager.get(job_id)
+    assert job is not None
+    assert job.result_text == f"done:{job_id}"
     await manager.dispose()
 
 
@@ -97,10 +104,12 @@ async def test_wait_returns_final_output_when_job_completes(tmp_path):
         tools, "task", {"label": "work", "prompt": "run"}, context
     )
     assert result.is_error is False
+    assert result.details is not None
     job_id = result.details["job_id"]
 
     waited = await _call(tools, "wait", {"job_id": job_id, "wait_ms": 1000}, context)
     assert waited.is_error is False
+    assert waited.details is not None
     assert waited.details["status"] == "completed"
     assert f"done:{job_id}" in waited.text
     await manager.dispose()
@@ -122,6 +131,7 @@ async def test_wait_bounded_by_wait_ms_times_out(tmp_path):
     elapsed = asyncio.get_running_loop().time() - started
     assert elapsed < 1.0  # returned promptly on the bound, did not hang
     assert result.is_error is False
+    assert result.details is not None
     assert result.details["status"] == "running"
     assert "still running" in result.text
     await manager.dispose()
@@ -137,15 +147,20 @@ async def test_jobs_lists_ids_labels_and_statuses(tmp_path):
 
     result = await _call(tools, "jobs", {}, context)
     assert result.is_error is False
+    assert result.details is not None
     assert result.details["count"] == 2
     assert "alpha" in result.text
     assert "beta" in result.text
     assert running_id in result.text
     assert "running" in result.text
+
+    def _settled():
+        job = manager.get(quick_id)
+        return job is not None and job.status != "running"
+
     # Let the quick job settle before dispose so its runner coroutine is
     # awaited rather than abandoned (the slow one is cancelled by dispose).
-    await wait_for(lambda: manager.get(quick_id) is not None and
-                   manager.get(quick_id).status != "running")
+    await wait_for(_settled)
     await manager.dispose()
 
 
@@ -156,6 +171,7 @@ async def test_jobs_empty_manager(tmp_path):
     tools = _tools(context)
     result = await _call(tools, "jobs", {}, context)
     assert result.is_error is False
+    assert result.details is not None
     assert result.details["count"] == 0
     assert "no background jobs" in result.text
     await manager.dispose()

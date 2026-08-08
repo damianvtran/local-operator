@@ -304,6 +304,7 @@ async def test_real_compaction_then_resume_replays_the_kept_window(tmp_path):
     entry_ids = [entry.id for entry in entries]
     assert ids_after_marker == entry_ids[entry_ids.index(cut_id) :][: len(ids_after_marker)]
 
+
 @pytest.mark.asyncio
 async def test_history_accessor_returns_the_resumed_conversation(tmp_path):
     """``Session.history()`` exposes the replayed conversation for rendering.
@@ -332,11 +333,12 @@ async def test_history_accessor_returns_the_resumed_conversation(tmp_path):
         system_blocks_provider=lambda: ["stable"],
     )
     history = resumed.history()
-    roles = [m.role for m in history]
+    messages = [m for m in history if isinstance(m, Message)]
+    roles = [m.role for m in messages]
     # The prior prompt survived the resume and sits first: the exact render
     # input the TUI needs to show the conversation before the first live turn.
     assert "user" in roles
-    assert history[roles.index("user")].text == "read engine.py"
+    assert messages[roles.index("user")].text == "read engine.py"
 
 
 @pytest.mark.asyncio

@@ -163,7 +163,9 @@ def test_an_exhausted_tier_row_never_outranks_a_shared_window() -> None:
         _percent("anthropic:7d", "7 day", 80.0, shared=True),
         _percent("anthropic:7d:fable", "7 day (Fable)", 100.0, tier="fable"),
     )
-    assert binding_limit(report).id == "anthropic:7d"
+    binding = binding_limit(report)
+    assert binding is not None
+    assert binding.id == "anthropic:7d"
 
 
 def test_a_tier_row_is_indented_under_the_windows_it_is_subordinate_to() -> None:
@@ -322,7 +324,7 @@ async def test_a_long_report_scrolls_instead_of_being_truncated() -> None:
         first = panel.render_lines_for_test()
         panel.action_scroll_page(1)
         second = panel.render_lines_for_test()
-    assert panel.offset > 0
+    assert panel.view_offset > 0
     assert first != second
 
 
@@ -333,14 +335,14 @@ async def test_scrolling_clamps_at_both_ends_rather_than_wrapping() -> None:
     async with _panel_app() as panel:
         panel.show_reports(_many_reports())
         panel.action_scroll_rows(-5)
-        assert panel.offset == 0
+        assert panel.view_offset == 0
         panel.action_scroll_end()
-        bottom = panel.offset
+        bottom = panel.view_offset
         assert bottom > 0
         panel.action_scroll_rows(5)
-        assert panel.offset == bottom
+        assert panel.view_offset == bottom
         panel.action_scroll_home()
-        assert panel.offset == 0
+        assert panel.view_offset == 0
 
 
 @pytest.mark.asyncio

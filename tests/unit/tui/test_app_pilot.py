@@ -7,13 +7,12 @@ paints first, then awaits the session in a worker.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
-from pathlib import Path
 
-from local_operator.harness.types import Message
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.tui.app import BOOT_LAYOUT_CLASS, SLASH_COMMANDS, OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice
@@ -33,6 +32,7 @@ class FakeSession:
         self.completions: list[tuple[str, str]] = []
         self.disposed = False
         self._handlers: list[Any] = []
+        self._history: list[Any] = []
 
     @property
     def session_id(self) -> str:
@@ -2090,16 +2090,19 @@ async def test_a_failing_turn_shows_the_providers_own_error() -> None:
         text = _transcript_text(app)
     assert "HTTP 400: `temperature` is deprecated for this model." in text, text
 
+
 # --- /resume ---------------------------------------------------------------
 
 
 def _resume_factory(boots: list[str]):
     """A resume factory that records the id it was asked to boot."""
+
     async def resume_factory(resume_id: str):
         boots.append(resume_id)
         session = FakeSession()
         session._history = ["dummy history entry"]
         return session
+
     return resume_factory
 
 

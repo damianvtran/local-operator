@@ -10,8 +10,6 @@ the full lifecycle.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
-from typing import Any
 
 import pytest
 
@@ -22,7 +20,6 @@ from local_operator.harness.types import (
     Message,
     ModelSpec,
     StreamEndEvent,
-    StreamEvent,
     StreamTextDelta,
     SubagentEndEvent,
     SubagentStartEvent,
@@ -156,9 +153,14 @@ async def test_launch_subagent_cancels_on_parent_dispose(tmp_path, monkeypatch):
     # Give the child a moment to register AND start its turn, so the runner's
     # inner coroutine is genuinely awaited before disposal (cancelling a task
     # that never reached `await coro` leaks an un-awaited coroutine warning).
-    await wait_for(lambda: (parent.jobs.get(job_id) is not None and
-                            parent.jobs.get(job_id).status == "running"))
+    def _running():
+        job = parent.jobs.get(job_id)
+        return job is not None and job.status == "running"
+
+    await wait_for(_running)
     await asyncio.sleep(0.05)
-    assert parent.jobs.get(job_id).status == "running"
+    assert (job := parent.jobs.get(job_id)) is not None
+    assert job.status == "running"
     await parent.dispose()
-    assert parent.jobs.get(job_id).status == "cancelled"
+    assert (job := parent.jobs.get(job_id)) is not None
+    assert job.status == "cancelled"

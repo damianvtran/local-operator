@@ -48,6 +48,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     NoticeEvent,
     RetryEndEvent,
+    RetryStartEvent,
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,

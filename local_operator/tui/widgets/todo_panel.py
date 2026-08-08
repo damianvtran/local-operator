@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from rich.cells import cell_len
 from rich.console import RenderableType
 from rich.style import Style
 from rich.text import Text
@@ -103,8 +102,7 @@ class TodoPanel(Container):
             session_id = getattr(session, "session_id", "") or ""
             items = todo_items(session_id)
             fingerprint = tuple(
-                (str(item.get("text", "")), str(item.get("status", "pending")))
-                for item in items
+                (str(item.get("text", "")), str(item.get("status", "pending"))) for item in items
             )
             if fingerprint == self._shown:
                 return  # equality guard — identical list = no work
@@ -164,8 +162,6 @@ class TodoPanel(Container):
         # approval prompt and the tool cards).
         row.append(
             strip_control_sequences(text),
-            style=Style(color=theme_mod.semantic_color("dim"), strike=True)
-            if done
-            else muted,
+            style=Style(color=theme_mod.semantic_color("dim"), strike=True) if done else muted,
         )
         return row

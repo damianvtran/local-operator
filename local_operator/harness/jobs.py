@@ -74,7 +74,7 @@ class AsyncJob(BaseModel):
     # ``None`` (not []) on jobs without a trajectory: a host probing
     # ``getattr(job, "trajectory", None)`` must be able to tell "no child
     # events recorded" apart from "this job type has none".
-    trajectory: list[dict] | None = None
+    trajectory: list[dict[str, Any]] | None = None
 
 
 class AsyncJobManager:
