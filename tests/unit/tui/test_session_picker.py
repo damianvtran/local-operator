@@ -17,6 +17,7 @@ from textual.app import App, ComposeResult
 
 from local_operator.resume import (
     NAME_MAX_CHARS,
+    NAME_SCAN_CHARS,
     SessionRow,
     recent_session_rows,
     session_name,
@@ -555,3 +556,29 @@ async def test_the_card_ends_on_quiet_ground_then_its_meta_in_both_states() -> N
     assert fits[-1].startswith("↑↓")
     assert fits[-2] == ""  # no position row, and NOT a second blank
     assert fits[-3] != ""
+
+
+def test_a_single_entry_with_no_trailing_newline_still_names_the_session(
+    tmp_path: Path,
+) -> None:
+    """The window's last line is dropped only when the read was TRUNCATED. A
+    complete final line simply has no newline after it, and dropping that lost
+    the name of any session whose transcript is one entry."""
+    directory = tmp_path / "sessions" / "onlyone"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text(
+        json.dumps(_message("user", "the only line, no newline")), encoding="utf-8"
+    )
+    assert session_name(directory) == "the only line, no newline"
+
+
+def test_a_truncated_first_line_is_not_parsed_as_a_name(tmp_path: Path) -> None:
+    """The other half of the same rule: a line the cap cut in half is a
+    fragment, not a message, and must not be mined for a name."""
+    directory = tmp_path / "sessions" / "huge"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text(
+        json.dumps(_message("user", "x" * (NAME_SCAN_CHARS * 2))) + "\n",
+        encoding="utf-8",
+    )
+    assert session_name(directory) == ""

@@ -185,12 +185,15 @@ def session_name(session_dir: Path, *, max_chars: int = NAME_MAX_CHARS) -> str:
             head = handle.read(NAME_SCAN_CHARS)
     except OSError:
         return ""
-    # The final line of the window is almost always truncated mid-token; it is
-    # dropped rather than parsed unless the window ended exactly on a newline,
-    # because a half-read line is indistinguishable from the half-WRITTEN line
-    # a live session leaves at the end of its transcript.
+    # A final line with no newline after it is dropped ONLY when the window was
+    # actually filled — i.e. the read stopped because of the cap, so that line
+    # is a half-READ one and parsing it would be parsing a fragment. When the
+    # whole file fitted, the same shape is a complete last line that simply has
+    # no trailing newline, and dropping it lost the name of any session whose
+    # transcript is a single entry.
+    truncated = len(head) >= NAME_SCAN_CHARS
     lines = head.splitlines()
-    if lines and not head.endswith("\n"):
+    if truncated and lines and not head.endswith("\n"):
         lines.pop()
     for line in lines:
         line = line.strip()
