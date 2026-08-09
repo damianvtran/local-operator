@@ -322,8 +322,13 @@ async def _build_child_session(
         # requests / 1.5M tokens before its default (600k-cap) threshold
         # ever fired — the CAP the parent's operator set must bound the child
         # too, or a delegated task silently bypasses the very knob that keeps
-        # long sessions alive.
-        compaction_settings=parent_session._compaction_settings,
+        # long sessions alive. Defensively COPIED so the child can never
+        # mutate the parent's settings (they are logically separate).
+        compaction_settings=(
+            parent_session._compaction_settings.model_copy()
+            if parent_session._compaction_settings is not None
+            else None
+        ),
     )
     await child.async_init()
     return child
