@@ -274,6 +274,7 @@ async def _build_child_session(
     cwd and the parent's approval handler; explicitly NOT yolo."""
     from datetime import datetime
 
+    from local_operator.config import ConfigManager
     from local_operator.harness.types import ToolContext
     from local_operator.prompts_api import build_system_blocks
     from local_operator.session.session import Session
@@ -295,6 +296,7 @@ async def _build_child_session(
         agent_id=parent_session.agent_id,
         has_ui=parent_session._has_ui,
         request_approval=request_approval,
+        web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
 

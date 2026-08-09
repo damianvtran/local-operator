@@ -69,6 +69,7 @@ NERD_TOOL_ICONS: dict[str, str] = {
     "list_variables": "\uf0ca",  # nf-fa-list_ul
     "read_variable": "\uf02b",  # nf-fa-tag
     "browser": "\uf0ac",  # nf-fa-globe
+    "web_search": "\uf0ac",  # nf-fa-globe
     "task": "\uf0c0",  # nf-fa-users — work handed to another agent
     "agent": "\uf0c0",
 }
@@ -94,6 +95,7 @@ PLAIN_TOOL_ICONS: dict[str, str] = {
     "list_variables": "x",  # the algebraic unknown
     "read_variable": "x",
     "browser": "@",  # the URL sigil
+    "web_search": "⌕",  # find/search without reusing grep's /pattern/ sigil
     "task": "»",  # work passed onward
     "agent": "»",
 }

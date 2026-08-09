@@ -4,8 +4,8 @@ Main entry point for the Local Operator CLI application.
 This script initializes the interactive agent experience or, when a
 subcommand is given, dispatches to it: ``serve`` (FastAPI server), ``exec``
 (one-shot headless task), ``credential``/``config``/``agents`` management,
-``login``/``logout``/``login-status`` provider auth, and ``mcp`` server
-management.
+``login``/``logout``/``login-status`` provider auth, ``search`` configuration,
+and ``mcp`` server management.
 
 Rewrite constraints (docs/REWRITE.md section E + backward-compat contracts):
 
@@ -462,6 +462,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default="global",
         help="Config scope to remove from (default: global)",
     )
+
+    # Built separately so provider transports stay off the CLI import path.
+    from local_operator.web_search.cli import add_search_subparser
+
+    add_search_subparser(subparsers, parent_parser)
 
     # CL-04: ``--yolo`` is accepted on every subcommand too (additive). The
     # root flag keeps its default; subparsers get a SUPPRESS copy so parsing
@@ -1301,6 +1306,10 @@ def main() -> int:
                 return config_list_command()
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
+        elif args.subcommand == "search":
+            from local_operator.web_search.cli import search_command
+
+            return search_command(args)
         elif args.subcommand == "agents":
             from local_operator.agents import AgentRegistry  # lazy: heavy module
 
