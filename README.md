@@ -182,7 +182,7 @@ To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have 
   local-operator search setup tavily --oauth
   local-operator search setup tavily --api-key
   local-operator search setup brave --api-key
-  local-operator search setup searxng --url https://search.example.com
+  local-operator search setup searxng --endpoint https://search.example.com
   ```
 
   Tavily OAuth adds the official remote MCP server and uses its connected
