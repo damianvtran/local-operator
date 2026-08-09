@@ -342,6 +342,7 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
         keep_recent_tokens: int = 20000
         threshold_percent: float = -1.0
         threshold_tokens: int = Field(default=-1)
+        max_threshold_tokens: int = 600_000
         auto_continue: bool = True
 
     prune_calls: list[tuple[int, int]] = []
@@ -362,7 +363,13 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
     )
     setattr(fake_api, "find_cut_point", lambda messages, keep: 1)  # cut after first message
     setattr(
-        fake_api, "resolve_threshold_tokens", lambda window, settings: settings.threshold_tokens
+        fake_api,
+        "resolve_threshold_tokens",
+        lambda window, settings: (
+            settings.threshold_tokens
+            if settings.threshold_tokens > 0
+            else min(int(window * 0.8), getattr(settings, "max_threshold_tokens", 600_000))
+        ),
     )
     setattr(fake_api, "RECOVERY_BAND", 0.8)
 
@@ -458,6 +465,7 @@ async def test_compaction_below_bound_never_pays_for_the_exact_estimate(tmp_path
         keep_recent_tokens: int = 20000
         threshold_percent: float = -1.0
         threshold_tokens: int = Field(default=-1)
+        max_threshold_tokens: int = 600_000
         auto_continue: bool = True
 
     exact_calls: list[int] = []
@@ -476,7 +484,13 @@ async def test_compaction_below_bound_never_pays_for_the_exact_estimate(tmp_path
         fake_api, "compaction_context_tokens", lambda provider, local: max(provider or 0, local)
     )
     setattr(
-        fake_api, "resolve_threshold_tokens", lambda window, settings: settings.threshold_tokens
+        fake_api,
+        "resolve_threshold_tokens",
+        lambda window, settings: (
+            settings.threshold_tokens
+            if settings.threshold_tokens > 0
+            else min(int(window * 0.8), getattr(settings, "max_threshold_tokens", 600_000))
+        ),
     )
     setattr(
         fake_api, "should_compact", lambda ctx, window, settings: ctx > settings.threshold_tokens
@@ -624,7 +638,12 @@ async def test_refresh_tools_takes_effect_next_model_call(tmp_path):
     )
     session = make_session(tmp_path, stream, tools=[])
     await session.prompt("one")
-    assert [t.name for t in stream.requests[0].tools] == []
+    # A session always self-merges its OWN capability tools (task/wait/jobs/
+    # wake are createIf-gated on the session's launcher + job manager), so the
+    # construction-time inventory is not empty even when the caller passed [].
+    first_names = [t.name for t in stream.requests[0].tools]
+    assert "task" in first_names and "wait" in first_names
+    assert "mcp__late_one" not in first_names
 
     session.refresh_tools([mk("mcp__late_one"), mk("mcp__late_two")])
     await session.prompt("two")
@@ -722,4 +741,27 @@ async def test_aborted_run_end_is_never_held(tmp_path, monkeypatch):
     await session.prompt("go")
     assert len(ends) == 1
     assert ends[0].aborted is True
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_merges_capability_tools_into_inventory(tmp_path):
+    """task/wait/jobs (and wake) are gated on the session's OWN capabilities
+    (subagent_launcher/jobs/wake_scheduler), which the factory context lacks.
+    A session must merge them at construction so the model can delegate even
+    when the factory inventory was built without the engine (reproduced live:
+    144 requests and 4M input tokens with zero task calls because task was
+    never advertised)."""
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    names = [t.name for t in session._tools]
+    assert "task" in names, f"task tool missing from inventory: {names}"
+    assert "wait" in names
+    assert "jobs" in names
+    # The merge replaced/added without duplicating existing tools.
+    assert len(names) == len(set(names))
+    # And the merged tools are the createIf ones, wired to this session.
+    task_tool = next((t for t in session._tools if t.name == "task"), None)
+    assert task_tool is not None
+    assert task_tool.name == "task"
     await session.dispose()

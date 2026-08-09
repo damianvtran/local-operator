@@ -204,11 +204,16 @@ Skills (deliberate design choices, user-requested):
   else context-full.
   - **Default threshold**: the lesser of 80% of the model context window and
     600,000 tokens (user-configurable via `values.compaction.threshold_tokens`
-    / `threshold_percent`).
+    / `threshold_percent`), and additionally capped by
+    `values.compaction.max_threshold_tokens` (default 600_000) — a defensive
+    ceiling for providers that advertise a window far larger than the serving
+    path sustains (a 1.05M-advertised model whose requests start aborting
+    around 250k is the case that motivated it; set it to your proxy's real
+    ceiling and long sessions compact before the stall point).
   - Settings in config.yml `values.compaction.*`: enabled (true),
     strategy (auto), reserve_tokens (16384), keep_recent_tokens (20000),
-    threshold_percent (-1), threshold_tokens (-1), auto_continue (true),
-    mid_turn_enabled (true).
+    threshold_percent (-1), threshold_tokens (-1), max_threshold_tokens
+    (600000), auto_continue (true), mid_turn_enabled (true).
   - `should_compact`/`resolve_threshold_tokens` math;
     `COMPACTION_RECOVERY_BAND = 0.8`.
   - `find_cut_point`: walk backwards accumulating estimated tokens, never cut

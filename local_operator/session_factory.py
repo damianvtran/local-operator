@@ -707,8 +707,12 @@ async def wire_mcp_into_session(
        returns ``(manager, tools, errors)``. Tools include deferred ones
        that await their connection inside ``execute`` (established semantics).
     2. Merge into the live inventory via ``session.refresh_tools`` — the
-       committed hook: full merged set (builtins + MCP), effective from the
-       next model call, even mid-turn.
+       committed hook: full merged set (builtins + capabilities + MCP),
+       effective from the next model call, even mid-turn. The merge BASE is
+       the session's own construction-time inventory (``session._tools``,
+       which carries the session-capability tools like task/wait/jobs that
+       the factory list predates); ``builtin_tools`` is only a fallback for
+       a host that constructed the session with an empty inventory.
     3. ``manager.set_on_tools_changed`` re-merges on server
        connect/disconnect/list-changed so the inventory tracks MCP state.
     4. Record the structured outcome on ``session.mcp_startup`` so a front end
@@ -799,14 +803,24 @@ async def wire_mcp_into_session(
         tool_count=len(mcp_tools),
     )
 
-    merged = list(builtin_tools) + list(mcp_tools)
+    # The NON-MCP base for every MCP merge: the session's construction-time
+    # inventory (builtins + session-capability tools like task/wait/jobs/wake).
+    # The factory's `builtin_tools` argument predates the capability merge, so
+    # it must not be the base — that is the MCP-20 wipe bug (a refresh dropped
+    # task/wait/jobs the moment MCP changed). Snapshot it BEFORE the first MCP
+    # merge adds MCP tools, so the callback below stays free of old MCP rows.
+    base_inventory = list(
+        getattr(session, "_tools", None) or getattr(session, "tools", None) or builtin_tools
+    )
+
+    merged = list(base_inventory) + list(mcp_tools)
     if mcp_tools:
         session.refresh_tools(merged)
 
     def on_tools_changed(new_mcp_tools: list[AgentTool]) -> None:
         # The manager's callback type tolerates sync handlers; refresh_tools
         # is the atomic swap point (loop re-reads the inventory per call).
-        session.refresh_tools(list(builtin_tools) + list(new_mcp_tools))
+        session.refresh_tools(list(base_inventory) + list(new_mcp_tools))
 
     manager.set_on_tools_changed(on_tools_changed)
     return manager
