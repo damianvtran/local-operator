@@ -849,6 +849,9 @@ class Session:
             browser=self._browser,
             subagent_launcher=self._launch_subagent,
             jobs=self.jobs,
+            delegated_tools={
+                tool.name: tool for tool in self._tools if tool.name.startswith("mcp__")
+            },
         )
 
     def _launch_subagent(self, label: str, prompt: str) -> str:
