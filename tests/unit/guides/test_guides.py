@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -71,7 +72,9 @@ async def test_each_guide_routes_from_representative_task(
     tmp_path: Path, query: str, expected: str
 ) -> None:
     guides = discover_guides()
-    index = SkillIndex(guides, LocalEmbedder(), cache_dir=tmp_path / "cache")
+    # A Guide satisfies the Skill protocol the index consumes; the annotation
+    # names the concrete class, so the cast is what admits the sibling type.
+    index = SkillIndex(cast(Any, guides), LocalEmbedder(), cache_dir=tmp_path / "cache")
     await index.build()
 
     selected = await index.select(query)
@@ -91,7 +94,7 @@ async def test_registered_agent_metadata_surfaces_only_generic_guide(
         categories=["performance"],
     )
     registry = SimpleNamespace(config_dir=tmp_path, list_agents=lambda: [specialist])
-    hints = _registered_agent_hints(registry)
+    hints = _registered_agent_hints(cast(Any, registry))
     agents_guide = next(guide for guide in discover_guides() if guide.name == "agents")
 
     main_index = SkillIndex([agents_guide], LocalEmbedder(), cache_dir=tmp_path / "main-cache")
@@ -124,7 +127,7 @@ def test_agent_hint_rows_are_never_rendered(tmp_path: Path) -> None:
     )
     registry = SimpleNamespace(config_dir=tmp_path, list_agents=lambda: [specialist])
 
-    assert render_block(_registered_agent_hints(registry)) == ""
+    assert render_block(_registered_agent_hints(cast(Any, registry))) == ""
 
 
 @pytest.mark.parametrize(

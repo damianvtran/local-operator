@@ -11,11 +11,14 @@ Three things are worth machine-checking here, and they are not the same thing:
   20 cells, where the clamp has to degrade to "as wide as there is room for"
   rather than hold its floor and overflow.
 - the STILLNESS: the frame the user stares at while the session connects holds
-  perfectly still except for the mark's own pulse, and holds still ENTIRELY
-  once animation is gated off. The strobe this pins out was never a design
-  choice — it was the editor's blinking caret inverting a letter of the
-  placeholder twice a second — so it is worth a test that a future default
-  cannot quietly reinstate.
+  perfectly still except for the mark's own glow, and holds still ENTIRELY once
+  animation is gated off. Two things had to be pinned here, and neither was a
+  design choice anyone made. The flicker was the editor's blinking caret
+  inverting a letter of the placeholder twice a second. The other was
+  structural: the composition measured itself off the frame it had just changed,
+  so the splash fell from the top of the screen and the card rose from the
+  bottom until they met, once per painted frame. The first frame is now the
+  settled frame, and a test walks every painted frame to say so.
 
 The frame is read from the compositor rather than from widget sizes: a size
 field can be stale and a region can be off-screen, while the composed strips are
@@ -31,6 +34,8 @@ from typing import Any
 
 import pytest
 from rich.cells import cell_len
+from textual.css.query import NoMatches
+from textual.screen import Screen
 
 from local_operator.harness.types import AgentMessage
 from local_operator.tui import theme as theme_mod
@@ -42,7 +47,12 @@ from local_operator.tui.app import (
 )
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import GAP_CLASS, NoticeBlock, TranscriptView
-from local_operator.tui.widgets.welcome import WelcomeView
+from local_operator.tui.widgets.welcome import (
+    LOGO_MARK,
+    TIPS,
+    WORDMARK_SPACED,
+    WelcomeView,
+)
 
 TCSS = Path(__file__).parent.parent.parent.parent / "local_operator" / "tui" / "local_operator.tcss"
 
@@ -140,11 +150,13 @@ def _make_app() -> OperatorApp:
 async def _settle(pilot, ticks: int = 24) -> None:  # type: ignore[no-untyped-def]
     """Pause until the boot frame stops moving, not for a fixed count.
 
-    Two things settle here and both are timing-dependent: the splash's poll timer
-    (see test_snapshot._settle) and the composition's vertical reserve, which is
-    measured off a laid-out frame and re-measured until it agrees with itself
-    (OperatorApp._sync_boot_composition). A fixed pause count races both, and the
-    race changes the frame's geometry rather than only its segmentation.
+    The COMPOSITION settles before the first paint and never moves again (see
+    test_the_boot_frame_paints_once_and_never_converges_into_place), but the
+    splash's poll timer does not: the model label lands a fraction of a second
+    in, the block can change height with it, and the composition is recomputed
+    from the message that reports it. The poll retiring with an unchanged reserve
+    is the settled edge; a fixed pause count races it, and the race changes the
+    frame's geometry rather than only its segmentation.
     """
     welcome = pilot.app.query_one(WelcomeView)
     previous: tuple[bool, int] | None = None
@@ -172,7 +184,7 @@ def _styled_rows(app: OperatorApp) -> list[tuple[str, tuple[tuple[str, str], ...
     """The composed frame WITH its segment styles.
 
     :func:`_rows` answers "what does it say"; a repaint that only recolours a
-    cell — a blinking caret inverting a letter, the mark breathing — is
+    cell — a blinking caret inverting a letter, the mark glowing — is
     invisible to it. Stillness is a claim about the bytes the terminal receives,
     so the styles have to be in the comparison.
     """
@@ -506,10 +518,14 @@ async def test_notices_under_the_splash_never_scroll_the_region(notices: int) ->
 
 
 @pytest.mark.asyncio
-async def test_the_mark_survives_two_failed_servers_at_the_tightest_size() -> None:
-    """96x28 is where the block wants the whole region, so it is where the budget
-    shows: two failing servers cost three rows (a row each plus the separator), and
-    the ladder spends the version number rather than the product's own mark."""
+async def test_notices_spend_the_mark_before_existing_information() -> None:
+    """Two startup failures consume rows from the splash's region.
+
+    The old refund ladder spent version and tip to preserve the mark, then
+    restored them only when an even shorter box dropped the mark. The strict
+    ladder keeps everything the user could already read and spends the largest
+    decoration first: wordmark, version, tip and keys survive; the mark yields.
+    """
     app = _make_app()
     async with app.run_test(size=(96, 28)) as pilot:
         await pilot.pause()
@@ -518,9 +534,42 @@ async def test_the_mark_survives_two_failed_servers_at_the_tightest_size() -> No
         app._system_notice("MCP two failed: command not found", "error")
         await _settle(pilot)
         frame = "\n".join(_rows(app))
-        assert "l o c a l   o p e r a t o r" in frame, "the wordmark"
-        assert "▄█████▄" in frame, "the mark's first row — the one that scrolled away"
+        assert "l o c a l   o p e r a t o r" in frame
+        assert "▄█████▄" not in frame
+        assert "v0.16.1" in frame
+        assert "/help" in frame
+        assert "/resume picks up a recent session where you left off" in frame
         assert frame.count("failed: command not found") == 2
+
+
+@pytest.mark.asyncio
+async def test_more_terminal_height_never_removes_welcome_content() -> None:
+    """D18 lives in the coupling between the terminal and the widget's budget.
+
+    A pure builder test cannot catch the app handing that builder a surprising
+    region. Walk every height around the classic 24-row terminal in the REAL app
+    and read the composited frame: once a section appears, it never disappears.
+    """
+    previous: frozenset[str] = frozenset()
+    for height in range(14, 34):
+        app = _make_app()
+        async with app.run_test(size=(80, height)) as pilot:
+            await pilot.pause()
+            await _settle(pilot)
+            frame = "\n".join(_rows(app))
+        current = frozenset(
+            name
+            for name, visible in (
+                ("keys", "/help" in frame),
+                ("tip", TIPS[0] in frame),
+                ("version", "v0." in frame),
+                ("wordmark", WORDMARK_SPACED in frame),
+                ("mark", LOGO_MARK[0] in frame),
+            )
+            if visible
+        )
+        assert previous <= current, (height, previous - current, previous, current)
+        previous = current
 
 
 @pytest.mark.asyncio
@@ -577,6 +626,53 @@ async def test_the_composition_is_centred_when_the_rows_are_there(size: tuple[in
         assert welcome.bottom == card.y - 1, "one row, not two"
 
 
+#: The one column where the splash's degradation ladder has a step between a
+#: cell and the next one: the block is 9 rows drawn at 21 cells and 19 rows drawn
+#: at 22. Measuring the splash a cell wider than it renders is invisible in the
+#: middle of a tier and decides the whole composition here, which is why the
+#: sweep is pinned at this width rather than at a comfortable one.
+LADDER_EDGE_WIDTH = 25
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", list(range(20, 51, 3)))
+async def test_the_composition_measures_the_splash_at_the_width_it_renders(
+    height: int,
+) -> None:
+    """The block the app centres for is the block the layout engine draws.
+
+    The composition's whole claim is that it can answer the layout engine's own
+    question one step ahead of it, so the two can never disagree. They did: the
+    width handed to ``spare_rows`` subtracted the transcript's padding but not
+    its permanently reserved scrollbar column, so the splash was measured one
+    cell wide. At 25 columns that cell is a tier edge — 19 rows measured for a
+    block that renders 9 — and the frame came out with every one of the missing
+    ten rows piled above the splash: at 25x30, 12 rows of ground above and 1
+    below; at 25x50, 22 and 11; at 25x20 the reserve overshot the other way (0
+    above, 3 below).
+
+    Swept over heights rather than pinned at one, because the error is in a WIDTH
+    and shows up as a mis-split of whatever slack the height provides — a single
+    size would pin one arbitrary point of a wrong line.
+    """
+    app = _make_app()
+    async with app.run_test(size=(LADDER_EDGE_WIDTH, height)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        transcript = app.query_one(TranscriptView)
+        region = transcript.content_region
+        welcome = app.query_one(WelcomeView).region
+        card = app.query_one("#input-shell").region
+
+        assert (
+            welcome.width == region.width - transcript.scrollbar_size_vertical
+        ), "premise: the reserved scrollbar column is not in the transcript's gutter"
+        above = welcome.y - region.y
+        below = (height - 1) - card.bottom  # the screen's own inset is not slack
+        assert above >= 1, "premise: this size has rows to spare"
+        assert abs(above - below) <= 1, (above, below, welcome.height)
+
+
 @pytest.mark.asyncio
 async def test_a_short_terminal_keeps_resting_the_splash_on_the_card() -> None:
     """Centring is CONDITIONAL, and 96x28 is why.
@@ -623,6 +719,107 @@ async def test_the_conversation_layout_reserves_nothing_and_clear_puts_it_back()
         await _settle(pilot)
         assert app.screen.has_class(BOOT_LAYOUT_CLASS)
         assert _reserve(app) != (False, 0), "and the centring comes back"
+
+
+#: Sizes where the composition has rows to spare, so the reserve is non-zero and
+#: a staged one would have somewhere to travel from. 100x30 is here as the
+#: control: it reserves nothing, which is why the regression this pins hid for so
+#: long — every existing test ran at a size that could not show it.
+REFLOW_SIZES = [(190, 48), (120, 40), (100, 50), (100, 30)]
+
+
+def _watch_painted_frames(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int, int]]:
+    """Collect ``(splash top, splash rows, card top)`` for every PAINTED frame.
+
+    ``Screen._compositor_refresh`` is the hook because it is the call that hands a
+    frame to ``App._display``: Textual exposes no public "a frame was painted"
+    signal, and widget geometry read at any other moment is a frame nobody saw.
+    Frames with the splash hidden are skipped — the conversation layout is not the
+    composition under test, and it holds no splash to move.
+    """
+    frames: list[tuple[int, int, int]] = []
+    painted = Screen._compositor_refresh
+
+    def record(self: "Screen[object]") -> None:
+        painted(self)
+        try:
+            welcome = self.app.query_one(WelcomeView)
+            card = self.app.query_one("#input-shell").region
+        except NoMatches:
+            return
+        if welcome.display:
+            frames.append((welcome.region.y, welcome.region.height, card.y))
+
+    monkeypatch.setattr(Screen, "_compositor_refresh", record)
+    return frames
+
+
+def _composition(app: OperatorApp) -> tuple[int, int, int]:
+    """The same triple as :func:`_watch_painted_frames`, read from the live app."""
+    welcome = app.query_one(WelcomeView).region
+    return welcome.y, welcome.height, app.query_one("#input-shell").region.y
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", REFLOW_SIZES)
+async def test_the_boot_frame_paints_once_and_never_converges_into_place(
+    monkeypatch: pytest.MonkeyPatch, size: tuple[int, int]
+) -> None:
+    """The FIRST frame the terminal is sent is the settled frame.
+
+    This is the "split that comes together from the top and bottom" the boot
+    screen used to do, and it was never a declared animation: the composition was
+    measured off a laid-out frame and re-measured one refresh later, but
+    ``call_after_refresh`` resumes BEFORE the compositor has re-arranged. So each
+    pass read the previous frame's splash offset against the padding it had just
+    written, double-counted its own reserve, and overshot. At 190x48 the mark's
+    top row walked 20, 3, 16, 6, 13, 8, 12, 9, 11, 10 while the input card walked
+    42, 26, 39, 29, 36, 31, 35, 32, 34, 33 — the logo falling from the top and the
+    card rising from the bottom until they met, over ten painted frames.
+
+    Every painted frame is sampled, not just the first and the last, because the
+    failure is the WALK: an assertion over the endpoints alone would pass a
+    composition that bounced and happened to return.
+    """
+    frames = _watch_painted_frames(monkeypatch)
+    app = _make_app()
+    async with app.run_test(size=size) as pilot:
+        await _settle(pilot)
+        settled = _composition(app)
+
+    assert frames, "premise: the boot screen painted at all"
+    assert set(frames) == {
+        settled
+    }, f"the boot composition moved while the user watched: {sorted(set(frames))}"
+
+
+@pytest.mark.asyncio
+async def test_clear_puts_the_composition_back_in_a_single_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/clear`` re-enters the boot layout, and it lands centred on the first try.
+
+    The same defect had a second home here. The clear hook restores the splash and
+    resolves the composition, and the "transcript cleared" receipt is appended
+    AFTER it — so the reserve was computed for a region that did not yet contain
+    the receipt's rows, and the splash settled a row late once the frame was
+    already up. The receipt goes through ``_append_block`` for exactly that
+    reason; this is the test that says so.
+    """
+    app = _make_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _settle(pilot)
+        app.query_one(Editor).text = "hello"
+        await pilot.press("enter")
+        await _settle(pilot)
+
+        frames = _watch_painted_frames(monkeypatch)
+        app._clear_transcript()
+        await _settle(pilot)
+        settled = _composition(app)
+
+    assert frames, "premise: the restored splash painted at all"
+    assert set(frames) == {settled}, f"the composition moved after /clear: {sorted(set(frames))}"
 
 
 # --- what MOVES on the boot frame ---------------------------------------------

@@ -29,6 +29,7 @@ from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.providers.failover import ProviderError
 from local_operator.tui import run_tui
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.welcome import WelcomeView
 
 from ..harness.test_loop import make_config
 from .test_app_pilot import FakeSession, _factory
@@ -57,15 +58,23 @@ def _frame(app: OperatorApp) -> list[str]:
 
 
 async def _settled_frame(pilot, app: OperatorApp) -> list[str]:
-    """Wait until the frame stops changing (boot composition retired), then
-    return it. Capturing a baseline mid-boot would diff against the settled
-    frame even with logging fully silent — a load-dependent race (CI under
-    coverage boots slower than a laptop)."""
+    """Wait until the splash has stopped changing for reasons of its OWN, then
+    return the frame.
+
+    Frame equality alone is not the settled edge and never was: the model label
+    lands on the splash's 0.25 s poll, and two consecutive 0.1 s pauses can both
+    fall inside that window and agree on a frame that still says ``connecting…``.
+    The baseline would then diff against the settled frame with logging fully
+    silent. The poll timer RETIRES when the label arrives, so waiting on it is
+    waiting on the actual event; the frame comparison stays as the backstop for
+    anything else still moving.
+    """
+    welcome = app.query_one(WelcomeView)
     previous = None
     for _ in range(100):
         await pilot.pause(0.1)
         current = _frame(app)
-        if current == previous:
+        if welcome._timer is None and current == previous:
             return current
         previous = current
     return previous or _frame(app)

@@ -32,6 +32,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.geometry import Size
 from textual.widgets import Static
 
 from local_operator.logger import current_log_file
@@ -78,6 +79,7 @@ from local_operator.tui.widgets.editor import (
     StopRequested,
 )
 from local_operator.tui.widgets.model_picker import ModelRow
+from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.toast import Toast, format_mcp_startup
@@ -108,6 +110,22 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
+
+#: ONE sentence for ONE instruction, carried verbatim by every surface that
+#: mentions ``/model default``: the bare-``/model`` notice, the switch receipt,
+#: the model picker's footer and the ``/help`` row. They used to say it four
+#: different ways within two keystrokes of each other — "saves this provider and
+#: model as the boot default", "to make it the boot default", "saves the boot
+#: default", "persists it" — so a user met a new phrasing on every surface
+#: instead of learning one string.
+#:
+#: Sized by its TIGHTEST site. The picker footer truncates at the card's width
+#: and this clause sits after the access note, so it has to be complete and short.
+#: "Saves provider and model" named the payload but not why it mattered; "saves
+#: this for new sessions" names the consequence, fits the same slot, and includes
+#: the article the clipped phrase lacked.
+PERSIST_HINT = "/model default saves this for new sessions"
+
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
 SLASH_COMMANDS: list[SlashCommand] = [
@@ -117,10 +135,18 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("reload", "Retry starting the session"),
     SlashCommand(
         "resume",
-        "List recent sessions, or resume one (id)",
+        "Pick a past conversation to resume, or resume one (id)",
         aliases=("recall",),
     ),
-    SlashCommand("model", "Show or switch model (provider/id)", aliases=("models",)),
+    SlashCommand(
+        "model",
+        # Terse by necessity — the description column wraps past ~55 cells — but
+        # it still carries PERSIST_HINT verbatim rather than a fifth paraphrase.
+        # The `<provider>/<id>` shape it used to show moved to the tip pool, which
+        # has the room for it (`welcome.TIPS`).
+        f"Switch model; {PERSIST_HINT}",
+        aliases=("models",),
+    ),
     SlashCommand("provider", "List providers and their login/usage state"),
     SlashCommand("accounts", "List stored credentials"),
     SlashCommand("usage", "Show provider usage quota"),
@@ -133,7 +159,6 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("login", "Authenticate a provider"),
     SlashCommand("logout", "Remove stored provider credentials"),
 ]
-
 
 #: ``/loop`` defaults and hard ceiling. A loop spends real tokens per
 #: iteration, so it is bounded by construction — an unbounded "keep going"
@@ -164,6 +189,12 @@ JOB_POLL_INTERVAL_S = 1.0
 #: little longer because our first press also has to be READ — it prints the
 #: resume command — where omp's only clears the editor.)
 DOUBLE_INTERRUPT_WINDOW_S = 1.5
+
+#: Sessions the ``/resume`` picker offers. Higher than the recovery listing's
+#: ten because the picker can scroll and filter, and a conversation from a
+#: fortnight ago is exactly the one worth searching for; low enough that
+#: opening it never costs more than a few dozen short transcript reads.
+RESUME_PICKER_LIMIT = 50
 
 #: Class the Screen carries while the session has no content. It selects the
 #: boot layout in the stylesheet (centred, clamped input card) and is flipped in
@@ -200,6 +231,12 @@ BOOT_CARD_MIN_INSET = 8
 #: separator comes straight out of the splash, whose degradation ladder pays in
 #: whole sections (the mark, the hints), never in single rows.
 BOOT_COMPOSITION_MIN_SPARE = 2
+
+#: The ``Screen``'s own gutter, both edges together. Every boot measurement is
+#: taken inside it — the card's width and the composition's row budget alike —
+#: because the percentage the sheet resolves and the rows the layout has to
+#: spend are both properties of the CONTENT box, not of the terminal.
+SCREEN_INSET = 2
 
 
 def boot_card_width(box: int) -> int:
@@ -604,44 +641,62 @@ class OperatorApp(App[None]):
         await self._boot_session()
 
     def _cmd_resume(self, arg: str, notice: NoticeFn) -> None:
-        """``/resume`` — list recent sessions; ``/resume <id>`` — resume one.
+        """``/resume`` — pick a conversation; ``/resume <id>`` — resume one.
 
-        A bare ``/resume`` lists the resumable sessions (newest first, with
-        age) as a notice — the pickable list the recovery question actually
-        needs, in the same grammar ``--resume`` reports on exit. An id (or the
-        ``@latest`` sentinel) rebinds the session factory to one that boots
-        THAT session and reloads, so the TUI can jump between conversations
-        without a shell round-trip. Without a CLI-provided resume factory the
-        resume path is unavailable and only the listing is offered.
+        A bare ``/resume`` opens :class:`SessionPickerScreen`: choosing a past
+        conversation is a two-way question, so it gets a surface that can hold
+        a cursor and hand an answer back, rather than a block of ids printed
+        into the transcript that the user then has to read and retype. Rows
+        are named by their opening message, because a column of hex ids is not
+        something anyone recognises their own work in.
+
+        An explicit id (or the ``@latest`` sentinel) skips the picker
+        entirely — a user who already knows which session they want, or who is
+        replaying a command from their shell history, should not be made to
+        answer a prompt. Without a CLI-provided resume factory the resume path
+        is unavailable and the command says so instead of opening a picker
+        whose every choice would fail.
         """
         from local_operator.paths import config_dir
-        from local_operator.resume import RESUME_LATEST, format_age, recent_sessions
+        from local_operator.resume import RESUME_LATEST, recent_session_rows
 
         if self._resume_factory is None:
             notice("resume requires a resume-capable launcher — see CLI", "warning")
-        recent = recent_sessions(config_dir(), limit=10)
-        if not recent:
-            notice("no previous sessions to resume", "warning")
             return
+
         if not arg:
-            now = float(__import__("time").time())
-            lines = ["recent sessions — /resume <id> to open one:"]
-            for session_id, mtime in recent:
-                lines.append(f"  {session_id}   {format_age(now - mtime)}")
-            notice("\n".join(lines), "note")
+            rows = recent_session_rows(config_dir(), limit=RESUME_PICKER_LIMIT)
+            if not rows:
+                notice("no previous sessions to resume", "warning")
+                return
+
+            def _resume_choice(session_id: str | None) -> None:
+                # Dismissed with Esc (or on an empty filter) — the session on
+                # screen is left exactly as it was, with nothing said: a
+                # cancelled picker is not an event worth a transcript line.
+                if session_id:
+                    self._resume_session(session_id, notice)
+
+            self.push_screen(SessionPickerScreen(rows, time.time()), _resume_choice)
             return
+
         # ``@latest`` is the oldest part of the CLI vocabulary (--resume
         # accepts it), so the sentinel must survive verbatim: resume.py only
         # resolves the newest session on an EXACT ``RESUME_LATEST`` match.
         # A bare arg is the same request, spelled the way a user would type it
         # without remembering the symbol.
-        resume_id = arg.strip() or RESUME_LATEST
+        self._resume_session(arg.strip() or RESUME_LATEST, notice)
+
+    def _resume_session(self, resume_id: str, notice: NoticeFn) -> None:
+        """Rebind the factory to ``resume_id`` and reboot onto that session.
+
+        Shared by the picker and by ``/resume <id>`` so both paths reload
+        identically. Failures inside the new factory surface through
+        ``_on_boot_failed`` exactly as a bad ``--resume`` does.
+        """
         if self._resume_factory is None:
             notice("resume unavailable: no resume-capable launcher", "warning")
             return
-        # Rebind the factory so the reload boots the named session, then reuse
-        # the same teardown/reboot path as /reload. Failures inside the new
-        # factory surface through _on_boot_failed exactly as a bad --resume does.
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         notice(f"resuming session {resume_id}…")
         self.run_worker(
@@ -775,30 +830,52 @@ class OperatorApp(App[None]):
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-fit width-sensitive chrome after a terminal resize."""
+        """Re-fit size-sensitive chrome after a terminal resize."""
         if self._status is not None:
             self.call_after_refresh(self._status.refresh)
-        # The EVENT's width, not the app's: during a resize `self.size` is still the
+        # The EVENT's size, not the app's: during a resize `self.size` is still the
         # previous frame's, and one stale cell is enough to put the card threshold on
         # the wrong side of itself — at 85 columns it decided "bar" for a box that was
-        # about to be exactly wide enough for the card.
-        self._sync_boot_layout(width=event.size.width)
+        # about to be exactly wide enough for the card. It is also the last handler
+        # to run BEFORE the screen arranges, which is what lets the composition below
+        # land in the first frame the terminal ever sees.
+        self._sync_boot_layout(size=event.size)
 
-    def _sync_boot_layout(self, *, width: int | None = None) -> None:
+    def on_welcome_view_block_resized(self, message: WelcomeView.BlockResized) -> None:
+        """The splash changed height, so the composition around it has moved.
+
+        The block grows and shrinks after the first frame — the model label lands
+        when the session factory resolves, and a credential warning appears with
+        it. Without this the boot composition would be centred for the block that
+        was measured at startup and left there.
+        """
+        self._sync_boot_layout()
+
+    def _sync_boot_layout(self, *, size: Size | None = None) -> None:
         """Re-measure everything about the boot layout that the sheet cannot.
 
-        Called from ``on_resize`` and from ``_set_welcome_visible``: a resize is not
-        the only way the answers change — the layout itself comes and goes with the
-        splash, and on the first frame no resize event has happened yet. ``width``
-        is the resize event's, when there is one.
+        Called from ``on_resize``, from ``_set_welcome_visible`` and from the splash
+        itself when its block changes height: a resize is not the only way the
+        answers change — the layout comes and goes with the splash, and on the first
+        frame no resize event has happened yet. ``size`` is the resize event's, when
+        there is one.
+
+        Everything below is ARITHMETIC on quantities this method cannot invalidate,
+        and it is applied synchronously. That is the whole fix for TUI boot: the
+        composition used to measure a laid-out frame and re-measure itself one
+        refresh later, but ``call_after_refresh`` resumes before the compositor has
+        re-arranged, so every pass read last frame's splash offset against the
+        padding it had just written and double-counted its own reserve. The lift
+        overshot, undershot, and converged over two dozen PAINTED frames — the
+        splash falling from the top of the screen while the card rose from the
+        bottom until the two met. That is the "logo and screen coming together"
+        effect; it was never an animation anyone declared.
         """
-        self._sync_boot_card(self.size.width if width is None else width)
-        # The card's width is a function of the terminal, so it resolves from the
-        # event itself. The composition is a function of how tall the SPLASH turned
-        # out, which is only knowable from a laid-out frame — and neither caller has
-        # one yet (a mount has not arranged, a resize is arranging). So it measures
-        # one refresh later, and re-measures itself until it stops changing.
-        self.call_after_refresh(self._sync_boot_composition)
+        size = self.size if size is None else size
+        # Card first: the shell's width decides how tall the shell measures, which
+        # is a term in the composition below.
+        self._sync_boot_card(size.width)
+        self._sync_boot_composition(size)
 
     def _sync_boot_card(self, terminal_width: int) -> None:
         """Decide whether this terminal is wide enough for the boot CARD.
@@ -808,13 +885,13 @@ class OperatorApp(App[None]):
         beside it is wide enough to read as a margin. Computing a width in Python
         for want of a media query is the same move ``Toast._refit`` already makes.
         """
-        # The content box, not the terminal: `Screen`'s one-cell inset is outside
-        # the percentage the sheet resolves.
-        box = max(0, terminal_width - 2)
+        # The content box, not the terminal: `Screen`'s inset is outside the
+        # percentage the sheet resolves.
+        box = max(0, terminal_width - SCREEN_INSET)
         card = boot_card_width(box)
         self.screen.set_class(box - card >= BOOT_CARD_MIN_INSET, BOOT_CARD_CLASS)
 
-    def _sync_boot_composition(self) -> None:
+    def _sync_boot_composition(self, size: Size) -> None:
         """Centre the boot composition — splash, separator, card — in the screen.
 
         The splash and the card are ONE block to the eye, and on a tall terminal
@@ -823,19 +900,22 @@ class OperatorApp(App[None]):
         reaches it, and how many rows to reserve below it depends on how tall the
         splash turned out at this width. So the composition's two chrome
         quantities — the ground row above the card and the slack below it — are
-        measured here, the same way ``Toast._refit`` measures a width the sheet
+        resolved here, the same way ``Toast._refit`` resolves a width the sheet
         cannot ask for.
 
         Both are CONDITIONAL, and on the same measurement. Every row this reserves
-        comes out of the splash's budget (WelcomeView.get_content_height), and the
+        comes out of the splash's budget (``WelcomeView.spare_rows``), and the
         splash pays in whole sections — a 28-row terminal that reserved rows to
         centre a block that already fills the region would trade the mark for air.
         So they are only spent out of rows that are empty anyway, which is why a
         96x28 frame is untouched and a 190x48 one is centred.
 
-        The spare count adds back what this method has already spent, which makes
-        it invariant under its own change: re-running converges instead of halving
-        the reserve every pass.
+        NOTHING here is read back off a laid-out frame. Both terms are asked of the
+        widgets as functions of a size — ``get_content_height`` for the dock's
+        children, ``spare_rows`` for the splash — so the answer does not depend on
+        the reserve that is about to be written, and one pass is final. Reading the
+        frame is what made this measurement circular, and a circular measurement
+        applied once per paint is an animation.
         """
         dock = self.query_one("#input-dock", Container)
         welcome = self._welcome
@@ -844,18 +924,55 @@ class OperatorApp(App[None]):
             # Rows left reserved here would be a hole below a populated transcript.
             self._reserve_boot_rows(dock, gap=False, lift=0)
             return
-        region = self.query_one(TranscriptView).content_region
-        # The empty rows ABOVE the block, read off the frame rather than derived:
-        # the region's content is bottom-aligned, so the block's own offset inside
-        # it IS the slack — and unlike `region.height - welcome.height` it does not
-        # count a notice mounted under the splash as spare.
-        spare = welcome.region.y - region.y + dock.styles.padding.bottom
-        if dock.has_class(GAP_CLASS):
-            spare += 1
+        box = Size(max(0, size.width - SCREEN_INSET), max(0, size.height - SCREEN_INSET))
+        transcript = self.query_one(TranscriptView)
+        # Rows the region above the card would have with NO reserve in it, and the
+        # width the splash is drawn at. The transcript's own gutter is part of the
+        # sheet's boot layout (it drops its top row there) and part of neither
+        # widget's content height, so it comes out of the budget here. So does the
+        # scrollbar column: `scrollbar-gutter: stable` reserves it permanently
+        # (D27) and `styles.gutter` does not count it, so a width measured without
+        # it is one cell wider than the splash can ever be drawn. One cell is
+        # nothing in the middle of a degradation tier and everything at its edge —
+        # at 25 columns it measured the 22-cell block (19 rows) for a splash that
+        # renders at 21 (9 rows), and centred the frame around ten rows that are
+        # not there. The app and the layout engine can only agree here if this
+        # width is the one the engine will hand the widget.
+        gutter = transcript.styles.gutter
+        region = max(0, box.height - self._boot_dock_height(dock, box, size) - gutter.height)
+        width = max(0, box.width - gutter.width - transcript.scrollbar_size_vertical)
+        spare = welcome.spare_rows(region, width)
         if spare < BOOT_COMPOSITION_MIN_SPARE:
             self._reserve_boot_rows(dock, gap=False, lift=0)
             return
+        # One row buys the separator; the rest is split between the ground above
+        # the splash and the ground below the card, the card taking the smaller
+        # half so an odd row lands overhead where the eye does not read it as a
+        # gap under the panel.
         self._reserve_boot_rows(dock, gap=True, lift=(spare - 1) // 2)
+
+    def _boot_dock_height(self, dock: Container, box: Size, viewport: Size) -> int:
+        """Rows the input dock occupies with no composition reserve in it.
+
+        Asked of the dock's CHILDREN rather than read off ``dock.outer_size``,
+        because the dock's own height already contains the lift this measurement
+        exists to compute. The children — the subagent/todo band and the input
+        shell — are content-sized and answer from their own state, so the total is
+        available before the first arrange and cannot move under the reserve.
+        """
+        width = boot_card_width(box.width) if self.screen.has_class(BOOT_CARD_CLASS) else box.width
+        total = 0
+        for child in dock.children:
+            if not child.display:
+                continue
+            gutter, margin = child.styles.gutter, child.styles.margin
+            inner = max(0, width - gutter.width)
+            total += (
+                child.get_content_height(Size(inner, box.height), viewport, inner)
+                + gutter.height
+                + margin.height
+            )
+        return total
 
     def _reserve_boot_rows(self, dock: Container, *, gap: bool, lift: int) -> None:
         """Apply the composition's separator row and its lift, once.
@@ -866,16 +983,16 @@ class OperatorApp(App[None]):
         as a block change. The lift is padding INSIDE the dock — the dock is the
         positioner, so reserving rows in it moves the panel it holds without
         anything else in the layout knowing.
+
+        It does NOT schedule a re-measure. The caller's arithmetic is already the
+        fixed point, and a self-rescheduling measurement is what animated the boot
+        screen; the equality gate is now only here to keep an unchanged sync from
+        dirtying the layout.
         """
         if dock.has_class(GAP_CLASS) == gap and dock.styles.padding.bottom == lift:
             return
         dock.set_class(gap, GAP_CLASS)
         dock.styles.padding = (0, 0, lift, 0)
-        # The measurement above read a laid-out height that this change invalidates,
-        # so it runs again once the new frame exists. The equality gate above is
-        # what ends the chain — the total it measures does not move, so the second
-        # pass agrees with the first.
-        self.call_after_refresh(self._sync_boot_composition)
 
     # -- input --------------------------------------------------------------
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
@@ -884,6 +1001,11 @@ class OperatorApp(App[None]):
         if not text:
             return
         if text.startswith("/"):
+            # Echoing a command is the same visible commitment as sending a
+            # prompt: the boot splash must yield before the transcript can own
+            # the screen. Calling slash handlers directly bypasses this path
+            # only in tests and internal control flows.
+            self._set_welcome_visible(False)
             self._append_block(UserBlock(text))  # D15: echo the command
             self._run_slash_command(text)
             return
@@ -1200,9 +1322,18 @@ class OperatorApp(App[None]):
             notice("tool approvals: ask — write and command tools prompt before running")
 
     def _clear_transcript(self) -> None:
-        transcript = self.query_one(TranscriptView)
-        transcript.clear_blocks()  # fires the on_clear hook
-        transcript.append_block(NoticeBlock("transcript cleared — history is untouched", "info"))
+        self.query_one(TranscriptView).clear_blocks()  # fires the on_clear hook
+        # ``ends_empty_state=False``: the receipt reports on the CLEAR, so the
+        # session has not started talking and the splash the clear just restored
+        # must survive it. Going through ``_append_block`` rather than straight to
+        # the transcript is what re-centres the composition around the receipt's
+        # own row — the clear hook above resolved it for a region that did not yet
+        # contain one, and the difference is the splash settling a row after the
+        # frame is up.
+        self._append_block(
+            NoticeBlock("transcript cleared — history is untouched", "info"),
+            ends_empty_state=False,
+        )
 
     def _on_transcript_cleared(self) -> None:
         """TUI-009: /clear and Ctrl+L reset the app's block bookkeeping."""
@@ -1223,9 +1354,9 @@ class OperatorApp(App[None]):
         # since `_set_welcome_visible` drives both from this one condition. One
         # mechanism for both directions rather than a second "should the splash
         # show" rule that could disagree with this one. The "transcript cleared"
-        # notice appended right after this lands UNDER the splash (it goes
-        # through TranscriptView.append_block, not _append_block), which is why
-        # the receipt for the action survives alongside the restored splash.
+        # notice appended right after this lands UNDER the splash (see
+        # ``_clear_transcript``), which is why the receipt for the action
+        # survives alongside the restored splash.
         self._set_welcome_visible(True)
 
     def _set_welcome_visible(self, visible: bool) -> None:
@@ -1238,11 +1369,13 @@ class OperatorApp(App[None]):
         selects between them, so there is no second layout written in Python to
         keep in step with the first.
 
-        The width class and the vertical reserve are re-measured here rather than
+        The width class and the vertical reserve are re-resolved here rather than
         being second conditions: they answer "how wide is this terminal" and "how
         many rows are going spare", which are facts about the frame, not about the
-        session — and they have to be right on the FIRST boot frame, before any
-        resize event has happened.
+        session. On the boot path this call runs at mount, before the terminal's
+        size is known, and resolves nothing; the resize that follows it does the
+        work, and still does it before the first arrange. On ``/clear`` the size
+        is known and this call is the one that re-centres.
         """
         if self._welcome is not None:
             self._welcome.set_visible(visible)
@@ -1368,6 +1501,16 @@ class OperatorApp(App[None]):
             self._subagent_panel.sync(session)
         if self._todo_panel is not None:
             self._todo_panel.sync(session)
+        # The usage card is an overlay, so a dock-band height change does not
+        # resize it and Textual emits no resize event. Re-measure after the band
+        # has repainted; otherwise a todo/subagent appearing under an open tall
+        # card can lift the input into the card.
+        self.call_after_refresh(self._sync_usage_layout)
+
+    def _sync_usage_layout(self) -> None:
+        panel = self._usage_panel()
+        if panel is not None:
+            panel.sync_layout()
 
     def _open_subagent_trajectory(self, job_id: str) -> None:
         """Open the trajectory modal for one task job.
@@ -1432,10 +1575,16 @@ class OperatorApp(App[None]):
         centred prompt at all. The notice is still appended and still scrolls
         back; it simply lands under the splash, exactly as the ``/clear`` receipt
         does.
+
+        A block that lands UNDER the splash takes rows out of the same region the
+        composition is measured against, so the reserve is recomputed here rather
+        than left centred for a region that no longer exists.
         """
         if ends_empty_state:
             self._set_welcome_visible(False)
         self.query_one(TranscriptView).append_block(block)
+        if not ends_empty_state:
+            self._sync_boot_layout()
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:
@@ -1527,12 +1676,26 @@ class OperatorApp(App[None]):
         on the status band, and the question a user actually has at that moment is
         "which models can I switch to", which they had no way to ask. The label is
         still reported, as the picker's current-row marker.
+
+        Every route out of here names ``/model default``, because a switch is
+        SESSION-scoped and does not look it. The user who picks a model has just
+        answered "which model do I want", the app confirms the switch, and nothing
+        on screen says the next launch comes back on the old one — so the command
+        that fixes that was reachable only by already knowing it existed.
         """
         session = self._session
         if not arg:
+            # ``_system_notice``, NOT ``notice``: opening the picker is the user
+            # configuring the app, not starting a conversation, and a plain
+            # notice ends the empty state — which collapses the boot
+            # composition and makes the centred prompt unreachable. That is the
+            # same failure a broken MCP server caused before ``_system_notice``
+            # existed; routing a hint about the app's own settings through the
+            # conversation path reintroduced it.
+            self._system_notice(self._persist_hint_notice())
             self._open_model_picker()
             return
-        # ``/model default <provider>/<id>`` PERSISTS the choice as the boot
+        # ``/model default [<provider>/<id>]`` PERSISTS the choice as the boot
         # default (config ``hosting`` + ``model_name``), so later launches
         # open on it. Distinct from ``/model <p>/<id>``, which only switches
         # the running session: the user phrase "make this the default" has no
@@ -1540,40 +1703,55 @@ class OperatorApp(App[None]):
         # am I on". Writing config here keeps the one-word habit — ``/model
         # default openrouter/deepseek/deepseek-chat`` — and the live switch
         # stays available on the same command.
-        persist_default = arg.lower().startswith("default ")
+        lowered = arg.lower()
+        persist_default = lowered == "default" or lowered.startswith("default ")
         target = arg[len("default ") :].strip() if persist_default else arg
-        if persist_default and not target:
-            notice("usage: /model default <provider>/<model-id>", "warning")
-            return
         if session is None or not hasattr(session, "set_model"):
-            notice("session is still starting…", "warning")
+            # A rejected command changed nothing, so the conversation has not
+            # started: `_system_notice` keeps the boot composition intact where
+            # `notice` would collapse it for a typo.
+            self._system_notice("session is still starting…", "warning")
             return
+        if persist_default and not target:
+            # Bare ``/model default`` means "keep the one I am on". Demanding the
+            # selector back was the gap behind "how do I even set a default": the
+            # sentence a user has right after switching is "make THIS the
+            # default", and answering it by retyping
+            # `openrouter/deepseek/deepseek-chat` is a transcription exercise the
+            # app can do for itself off the session's own label.
+            target = session.model_label
+            if not target:
+                self._system_notice("usage: /model default <provider>/<model-id>", "warning")
+                return
         provider, sep, model_id = target.partition("/")
         if not sep or not model_id:
-            notice(
+            self._system_notice(
                 "usage: /model <provider>/<model-id> (e.g. openrouter/deepseek/deepseek-chat)",
                 "warning",
             )
             return
         provider = provider.lower()  # build_model_spec is case-insensitive
         if self._providers is None:
-            notice("provider controller unavailable — cannot infer model spec", "warning")
+            self._system_notice(
+                "provider controller unavailable — cannot infer model spec", "warning"
+            )
             return
         # Validate the provider BEFORE switching. resolve_model does not raise
         # on an unknown provider — it returns a spec with base_url=None — so a
         # typo would silently reconfigure the session and only fail on the next
         # turn, reading as a network/auth error instead of a typo.
         if self._providers.provider(provider) is None:
-            notice(f"unknown provider: {provider} — see /provider", "warning")
+            self._system_notice(f"unknown provider: {provider} — see /provider", "warning")
             return
         try:
             spec = self._providers.resolve_model(provider, model_id)
         except Exception as error:  # unresolvable hosting/model pair
-            notice(f"cannot resolve {provider}: {error}", "error")
+            self._system_notice(f"cannot resolve {provider}: {error}", "error")
             return
         old_label = session.model_label
         session.set_model(spec)
         persist_result: str | None = None
+        saved_to = ""
         if persist_default:
             # Persist as the boot default. Written independently of the live
             # switch above so the two stay composable (``/model default p/m``
@@ -1590,6 +1768,7 @@ class OperatorApp(App[None]):
                 manager = ConfigManager(config_dir())
                 manager.set_config_value("hosting", provider)
                 manager.set_config_value("model_name", model_id)
+                saved_to = _home_relative(str(manager.config_file))
             except Exception as error:  # config write failure
                 persist_result = f"model switched, but could not save default: {error}"
         if self._status is not None:
@@ -1605,11 +1784,48 @@ class OperatorApp(App[None]):
         if persist_result is not None:
             notice(persist_result, "warning")
         elif persist_default:
-            notice(f"default model saved: {provider}/{model_id} (next launch){suffix}")
+            # Names both halves, the file and the keys. "saved" alone is a claim
+            # the user cannot check without quitting and relaunching, and the
+            # PROVIDER is the half that rides along silently — it is written from
+            # the selector's left side, never typed as its own setting.
+            notice(
+                f"boot default saved to {saved_to}: hosting {provider}, "
+                f"model_name {model_id} (used from the next launch){suffix}"
+            )
         else:
-            notice(f"model: {old_label} → {session.model_label} (next turn){suffix}")
+            # "(next turn)" alone read as permanent — the complaint behind this
+            # wording. The scope and the one command that widens it belong on the
+            # line that announces the switch, not in documentation the user would
+            # have to already suspect exists.
+            #
+            # TWO clauses and no more. This carried four separators — a
+            # parenthetical with a comma in it, the access note's ` · `, then a
+            # ` — ` onto a sentence of its own — and wrapped at 80 columns into a
+            # run-on. "(this session)" is the half that answers "for how long";
+            # "from the next turn" answered "starting when", which nothing had
+            # asked and which the very next receipt demonstrates anyway.
+            notice(
+                f"model: {old_label} → {session.model_label} "
+                f"(this session){suffix} — {PERSIST_HINT}"
+            )
         if warning:
             notice(warning, "warning")
+
+    def _persist_hint_notice(self) -> str:
+        """The line a bare ``/model`` prints above the list.
+
+        It says the one thing the picker cannot: that a pick is session-scoped
+        until ``/model default`` writes it, and that "the default" is a provider
+        AND a model, not two separate settings to hunt for. The current label is
+        repeated here even though the status band carries it, because it is the
+        subject of the sentence — "make THIS the default" needs a this, and with
+        no session yet there is no this, so the label is all that varies.
+        """
+        session = self._session
+        label = session.model_label if session is not None else ""
+        if not label:
+            return PERSIST_HINT
+        return f"model: {label} — {PERSIST_HINT}"
 
     def _model_access_note(self, provider: str) -> tuple[str, str | None]:
         """``(suffix, warning)`` answering "can I actually run this model now".
@@ -1692,7 +1908,9 @@ class OperatorApp(App[None]):
             # every other clause is background — "cached: anthropic, openrouter,
             # radient" pushed `/login <provider>` off the end at 100 columns, which
             # cost the one clause the user can act on.
-            status=_status_line(note, "checking providers…" if self._providers else ""),
+            status=_status_line(
+                note, "checking providers…" if self._providers else "", PERSIST_HINT
+            ),
         )
         if self._providers is not None:
             self.run_worker(self._refresh_catalogue(), thread=False, group="catalogue")
@@ -1708,14 +1926,14 @@ class OperatorApp(App[None]):
             self._editor().model_picker.set_rows(
                 rows,
                 current=self._current_selector(),
-                status=_status_line(note, f"live model list unavailable: {error}"),
+                status=_status_line(note, f"live model list unavailable: {error}", PERSIST_HINT),
             )
             return
         rows, note = self._catalogue_rows(entries)
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
-            status=_status_line(note, _catalogue_status(statuses)),
+            status=_status_line(note, _catalogue_status(statuses), PERSIST_HINT),
         )
 
     def _catalogue_rows(self, entries: list["CatalogueEntry"]) -> tuple[list[ModelRow], str]:
@@ -1809,7 +2027,10 @@ class OperatorApp(App[None]):
         """
         session = self._session
         if session is None or not hasattr(session, "set_goal"):
-            notice("session is still starting…", "warning")
+            # A rejected command changed nothing, so the conversation has not
+            # started: `_system_notice` keeps the boot composition intact where
+            # `notice` would collapse it for a typo.
+            self._system_notice("session is still starting…", "warning")
             return
         if not arg:
             current = session.goal
@@ -1838,7 +2059,10 @@ class OperatorApp(App[None]):
                 notice("no loop is running")
             return
         if session is None:
-            notice("session is still starting…", "warning")
+            # A rejected command changed nothing, so the conversation has not
+            # started: `_system_notice` keeps the boot composition intact where
+            # `notice` would collapse it for a typo.
+            self._system_notice("session is still starting…", "warning")
             return
         if self._loop_running:
             notice("a loop is already running — /loop stop to cancel", "warning")
@@ -2027,9 +2251,16 @@ class OperatorApp(App[None]):
             self._append_block(NoticeBlock("usage panel unavailable", "warning"))
             return
         self._usage_focus_restore = self.focused
-        panel.start_fetch(target)
+        generation = panel.start_fetch(target)
         panel.focus()
-        self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")
+        # A second command replaces the first request. Without exclusivity a slow
+        # response can overwrite the newer provider's report.
+        self.run_worker(
+            self._fetch_usage_worker(target or None, generation),
+            thread=False,
+            group="usage",
+            exclusive=True,
+        )
 
     def _usage_panel(self) -> UsagePanel | None:
         """The mounted panel, or None before compose (or in a stripped harness)."""
@@ -2038,8 +2269,8 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — the panel is optional chrome
             return None
 
-    async def _fetch_usage_worker(self, provider: str | None) -> None:
-        """Worker that fetches usage and hands the reports to the panel.
+    async def _fetch_usage_worker(self, provider: str | None, generation: int) -> None:
+        """Fetch usage and paint only if this request still owns the panel.
 
         A failure is reported INSIDE the panel rather than as a transcript
         notice: the panel is what has focus and what carries the key that
@@ -2053,13 +2284,14 @@ class OperatorApp(App[None]):
         except Exception as error:
             if panel is None:
                 self._append_block(NoticeBlock(f"usage fetch failed: {error}", "error"))
-            else:
+            elif panel.accepts_request(generation):
                 panel.show_error(f"usage fetch failed: {error}")
             return
         if panel is None:
             self._append_block(NoticeBlock("usage panel unavailable", "warning"))
             return
-        panel.show_reports(reports)
+        if panel.accepts_request(generation):
+            panel.show_reports(reports)
 
     def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
         """``r`` in the panel — re-run the same fetch behind the same view."""
@@ -2070,12 +2302,21 @@ class OperatorApp(App[None]):
         if panel is None:
             return
         target = panel.target
-        panel.start_fetch(target)
-        self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")
+        generation = panel.start_fetch(target)
+        self.run_worker(
+            self._fetch_usage_worker(target or None, generation),
+            thread=False,
+            group="usage",
+            exclusive=True,
+        )
 
     def on_usage_dismissed(self, message: UsageDismissed) -> None:
         """Esc/q in the panel — give focus back to whatever had it."""
         message.stop()
+        # Dismissal retires the request as well as its surface. `show_reports`
+        # opens the panel, so allowing a late response through would resurrect a
+        # card the user explicitly closed.
+        self.workers.cancel_group(self, "usage")
         restore = self._usage_focus_restore
         self._usage_focus_restore = None
         if restore is not None and getattr(restore, "is_mounted", False):
@@ -2396,15 +2637,21 @@ class OperatorApp(App[None]):
             notice(f"logout failed: {error}", "error")
 
     def _help_block(self) -> RichBlock:
-        """Two-column help: command muted padded 10, description dim (D16)."""
+        """Two-column help with a gutter wider than every command name."""
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
+        named_commands = [
+            (", ".join(f"/{name}" for name in command.names), command) for command in SLASH_COMMANDS
+        ]
+        # A literal 14 worked until `/model, /models` and `/resume, /recall`
+        # became the two rows this feature rewrote. Both exceeded the floor and
+        # glued straight onto their descriptions. Derive one shared column and
+        # preserve the two-cell gutter for every row.
+        name_width = max((len(names) for names, _ in named_commands), default=0) + 2
         lines = []
-        for command in SLASH_COMMANDS:
-
-            names = ", ".join(f"/{name}" for name in command.names)
+        for names, command in named_commands:
             line = Text()
-            line.append(names.ljust(14), style=muted)
+            line.append(names.ljust(name_width), style=muted)
             line.append(command.description, style=dim)
             lines.append(line)
         # Where the logs went. Console logging is off while the TUI owns the
@@ -2415,7 +2662,7 @@ class OperatorApp(App[None]):
         log_file = current_log_file()
         if log_file is not None:
             footer = Text()
-            footer.append("logs".ljust(14), style=muted)
+            footer.append("logs".ljust(name_width), style=muted)
             footer.append(str(log_file), style=dim)
             lines.append(Text())
             lines.append(footer)
@@ -3007,3 +3254,17 @@ def _status_line(*bits: str) -> str:
     seam from the one beside it.
     """
     return " · ".join(bit for bit in bits if bit)
+
+
+def _home_relative(path: str) -> str:
+    """``~/.local-operator/config.yml`` rather than the full ``/Users/…`` form.
+
+    The prefix is the same on every machine and costs a third of the line the
+    confirmation has to spend saying WHERE it wrote. A path outside the home
+    tree — the ``LOCAL_OPERATOR_CONFIG_DIR`` override, a test's tmp dir — is
+    left absolute, because there is no shorter honest rendering of it.
+    """
+    home = os.path.expanduser("~")
+    if home in ("", "/") or not path.startswith(home + os.sep):
+        return path
+    return "~" + path[len(home) :]
