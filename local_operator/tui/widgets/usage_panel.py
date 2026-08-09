@@ -620,10 +620,11 @@ class UsagePanel(Static):
         for index, (key, what) in enumerate(KEY_HINTS):
             # Scroll keys are only offered when there is something to scroll: a
             # hint for a key that does nothing teaches the user to distrust the
-            # other two.
+            # other two. The separator rides the PREVIOUS segment so a skipped
+            # hint never leaves a leading ``·``.
             if key == "↑↓" and not scrolled:
                 continue
-            if index:
+            if row.plain:
                 row.append(" · ", style=faint)
             row.append(key, style=dim)
             row.append(f" {what}", style=faint)

@@ -376,6 +376,23 @@ async def test_the_scroll_position_is_reported_only_when_there_is_overflow() -> 
 
 
 @pytest.mark.asyncio
+async def test_a_skipped_hint_never_leaves_a_leading_separator() -> None:
+    """The hint row's separators ride the PREVIOUS segment, so when the
+    scroll hint is skipped (nothing to scroll) on a row with no stat prefix,
+    the first visible hint does not start with a dangling ``·``."""
+    async with _panel_app() as panel:
+        panel.show_reports([])  # empty: no stat prefix, so row.plain is empty
+        hint_line = panel.render_lines_for_test()[-1]
+    assert not hint_line.lstrip().startswith("·"), hint_line
+    assert hint_line == "r refresh · esc close"
+    # And the separator still joins hints when scroll IS offered.
+    async with _panel_app() as panel:
+        panel.show_reports(_many_reports())
+        joined = panel.render_lines_for_test()[-1]
+    assert "↑↓ scroll · r refresh · esc close" in joined
+
+
+@pytest.mark.asyncio
 async def test_an_empty_result_names_both_reasons_it_could_be_empty() -> None:
     """ "No endpoint" and "an endpoint you cannot reach" look identical in an
     empty panel, and only the second is something the user can act on."""
