@@ -2231,7 +2231,14 @@ class OperatorApp(App[None]):
         self._usage_focus_restore = self.focused
         panel.start_fetch(target)
         panel.focus()
-        self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")
+        # A second command replaces the first request. Without exclusivity a slow
+        # response can overwrite the newer provider's report.
+        self.run_worker(
+            self._fetch_usage_worker(target or None),
+            thread=False,
+            group="usage",
+            exclusive=True,
+        )
 
     def _usage_panel(self) -> UsagePanel | None:
         """The mounted panel, or None before compose (or in a stripped harness)."""
@@ -2273,11 +2280,20 @@ class OperatorApp(App[None]):
             return
         target = panel.target
         panel.start_fetch(target)
-        self.run_worker(self._fetch_usage_worker(target or None), thread=False, group="usage")
+        self.run_worker(
+            self._fetch_usage_worker(target or None),
+            thread=False,
+            group="usage",
+            exclusive=True,
+        )
 
     def on_usage_dismissed(self, message: UsageDismissed) -> None:
         """Esc/q in the panel — give focus back to whatever had it."""
         message.stop()
+        # Dismissal retires the request as well as its surface. `show_reports`
+        # opens the panel, so allowing a late response through would resurrect a
+        # card the user explicitly closed.
+        self.workers.cancel_group(self, "usage")
         restore = self._usage_focus_restore
         self._usage_focus_restore = None
         if restore is not None and getattr(restore, "is_mounted", False):

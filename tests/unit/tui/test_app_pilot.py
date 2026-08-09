@@ -7,6 +7,7 @@ paints first, then awaits the session in a worker.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -1159,7 +1160,7 @@ async def test_accounts_command_renders_credentials() -> None:
     assert "api_key (login)" in texts
 
 
-def _usage_reports():
+def _usage_reports(*, used: float = 5.0):
     from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 
     return [
@@ -1169,11 +1170,33 @@ def _usage_reports():
                 UsageLimit(
                     id="openrouter:credits",
                     label="Credits",
-                    amount=UsageAmount(used=5.0, limit=50.0, unit="usd"),
+                    amount=UsageAmount(used=used, limit=50.0, unit="usd"),
                 )
             ],
         )
     ]
+
+
+class _ControlledUsageController(FakeProviderController):
+    """Keeps the first network request pending so ordering is observable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_release = asyncio.Event()
+        self.first_started = asyncio.Event()
+        self.first_cancelled = False
+
+    async def fetch_usage(self, provider_ids=None):
+        self.usage_calls.append(provider_ids)
+        if len(self.usage_calls) == 1:
+            self.first_started.set()
+            try:
+                await self.first_release.wait()
+            except asyncio.CancelledError:
+                self.first_cancelled = True
+                raise
+            return _usage_reports(used=5.0)
+        return _usage_reports(used=42.0)
 
 
 async def _run_usage_command(pilot, app) -> None:
@@ -1230,6 +1253,57 @@ async def test_escape_closes_the_usage_panel_and_returns_focus() -> None:
             await pilot.pause()
         assert not panel.is_open
         assert isinstance(app.focused, Editor)
+
+
+@pytest.mark.asyncio
+async def test_dismissed_usage_request_cannot_reopen_the_panel() -> None:
+    """Esc closes the request as well as its card; a late network response must
+    not reverse an explicit user action."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    ctrl = _ControlledUsageController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        await ctrl.first_started.wait()
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        ctrl.first_release.set()
+        for _ in range(4):
+            await pilot.pause()
+
+        assert ctrl.first_cancelled
+        assert not panel.is_open
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_supersedes_a_slower_request() -> None:
+    """A stale first response must not overwrite the report returned by the
+    refresh that replaced it."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    ctrl = _ControlledUsageController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        await ctrl.first_started.wait()
+        await pilot.press("r")
+        for _ in range(6):
+            await pilot.pause()
+        ctrl.first_release.set()
+        for _ in range(4):
+            await pilot.pause()
+        text = "\n".join(panel.render_lines_for_test())
+
+        assert ctrl.first_cancelled
+        assert len(ctrl.usage_calls) == 2
+        assert "84%" in text
+        assert "10%" not in text
 
 
 @pytest.mark.asyncio
