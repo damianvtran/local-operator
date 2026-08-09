@@ -9,15 +9,20 @@ it inherits the renderer's contract.
 
 from __future__ import annotations
 
+import re
 from contextlib import asynccontextmanager
 
 import pytest
+from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.containers import Container
 
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.usage_panel import (
     BAR_UNKNOWN,
+    PANEL_PADDING_ROWS,
     UsagePanel,
     binding_limit,
     build_usage_body,
@@ -27,12 +32,18 @@ from local_operator.tui.widgets.usage_panel import (
     usage_bar,
 )
 
+# The boot app's fake session, reused rather than re-declared: the frame tests
+# below need the REAL app (the lightweight host declares no CSS_PATH, so the
+# card's padding and fill — half of what "centred" means — are not in its
+# frames), and what they need from a session is only that one starts.
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
 #: A wide-enough panel that nothing truncates, so a failure is about content.
 WIDTH = 76
 
 
 def _lines(reports, width: int = WIDTH, now: float = 0.0) -> list[str]:
-    return [line.plain for line in build_usage_body(reports, width, now)]
+    return [line.plain for line in build_usage_body(reports, width, now).lines]
 
 
 def _report(*limits, provider: str = "anthropic", notes: str | None = None, identity=None):
@@ -420,3 +431,335 @@ async def test_the_panel_says_it_is_fetching_before_the_first_result() -> None:
     async with _panel_app() as panel:
         panel.start_fetch("")
         assert "fetching…" in "\n".join(panel.render_lines_for_test())
+
+
+@pytest.mark.asyncio
+async def test_the_card_reserves_its_padding_rows_so_nothing_is_clipped() -> None:
+    """The widget pins its own height, and Textual sizes border-box: pinning
+    the ROW COUNT alone would hand the gutter the last two rows and cut the
+    hint row off the bottom of the card. The pinned height is therefore the
+    rows PLUS the padding.
+
+    The resulting CONTENT box is asserted against the real stylesheet in
+    ``test_app_pilot`` — this host deliberately loads no CSS, so the padding
+    it must survive only exists there.
+    """
+    async with _panel_app() as panel:
+        panel.show_reports([_report(_percent("a:5h", "5 hour", 5.0, shared=True))])
+        rows = panel.render_lines_for_test()
+        assert panel.styles.height is not None
+        assert panel.styles.height.value == len(rows) + PANEL_PADDING_ROWS
+
+
+@pytest.mark.asyncio
+async def test_a_report_block_separates_its_heading_from_its_meters() -> None:
+    """Heading → (note) → blank → meters. Without the blank, the identity
+    line, the account note and the first meter render as three equal rows and
+    the block reads as an undifferentiated wall."""
+    lines = _lines(
+        [
+            _report(
+                _percent("a:5h", "5 hour", 5.0, shared=True),
+                notes="extra usage disabled",
+            )
+        ]
+    )
+    assert lines[0].startswith("anthropic")
+    assert lines[1].strip() == "extra usage disabled"
+    assert lines[2] == ""  # the breathing row
+    assert "5 hour" in lines[3]
+
+
+@pytest.mark.asyncio
+async def test_the_footer_is_separated_from_the_last_meter() -> None:
+    """The tally/keys footer is chrome. Flush against the last meter it reads
+    as one more row of the report."""
+    async with _panel_app() as panel:
+        panel.show_reports([_report(_percent("a:5h", "5 hour", 5.0, shared=True))])
+        rows = panel.render_lines_for_test()
+    assert rows[-1].startswith("1 window")  # the footer
+    assert rows[-2] == ""  # the quiet row above it
+
+
+#: The position marker, matched as a whole row. It is the first row of the
+#: card's bottom meta, so the tests below find the end of the report by finding
+#: it (and fall back to the key hints when there is nothing to scroll).
+_MARKER = re.compile(r"^showing \d+ of \d+$")
+
+
+def _report_rows(rows: list[str]) -> list[str]:
+    """The report's own rows: the rule to the last row that says something.
+
+    The quiet ground above the meta is not part of the report — it is the
+    card's bottom margin, and how much of it there is depends on where the
+    block boundary fell.
+    """
+    meta = next((index for index, row in enumerate(rows) if _MARKER.match(row)), len(rows) - 1)
+    report = rows[2:meta]
+    while report and not report[-1]:
+        report.pop()
+    return report
+
+
+@pytest.mark.asyncio
+async def test_the_card_ends_on_quiet_ground_then_its_meta_in_both_states() -> None:
+    """One grammar for the bottom of the card, scrolled or not.
+
+    The position and the key hints are the same KIND of row — statements about
+    the list rather than entries in it — so they travel together at the bottom
+    with the quiet ground above the pair, and the scrolled card differs from the
+    one that fits by exactly one meta row. Pinned because the two other
+    arrangements are both reachable by one plausible edit and both read wrong:
+    the counter under the spacer glues it to the keys with the gap in the middle
+    of the chrome, and a card whose slack lands between the counter and the keys
+    punches a hole through the meta that reads as a failure to render.
+    """
+    async with _panel_app() as panel:
+        panel.show_reports([_report(_percent("a:5h", "5 hour", 5.0, shared=True))])
+        fits = panel.render_lines_for_test()
+        panel.show_reports(_many_reports())
+        scrolled = panel.render_lines_for_test()
+
+    assert fits[-2] == "", fits
+    assert _MARKER.match(scrolled[-2]), scrolled
+    assert scrolled[-3] == "", scrolled
+    assert _report_rows(scrolled)[-1].strip(), scrolled
+
+
+@pytest.mark.asyncio
+async def test_no_window_ends_on_a_provider_heading_with_no_meters_under_it() -> None:
+    """A block boundary is where the window stops, at every scroll position.
+
+    A budget that cut wherever it ran out left ``provider-2  ·  7 day 20%`` as the
+    last row of the report with nothing under it — a provider announced and then
+    no numbers, which is the one thing the card exists to state. Verified at 80x24
+    because that is the size where the budget (12 rows) lands mid-block.
+
+    The card's HEIGHT is pinned across the sweep in the same pass: the rows the
+    boundary gives back become quiet ground above the meta rather than a shorter
+    card, because a card that changed height per keystroke would walk up and down
+    the screen while being read (it is centred on its own height).
+    """
+    async with _panel_app() as panel:
+        panel.show_reports(_many_reports())
+        panel.action_scroll_home()
+        heights: set[int] = set()
+        offsets = 0
+        while True:
+            rows = panel.render_lines_for_test()
+            report = _report_rows(rows)
+            heights.add(len(rows))
+            offsets += 1
+            assert report, (panel.view_offset, rows)
+            assert not report[-1].startswith("provider-"), (panel.view_offset, rows)
+            before = panel.view_offset
+            panel.action_scroll_rows(1)
+            if panel.view_offset == before:
+                break
+
+    assert offsets > 10, "premise: this size scrolls far enough to cut mid-block"
+    assert heights == {max(heights)}, f"the card changed height while scrolling: {heights}"
+
+
+class _Wheel:
+    """The only thing the scroll handlers use from a Textual event."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.mark.asyncio
+async def test_the_mouse_wheel_scrolls_the_report_and_clamps() -> None:
+    """The card is read, not picked from, so the wheel moves the WINDOW. It
+    clamps at both ends for the same reason the keys do: a quota list has a
+    top and a bottom that mean something."""
+    async with _panel_app() as panel:
+        panel.show_reports(_many_reports())
+        assert panel.view_offset == 0
+        panel.on_mouse_scroll_down(_Wheel())
+        assert panel.view_offset == 1
+        for _ in range(500):
+            panel.on_mouse_scroll_down(_Wheel())
+        bottom = panel.view_offset
+        assert bottom > 1
+        panel.on_mouse_scroll_down(_Wheel())
+        assert panel.view_offset == bottom  # clamped, never wrapped
+        for _ in range(500):
+            panel.on_mouse_scroll_up(_Wheel())
+        assert panel.view_offset == 0
+
+
+@pytest.mark.asyncio
+async def test_the_wheel_is_stopped_so_the_transcript_behind_stays_put() -> None:
+    """The card floats over the conversation; an un-stopped wheel would move
+    both surfaces for one gesture."""
+    async with _panel_app() as panel:
+        panel.show_reports(_many_reports())
+        down, up = _Wheel(), _Wheel()
+        panel.on_mouse_scroll_down(down)
+        panel.on_mouse_scroll_up(up)
+    assert down.stopped and up.stopped
+
+
+# -- the card ON the screen (the real app, so the fill is in the frame) -------
+def _painted_span(app: OperatorApp, row: int, fill: str) -> tuple[int, int, int]:
+    """``(cells left of the card, cells right of it, its painted width)``.
+
+    Measured off the composed strip rather than off ``panel.region``: the card is
+    positioned by an offset inside a hugging host inside the screen's own inset,
+    and a region compared against the wrong one of those three boxes is how the
+    card was reported as off-centre when the paint is symmetric. The fill is the
+    card's own background, which is what a reader sees the edges of.
+    """
+    strip = app.screen._compositor.render_strips()[row]
+    column = first = last = 0
+    for segment in strip:
+        colour = segment.style.bgcolor if segment.style else None
+        if colour is not None and colour.triplet is not None and colour.triplet.hex == fill:
+            first = first or column
+            last = column + len(segment.text) - 1
+        column += len(segment.text)
+    return first, column - 1 - last, last - first + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(120, 40), (121, 40), (100, 30), (101, 30), (80, 24), (81, 24)])
+async def test_the_card_is_centred_on_the_terminal_at_odd_and_even_widths(
+    size: tuple[int, int],
+) -> None:
+    """Equal ground either side of the card, to the cell the parity allows.
+
+    The centring is arithmetic in the widget (the host hugs the card, so
+    ``align: center middle`` is not available), and arithmetic against the
+    screen's CONTENT box while the card is painted inside the screen's inset —
+    two boxes that differ by the inset on each side. They cancel only because the
+    inset is symmetric, which is an assumption worth a frame test rather than a
+    comment: this reads the painted edges, so it fails for a real off-centre card
+    however the widget arrived at its offset.
+    """
+    width, _ = size
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.display = True
+        panel.show_reports(_many_reports())
+        for _ in range(4):
+            await pilot.pause()
+        fill = app.get_css_variables()["lo-overlay"]
+        card = panel.region
+        left, right, painted = _painted_span(app, card.y + 2, fill)
+
+    assert painted == card.width, (painted, card)
+    slack = width - painted
+    assert (left, right) == (slack // 2, slack - slack // 2), (left, right, painted)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(120, 40), (100, 30), (120, 24), (80, 24), (80, 16), (80, 14)])
+async def test_a_scrolled_card_never_covers_the_input_prompt(
+    size: tuple[int, int],
+) -> None:
+    """D19 was visible only after the card had enough data to scroll.
+
+    Drive the REAL app and compare the painted widgets' absolute regions. The
+    old screen-centred placement overlapped the editor by two rows even though
+    the body budget was correct; at 80x24 its footer rendered as
+    ``❯  24 windows · ↑↓ scroll`` on the prompt's own row.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.display = True
+        panel.show_reports(_many_reports())
+        for _ in range(4):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+
+    assert not panel.region.overlaps(editor.region), (size, panel.region, editor.region)
+    assert panel.region.bottom <= editor.region.y
+
+
+@pytest.mark.asyncio
+async def test_narrow_error_and_empty_states_keep_their_retry_and_close_receipts() -> None:
+    """Provider prose is unbounded; at 50x20 it must lose its tail rather than
+    wrap through or clip the footer actions that recover and close the panel."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(50, 20)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_error("provider failed: " + "network timeout " * 20)
+        for _ in range(3):
+            await pilot.pause()
+        error_rows = panel.render_lines_for_test()
+        assert all(cell_len(row) <= panel._content_width() for row in error_rows)
+        assert "r refresh" in error_rows[-1] and "esc close" in error_rows[-1]
+        assert not panel.region.overlaps(app.query_one(Editor).region)
+
+        panel.show_reports([])
+        for _ in range(3):
+            await pilot.pause()
+        empty_rows = panel.render_lines_for_test()
+        assert all(cell_len(row) <= panel._content_width() for row in empty_rows)
+        assert "r refresh" in empty_rows[-1] and "esc close" in empty_rows[-1]
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+    assert "r refresh" in painted and "esc close" in painted, painted
+
+
+@pytest.mark.asyncio
+async def test_compact_usage_keeps_provider_identity_and_operational_actions() -> None:
+    """At End on 50x20, decorative air must yield before the provider heading
+    for the final meters and the refresh/close actions."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(50, 20)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_many_reports())
+        panel.action_scroll_end()
+        for _ in range(3):
+            await pilot.pause()
+        rows = panel.render_lines_for_test()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+    assert any("provider-11" in row for row in rows), rows
+    assert any("5 hour" in row for row in rows), rows
+    assert any("7 day" in row for row in rows), rows
+    assert all(cell_len(row) <= panel._content_width() for row in rows)
+    assert "r refresh" in rows[-1] and "esc close" in rows[-1], rows[-1]
+    assert "provider-11" in painted, painted
+
+
+@pytest.mark.asyncio
+async def test_open_usage_reflows_when_the_bottom_band_grows(monkeypatch) -> None:
+    """A dock mutation does not resize an overlay, so the app must explicitly
+    re-measure an already-open tall card after todos appear."""
+    from local_operator.tui.widgets import todo_panel as todo_panel_module
+
+    todos: list[dict[str, str]] = []
+    monkeypatch.setattr(todo_panel_module, "todo_items", lambda _session_id: list(todos))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_many_reports())
+        for _ in range(4):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        before = panel.region
+        assert not before.overlaps(editor.region)
+
+        todos.extend({"text": f"new live todo {index}", "status": "pending"} for index in range(5))
+        app._refresh_band()
+        for _ in range(6):
+            await pilot.pause()
+        after = panel.region
+        editor_region = editor.region
+
+    assert after.height < before.height, (before, after)
+    assert not after.overlaps(editor_region), (after, editor_region)
+    assert after.bottom <= editor_region.y

@@ -7,6 +7,8 @@ paints first, then awaits the session in a worker.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,10 +18,16 @@ import pytest
 
 from local_operator.harness.types import NoticeEvent
 from local_operator.session.mcp_status import McpStartupOutcome
-from local_operator.tui.app import BOOT_LAYOUT_CLASS, SLASH_COMMANDS, OperatorApp
+from local_operator.tui.app import (
+    BOOT_LAYOUT_CLASS,
+    PERSIST_HINT,
+    SLASH_COMMANDS,
+    OperatorApp,
+)
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
@@ -1155,7 +1163,7 @@ async def test_accounts_command_renders_credentials() -> None:
     assert "api_key (login)" in texts
 
 
-def _usage_reports():
+def _usage_reports(*, used: float = 5.0):
     from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 
     return [
@@ -1165,11 +1173,33 @@ def _usage_reports():
                 UsageLimit(
                     id="openrouter:credits",
                     label="Credits",
-                    amount=UsageAmount(used=5.0, limit=50.0, unit="usd"),
+                    amount=UsageAmount(used=used, limit=50.0, unit="usd"),
                 )
             ],
         )
     ]
+
+
+class _ControlledUsageController(FakeProviderController):
+    """Keeps the first network request pending so ordering is observable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_release = asyncio.Event()
+        self.first_started = asyncio.Event()
+        self.first_cancelled = False
+
+    async def fetch_usage(self, provider_ids=None):
+        self.usage_calls.append(provider_ids)
+        if len(self.usage_calls) == 1:
+            self.first_started.set()
+            try:
+                await self.first_release.wait()
+            except asyncio.CancelledError:
+                self.first_cancelled = True
+                raise
+            return _usage_reports(used=5.0)
+        return _usage_reports(used=42.0)
 
 
 async def _run_usage_command(pilot, app) -> None:
@@ -1226,6 +1256,82 @@ async def test_escape_closes_the_usage_panel_and_returns_focus() -> None:
             await pilot.pause()
         assert not panel.is_open
         assert isinstance(app.focused, Editor)
+
+
+@pytest.mark.asyncio
+async def test_dismissed_usage_request_cannot_reopen_the_panel() -> None:
+    """Esc closes the request as well as its card; a late network response must
+    not reverse an explicit user action."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    ctrl = _ControlledUsageController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        await ctrl.first_started.wait()
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        ctrl.first_release.set()
+        for _ in range(4):
+            await pilot.pause()
+
+        assert ctrl.first_cancelled
+        assert not panel.is_open
+
+
+@pytest.mark.asyncio
+async def test_usage_result_ready_between_close_and_dismiss_handler_is_ignored() -> None:
+    """Closing invalidates the request synchronously, before the app can receive
+    the dismissal message and cancel its worker."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    ctrl = _ControlledUsageController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        await ctrl.first_started.wait()
+
+        # This is the exact cross-queue gap inside `action_dismiss`: the panel is
+        # already closed, while the app has not yet handled `UsageDismissed`.
+        panel.close()
+        ctrl.first_release.set()
+        for _ in range(4):
+            await pilot.pause()
+
+        assert not ctrl.first_cancelled
+        assert not panel.is_open
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_supersedes_a_slower_request() -> None:
+    """A stale first response must not overwrite the report returned by the
+    refresh that replaced it."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    ctrl = _ControlledUsageController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        await ctrl.first_started.wait()
+        await pilot.press("r")
+        for _ in range(6):
+            await pilot.pause()
+        ctrl.first_release.set()
+        for _ in range(4):
+            await pilot.pause()
+        text = "\n".join(panel.render_lines_for_test())
+
+        assert ctrl.first_cancelled
+        assert len(ctrl.usage_calls) == 2
+        assert "84%" in text
+        assert "10%" not in text
 
 
 @pytest.mark.asyncio
@@ -1938,15 +2044,15 @@ async def test_the_model_list_offers_what_the_user_can_actually_run() -> None:
 @pytest.mark.asyncio
 async def test_the_hidden_models_are_counted_with_the_command_that_reveals_them() -> None:
     """Discoverability was the whole argument for the old show-everything list.
-    The count keeps it, at one footer line instead of the visible catalogue."""
+    The footer chrome keeps it without crowding the persistence instruction."""
     ctrl = _AccessController()
     app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
         await pilot.pause()
         picker = await _open_model_picker(app, pilot)
-        footer = picker.render_text(90).plain.split("\n")[-1]
-    assert "1 hidden" in footer, footer
-    assert "/login <provider>" in footer, footer
+        chrome = picker.render_text(90).plain
+    assert "1 hidden" in chrome, chrome
+    assert "/login <provider>" in chrome, chrome
 
 
 @pytest.mark.asyncio
@@ -1959,11 +2065,11 @@ async def test_an_unreadable_credential_store_shows_every_model_not_none() -> No
         await pilot.pause()
         picker = await _open_model_picker(app, pilot)
         offered = {row.selector for row in picker.rows()}
-        footer = picker.render_text(90).plain.split("\n")[-1]
+        chrome = picker.render_text(90).plain
     assert "anthropic/claude-opus-5" in offered, offered
     assert len(offered) == 3, offered
     # …and it says so, rather than quietly presenting a list it could not filter.
-    assert "credential check unavailable" in footer, footer
+    assert "credential check unavailable" in chrome, chrome
 
 
 @pytest.mark.asyncio
@@ -2118,23 +2224,49 @@ def _resume_factory(
     return resume_factory
 
 
-def _seed_session(tmp_path: Path, session_id: str) -> None:
+def _seed_session(tmp_path: Path, session_id: str, prompt: str = "") -> None:
     """Lay down one resumable session transcript under a temp config dir.
 
     ``recent_sessions`` globs ``<config_dir>/sessions/*`` for transcripts, so
     a real file is the only honest way to make the listing and the resume
     both resolve — same convention the ``--resume`` CLI path trusts.
+
+    ``prompt`` writes a real opening user message, which is what the picker
+    names the row by; without one the session is legitimately nameless.
     """
     sess_dir = tmp_path / "sessions" / session_id
     sess_dir.mkdir(parents=True, exist_ok=True)
-    (sess_dir / "transcript.jsonl").write_text("")
+    body = ""
+    if prompt:
+        body = (
+            json.dumps(
+                {
+                    "id": "e1",
+                    "ts": 0,
+                    "type": "message",
+                    "payload": {
+                        "kind": "message",
+                        "role": "user",
+                        "content": [{"text": prompt}],
+                    },
+                }
+            )
+            + "\n"
+        )
+    (sess_dir / "transcript.jsonl").write_text(body)
 
 
 @pytest.mark.asyncio
-async def test_resume_lists_recent_sessions_without_a_boot(tmp_path, monkeypatch) -> None:
-    """A bare ``/resume`` lists resumable sessions rather than resuming one."""
+async def test_a_bare_resume_opens_the_picker_naming_each_session(tmp_path, monkeypatch) -> None:
+    """A bare ``/resume`` opens the picker instead of printing ids.
+
+    The old behaviour dumped ``<hex id>  3h ago`` rows into the transcript,
+    which pushed the conversation up, could not be navigated, and left the
+    user to retype an id read off the scrollback. The picker is a two-way
+    surface and names each row by its opening message.
+    """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    _seed_session(tmp_path, "aabbcc")
+    _seed_session(tmp_path, "aabbcc", prompt="Make an asteroids game")
 
     session = FakeSession()
     boots: list[str] = []
@@ -2142,7 +2274,7 @@ async def test_resume_lists_recent_sessions_without_a_boot(tmp_path, monkeypatch
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
     )
-    async with app.run_test(size=(80, 24)) as pilot:
+    async with app.run_test(size=(90, 24)) as pilot:
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
@@ -2150,9 +2282,58 @@ async def test_resume_lists_recent_sessions_without_a_boot(tmp_path, monkeypatch
         await pilot.pause()
         await pilot.pause()
         assert boots == [], "a bare /resume must not boot a session"
-        text = _transcript_text(app)
-        assert "aabbcc" in text, text
-        assert "recent sessions" in text, text
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen)
+        card = "\n".join(picker.render_lines_for_test())
+        # Named by the opening message, not just listed by id.
+        assert "Make an asteroids game" in card, card
+        assert "aabbcc" in card, card
+
+
+@pytest.mark.asyncio
+async def test_choosing_in_the_picker_resumes_that_session(tmp_path, monkeypatch) -> None:
+    """Enter on a row is what actually resumes it — the picker's whole job."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "aabbcc", prompt="the only session")
+
+    session = FakeSession()
+    boots: list[str] = []
+    app = OperatorApp(
+        lambda: _factory(session),
+        resume_factory=_resume_factory(boots),
+    )
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+    assert boots == ["aabbcc"], boots
+
+
+@pytest.mark.asyncio
+async def test_escaping_the_picker_resumes_nothing(tmp_path, monkeypatch) -> None:
+    """A cancelled picker leaves the session on screen exactly as it was."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "aabbcc", prompt="the only session")
+
+    session = FakeSession()
+    boots: list[str] = []
+    app = OperatorApp(
+        lambda: _factory(session),
+        resume_factory=_resume_factory(boots),
+    )
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+    assert boots == [], boots
 
 
 @pytest.mark.asyncio
@@ -2292,3 +2473,271 @@ async def test_resume_at_latest_passes_the_sentinel_verbatim(tmp_path, monkeypat
         await pilot.pause()
         await pilot.pause()
         assert boots == ["@latest"], boots
+
+
+@pytest.mark.asyncio
+async def test_a_tall_usage_overlay_never_scrolls_the_screen_or_steals_width() -> None:
+    """A floating overlay must leave the layout beneath it alone.
+
+    It did not. The `/usage` card is sized by the widget and positioned by an
+    offset on the `toast` layer; layers keep it out of the FLOW, but nothing
+    kept it out of the SCROLLABLE REGION. A card taller than its resting
+    offset allowed pushed the screen's virtual height past its size, so
+    Textual drew a screen scrollbar — which the app has no use for (the
+    transcript is the scrolling surface and the input is docked) and which
+    cost two cells of width, reflowing the transcript behind a popup that is
+    supposed to change nothing. `overflow: hidden` on `Screen` is the guard.
+    """
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+    from tests.unit.tui.test_usage_panel import _many_reports
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        width_before = app.screen.size.width
+        panel = app.query_one(UsagePanel)
+        panel.display = True
+        # Deliberately taller than the terminal so the overlay MUST overflow.
+        panel.show_reports(_many_reports())
+        await pilot.pause()
+        await pilot.pause()
+        assert app.screen.show_vertical_scrollbar is False
+        assert app.screen.size.width == width_before
+        # And the card's own content box still gets every row it composed:
+        # the pinned height carries the padding, it does not eat the footer.
+        assert panel.size.height == len(panel.render_lines_for_test())
+
+
+# --- the boot default: is it settable, and did it land -----------------------
+
+
+def _unwrapped(text: str) -> str:
+    """Text with all whitespace removed.
+
+    The transcript wraps a notice to the widget's width, breaking both prose and
+    a tmp-dir path across lines. Comparing what was WRITTEN with what was
+    RENDERED has to ignore the wrap, or the assertion is really about whichever
+    terminal size the test happened to pick.
+    """
+    return "".join(text.split())
+
+
+@pytest.mark.asyncio
+async def test_a_bare_model_names_the_current_pair_and_the_command_that_keeps_it() -> None:
+    """The complaint this closes: nothing on the model surfaces said a default
+    existed, so `/model default` was reachable only by already knowing the word.
+    Both the notice above the list and the list's own footer now say it."""
+    session = _SwitchableSession()
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model")
+        await pilot.pause()
+        await pilot.pause()
+        text = _transcript_text(app)
+        picker = app.query_one(Editor).model_picker
+        footer = picker.render_text(90).plain.split("\n")[-1]
+    # The subject of the sentence: "make THIS the default" needs a this.
+    assert "openrouter/deepseek/deepseek-chat" in _unwrapped(text), text
+    assert _unwrapped(PERSIST_HINT) in _unwrapped(text), text
+    # …and the list itself, which is the surface the user is actually reading.
+    assert PERSIST_HINT in footer, footer
+
+
+@pytest.mark.asyncio
+async def test_rejected_model_commands_keep_the_boot_composition() -> None:
+    """A typo changed no state and must not permanently collapse the splash."""
+    session = _SwitchableSession()
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        welcome = app.query_one(WelcomeView)
+        for command in ("/model missing-slash", "/model bogus-provider/model"):
+            app._run_slash_command(command)
+            await pilot.pause()
+            assert welcome.display is True, command
+            assert app.screen.has_class("boot"), command
+
+
+@pytest.mark.asyncio
+async def test_an_entered_rejected_model_command_dismisses_the_boot_splash() -> None:
+    """The real submit path echoes the command into the transcript, so the
+    splash must yield even when the command handler rejects the model."""
+    session = _SwitchableSession()
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.text = "/model missing-slash"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        welcome_display = app.query_one(WelcomeView).display
+        boot = app.screen.has_class("boot")
+
+    assert "/model missing-slash" in painted, painted
+    assert welcome_display is False
+    assert not boot
+
+
+def test_help_uses_one_column_wider_than_every_command_name() -> None:
+    """The two longest aliases used to consume the literal 14-cell column and
+    glue directly onto descriptions: `/model, /modelsSwitch model…`."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    rows = _renderable_plain(app._help_block().renderable).splitlines()
+    for command in SLASH_COMMANDS:
+        names = ", ".join(f"/{name}" for name in command.names)
+        row = next(row for row in rows if row.startswith(names))
+        assert row[len(names) :].startswith("  "), row
+
+
+@pytest.mark.asyncio
+async def test_a_switch_admits_it_is_session_only_and_names_the_persist_command() -> None:
+    """A switch that looks permanent and is not is the actual bug: the old
+    "(next turn)" said WHEN it applied and never said for how long, so the next
+    launch coming back on the old model read as the switch having been lost."""
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        text = _transcript_text(app)
+    assert _unwrapped("this session") in _unwrapped(text), text
+    assert _unwrapped("/model default") in _unwrapped(text), text
+    # The access clause is unchanged by the new one sharing the line.
+    assert _unwrapped("anthropic logged in") in _unwrapped(text), text
+
+
+@pytest.mark.asyncio
+async def test_model_default_confirms_both_keys_and_the_file_it_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare "saved" is a claim the user cannot check without relaunching.
+    The provider is the half that rides along silently — it is written from the
+    selector's left side and never typed as a setting of its own."""
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # A file on disk, so ConfigManager builds its own Config rather than handing
+    # back (and mutating) the module-level DEFAULT_CONFIG singleton.
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model default anthropic/claude-opus-5")
+        await pilot.pause()
+        text = _transcript_text(app)
+    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert written["hosting"] == "anthropic", written
+    assert written["model_name"] == "claude-opus-5", written
+    # What it wrote, under the names the config file uses…
+    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+    # …and where, so the user can go and read or undo it.
+    assert str(tmp_path / "config.yml") in _unwrapped(text), text
+
+
+@pytest.mark.asyncio
+async def test_model_default_alone_persists_the_model_already_in_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sentence a user has right after switching is "make THIS the default".
+    Answering it used to mean retyping the selector back at the app, which is the
+    transcription step that made the default feel like a separate, hidden system."""
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        app._run_slash_command("/model default")
+        await pilot.pause()
+        text = _transcript_text(app)
+    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert (written["hosting"], written["model_name"]) == ("anthropic", "claude-opus-5"), written
+    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+
+
+@pytest.mark.asyncio
+async def test_every_model_default_surface_says_it_the_same_way() -> None:
+    """D14. One instruction had four wordings on four surfaces a user meets
+    within two keystrokes. The canonical sentence now names the consequence —
+    future sessions — rather than merely saying an unspecified pair is saved.
+
+    The defect is the divergence, so all four surfaces are checked together.
+    The footer is checked unwrapped and whole because it is the tightest site:
+    an instruction that is consistent only after truncation is not consistent.
+    """
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model")
+        await pilot.pause()
+        await pilot.pause()
+        picker = app.query_one(Editor).model_picker
+        footer = picker.render_text(picker.size.width or 90).plain.split("\n")[-1]
+        bare_notice = _transcript_text(app)
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        receipt = _transcript_text(app)
+        app._run_slash_command("/help")
+        await pilot.pause()
+        help_text = _transcript_text(app)
+
+    # 1. the notice a bare `/model` prints above the list, 2. the switch receipt,
+    # 3. the picker's own footer, 4. the `/help` row.
+    assert _unwrapped(PERSIST_HINT) in _unwrapped(bare_notice), bare_notice
+    assert _unwrapped(PERSIST_HINT) in _unwrapped(receipt), receipt
+    assert PERSIST_HINT in footer, footer
+    assert _unwrapped(PERSIST_HINT) in _unwrapped(help_text), help_text
+    model_row = next(c for c in SLASH_COMMANDS if c.name == "model")
+    assert PERSIST_HINT in model_row.description, model_row.description
+
+    # And the four it replaced are gone from all of them, so there is no second
+    # phrasing left for the user to meet.
+    everything = _unwrapped(bare_notice + receipt + footer + help_text)
+    for stale in (
+        "as the boot default",
+        "to make it the boot default",
+        "saves the boot default",
+        "/model default persists it",
+    ):
+        assert _unwrapped(stale) not in everything, stale
+
+    # The receipt is two clauses now, not a run-on of four separators — and it
+    # still says the two things that made it necessary: the scope, and the access
+    # state of the provider it just switched to.
+    switch_line = next(line for line in _unwrapped(receipt).split("·") if _unwrapped("→") in line)
+    assert _unwrapped("(this session)") in switch_line, switch_line
+    assert _unwrapped("from the next turn") not in _unwrapped(receipt), receipt
+    assert _unwrapped("anthropic logged in") in _unwrapped(receipt), receipt
+
+
+@pytest.mark.asyncio
+async def test_model_default_hint_survives_every_supported_narrow_footer() -> None:
+    """More terminal width must never hide words from the approved persistence
+    instruction; the 50-column footer must keep the command whole."""
+    for size in ((50, 20), (60, 22), (80, 24), (100, 30)):
+        ctrl = _AccessController()
+        app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            await _open_model_picker(app, pilot)
+            await pilot.pause()
+            painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert PERSIST_HINT in painted, (size, painted)

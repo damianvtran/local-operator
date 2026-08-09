@@ -70,17 +70,49 @@ TIER_INDENT = "  "
 
 #: Panel geometry. The width cap is a measure, not a fraction of the terminal:
 #: a label, a bar and two numbers need about seventy cells and gain nothing from
-#: two hundred. The margins keep the card off the screen's own edge padding.
+#: two hundred. The width margin keeps the card off the screen's edge padding.
 PANEL_MAX_WIDTH = 76
 PANEL_MIN_WIDTH = 32
 PANEL_WIDTH_MARGIN = 4
-PANEL_HEIGHT_MARGIN = 4
 
-#: Rows the pinned chrome costs: the title, the rule under it, and the hint row.
-CHROME_ROWS = 3
+#: Ground the card keeps between itself and the two surfaces it floats between:
+#: one row under the screen's top inset, one row above the docked input panel.
+#: The card's fill is an elevation step, and a step flush against the input
+#: panel's fill reads as two stacked bars rather than a card lifted off the page.
+#:
+#: Advisory rather than reserved — it comes off the rows the card may use, and
+#: the one-row body floor overrides it on a terminal too short to grant both.
+PANEL_HEIGHT_MARGIN = 2
 
-#: One cell of padding inside the card, matching the toast's.
-PANEL_PADDING_CELLS = 2
+#: Rows the pinned chrome costs: the title, the rule under it, the blank row
+#: that separates the report from the footer, the ``N of M`` position, and the
+#: hint row itself. The spacer is chrome rather than a body row because it must
+#: survive scrolling — a footer that sits flush against the last meter reads as
+#: one more data row.
+#:
+#: The position row is counted even though it is drawn only when the report
+#: SCROLLS, because scrolling is exactly when the budget binds: a card sized
+#: without it came out one row taller than the space it had been measured
+#: against, and that row landed on the docked prompt.
+CHROME_ROWS = 5
+
+#: Inner padding, as CELLS across (``padding: 1 2`` → 2 left + 2 right) and
+#: ROWS down (1 top + 1 bottom). Both are declared here as well as in the
+#: stylesheet because the widget SIZES ITSELF: Textual's width/height are
+#: border-box, so the panel must add the padding back when it pins its own
+#: height and subtract it when it measures the content that has to fit. A
+#: single-cell gutter is what made the card read as cramped against the text
+#: it floats over — the overlay needs to feel lifted off the transcript, and
+#: a row of quiet at the top and bottom is what does that.
+PANEL_PADDING_CELLS = 4
+PANEL_PADDING_ROWS = 2
+
+#: Rows above the dock at which the card can still afford its vertical gutter.
+#: Below it the gutter is dropped (the ``-squeezed`` class in the stylesheet),
+#: because the alternative is a card that covers the prompt: the margin, chrome,
+#: one body row and gutter are the smallest useful card, and the gutter is the
+#: only decorative part. A terminal that short has no breathing room to protect.
+SQUEEZE_ROWS = PANEL_HEIGHT_MARGIN + CHROME_ROWS + PANEL_PADDING_ROWS + 1
 
 #: Keys the panel offers, in the order the hint row prints them. Data rather
 #: than a literal string so the hints and the bindings cannot drift apart.
@@ -393,15 +425,38 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
     return row
 
 
-def build_usage_body(reports, width: int, now_ms: float) -> list[Text]:  # noqa: ANN001
+@dataclass(frozen=True)
+class UsageBody:
+    """The scrolling half of the panel and its semantic block boundaries.
+
+    ``cuts`` holds row counts at which a window may end. ``blocks`` holds
+    ``(start, end)`` ranges for provider groups, allowing a short viewport to
+    remove decorative air without separating meters from their provider.
+    """
+
+    lines: list[Text]
+    cuts: frozenset[int]
+    blocks: tuple[tuple[int, int], ...] = ()
+
+
+def build_usage_body(reports, width: int, now_ms: float) -> UsageBody:  # noqa: ANN001
     """The scrolling half of the panel: one block per report.
 
     Column widths are measured over EVERY row rather than per provider, so the
     bars of two providers line up and the whole panel can be read as one table.
+
+    Each block is heading → (notes) → blank → meters. The blank row is what
+    makes the heading read as a heading: without it the identity line, the
+    account note and the first meter run together as three equal rows, which is
+    the "tight" the card was reported for. The blank is also why the returned
+    :class:`UsageBody` carries its cut points: those three rows are one unit,
+    and a window may not stop part way through them.
     """
     lines: list[Text] = []
+    cuts: set[int] = set()
+    blocks: list[tuple[int, int]] = []
     if not reports:
-        return lines
+        return UsageBody(lines, frozenset({0}))
 
     columns = _measure_columns(reports, width, now_ms)
 
@@ -409,15 +464,27 @@ def build_usage_body(reports, width: int, now_ms: float) -> list[Text]:  # noqa:
     for index, report in enumerate(reports):
         if index:
             lines.append(Text())
-        lines.append(_provider_header(report, now_ms))
+        block_start = len(lines)
+        header = _provider_header(report, now_ms)
+        # Provider/account identifiers are user data, not geometry. A long
+        # identity must lose its tail rather than widen or clip the whole card.
+        header.truncate(max(1, width), overflow="ellipsis")
+        lines.append(header)
         if report.notes:
-            lines.append(Text(f"  {report.notes}", style=dim))
+            note = Text(f"  {report.notes}", style=dim)
+            note.truncate(max(1, width), overflow="ellipsis")
+            lines.append(note)
         if not report.limits:
             lines.append(Text("  no windows reported", style=dim))
+            cuts.add(len(lines))
+            blocks.append((block_start, len(lines)))
             continue
+        lines.append(Text())
         for limit in report.limits:
             lines.append(_limit_row(limit, columns, now_ms))
-    return lines
+            cuts.add(len(lines))
+        blocks.append((block_start, len(lines)))
+    return UsageBody(lines, frozenset(cuts), tuple(blocks))
 
 
 class UsagePanel(Static):
@@ -451,22 +518,33 @@ class UsagePanel(Static):
         self._error = ""
         self._target = ""
         self._fetched_ms: float | None = None
+        # A monotonic identity for the network request allowed to paint this
+        # surface. Textual messages and workers run on separate queues, so worker
+        # cancellation alone cannot close the gap between `close()` and the app
+        # receiving `UsageDismissed`.
+        self._request_generation = 0
         self._clock: float = 0.0
+        # Screen size plus the live bottom-dock ceiling used for the last
+        # paint. The dock can grow without resizing this overlay, so Textual
+        # emits no resize event for the panel itself.
+        self._layout_shown: tuple[int, int, int] | None = None
         self.display = False
 
     # -- state ---------------------------------------------------------------
-    def start_fetch(self, target: str = "") -> None:
-        """Show the panel in its loading state.
+    def start_fetch(self, target: str = "") -> int:
+        """Show the panel in its loading state and return this request's identity.
 
         Opened BEFORE the request rather than after it: the fetch crosses the
         network for every logged-in provider, and a command that does nothing
         visible for two seconds reads as a command that did nothing.
         """
+        self._request_generation += 1
         self._loading = True
         self._error = ""
         self._target = target
         self.display = True
         self._repaint()
+        return self._request_generation
 
     def show_reports(self, reports, *, now_ms: float | None = None) -> None:  # noqa: ANN001
         """Install a finished fetch and paint it."""
@@ -485,8 +563,13 @@ class UsagePanel(Static):
         self.display = True
         self._repaint()
 
+    def accepts_request(self, generation: int) -> bool:
+        """Whether a worker result still belongs to the visible request."""
+        return self.is_open and generation == self._request_generation
+
     def close(self) -> None:
         """Hide the panel and forget the scroll position."""
+        self._request_generation += 1
         self._loading = False
         self._offset = 0
         self.display = False
@@ -536,7 +619,12 @@ class UsagePanel(Static):
         self._scroll_by(delta)
 
     def action_scroll_page(self, delta: int) -> None:
-        self._scroll_by(delta * max(1, self._body_budget()))
+        # A page is what the card is SHOWING, not what it budgeted for: the
+        # window stops at a block boundary, so paging by the budget would step
+        # over the heading that the boundary held back.
+        body = self._body()
+        shown = self._window_end(body, self._body_budget()) - self._offset
+        self._scroll_by(delta * max(1, shown))
 
     def action_scroll_home(self) -> None:
         self._offset = 0
@@ -545,6 +633,17 @@ class UsagePanel(Static):
     def action_scroll_end(self) -> None:
         self._offset = self._max_offset()
         self._repaint()
+
+    # The wheel scrolls the report the same rows the arrow keys do. Stopped
+    # here because the card floats over the transcript: left to bubble, one
+    # gesture would scroll both the quota table and the conversation behind it.
+    def on_mouse_scroll_down(self, event) -> None:  # noqa: ANN001 - Textual event type
+        event.stop()
+        self._scroll_by(1)
+
+    def on_mouse_scroll_up(self, event) -> None:  # noqa: ANN001 - Textual event type
+        event.stop()
+        self._scroll_by(-1)
 
     def _scroll_by(self, delta: int) -> None:
         """Scroll, CLAMPED rather than wrapping.
@@ -571,32 +670,107 @@ class UsagePanel(Static):
     def _content_width(self) -> int:
         return max(1, self.panel_width() - PANEL_PADDING_CELLS)
 
+    def _rows_above_dock(self) -> int:
+        """Rows the card may occupy: the ground ABOVE the docked input panel.
+
+        NOT "the screen height less a constant". The prompt is DOCKED, so the
+        layout engine reserves its rows before it offers the rest to anything
+        else, and how many it takes is a function of the editor's line count,
+        the subagent/todo band and the boot layout — five rows to ten across the
+        sizes the tests sweep. Measured against a constant instead, the card ran
+        over the prompt at every size once the report was long enough to scroll:
+        ``❯  Message Local Ope  24 windows · ↑↓ scroll`` sharing one row (D19).
+
+        The absolute and relative boxes are reconciled HERE and handed back as a
+        COUNT, so no caller can mix them: ``region`` is absolute while
+        ``screen.size`` is the content box that ``Screen { padding: 1 }`` insets,
+        and subtracting one from the other is what made a centred card look a
+        cell off-centre in an earlier round.
+
+        The bound is read off whatever is docked rather than off an id: the
+        invariant is "the card covers no docked surface", and a rule that names
+        ``#input-dock`` would go quietly back to overlapping if the dock were
+        ever renamed. Hosts with nothing docked (the widget-only test app) get
+        the whole content box, which is the same answer by the same rule.
+        """
+        try:
+            screen = self.screen
+        except NoScreen:
+            return self._screen_size()[1]
+        content = screen.content_region
+        ceiling = content.bottom
+        for sibling in screen.children:
+            if sibling.display and sibling.styles.dock == "bottom":
+                ceiling = min(ceiling, sibling.region.y)
+        return max(1, ceiling - content.y)
+
+    def _fit(self) -> tuple[int, int, int]:
+        """``(rows above the dock, gutter rows, body budget)`` — one measurement.
+
+        The three travel together because they are one sum: the pinned height a
+        scrolled card settles at is exactly ``budget + CHROME_ROWS + gutter``, and
+        that has to come out no greater than the rows above the dock. Splitting
+        the terms across methods that each re-measure is how the budget and the
+        height came to disagree by the position row in the first place.
+        """
+        rows = self._rows_above_dock()
+        gutter = PANEL_PADDING_ROWS if rows >= SQUEEZE_ROWS else 0
+        return rows, gutter, max(1, rows - PANEL_HEIGHT_MARGIN - CHROME_ROWS - gutter)
+
+    def sync_layout(self) -> None:
+        """Repaint when the screen or live dock changed around an open card."""
+        if not self.display or not self.is_mounted:
+            return
+        width, height = self._screen_size()
+        fingerprint = (width, height, self._rows_above_dock())
+        if fingerprint != self._layout_shown:
+            self._repaint()
+
+    def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        """A terminal resize changes both the card width and body budget."""
+        self._repaint()
+
     def _body_budget(self) -> int:
-        """Rows the scrolling half may use, after the chrome and the screen."""
-        _, height = self._screen_size()
-        return max(1, height - PANEL_HEIGHT_MARGIN - CHROME_ROWS)
+        """Rows the scrolling half may use, after the chrome and the dock."""
+        return self._fit()[2]
 
     def _max_offset(self) -> int:
-        return max(0, len(self._body_lines()) - self._body_budget())
+        body = self._body()
+        budget = self._body_budget()
+        raw = max(0, len(body.lines) - budget)
+        # If the raw tail begins inside a provider block, start at its heading.
+        # `_window_rows` then removes notes/blank air and keeps the meters that
+        # fit, so End never shows anonymous numbers.
+        for start, end in body.blocks:
+            if start <= raw < end and end - start > budget:
+                return start
+        return raw
 
     # -- rendering -----------------------------------------------------------
-    def _body_lines(self) -> list[Text]:
+    def _body(self) -> UsageBody:
         dim = Style(color=theme_mod.semantic_color("dim"))
+        width = self._content_width()
         if self._error:
-            return [Text(self._error, style=Style(color=theme_mod.semantic_color("danger")))]
+            danger = Style(color=theme_mod.semantic_color("danger"))
+            # Error text commonly comes from a provider and is unbounded. The
+            # popup is intentionally single-line-per-row: wrap would consume
+            # its footer/close receipt, while no truncation clips both.
+            return UsageBody(
+                [Text(truncate_cells(self._error, width), style=danger)],
+                frozenset({1}),
+            )
         if self._loading:
-            return [Text("fetching…", style=dim)]
+            return UsageBody([Text("fetching…", style=dim)], frozenset({1}))
         if not self._reports:
             # Two failures look identical in an empty panel and only one is
             # actionable, so the message names both rather than the shorter one.
             target = f"{self._target} reports" if self._target else "no provider reports"
-            return [
-                Text(
-                    f"{target} no usage — no quota endpoint, or no credential for one",
-                    style=dim,
-                )
-            ]
-        return build_usage_body(self._reports, self._content_width(), self._now())
+            message = f"{target} no usage — no quota endpoint, or no credential for one"
+            return UsageBody(
+                [Text(truncate_cells(message, width), style=dim)],
+                frozenset({1}),
+            )
+        return build_usage_body(self._reports, width, self._now())
 
     def _title_row(self) -> Text:
         muted = Style(color=theme_mod.semantic_color("muted"))
@@ -610,26 +784,45 @@ class UsagePanel(Static):
         return row
 
     def _hint_row(self, scrolled: bool) -> Text:
+        """Footer facts that fit, preserving actions in operational order.
+
+        ``esc`` is non-negotiable, refresh repairs stale/error states, and
+        scrolling is merely a convenience. The old left-to-right append let
+        ``↑↓ scroll`` consume a narrow footer before ``r refresh`` appeared.
+        """
         dim = Style(color=theme_mod.semantic_color("dim"))
         faint = Style(color=theme_mod.semantic_color("faint"))
-        row = Text()
+        width = self._content_width()
         stats = collect_stats(self._reports).describe() if self._reports else ""
+        segments: list[tuple[str, str, str]] = []
         if stats:
-            row.append(stats, style=dim)
-            row.append("   ", style=faint)
+            segments.append(("stats", stats, ""))
         for key, what in KEY_HINTS:
-            # Scroll keys are only offered when there is something to scroll: a
-            # hint for a key that does nothing teaches the user to distrust the
-            # other two. The separator rides the PREVIOUS segment so a skipped
-            # hint never leaves a leading ``·`` — and so a populated row joins
-            # its stats tally to the first hint with the SAME ``·`` glyph the
-            # hint list uses internally (a consistent join, never a leading one).
             if key == "↑↓" and not scrolled:
                 continue
+            segments.append((key, key, what))
+
+        def painted_width(items: list[tuple[str, str, str]]) -> int:
+            return (
+                sum(cell_len(key) + (1 + cell_len(what) if what else 0) for _, key, what in items)
+                + max(0, len(items) - 1) * 3
+            )
+
+        # Drop the least important receipts until the canonical, fully-labelled
+        # row fits. Stats go only after scrolling; close is never dropped.
+        for disposable in ("↑↓", "stats"):
+            if painted_width(segments) <= width:
+                break
+            segments = [segment for segment in segments if segment[0] != disposable]
+
+        row = Text()
+        for _, key, what in segments:
             if row.plain:
                 row.append(" · ", style=faint)
             row.append(key, style=dim)
-            row.append(f" {what}", style=faint)
+            if what:
+                row.append(f" {what}", style=faint)
+        row.truncate(max(1, width), overflow="ellipsis")
         return row
 
     def render_lines_for_test(self) -> list[str]:
@@ -637,46 +830,107 @@ class UsagePanel(Static):
         return [line.plain for line in self._compose_rows()]
 
     def _compose_rows(self) -> list[Text]:
-        body = self._body_lines()
+        body = self._body()
+        lines = body.lines
         budget = self._body_budget()
-        self._offset = max(0, min(self._offset, max(0, len(body) - budget)))
-        window = body[self._offset : self._offset + budget]
-        scrolled = len(body) > budget
-        rule = Text(
-            "─" * self._content_width(), style=Style(color=theme_mod.semantic_color("edge"))
-        )
+        self._offset = max(0, min(self._offset, self._max_offset()))
+        scrolled = len(lines) > budget
+        window, shown_end = self._window_rows(body, budget)
+        # ``edge`` is tuned against the app ground; the raised overlay ground
+        # needs one raised step to preserve the same intentionally quiet ratio.
+        faint = Style(color=theme_mod.semantic_color("faint"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        rule = Text("─" * self._content_width(), style=faint)
         rows = [self._title_row(), rule, *window]
+        # Quiet ground between the report and the card's bottom meta, in BOTH
+        # states. Without it the tally and the key hints sit flush against the
+        # last meter and read as one more data row rather than as chrome.
+        #
+        # The rows a block boundary gave back (see _window_end) are quiet HERE,
+        # above the meta, rather than taken off the card. Off the card they would
+        # shrink it, and the card is centred on its own height — it would walk up
+        # and down the screen as a reader scrolled it. Between the position and
+        # the keys they would punch a hole through the middle of two meta rows,
+        # which reads as something failing to render; above the pair the same
+        # rows read as the card's bottom margin. So the frame never moves and
+        # only the interior does.
+        rows.extend(Text() for _ in range(1 + (budget - len(window) if scrolled else 0)))
         if scrolled:
             # The position is part of the CHROME, not a row of the report: a
-            # "12 of 30" that scrolled away with the content would be useless
-            # exactly when it is needed.
-            marker = Text(
-                f"{self._offset + len(window)} of {len(body)}",
-                style=Style(color=theme_mod.semantic_color("faint")),
-            )
-            rows.append(marker)
+            # counter that scrolled away with the content would be useless
+            # exactly when it is needed. It sits with the key hints because the
+            # two are the same KIND of row — both are statements about the list
+            # rather than entries in it — so they travel together at the bottom.
+            position = Text()
+            position.append("showing ", style=faint)
+            position.append(str(shown_end), style=dim)
+            position.append(" of ", style=faint)
+            position.append(str(len(lines)), style=dim)
+            rows.append(position)
         rows.append(self._hint_row(scrolled))
         return rows
 
+    def _window_rows(self, body: UsageBody, budget: int) -> tuple[list[Text], int]:
+        """Visible rows plus the source position represented by their tail.
+
+        A provider block taller than the short viewport is compacted
+        semantically: heading first, then the last meters that fit. Notes and
+        the decorative blank yield before identity or quota values.
+        """
+        for start, end in body.blocks:
+            if self._offset == start and end - start > budget:
+                data = [
+                    body.lines[index] for index in range(start + 1, end) if index + 1 in body.cuts
+                ]
+                if budget <= 1:
+                    return [body.lines[start]], end
+                return [body.lines[start], *data[-(budget - 1) :]], end
+        end = self._window_end(body, budget)
+        return body.lines[self._offset : end], end
+
+    def _window_end(self, body: UsageBody, budget: int) -> int:
+        """Where the window stops: the last row that COMPLETES a block.
+
+        A budget that ran out mid-block left a provider heading — or a heading
+        and the blank under it — as the last thing on the card, announcing a
+        provider and then showing none of its numbers (80x24 landed exactly
+        there). The cut moves back to the end of the last whole block instead.
+
+        A budget too small to hold even one block has nothing to give back, so
+        it keeps the raw cut: the head of a block reads better than a card with
+        an empty body.
+        """
+        end = min(self._offset + budget, len(body.lines))
+        pulled = end
+        while pulled > self._offset and pulled not in body.cuts:
+            pulled -= 1
+        return pulled if pulled > self._offset else end
+
     def _recentre(self, width: int, height: int) -> None:
-        """Pull the HOST over the panel and centre the pair on the screen.
+        """Centre the host in the ground ABOVE the docked input panel.
 
         The host is ``width: auto`` so it hugs this card, exactly as the toast's
         does: a widget owns its whole region and Textual blanks all of it, so a
         stretched host on the overlay layer erases the transcript either side of
-        the panel. Centring therefore cannot be `align: center middle` in the
-        stylesheet — that needs the stretched host — and is done here instead,
-        against the same measured screen the bars are sized from.
+        the panel. Centring therefore cannot be ``align: center middle`` in the
+        stylesheet — that needs the stretched host — and is done here instead.
+
+        Horizontally the symmetric screen inset cancels, which a painted-frame
+        test pins. Vertically there is NO such cancellation: the input is docked
+        at the bottom. Centring against the whole screen put the lower half of a
+        tall card on top of the prompt even though ``_fit`` had correctly sized
+        it for the rows above that dock (D19). The same available-row count must
+        therefore size AND place the card.
         """
         parent = self.parent
         if parent is None or isinstance(parent, Screen):
-            # A panel mounted straight onto the screen would shift the whole app
-            # sideways, which is louder than an off-centre popup.
+            # A panel mounted straight on the screen must not move the screen.
             return
-        screen_width, screen_height = self._screen_size()
+        screen_width, _ = self._screen_size()
+        rows_above_dock = self._rows_above_dock()
         parent.styles.offset = (
             max(0, (screen_width - width) // 2),
-            max(0, (screen_height - height) // 2),
+            max(0, (rows_above_dock - height) // 2),
         )
 
     def _repaint(self) -> None:
@@ -690,8 +944,20 @@ class UsagePanel(Static):
         # too tall, and this widget is repainted on every keystroke that scrolls
         # it — a card that grew by a row per keypress would crawl down the
         # screen while being read.
-        self.styles.height = len(rows)
-        self._recentre(width, len(rows))
+        #
+        # The padding rows are ADDED BACK here (and to the centring height):
+        # Textual sizes border-box, so pinning the row count alone would give
+        # the gutter the last two content rows and clip the hint row off the
+        # bottom of the card. At extreme heights ``_fit`` deliberately drops
+        # that gutter; the class changes the stylesheet and the arithmetic as
+        # one decision rather than merely pretending the padding disappeared.
+        _, gutter, _ = self._fit()
+        self.set_class(gutter == 0, "-squeezed")
+        outer_height = len(rows) + gutter
+        self.styles.height = outer_height
+        self._recentre(width, outer_height)
+        screen_width, screen_height = self._screen_size()
+        self._layout_shown = (screen_width, screen_height, self._rows_above_dock())
         out = Text()
         for index, row in enumerate(rows):
             if index:

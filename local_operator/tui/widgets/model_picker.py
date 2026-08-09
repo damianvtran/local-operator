@@ -35,10 +35,13 @@ from textual.widgets import Static
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
 
-#: Cursor glyph and its gutter. Identical to the command picker's, because the
-#: two lists appear in the same place and a different caret would read as a
-#: different kind of control.
-_CURSOR = "›"
+#: Cursor glyph and its gutter. Identical to the command picker's and the
+#: session picker's, because all three lists appear in the same place and a
+#: different caret would read as a different kind of control. This said
+#: "identical" while shipping ``›`` against the others' ``❯`` — three pickers,
+#: two glyphs — until the round that put four cards on one ramp made them a
+#: family and the divergence had to be settled.
+_CURSOR = "❯"
 _GUTTER_CELLS = 2
 
 #: One cell of breathing room at the right edge, matching the transcript's.
@@ -412,6 +415,21 @@ class ModelPicker(Static):
         self._scroll_to_selection()
         self._repaint()
 
+    def scroll_rows(self, delta: int) -> None:
+        """Move the highlight by ``delta`` rows for a WHEEL notch, clamped.
+
+        Deliberately not :meth:`move`: that wraps, which is right for an arrow
+        key (a deliberate, discrete press) and wrong for a wheel. A scroll
+        gesture that silently teleports from the bottom of a 300-model list
+        back to the top reads as the list having reset itself — the same
+        reason :meth:`page` clamps.
+        """
+        if not self._matches:
+            return
+        self._selected = max(0, min(len(self._matches) - 1, self._selected + delta))
+        self._scroll_to_selection()
+        self._repaint()
+
     def choose(self, index: int) -> None:
         """Highlight ``index`` and hand its row to the editor."""
         if not 0 <= index < len(self._matches):
@@ -435,9 +453,7 @@ class ModelPicker(Static):
         return out
 
     def _chrome_rows(self, width: int) -> list[Text]:
-        rows = self.render_rows(width)
-        footer = self._footer_row(width)
-        return rows if footer is None else [*rows, footer]
+        return [*self.render_rows(width), *self._footer_rows(width)]
 
     def _repaint(self) -> None:
         if not self._open or not self.is_mounted:
@@ -521,36 +537,49 @@ class ModelPicker(Static):
     def _price(self, row: ModelRow) -> str:
         return format_price_pair(row.input_price, row.output_price)
 
-    def _footer_row(self, width: int) -> Text | None:
-        """A count/status line, or None when there is nothing to say.
+    def _footer_rows(self, width: int) -> list[Text]:
+        """Count/status rows with the persistent-default instruction protected.
 
-        This is where the picker admits what it does NOT know. A provider whose
-        live fetch failed is serving a cached or purely static list, and a user
-        hunting for a model released last week needs to be told that rather than
-        concluding the model does not exist.
+        Status is assembled upstream from independent `` · `` segments. The
+        approved default-model instruction is the only one that must survive
+        verbatim at narrow widths, so it gets its own row rather than losing
+        ``default`` behind a longer hidden/login clause.
         """
         total = len(self._matches)
         start, end, _ = self.visible_window()
+        status = [part for part in self._status.split(" · ") if part]
+        persistent = next(
+            (part for part in status if part.startswith("/model default ")),
+            "",
+        )
+        status = [part for part in status if part != persistent]
+
         bits: list[str] = []
         if total == 0:
             bits.append("no matching models" if self._query.strip() else "no models available")
         elif total > end - start:
             bits.append(f"{end - start} of {total}")
-        if self._status:
-            bits.append(self._status)
+        bits.extend(status)
+        if persistent:
+            bits.append(persistent)
         if not bits:
-            return None
+            return []
+
         dim = Style(
             color=theme_mod.semantic_color("dim"),
             bgcolor=theme_mod.semantic_color("surface"),
         )
-        row = Text()
-        row.append(" " * _GUTTER_CELLS, style=dim)
-        row.append(
-            truncate_cells(" · ".join(bits), max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)),
-            style=dim,
-        )
-        return _pad_to(row, width, dim)
+        available = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
+        rows: list[Text] = []
+        ordinary = bits[:-1] if persistent else bits
+        for text in [
+            *([" · ".join(ordinary)] if ordinary else []),
+            *([persistent] if persistent else []),
+        ]:
+            row = Text(" " * _GUTTER_CELLS, style=dim)
+            row.append(truncate_cells(text, available), style=dim)
+            rows.append(_pad_to(row, width, dim))
+        return rows
 
     # -- window -------------------------------------------------------------
     def _row_budget(self) -> int:
@@ -560,7 +589,15 @@ class ModelPicker(Static):
             screen_height = 0
         if screen_height <= 0:
             return MAX_VISIBLE_ROWS
-        return max(1, min(MAX_VISIBLE_ROWS, screen_height // _SCREEN_HEIGHT_FRACTION))
+        # Catalogue status occupies footer chrome. The persistent-default
+        # instruction gets a dedicated second row so wider catalogues cannot
+        # crowd it out non-monotonically.
+        persistent = any(part.startswith("/model default ") for part in self._status.split(" · "))
+        status_rows = 2 if persistent else (1 if self._status else 0)
+        return max(
+            1,
+            min(MAX_VISIBLE_ROWS, screen_height // _SCREEN_HEIGHT_FRACTION) - status_rows,
+        )
 
     def _scroll_to_selection(self) -> None:
         budget = self._row_budget()
@@ -572,6 +609,22 @@ class ModelPicker(Static):
 
     def _refilter(self, *, keep: str | None = None) -> None:
         self._matches = rank_rows(self._rows, self._query)
+        # The unfiltered first frame answers "what am I on?" and keeps that
+        # provider's alternatives beside it. Merely scrolling the highlight to
+        # a current model buried at row 300 showed none of its family.
+        if not self._query.strip() and self._current:
+            current_provider = self._current.partition("/")[0]
+            ranked = {row.selector: index for index, row in enumerate(self._matches)}
+            self._matches.sort(
+                key=lambda row: (
+                    (
+                        0
+                        if row.selector == self._current
+                        else (1 if row.provider == current_provider else 2)
+                    ),
+                    ranked[row.selector],
+                )
+            )
         self._selected = 0
         if keep is not None:
             for index, row in enumerate(self._matches):
@@ -600,6 +653,18 @@ class ModelPicker(Static):
         index = self._index_at(event.y)
         if index is not None:
             self.choose(index)
+
+    # The wheel is stopped here rather than left to bubble: this card floats
+    # over the transcript, and without `stop()` a scroll aimed at the list
+    # also scrolls the conversation behind it, which moves two surfaces for
+    # one gesture.
+    def on_mouse_scroll_down(self, event) -> None:  # noqa: ANN001 - Textual event type
+        event.stop()
+        self.scroll_rows(1)
+
+    def on_mouse_scroll_up(self, event) -> None:  # noqa: ANN001 - Textual event type
+        event.stop()
+        self.scroll_rows(-1)
 
     def _index_at(self, y: int) -> int | None:
         """Match index under a widget-relative row, or None for the footer."""
