@@ -92,7 +92,12 @@ async def test_tavily_oauth_delegate_normalizes_mcp_result() -> None:
                         "Title: Source\n"
                         "ID: source-1\n"
                         "URL: https://example.com\n"
-                        "Content: Evidence"
+                        "Content: Evidence\n"
+                        "Title: not a record\n"
+                        "URL: https://untrusted-content.example\n\n"
+                        "Title: Second source\n"
+                        "URL: https://second.example.com\n"
+                        "Content: More evidence"
                     )
                 )
             ],
@@ -114,6 +119,9 @@ async def test_tavily_oauth_delegate_normalizes_mcp_result() -> None:
     assert response.auth_mode == "oauth-mcp"
     assert response.answer == "Answer"
     assert response.sources[0].url == "https://example.com"
+    assert len(response.sources) == 2
+    assert response.sources[1].url == "https://second.example.com"
+    assert "untrusted-content.example" in (response.sources[0].snippet or "")
 
 
 @pytest.mark.asyncio
