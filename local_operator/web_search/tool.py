@@ -160,41 +160,55 @@ async def _search_or_abort(service_call, signal: AbortSignal | None):
 
 
 def _parse_tavily_mcp_text(text: str) -> dict[str, Any]:
-    """Parse the official Tavily MCP's ``formatResults`` text contract."""
+    """Parse the official Tavily MCP's unescaped ``formatResults`` text."""
     answer: list[str] = []
     results: list[dict[str, str]] = []
     current: dict[str, str] = {}
-    collecting: str | None = None
+    in_results = False
+    phase: str | None = None
+    previous_blank = False
 
     def finish() -> None:
         nonlocal current
         if current.get("url"):
+            content = current.get("content")
+            if content is not None:
+                current["content"] = content.strip()
             results.append(current)
         current = {}
 
-    for raw_line in text.splitlines():
+    for raw_line in text.replace("\r\n", "\n").splitlines():
         line = raw_line.strip()
+        if not line:
+            if phase == "content" and current.get("content"):
+                current["content"] += "\n"
+            previous_blank = True
+            continue
         if line == "Detailed Results:":
-            collecting = None
-        elif line.startswith("Answer:"):
+            in_results = True
+            phase = None
+        elif not in_results and line.startswith("Answer:"):
             answer.append(line.removeprefix("Answer:").strip())
-            collecting = "answer"
-        elif line.startswith("Title:"):
+            phase = "answer"
+        elif not in_results and phase == "answer":
+            answer.append(line)
+        elif in_results and previous_blank and line.startswith("Title:"):
+            # Official records begin with a blank line before Title. Content is
+            # unescaped, so Title:/URL: text inside an ordinary snippet must
+            # remain content rather than becoming a forged source record.
             finish()
             current["title"] = line.removeprefix("Title:").strip()
-            collecting = None
-        elif line.startswith("URL:"):
+            phase = "metadata"
+        elif phase == "metadata" and line.startswith("ID:"):
+            pass
+        elif phase == "metadata" and line.startswith("URL:"):
             current["url"] = line.removeprefix("URL:").strip()
-            collecting = None
-        elif line.startswith("Content:"):
+        elif phase == "metadata" and line.startswith("Content:"):
             current["content"] = line.removeprefix("Content:").strip()
-            collecting = "content"
-        elif line.startswith(("ID:", "Score:", "Raw Content:")):
-            collecting = None
-        elif line and collecting == "answer":
-            answer.append(line)
-        elif line and collecting == "content":
+            phase = "content"
+        elif phase == "content":
             current["content"] = " ".join(part for part in (current.get("content"), line) if part)
+        previous_blank = False
     finish()
     if not results:
         raise RuntimeError("Tavily OAuth MCP returned no parseable results")
