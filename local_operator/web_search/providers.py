@@ -14,7 +14,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -108,7 +108,7 @@ def _unwrap_duckduckgo_url(href: str) -> str:
     parsed = urlparse(decoded if "://" in decoded else f"https:{decoded}")
     wrapped = parse_qs(parsed.query).get("uddg")
     if wrapped:
-        return unquote(wrapped[0])
+        return wrapped[0]
     if decoded.startswith("//"):
         return "https:" + decoded
     return decoded
@@ -563,7 +563,7 @@ PROVIDERS: dict[SearchProviderId, ProviderDefinition] = {
         "tavily",
         "Tavily",
         "free / key / OAuth MCP",
-        "Official keyless access; TAVILY_API_KEY raises limits",
+        "Keyless by default; API key raises limits; OAuth setup available",
         ("TAVILY_API_KEY",),
         _search_tavily,
     ),

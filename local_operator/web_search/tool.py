@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import uuid
-from contextlib import suppress
 from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -135,6 +135,10 @@ async def _search_or_abort(service_call, signal: AbortSignal | None):
     if signal is None:
         return await service_call
     if signal.aborted:
+        # The caller constructs the provider coroutine before handing it over.
+        # Close an unscheduled coroutine or Python will warn at collection time.
+        if inspect.iscoroutine(service_call):
+            service_call.close()
         raise asyncio.CancelledError(signal.reason or "aborted")
     search_task = asyncio.create_task(service_call)
     abort_task = asyncio.create_task(signal.wait())
@@ -143,15 +147,76 @@ async def _search_or_abort(service_call, signal: AbortSignal | None):
             {search_task, abort_task}, return_when=asyncio.FIRST_COMPLETED
         )
         if abort_task in done:
-            search_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await search_task
             raise asyncio.CancelledError(signal.reason or "aborted")
         return await search_task
     finally:
-        abort_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await abort_task
+        # Immediate steering cancels this coroutine itself rather than setting
+        # AbortSignal. Own and reap both children on every exit so provider or
+        # delegated MCP I/O can never continue detached from its tool call.
+        for task in (search_task, abort_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(search_task, abort_task, return_exceptions=True)
+
+
+def _parse_tavily_mcp_text(text: str) -> dict[str, Any]:
+    """Parse the official Tavily MCP's ``formatResults`` text contract."""
+    answer: list[str] = []
+    results: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    collecting: str | None = None
+
+    def finish() -> None:
+        nonlocal current
+        if current.get("url"):
+            results.append(current)
+        current = {}
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line == "Detailed Results:":
+            collecting = None
+        elif line.startswith("Answer:"):
+            answer.append(line.removeprefix("Answer:").strip())
+            collecting = "answer"
+        elif line.startswith("Title:"):
+            finish()
+            current["title"] = line.removeprefix("Title:").strip()
+            collecting = None
+        elif line.startswith("URL:"):
+            current["url"] = line.removeprefix("URL:").strip()
+            collecting = None
+        elif line.startswith("Content:"):
+            current["content"] = line.removeprefix("Content:").strip()
+            collecting = "content"
+        elif line.startswith(("ID:", "Score:", "Raw Content:")):
+            collecting = None
+        elif line and collecting == "answer":
+            answer.append(line)
+        elif line and collecting == "content":
+            current["content"] = " ".join(part for part in (current.get("content"), line) if part)
+    finish()
+    if not results:
+        raise RuntimeError("Tavily OAuth MCP returned no parseable results")
+    return {"answer": " ".join(answer).strip() or None, "results": results}
+
+
+def _tavily_mcp_payload(result: ToolResult) -> dict[str, Any]:
+    """Normalize official prose plus structured payloads from other servers."""
+    server_result = (result.details or {}).get("server_result")
+    if isinstance(server_result, dict):
+        structured = server_result.get("structuredContent")
+        if not isinstance(structured, dict):
+            structured = server_result.get("structured_content")
+        if isinstance(structured, dict):
+            return structured
+    try:
+        payload = json.loads(result.text)
+    except json.JSONDecodeError:
+        return _parse_tavily_mcp_text(result.text)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Tavily OAuth MCP returned a non-object response")
+    return payload
 
 
 def _tavily_oauth_delegate(
@@ -176,12 +241,7 @@ def _tavily_oauth_delegate(
         )
         if result.is_error:
             raise RuntimeError(result.text or "Tavily OAuth MCP search failed")
-        try:
-            payload = json.loads(result.text)
-        except json.JSONDecodeError as error:
-            raise RuntimeError("Tavily OAuth MCP returned non-JSON output") from error
-        if not isinstance(payload, dict):
-            raise RuntimeError("Tavily OAuth MCP returned a non-object response")
+        payload = _tavily_mcp_payload(result)
         return tavily_response_from_payload(payload, auth_mode="oauth-mcp", limit=limit)
 
     return search

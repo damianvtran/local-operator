@@ -95,7 +95,7 @@ PLAIN_TOOL_ICONS: dict[str, str] = {
     "list_variables": "x",  # the algebraic unknown
     "read_variable": "x",
     "browser": "@",  # the URL sigil
-    "web_search": "⌕",  # find/search without reusing grep's /pattern/ sigil
+    "web_search": "?",  # a search query, in the verified ASCII fallback repertoire
     "task": "»",  # work passed onward
     "agent": "»",
 }

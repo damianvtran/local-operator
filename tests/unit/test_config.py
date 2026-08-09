@@ -61,6 +61,19 @@ def test_config_manager_initialization(temp_config_dir):
     )
 
 
+def test_config_managers_do_not_share_nested_defaults(temp_config_dir):
+    """A provider setup in one fresh config must not alter another."""
+    first = ConfigManager(temp_config_dir / "first")
+    first_search = dict(first.get_config_value("web_search"))
+    first_search["providers"] = ["searxng"]
+    first_search["searxng_endpoint"] = "https://search.example.test"
+    first.config.set_value("web_search", first_search)
+
+    second = ConfigManager(temp_config_dir / "second")
+
+    assert second.get_config_value("web_search") == DEFAULT_CONFIG.get_value("web_search")
+
+
 @patch("local_operator.config.version")
 def test_config_manager_version_warning(mock_version, temp_config_dir, capsys):
     """Test ConfigManager warns about old config versions."""

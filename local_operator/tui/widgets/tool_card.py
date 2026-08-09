@@ -370,7 +370,7 @@ def _search_result_output(details: dict[str, Any] | None) -> list[str]:
             if len(snippet) > SEARCH_EXPANDED_SNIPPET_CHARS:
                 snippet = snippet[: SEARCH_EXPANDED_SNIPPET_CHARS - 1].rstrip() + "…"
             lines.append(f"   {snippet}")
-    lines.append("Open a result URL with browser to read the full page.")
+    lines.append("Ask Operator to open result N with browser for the full page.")
     return lines
 
 
@@ -1018,6 +1018,8 @@ class ToolCard(TranscriptBlock):
             return row
         if self._diff:
             self._append_diff_body(row, width)
+        elif self.tool_name.lower() == "web_search" and self._output:
+            self._append_search_body(row, width)
         elif self._output:
             self._append_output_body(row, width)
         return row
@@ -1040,6 +1042,33 @@ class ToolCard(TranscriptBlock):
         hidden = len(self._output) - len(shown)
         if hidden > 0:
             marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(marker, line_width), style=dim)
+
+    def _append_search_body(self, row: Text, width: int) -> None:
+        """Search expansion hierarchy: titles lead, URLs signal, snippets recede."""
+        fg = Style(color=theme_mod.semantic_color("fg"), bold=True)
+        signal = Style(color=theme_mod.semantic_color("signal"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        shown = self._output[:EXPAND_MAX_LINES]
+        for line in shown:
+            stripped = line.strip()
+            if stripped.startswith(("http://", "https://")):
+                ink = signal
+            elif stripped[:1].isdigit() and ". " in stripped:
+                ink = fg
+            elif stripped.startswith(("Provider:", "Sources:", "Ask Operator")):
+                ink = muted
+            else:
+                ink = dim
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(line, line_width), style=ink)
+        hidden = len(self._output) - len(shown)
+        if hidden > 0:
+            marker = f"… {hidden} more search line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
@@ -1170,12 +1199,10 @@ class ToolCard(TranscriptBlock):
         slot_token = "dim"
         remaining = max(0, width - prefix_cells - status_cells - 2)
         if self.can_expand():
-            # Offered under the pointer or under keyboard focus, silent at
-            # rest. A settled transcript is content, not a wall of controls:
-            # printing ⟨expand⟩ on every row costs ~9 cells of permanent
-            # chrome on the common 80-column terminal, and the row's ground
-            # already lifts on :hover and :focus to say it is a target.
-            if self._hovered or self._focused:
+            # Generic tool output stays quiet until the row is targeted. Search
+            # sources are the primary result, not diagnostics, so their
+            # disclosure remains visible at rest and in colorless terminals.
+            if self.tool_name.lower() == "web_search" or self._hovered or self._focused:
                 offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
                 if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
                     slot = offer

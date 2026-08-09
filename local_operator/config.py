@@ -6,6 +6,7 @@ It provides default configurations and methods to update them.
 
 import argparse
 import sys
+from copy import deepcopy
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -196,10 +197,12 @@ class ConfigManager:
         """
         if not self.config_file.exists():
             self.config_dir.mkdir(parents=True, exist_ok=True)
-            return DEFAULT_CONFIG
+            # DEFAULT_CONFIG is process-global; every manager needs its own
+            # nested values so one setup command cannot change later sessions.
+            return Config(deepcopy(vars(DEFAULT_CONFIG)))
 
         with open(self.config_file, "r", encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f) or vars(DEFAULT_CONFIG)
+            config_dict = yaml.safe_load(f) or deepcopy(vars(DEFAULT_CONFIG))
 
             # Check if config version is older than current version
             config_version = config_dict.get("version", "0.0.0")
@@ -218,12 +221,12 @@ class ConfigManager:
 
             # Fill in any missing values with defaults
             if "values" not in config_dict:
-                config_dict["values"] = vars(DEFAULT_CONFIG)["values"]
+                config_dict["values"] = deepcopy(vars(DEFAULT_CONFIG)["values"])
             else:
                 default_values = vars(DEFAULT_CONFIG)["values"]
                 for key, value in default_values.items():
                     if key not in config_dict["values"]:
-                        config_dict["values"][key] = value
+                        config_dict["values"][key] = deepcopy(value)
 
             return Config(config_dict)
 
@@ -243,7 +246,7 @@ class ConfigManager:
         if "version" not in config:
             config["version"] = DEFAULT_CONFIG.version
         if "metadata" not in config:
-            config["metadata"] = DEFAULT_CONFIG.metadata
+            config["metadata"] = deepcopy(DEFAULT_CONFIG.metadata)
 
         # Ensure created_at and last_modified are included
         if "created_at" not in config["metadata"]:

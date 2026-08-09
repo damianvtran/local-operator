@@ -300,13 +300,20 @@ def test_web_search_expansion_uses_structured_page_metadata() -> None:
         },
     )
 
+    # Search sources are primary content, so their disclosure stays visible
+    # without requiring hover or prior knowledge of generic card controls.
+    assert EXPAND_HINT in card._build_row(120).plain
     card.toggle_expanded()
-    content = card._build_content(120).plain
+    content = card._build_content(120)
 
-    assert "Python 3.13 release" in content
-    assert "https://python.org/downloads/release/python-3130/" in content
-    assert "Release notes and downloads for Python 3.13." in content
-    assert "Open a result URL with browser" in content
+    assert "Python 3.13 release" in content.plain
+    assert "https://python.org/downloads/release/python-3130/" in content.plain
+    assert "Release notes and downloads for Python 3.13." in content.plain
+    assert "Ask Operator to open result N with browser" in content.plain
+    assert _style_at(content, "Python 3.13 release").bold is True
+    assert (
+        _style_at(content, "https://python.org").color != _style_at(content, "Release notes").color
+    )
 
 
 # --- the one-line guarantee ------------------------------------------------

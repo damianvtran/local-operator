@@ -1918,19 +1918,42 @@ class OperatorApp(App[None]):
         try:
             if not words:
                 settings = load_search_settings(manager)
+                statuses = provider_statuses(settings, credentials)
+                labels = {status.id: status.label for status in statuses}
+                strategy = settings.strategy.replace("_", " ").title()
+                order = " → ".join(labels[value] for value in settings.providers)
                 items: list[tuple[str, str]] = [
                     (
-                        "web search",
-                        f"{'on' if settings.enabled else 'off'} · "
-                        f"{settings.strategy} · "
-                        f"{', '.join(settings.providers) or 'no providers'}",
+                        "Web search",
+                        f"{'On' if settings.enabled else 'Off'} · {strategy} · "
+                        f"{order or 'No providers'}",
                     )
                 ]
-                for status in provider_statuses(settings, credentials):
+                for status in statuses:
                     enabled = "enabled" if status.enabled else "disabled"
-                    ready = "ready" if status.available else "setup needed"
-                    items.append((status.id, f"{enabled} · {ready} · {status.detail}"))
-                items.append(("setup", "local-operator search setup <provider>"))
+                    available = "available" if status.available else "setup needed"
+                    items.append((status.label, f"{enabled} · {available} · {status.detail}"))
+                items.extend(
+                    [
+                        ("toggle", "/search on|off · /search enable|disable <provider>"),
+                        (
+                            "balance",
+                            "/search balance round_robin|ordered · " "/search order <providers…>",
+                        ),
+                        (
+                            "setup (shell)",
+                            "local-operator search setup tavily --oauth|--api-key",
+                        ),
+                        (
+                            "API keys (shell)",
+                            "local-operator search setup <provider> --api-key",
+                        ),
+                        (
+                            "SearXNG (shell)",
+                            "local-operator search setup searxng --endpoint <url>",
+                        ),
+                    ]
+                )
                 self._append_block(RichBlock(_tree_listing(items)))
                 return
 
@@ -1979,7 +2002,19 @@ class OperatorApp(App[None]):
                 if provider not in PROVIDER_IDS:
                     notice(f"unknown search provider: {provider}", "warning")
                     return
-                notice(f"run: local-operator search setup {provider}")
+                if provider == "tavily":
+                    notice(
+                        "run in a shell: local-operator search setup tavily "
+                        "--oauth (or --api-key)"
+                    )
+                elif provider == "searxng":
+                    notice(
+                        "run in a shell: local-operator search setup searxng " "--endpoint <url>"
+                    )
+                elif provider in ("brave", "exa", "serpapi", "perplexity"):
+                    notice(f"run in a shell: local-operator search setup {provider} " "--api-key")
+                else:
+                    notice("DuckDuckGo needs no setup; use /search enable duckduckgo")
                 return
             notice(
                 "usage: /search [on|off|enable <provider>|disable <provider>|"
