@@ -33,10 +33,12 @@ TRANSCRIPT_NAME = "transcript.jsonl"
 #: two days' work apart, short enough that a column of them still scans.
 NAME_MAX_CHARS = 64
 
-#: Bytes of a transcript the name scan will read before giving up. A name is a
-#: convenience; a pathological first line (a pasted file, a base64 image) must
-#: not turn opening the picker into reading megabytes off disk for every row.
-NAME_SCAN_BYTES = 64_000
+#: Characters of a transcript the name scan will read before giving up — not
+#: bytes: the file is opened in text mode, so this bounds the decoded string,
+#: which is what actually occupies memory here. A name is a convenience; a
+#: pathological first line (a pasted file, a base64 image) must not turn
+#: opening the picker into reading megabytes off disk for every row.
+NAME_SCAN_CHARS = 64_000
 
 
 class ResumeNotFound(Exception):
@@ -167,41 +169,52 @@ def session_name(session_dir: Path, *, max_chars: int = NAME_MAX_CHARS) -> str:
     picker, so a transcript that is truncated, half-written by a session still
     running, or corrupt yields ``""`` and a nameless row rather than taking
     the picker down. The scan also stops at the first user message and at
-    :data:`NAME_SCAN_BYTES`, so it costs one short read per session instead of
+    :data:`NAME_SCAN_CHARS`, so it costs one short read per session instead of
     a full parse of a file that can be hundreds of kilobytes.
     """
     transcript = session_dir / TRANSCRIPT_NAME
-    scanned = 0
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                scanned += len(line)
-                if scanned > NAME_SCAN_BYTES:
-                    return ""
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except ValueError:
-                    # A partial final line is normal for a session that is
-                    # still running: the writer appends, we may read mid-write.
-                    continue
-                if not isinstance(entry, dict) or entry.get("type") != "message":
-                    continue
-                payload = entry.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                # ``role`` is matched EXACTLY: a tool result is also a
-                # four-character role and carries the tool's output, which
-                # would name the conversation after a directory listing.
-                if payload.get("role") != "user":
-                    continue
-                text = _first_text(payload.get("content"))
-                if text:
-                    return _condense(text, max_chars)
+            # ONE bounded read, not `for line in handle`. Iterating the file
+            # materialises each line in full BEFORE any cap can be checked, so a
+            # transcript whose first line is a pasted file or a base64 image —
+            # exactly the case this cap exists for — allocated the whole line
+            # anyway (measured: an 80 MB first line peaked at 168 MB before the
+            # check that was supposed to prevent it). Reading a fixed window
+            # first makes the bound real.
+            head = handle.read(NAME_SCAN_CHARS)
     except OSError:
         return ""
+    # The final line of the window is almost always truncated mid-token; it is
+    # dropped rather than parsed unless the window ended exactly on a newline,
+    # because a half-read line is indistinguishable from the half-WRITTEN line
+    # a live session leaves at the end of its transcript.
+    lines = head.splitlines()
+    if lines and not head.endswith("\n"):
+        lines.pop()
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            # A partial final line is normal for a session that is still
+            # running: the writer appends, we may read mid-write.
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "message":
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        # ``role`` is matched EXACTLY: a tool result is also a four-character
+        # role and carries the tool's output, which would name the
+        # conversation after a directory listing.
+        if payload.get("role") != "user":
+            continue
+        text = _first_text(payload.get("content"))
+        if text:
+            return _condense(text, max_chars)
     return ""
 
 
@@ -241,6 +254,13 @@ def recent_session_rows(config_dir: Path, limit: int = 10) -> list[SessionRow]:
     Layered over :func:`recent_sessions` rather than replacing it: the CLI's
     recovery listing wants only ``(id, mtime)`` and must stay as cheap as it
     is, while the picker pays one extra short read per row for the name.
+
+    Synchronous, and called from the UI thread when the picker opens. That is
+    deliberate: each read is bounded (:data:`NAME_SCAN_CHARS`) and stops at the
+    first user turn, so the pathological case — a transcript whose first line
+    is an 80 MB paste — measures 0.2 ms, and fifty of them are still under a
+    frame. Moving this to a worker would trade that for a picker that opens
+    empty and fills in, which is worse for a list the user is about to read.
     """
     return [
         SessionRow(session_id, mtime, session_name(config_dir / "sessions" / session_id))

@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 from textual import events
 from textual.app import App, ComposeResult
 
@@ -20,10 +21,15 @@ from local_operator.resume import (
     recent_session_rows,
     session_name,
 )
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
-    PAGE_ROWS,
+    CARD_MAX_HEIGHT_FRACTION,
+    CARD_PADDING_ROWS,
+    NAME_MIN_CELLS,
+    PAGE_ROWS_MAX,
     SessionPickerScreen,
     filter_rows,
+    plan_columns,
     render_rows,
 )
 
@@ -272,7 +278,7 @@ async def test_a_filter_that_empties_the_list_says_so_and_answers_nothing() -> N
         for char in "zzz":
             await pilot.press(char)
         await pilot.pause()
-        assert "nothing matches" in "\n".join(screen.render_lines_for_test())
+        assert "no session matches that filter" in "\n".join(screen.render_lines_for_test())
         await pilot.press("enter")
         await pilot.pause()
     assert app.chosen == [None]
@@ -280,7 +286,7 @@ async def test_a_filter_that_empties_the_list_says_so_and_answers_nothing() -> N
 
 @pytest.mark.asyncio
 async def test_a_long_list_pages_and_reports_its_position() -> None:
-    rows = [_row(f"id{index:04d}", f"session {index}") for index in range(PAGE_ROWS * 3)]
+    rows = [_row(f"id{index:04d}", f"session {index}") for index in range(PAGE_ROWS_MAX * 3)]
     app = _PickerHost(rows)
     async with app.run_test(size=(100, 40)) as pilot:
         screen = await app.open_picker()
@@ -369,3 +375,183 @@ def test_the_wheel_handlers_stop_the_event_so_the_transcript_stays_put() -> None
     screen.on_mouse_scroll_down(down)
     screen.on_mouse_scroll_up(up)
     assert down.stopped and up.stopped
+
+
+# --- measured geometry (the card reads the terminal) ------------------------
+
+
+def test_a_narrow_card_drops_the_id_rather_than_cutting_it() -> None:
+    """A cut hex id still LOOKS like a valid id, and it is the one field a
+    user copies into `/resume <id>`. Columns are dropped, never truncated —
+    the id first, then the age, and the name last (a prefix of a sentence is
+    still recognisable)."""
+    rows = [_row("abc123def456", "port the CLI to typer")]
+    ages = ["3h ago"]
+    wide_name, wide_age, wide_id = plan_columns(rows, 74, ages)
+    assert wide_id == 12 and wide_age == 6
+
+    # Too narrow for the id: it goes, the age stays, nothing is cut.
+    _, age_col, id_col = plan_columns(rows, 34, ages)
+    assert id_col == 0 and age_col == 6
+
+    # Narrower still: the age goes too, and the name keeps its floor.
+    name_col, age_col, id_col = plan_columns(rows, 20, ages)
+    assert (age_col, id_col) == (0, 0)
+    assert name_col >= NAME_MIN_CELLS
+
+
+@pytest.mark.asyncio
+async def test_the_card_never_renders_wider_than_the_terminal() -> None:
+    """The first cut was a fixed 78 cells that a 70-column terminal simply
+    clipped, amputating the id column mid-token."""
+    rows = [_row(f"id{index:010d}", f"session number {index}") for index in range(20)]
+    for width in (60, 70, 80, 100, 120, 190):
+        app = _PickerHost(rows)
+        async with app.run_test(size=(width, 30)) as pilot:
+            screen = await app.open_picker()
+            await pilot.pause()
+            for line in screen.render_lines_for_test():
+                assert cell_len(line) <= width, (width, line)
+
+
+@pytest.mark.asyncio
+async def test_a_short_terminal_loses_list_rows_not_the_way_out() -> None:
+    """Chrome is reserved first. The footer is the only place the card says
+    `esc cancel`, so a clip that ate it left no stated way out."""
+    rows = [_row(f"id{index:04d}", f"session {index}") for index in range(40)]
+    for height in (16, 18, 22, 30, 48):
+        app = _PickerHost(rows)
+        async with app.run_test(size=(100, height)) as pilot:
+            screen = await app.open_picker()
+            await pilot.pause()
+            lines = screen.render_lines_for_test()
+            assert "esc cancel" in lines[-1], (height, lines[-1])
+            # And the whole card fits the share of the screen it may occupy.
+            budget = int(height * CARD_MAX_HEIGHT_FRACTION) - CARD_PADDING_ROWS
+            assert len(lines) <= budget, (height, len(lines), budget)
+
+
+@pytest.mark.asyncio
+async def test_the_cursor_is_always_on_a_row_the_card_actually_draws() -> None:
+    """A fixed page size let the cursor sit on a row that was never rendered,
+    and Enter then resumed a session the user could not see."""
+    rows = [_row(f"id{index:04d}", f"session {index}") for index in range(40)]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 16)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        for _ in range(20):
+            await pilot.press("down")
+        await pilot.pause()
+        drawn = "\n".join(screen.render_lines_for_test())
+        chosen = screen.visible_rows[screen.selected_index]
+        assert chosen.name in drawn, (screen.selected_index, drawn)
+
+
+# --- selection legibility ---------------------------------------------------
+
+
+def test_selecting_an_unnamed_row_brightens_it_like_any_other() -> None:
+    """Pinning the placeholder to the dim floor made a SELECTED unnamed row
+    darker than every unselected named row, inverting the highlight."""
+    rows = [_row("aaa1", ""), _row("bbb2", "a named session")]
+
+    def name_colour(lines, index: int) -> str:
+        colour = lines[index].spans[1].style.color
+        assert colour is not None and colour.triplet is not None
+        return colour.triplet.hex
+
+    at_rest = render_rows(rows, 1, 74, NOW)  # the NAMED row is selected
+    selected = render_rows(rows, 0, 74, NOW)  # the UNNAMED row is selected
+    assert name_colour(selected, 0) != name_colour(at_rest, 0)
+    # And selecting it does not make it dimmer than an unselected named row.
+    assert name_colour(selected, 0) == theme_mod.semantic_color("muted")
+
+
+def test_every_row_style_clears_the_dim_step() -> None:
+    """`faint` is 1.49:1 against this card's raised ground — the ramp is
+    calibrated against the app background, and an overlay lifts the ground
+    without lifting the text."""
+    faint = theme_mod.semantic_color("faint")
+    lines = render_rows([_row("abc123def456", "a session")], 0, 74, NOW)
+    for span in lines[0].spans:
+        style = span.style
+        if isinstance(style, str):  # rich allows a named style; ours are objects
+            continue
+        colour = style.color
+        if colour is not None and colour.triplet is not None:
+            assert colour.triplet.hex != faint, span
+
+
+# --- mouse ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_row_resumes_it() -> None:
+    """The card invited the mouse in with the wheel; a list you can scroll
+    with the mouse and cannot click is a half-built affordance."""
+    rows = [_row("first1", "one"), _row("second", "two"), _row("third3", "three")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        body = screen.query_one("#session-picker-body")
+        # Row 1 (the second session) sits under the header and the rule.
+        await pilot.click(body, offset=(4, 3))
+        await pilot.pause()
+    assert app.chosen == ["second"]
+
+
+@pytest.mark.asyncio
+async def test_narrowing_the_filter_selects_the_first_match() -> None:
+    """Clamping the old index landed the cursor on the LAST match, so Enter
+    took the least related row still standing."""
+    rows = [
+        _row("aaa111", "alpha session"),
+        _row("bbb222", "beta session"),
+        _row("ccc333", "gamma session"),
+    ]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        await pilot.press("end")  # cursor on the LAST row
+        await pilot.pause()
+        assert screen.selected_index == 2
+        for char in "session":  # matches all three
+            await pilot.press(char)
+        await pilot.pause()
+        assert screen.selected_index == 0
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.chosen == ["aaa111"]
+
+
+@pytest.mark.asyncio
+async def test_the_card_ends_on_quiet_ground_then_its_meta_in_both_states() -> None:
+    """The position and the key hints are the same kind of row — statements
+    ABOUT the list, not entries in it — so they travel together at the bottom
+    with one quiet row above the pair. Same grammar as the usage card; the two
+    differ only by whether the position row exists. Emitting an EMPTY counter
+    row left two blank rows and pushed the keys off the block."""
+    many = [_row(f"id{index:04d}", f"session {index}") for index in range(40)]
+    few = [_row("only01", "the only session")]
+
+    app = _PickerHost(many)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        scrolled = screen.render_lines_for_test()
+    assert scrolled[-1].startswith("↑↓")  # keys last
+    assert scrolled[-2].startswith("showing ")  # position above them
+    assert scrolled[-3] == ""  # one quiet row above the pair
+    assert scrolled[-4] != ""  # and the report right above that
+
+    app = _PickerHost(few)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        fits = screen.render_lines_for_test()
+    assert fits[-1].startswith("↑↓")
+    assert fits[-2] == ""  # no position row, and NOT a second blank
+    assert fits[-3] != ""

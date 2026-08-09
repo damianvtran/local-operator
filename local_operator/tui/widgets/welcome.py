@@ -250,27 +250,30 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: this is the one screen a first-run user reads word for word.
 #:
 #: Each one leads with the command or the verb so that the width tiers can
-#: truncate the tail and still leave something actionable behind; each fits
-#: inside a 60-cell terminal untruncated (pinned in the tests).
+#: truncate the tail and still leave something actionable behind; each is a
+#: SINGLE clause, because the pool's separator vocabulary is already spent on
+#: the prefix glyph and a second join inside the sentence reads as two tips
+#: crammed into one row.
 #:
 #: Twelve, and deliberately not more: the pool is what a user meets a couple of
 #: entries at a time across many launches, so every addition dilutes the odds of
 #: seeing the ones that change how the app is used. The first entry is the one
-#: every still frame shows (see :meth:`WelcomeView._sync_tip_timer`), which is
-#: why it is resumption — the single question a returning user arrives with.
+#: EVERY LAUNCH OPENS ON — the rotation is pinned to it and only then resumes at
+#: a random point in the ring (see :meth:`WelcomeView._sync_tip_timer`) — which
+#: is why it is resumption, the single question a returning user arrives with.
 TIPS: tuple[str, ...] = (
     "/resume picks up a recent session where you left off",
-    "/model switches the model for this session",
-    "/model default <provider>/<id> sets the boot default",
+    "/model <provider>/<id> switches this session only",
+    "/model default saves provider and model",
     "/usage shows how much provider quota is left",
-    "/approvals auto runs tools unprompted, ask confirms",
-    "Type while the agent works — it sends at the next step",
+    "/approvals <ask|auto> sets whether tools ask first",
+    "Type as the agent works — the message sends next step",
     "esc stops the agent without ending the session",
     "Ask for parallel work and the agent fans out subagents",
     "Compaction runs itself when the context window fills",
     "/mcp lists the MCP servers found in your mcp.json",
     "/skills lists the skills loaded for this session",
-    "/goal sets a standing objective, /loop iterates to it",
+    "/goal sets the objective that /loop iterates toward",
 )
 
 #: The tip's prefix: the app's own `info` glyph, the mark every quiet one-line
@@ -300,7 +303,14 @@ TIP_ROTATE_INTERVAL_S = 12.0
 #: tip's own length: presence has to be the same answer for every entry in the
 #: pool, or the block would gain and lose a row as it rotated. See
 #: :func:`_tip_lines`.
-TIP_MIN_WIDTH = 32
+#:
+#: DERIVED from the pool, not chosen. A hand-picked 32 admitted the row and then
+#: handed it to the shared ellipsis pass, so every terminal from 32 to 55 cells
+#: read `· /resume picks up a recent ses…` — exactly the fragment this constant
+#: exists to refuse, and a number that silently went stale the first time a tip
+#: was reworded. Measured against the LONGEST entry, so the widest tip in the
+#: pool is the one that decides, and the invariant holds by construction.
+TIP_MIN_WIDTH = max(cell_len(f"{TIP_GLYPH} {tip}") for tip in TIPS)
 
 #: Warning body without its remedy, for widths that cannot hold the full
 #: `— /login <provider>` tail. A half-printed command is worse than none: the
@@ -634,14 +644,11 @@ def build_welcome_lines(
     block in the region while the alignment put it against the card, and the two
     disagreed by half the region's spare rows.
 
-    Height degradation sheds whole sections in a fixed order — decoration,
-    then teaching, then information:
-
-    1. the tip (with the blank row above it),
-    2. the logo (with the blank row under it),
-    3. the hints (with the blank row above them),
-    4. status rows, lowest priority first (version, then cwd, then model),
-       which stops at one row so the credential warning always survives.
+    Height degradation sheds whole sections in a fixed order, cheapest
+    concession first — see the ladder in the body, which spells out what each
+    step costs the user. The rule it never breaks is that the block degrades
+    gracefully: every step is one section, the credential warning is the last
+    row standing, and nothing is ever half-drawn.
 
     ``mark_color`` tints the mark for one frame of the glow and is
     the ONLY argument that cannot change the result's shape: it reaches
@@ -686,37 +693,50 @@ def build_welcome_lines(
     # decoration-before-information:
     #
     # 1. tighten the lockup — costs one row of air.
-    # 2. drop the tip, and hand that row of air straight back. It is the only row
-    #    here the user loses NOTHING permanent with — the same entry comes round on
-    #    the next launch, while every other row is either a fact or the way in —
-    #    and it is worth two, so what is left is EXACTLY the splash as it stood
-    #    before tips existed. From here down a 28-row terminal draws the frame it
-    #    always drew, with the tip as the thing that appears when there is room.
-    # 3. tighten the lockup again. The blank row is still the cheapest concession
+    # 2. drop the weakest status row — the version number, the least actionable
+    #    thing on the screen and the one row a first-run user needs least.
+    # 3. drop the tip, and hand that row of air straight back. It goes AFTER the
+    #    version number, not before: it is one row against that row's one, it is
+    #    the only affordance here the hint table does not already carry, and it
+    #    is the newest thing on the splash — a build number is what the user can
+    #    look up, a tip is what they cannot. Shedding it second was what made a
+    #    28-row terminal the floor for seeing one at all.
+    # 4. tighten the lockup again. The blank row is still the cheapest concession
     #    on the screen, so it is spent twice rather than once.
-    # 4. drop the weakest status row — the version number, which is the least
-    #    actionable thing on the screen. Spending it to keep the mark is a
-    #    better trade than losing the product's identity on the one screen that
-    #    exists to show it, and at a 28-row terminal this single row is exactly
-    #    the difference.
-    # 5. drop the mark.
+    # 5. drop the mark — and with it the reason steps 2 and 3 happened. Twelve
+    #    rows come back for the three they bought, so both concessions are UNDONE
+    #    and then re-made against the budget that is actually left. Without this
+    #    the tip was collateral damage of a concession made ten rows later: every
+    #    terminal too short for the lockup — 80x24, the classic default and a
+    #    common split pane — drew a splash with no tip on it, which is the one
+    #    outcome that defeats a rotating tip entirely.
     # 6. drop the hints — a first-time user's way in, so it goes last.
+    def drop_weakest_status() -> None:
+        """Shed the lowest-priority status row, never the last one standing."""
+        if len(status) > 1:
+            status.pop(min(range(len(status)), key=lambda index: status[index][0]))
+
     if total(len(status)) > height:
         logo = _logo_lines(width, flush=True, mark_color=mark_color)
+    if total(len(status)) > height:
+        drop_weakest_status()
     if total(len(status)) > height and show_tip:
         show_tip = False
         logo = _logo_lines(width, mark_color=mark_color)
     if total(len(status)) > height:
         logo = _logo_lines(width, flush=True, mark_color=mark_color)
-    if total(len(status)) > height and len(status) > 1:
-        status.pop(min(range(len(status)), key=lambda index: status[index][0]))
     if total(len(status)) > height:
         show_logo = False
+        show_tip = bool(tip)
+        status = list(status_full)
+        if total(len(status)) > height:
+            drop_weakest_status()
+        if total(len(status)) > height and show_tip:
+            show_tip = False
     if total(len(status)) > height:
         show_hints = False
     while len(status) > 1 and total(len(status)) > height:
-        weakest = min(range(len(status)), key=lambda index: status[index][0])
-        status.pop(weakest)
+        drop_weakest_status()
 
     # One shared pad across the status stack and the hint stack, so the splash has
     # a single left edge below the wordmark whatever the model label turns out to
@@ -805,8 +825,13 @@ class WelcomeView(Static):
         # Which tip is on screen. Zero is not a placeholder: it is what a still
         # frame shows (the rotation is gated on the animation switch, see
         # `_sync_tip_timer`), so it is the entry every reproducible frame in the
-        # suite and every snapshot carries.
+        # suite and every snapshot carries — and, since the rotation is pinned to
+        # it, the entry a LIVE launch opens on too.
         self._tip_index = 0
+        # Where the ring picks up after the pinned first tip, consumed by the
+        # first tick. See `_sync_tip_timer` for why the resume point is drawn and
+        # the start is not.
+        self._tip_resume: int | None = None
 
     def on_mount(self) -> None:
         self._poll()
@@ -1032,18 +1057,21 @@ class WelcomeView(Static):
         """
         wanted = bool(self.display) and shimmer_enabled()
         if wanted and self._tip_timer is None:
-            # Start somewhere in the ring, then advance by one. A user who types
-            # their first prompt straight away sees exactly ONE tip per launch, so
-            # a fixed start would make everything after `TIPS[0]` unreachable for
-            # them — the pool would exist for nobody. Choosing per tick instead
-            # would let the same tip come up twice in a row, which reads as a
-            # broken rotation rather than a coincidence.
+            # The row OPENS on `TIPS[0]` and never on a lottery. The pool is
+            # ordered, and the first thing a first-run user reads was whichever
+            # entry `randrange` landed on — "compaction runs itself when the
+            # context window fills" is meaningless to someone who does not yet
+            # have a context, while resumption is the question they arrive with.
             #
-            # The offset is drawn only behind the animation gate, so the frames
-            # that must be reproducible are exactly the frames that hold at
-            # `TIPS[0]`, and re-drawn per appearance rather than per app, so a
-            # `/clear` an hour in is not the boot frame again.
-            self._tip_index = random.randrange(len(TIPS))
+            # The ring still has to be REACHABLE, though, and that is what the
+            # draw is for: a user who types their first prompt straight away sees
+            # exactly one tip, so walking 0, 1, 2… every launch would make
+            # everything past the second entry unreachable for them. So the start
+            # is pinned and the RESUME point is drawn — from 1 upward, so the
+            # first tick always turns the row over rather than repainting the
+            # same sentence, which reads as a broken rotation.
+            self._tip_index = 0
+            self._tip_resume = random.randrange(1, len(TIPS))
             self._tip_timer = self.set_interval(TIP_ROTATE_INTERVAL_S, self._tip_tick)
         elif not wanted and self._tip_timer is not None:
             self._stop_tip_timer()
@@ -1059,6 +1087,7 @@ class WelcomeView(Static):
             self._tip_timer.stop()
             self._tip_timer = None
         self._tip_index = 0
+        self._tip_resume = None
 
     def _tip_tick(self) -> None:
         """The next tip in the ring, and a repaint that cannot move a row.
@@ -1071,5 +1100,8 @@ class WelcomeView(Static):
         is the one place in the app where a row appearing or vanishing moves the
         whole splash.
         """
-        self._tip_index = (self._tip_index + 1) % len(TIPS)
+        # The pinned first tip hands off to the drawn resume point once; every
+        # tick after that is a plain step round the ring.
+        resume, self._tip_resume = self._tip_resume, None
+        self._tip_index = resume if resume is not None else (self._tip_index + 1) % len(TIPS)
         self.refresh()

@@ -12,13 +12,24 @@ viewer already does for the other "read a list, pick a row" case.
 Why names. A column of hex ids is not something anyone recognises their own
 work in; the id is what the machine resumes, not what a human picks by. The
 name is the session's opening user message (see
-:func:`local_operator.resume.session_name`), which is both the only per-session
-title on disk and the thing the user actually remembers about the session.
+:func:`local_operator.resume.session_name`), which is both the only
+per-session title on disk and the thing the user actually remembers about the
+session.
 
 The list is filterable by typing because the ids are unmemorable and the names
 are not: with a hundred sessions, "asteroids" finds the one you mean faster
 than paging can. Filtering narrows; it never reorders, so a row does not move
 under the cursor as the query grows.
+
+**The card measures the terminal.** Every column here is a cell count derived
+from the screen, not a constant: the first cut shipped a fixed 78-cell card
+that a 70-column terminal simply clipped, which amputated the id column
+mid-token and left a truncated hex string that still looked like a valid id —
+the one field a user copies into ``/resume <id>``. Below the width the id
+needs, the id column is DROPPED rather than cut, and the age after it. The
+same applies down: the chrome is reserved first and the list takes what is
+left, so a short terminal loses list rows (which scroll) instead of the
+footer (which is the only place the card says how to get out).
 """
 
 from __future__ import annotations
@@ -38,19 +49,51 @@ from local_operator.resume import SessionRow, format_age
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
 
-#: Width the card asks for. Wide enough for a readable name plus the age and
-#: id columns; the stylesheet caps it against narrow terminals.
-PICKER_WIDTH = 74
+#: Width the card will take when the terminal allows it, and the floor it will
+#: not go below. Both are CELL counts of the card's content, inside its
+#: padding; :meth:`SessionPickerScreen._card_width` resolves the actual value
+#: against the screen every paint.
+PICKER_MAX_WIDTH = 74
+PICKER_MIN_WIDTH = 30
 
-#: Rows shown before the list scrolls. A page that fills the terminal makes the
-#: modal feel like a mode switch rather than a popup; ten is enough to scan.
-PAGE_ROWS = 10
+#: Cells the card leaves between itself and the terminal's edges, on top of its
+#: own padding, so it reads as floating rather than as a panel bolted to the
+#: side.
+PICKER_WIDTH_MARGIN = 6
 
-#: The cursor. A filled caret rather than a reversed row: the transcript behind
-#: this card is dim, and a block of inverted colour reads as a selection the
-#: user made rather than as the position they are on.
-CURSOR = "❯ "
-NO_CURSOR = "  "
+#: Name column floor. Below this a name is not identifiable, so the id and then
+#: the age give up their cells first — they are lookup keys, and the name is
+#: the thing being looked up.
+NAME_MIN_CELLS = 16
+
+#: Rows of sessions shown before the list scrolls, when the terminal has room.
+#: A page that fills the screen makes the modal feel like a mode switch rather
+#: than a popup; ten is enough to scan. A CEILING, not the page size — see
+#: :meth:`SessionPickerScreen._page_rows`.
+PAGE_ROWS_MAX = 10
+
+#: Non-row lines the card always draws: header, rule, blank spacer, the
+#: position counter, and the key hints. Reserved UNCONDITIONALLY (the counter
+#: included, even when the list fits) so the height never depends on content
+#: the user is about to change by typing a filter — a footer that appeared and
+#: vanished as the list narrowed would move the card under the cursor.
+CARD_CHROME_ROWS = 5
+
+#: The card's own padding rows, mirroring ``padding: 1 2`` in the stylesheet.
+CARD_PADDING_ROWS = 2
+
+#: Share of the terminal the card may occupy, mirroring ``max-height: 80%``.
+#: Kept in step by hand because Textual clips SILENTLY: rows past the cap are
+#: simply not drawn and nothing reads back that it happened.
+CARD_MAX_HEIGHT_FRACTION = 0.8
+
+#: The cursor glyph, matching the command picker's. A caret plus a row ground
+#: rather than a reversed row: the transcript behind this card is dim, and a
+#: block of inverted colour reads as a selection the user made rather than as
+#: the position they are on.
+CURSOR = "❯"
+#: Cells the cursor gutter always occupies, so names start at one column.
+GUTTER_CELLS = 2
 
 
 def filter_rows(rows: Sequence[SessionRow], query: str) -> list[SessionRow]:
@@ -67,49 +110,106 @@ def filter_rows(rows: Sequence[SessionRow], query: str) -> list[SessionRow]:
     return [row for row in rows if needle in row.name.lower() or needle in row.id.lower()]
 
 
+def _pad_cells(text: str, width: int) -> str:
+    """Pad ``text`` to exactly ``width`` CELLS (not characters).
+
+    Wide glyphs — CJK, most emoji — occupy two cells each, so the character
+    count a name pads to is not the width it renders at. ``str.ljust`` counts
+    characters, which let a CJK name satisfy the pad at half its rendered
+    width and push the row past the card, where the ellipsis overflow silently
+    ate the age and id columns.
+    """
+    return text + " " * max(0, width - cell_len(text))
+
+
+def plan_columns(
+    rows: Sequence[SessionRow], width: int, ages: Sequence[str]
+) -> tuple[int, int, int]:
+    """``(name, age, id)`` cell budgets for ``width``, dropping before cutting.
+
+    A column that does not fit is removed, never truncated. The id is dropped
+    first: a cut hex id still LOOKS like an id, and it is the one field a user
+    copies into ``/resume <id>``. The age goes second — "4h" with the "ago"
+    sliced off is noise. The name is last and truncates with an ellipsis,
+    because a prefix of a sentence is still recognisable.
+    """
+    age_col = max((cell_len(age) for age in ages), default=0)
+    # Measured rather than assumed at 12: an id written by an older build with
+    # a different length must still line up instead of ragging the column.
+    id_col = max((cell_len(row.id) for row in rows), default=0)
+    fixed = GUTTER_CELLS + 2 + age_col + 2 + id_col
+    if width - fixed >= NAME_MIN_CELLS:
+        return width - fixed, age_col, id_col
+    fixed = GUTTER_CELLS + 2 + age_col
+    if width - fixed >= NAME_MIN_CELLS:
+        return width - fixed, age_col, 0
+    return max(NAME_MIN_CELLS, width - GUTTER_CELLS), 0, 0
+
+
 def render_rows(
     rows: Sequence[SessionRow],
     selected: int,
     width: int,
     now: float,
+    hovered: int | None = None,
 ) -> list[Text]:
     """One line per session: cursor, name, age, id.
 
-    The name takes whatever the age and id columns do not, and truncates
-    rather than wrapping — a two-row entry would break the arithmetic that
-    maps a cursor index to a row.
+    Every style here is at least the ``dim`` step. The first cut put the ids,
+    the ages and the whole key footer at ``faint``, which is 1.49:1 against
+    this card's raised ground — the ramp is calibrated against the app's own
+    background, and an overlay lifts the ground two steps without lifting the
+    text with it.
     """
-    fg = Style(color=theme_mod.semantic_color("fg"))
-    muted = Style(color=theme_mod.semantic_color("muted"))
-    dim = Style(color=theme_mod.semantic_color("dim"))
-    faint = Style(color=theme_mod.semantic_color("faint"))
-    accent = Style(color=theme_mod.semantic_color("label"))
+    fg = theme_mod.semantic_color("fg")
+    muted = theme_mod.semantic_color("muted")
+    dim = theme_mod.semantic_color("dim")
+    accent = theme_mod.semantic_color("label")
 
     ages = [format_age(max(0.0, now - row.mtime)) for row in rows]
-    age_col = max((cell_len(age) for age in ages), default=0)
-    # The id is fixed-width by construction (uuid4().hex[:12]) but is measured
-    # rather than assumed, so an older session written by a build with a
-    # different id length still lines up instead of ragging the column.
-    id_col = max((cell_len(row.id) for row in rows), default=0)
-    name_col = max(8, width - len(CURSOR) - age_col - id_col - 4)
+    name_col, age_col, id_col = plan_columns(rows, width, ages)
 
     lines: list[Text] = []
     for index, (row, age) in enumerate(zip(rows, ages)):
         current = index == selected
+        # A ground behind the whole row, as the command picker paints: a bare
+        # accent chevron gives a mouse user almost nothing, and it is the only
+        # selection signal an unnamed row would otherwise have.
+        if current:
+            ground = theme_mod.semantic_color(
+                "tint-select-hi" if index == hovered else "tint-select"
+            )
+        elif index == hovered:
+            ground = theme_mod.semantic_color("tint-select")
+        else:
+            ground = theme_mod.semantic_color("overlay")
+        row_bg = Style(bgcolor=ground)
+
         line = Text(no_wrap=True, overflow="ellipsis")
-        line.append(CURSOR if current else NO_CURSOR, style=accent if current else faint)
+        line.append(
+            _pad_cells(CURSOR if current else "", GUTTER_CELLS),
+            style=row_bg + Style(color=accent),
+        )
         # An unnamed session is one whose transcript could not be read or that
-        # has no user turn yet. Saying so is better than an empty cell, which
-        # reads as a rendering fault.
+        # has no user turn yet. Saying so beats an empty cell, which reads as a
+        # rendering fault. It takes the SAME selection step as a named row —
+        # pinning it to the floor made selecting it darker than every
+        # unselected row, so the highlight inverted.
         name = row.name or "(unnamed session)"
-        name_style = fg if current else muted
-        if not row.name:
-            name_style = dim
-        line.append(truncate_cells(name, name_col).ljust(name_col), style=name_style)
-        line.append("  ")
-        line.append(age.rjust(age_col), style=dim if current else faint)
-        line.append("  ")
-        line.append(row.id, style=faint)
+        if row.name:
+            name_colour = fg if current else muted
+        else:
+            name_colour = muted if current else dim
+        line.append(
+            _pad_cells(truncate_cells(name, name_col), name_col),
+            style=row_bg + Style(color=name_colour),
+        )
+        if age_col:
+            line.append("  ", style=row_bg)
+            line.append(age.rjust(age_col), style=row_bg + Style(color=dim))
+        if id_col:
+            line.append("  ", style=row_bg)
+            line.append(row.id, style=row_bg + Style(color=dim))
         lines.append(line)
     return lines
 
@@ -119,8 +219,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     Two-way by construction: the caller pushes the screen and acts on what it
     returns, so the picker owns navigation and the caller owns resuming. Esc
-    (or a filter that matches nothing, then Esc) answers ``None`` and the
-    session on screen is left exactly as it was.
+    answers ``None`` and the session on screen is left exactly as it was.
     """
 
     BINDINGS = [
@@ -147,6 +246,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._query = ""
         self._selected = 0
         self._offset = 0
+        self._hovered: int | None = None
+        # Filtering runs on every keystroke and again on every paint; the
+        # result is cached against the query that produced it so a card with
+        # several hundred sessions does not re-scan the list per repaint.
+        self._filtered: list[SessionRow] = list(rows)
+        self._filtered_for = ""
         self._body: Static
 
     # -- state ---------------------------------------------------------------
@@ -158,7 +263,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
     @property
     def visible_rows(self) -> list[SessionRow]:
         """The rows the current filter admits, in their original order."""
-        return filter_rows(self._all, self._query)
+        if self._filtered_for != self._query:
+            self._filtered = filter_rows(self._all, self._query)
+            self._filtered_for = self._query
+        return self._filtered
 
     @property
     def filter_query(self) -> str:
@@ -189,7 +297,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._move_to(self._selected + delta)
 
     def action_page(self, delta: int) -> None:
-        self._move_to(self._selected + delta * PAGE_ROWS)
+        self._move_to(self._selected + delta * self._page_rows())
 
     def action_jump(self, to_end: int) -> None:
         self._move_to(len(self.visible_rows) - 1 if to_end else 0)
@@ -211,10 +319,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
             event.prevent_default()
             self.set_query(self._query + char)
 
-    # The wheel moves the cursor a row at a time, which scrolls the window
-    # with it (``_move_to`` keeps the selection on screen). Clamped, like
-    # every other movement here: a scroll gesture that wrapped to the other
-    # end of the list would read as the picker resetting itself.
+    # -- mouse ---------------------------------------------------------------
+    # The wheel moves the cursor a row at a time, which scrolls the window with
+    # it (``_move_to`` keeps the selection on screen). Clamped, like every
+    # other movement here: a scroll gesture that wrapped to the other end of
+    # the list would read as the picker resetting itself. Every handler stops
+    # the event so one gesture does not also scroll the transcript behind.
     def on_mouse_scroll_down(self, event) -> None:  # type: ignore[no-untyped-def]
         event.stop()
         self.action_move(1)
@@ -223,14 +333,93 @@ class SessionPickerScreen(ModalScreen[str | None]):
         event.stop()
         self.action_move(-1)
 
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Click a row to resume it.
+
+        This card invited the mouse in with the wheel; a list you can scroll
+        with the mouse and cannot click with it is a half-built affordance.
+        """
+        index = self._index_at(event)
+        if index is None:
+            return
+        event.stop()
+        rows = self.visible_rows
+        if 0 <= index < len(rows):
+            self._selected = index
+            self.dismiss(rows[index].id)
+
+    def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
+        index = self._index_at(event)
+        if index != self._hovered:
+            self._hovered = index
+            self._repaint()
+
+    def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._hovered is not None:
+            self._hovered = None
+            self._repaint()
+
+    def _index_at(self, event) -> int | None:  # type: ignore[no-untyped-def]
+        """List index under a mouse event, or ``None`` off the rows.
+
+        Measured against the BODY's region rather than the event's own widget:
+        the card is one ``Static``, so a click anywhere in it reports a y
+        relative to the whole block — header and rule included.
+        """
+        body = getattr(self, "_body", None)
+        if body is None or not body.is_mounted:
+            return None
+        row = event.screen_y - body.region.y - self._header_rows()
+        if row < 0:
+            return None
+        index = self._offset + row
+        return index if 0 <= index < len(self.visible_rows) else None
+
+    # -- geometry ------------------------------------------------------------
+    def _screen_size(self) -> tuple[int, int]:
+        try:
+            size = self.app.size
+        except Exception:  # pragma: no cover - only before the app has a screen
+            return 80, 24
+        return max(PICKER_MIN_WIDTH, size.width), max(8, size.height)
+
+    def _card_width(self) -> int:
+        """Content cells the card may use, measured against the terminal."""
+        width, _ = self._screen_size()
+        room = width - PICKER_WIDTH_MARGIN - (CARD_PADDING_ROWS * 2)
+        return max(PICKER_MIN_WIDTH, min(PICKER_MAX_WIDTH, room))
+
+    def _page_rows(self) -> int:
+        """Session rows the card can actually DRAW right now.
+
+        Chrome is reserved FIRST and the list takes what is left. A fixed page
+        let the cursor sit on a row the card never rendered — Enter then
+        resumed a session the user could not see — and let the clip eat the
+        footer, which is the only statement of how to leave.
+        """
+        _, height = self._screen_size()
+        budget = int(height * CARD_MAX_HEIGHT_FRACTION) - CARD_PADDING_ROWS - CARD_CHROME_ROWS
+        return max(1, min(PAGE_ROWS_MAX, budget))
+
+    def _header_rows(self) -> int:
+        """Rows above the first session row: the header and its rule."""
+        return 2
+
     # -- internals -----------------------------------------------------------
     def set_query(self, query: str) -> None:
-        """Apply a filter, keeping the cursor on a row that still exists."""
+        """Apply a filter and put the cursor on the FIRST match.
+
+        Not the nearest surviving row: clamping the old index meant narrowing
+        a list usually landed the cursor on the LAST match, so the row Enter
+        would take was the least related one still standing. Every finder the
+        user has met — fzf, a command palette, this app's own command picker —
+        answers a narrowing query with its best match at the top.
+        """
+        if query == self._query:
+            return
         self._query = query
-        # The cursor is clamped rather than preserved by identity: a filter
-        # that removes the selected row has to leave the cursor somewhere, and
-        # the nearest surviving row is less surprising than jumping to the top.
-        self._move_to(self._selected)
+        self._selected = 0
+        self._offset = 0
         self._repaint()
 
     def _move_to(self, index: int) -> None:
@@ -245,11 +434,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._selected = max(0, min(len(rows) - 1, index))
         # Scroll only far enough to keep the cursor on screen, so the list is
         # stable while paging through the middle of it.
+        page = self._page_rows()
         if self._selected < self._offset:
             self._offset = self._selected
-        elif self._selected >= self._offset + PAGE_ROWS:
-            self._offset = self._selected - PAGE_ROWS + 1
-        self._offset = max(0, min(self._offset, max(0, len(rows) - PAGE_ROWS)))
+        elif self._selected >= self._offset + page:
+            self._offset = self._selected - page + 1
+        self._offset = max(0, min(self._offset, max(0, len(rows) - page)))
         self._repaint()
 
     # -- rendering -----------------------------------------------------------
@@ -260,6 +450,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     def on_mount(self) -> None:
         self._repaint()
+
+    def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Re-measure: every column and the page size come from the screen."""
+        self._move_to(self._selected)
 
     def _repaint(self) -> None:
         body = getattr(self, "_body", None)
@@ -274,42 +468,103 @@ class SessionPickerScreen(ModalScreen[str | None]):
     def _card_text(self) -> Text:
         dim = Style(color=theme_mod.semantic_color("dim"))
         faint = Style(color=theme_mod.semantic_color("faint"))
+        label = Style(color=theme_mod.semantic_color("label"))
+        width = self._card_width()
         rows = self.visible_rows
 
         header = Text(no_wrap=True, overflow="ellipsis")
         header.append("Resume a conversation", style=Style(color=theme_mod.semantic_color("fg")))
         if self._query:
-            # The filter is echoed in the header rather than in a separate
-            # input row: it is one short string, and a dedicated row would
-            # cost a line of the list on every terminal to show nothing most
-            # of the time.
-            header.append(f"  /{self._query}", style=Style(color=theme_mod.semantic_color("label")))
-        header.append(f"  {len(rows)} of {len(self._all)}", style=faint)
+            # No ``/`` sigil: in this app a leading slash means a COMMAND, and
+            # the user reached this card by typing ``/resume``, so ``/asteroid``
+            # read as a command named asteroid rather than as a filter.
+            header.append("  filter ", style=faint)
+            header.append(self._query, style=label)
+            header.append(f"  {len(rows)} of {len(self._all)}", style=dim)
+        else:
+            header.append(f"  {len(self._all)} sessions", style=dim)
 
         out = Text()
         out.append_text(header)
         out.append("\n")
-        out.append("─" * PICKER_WIDTH, style=Style(color=theme_mod.semantic_color("edge")))
+        out.append("─" * width, style=Style(color=theme_mod.semantic_color("edge")))
         out.append("\n")
 
+        page = self._page_rows()
         if not self._all:
             out.append("no previous sessions to resume", style=dim)
+            counter = ""
         elif not rows:
-            out.append(f"nothing matches {self._query!r}", style=dim)
+            # The header already echoes the query; repeating it here — and via
+            # ``repr``, whose quoting flips on an apostrophe — said it twice in
+            # two grammars.
+            out.append("no session matches that filter", style=dim)
+            counter = ""
         else:
-            window = rows[self._offset : self._offset + PAGE_ROWS]
-            selected_in_window = self._selected - self._offset
+            window = rows[self._offset : self._offset + page]
             for index, line in enumerate(
-                render_rows(window, selected_in_window, PICKER_WIDTH, self._now)
+                render_rows(
+                    window,
+                    self._selected - self._offset,
+                    width,
+                    self._now,
+                    None if self._hovered is None else self._hovered - self._offset,
+                )
             ):
                 if index:
                     out.append("\n")
                 out.append_text(line)
-            if len(rows) > PAGE_ROWS:
-                out.append("\n")
-                shown = self._offset + len(window)
-                out.append(f"{shown} of {len(rows)}", style=faint)
+            counter = (
+                f"showing {self._offset + 1}–{self._offset + len(window)} of {len(rows)}"
+                if len(rows) > page
+                else ""
+            )
 
+        # Body, then one quiet row, then the card's META — the position and the
+        # key hints, which are the same KIND of row (statements ABOUT the list,
+        # not entries in it) and so travel together at the bottom. This is the
+        # usage card's grammar; the two overlays differ only by whether the
+        # position row is there at all. The counter is EMITTED only when the
+        # list scrolls: printing an empty line in its place left two blank rows
+        # and pushed the keys away from the block they belong to.
         out.append("\n\n")
-        out.append("↑↓ move · enter resume · type to filter · esc cancel", style=faint)
+        if counter:
+            out.append(counter, style=faint)
+            out.append("\n")
+        # Key NAMES at `dim` and their labels at `faint`, matching the usage
+        # card: at `faint` on this ground the keys themselves were 1.49:1.
+        # Hints DROP to fit, in reverse order of need — the same discipline the
+        # columns use. A footer that overflowed the card was the one row that
+        # could not afford to: it is the only statement of how to get out.
+        for index, (key, what) in enumerate(_footer_hints(width)):
+            if index:
+                out.append(" · ", style=faint)
+            out.append(key, style=dim)
+            out.append(f" {what}", style=faint)
         return out
+
+
+#: Footer hints, MOST disposable first. ``enter``/``esc`` are never dropped:
+#: between them they are how the card is used and how it is left.
+_FOOTER_HINTS: tuple[tuple[str, str], ...] = (
+    ("↑↓", "move"),
+    ("pgup/pgdn", "page"),
+    ("type", "to filter"),
+    ("enter", "resume"),
+    ("esc", "cancel"),
+)
+_FOOTER_DROP_ORDER = ("pgup/pgdn", "type", "↑↓")
+
+
+def _footer_hints(width: int) -> list[tuple[str, str]]:
+    """The key hints that fit in ``width`` cells, dropping the least needed."""
+    hints = list(_FOOTER_HINTS)
+
+    def cells(pairs: list[tuple[str, str]]) -> int:
+        return sum(cell_len(f"{key} {what}") for key, what in pairs) + 3 * max(0, len(pairs) - 1)
+
+    for droppable in _FOOTER_DROP_ORDER:
+        if cells(hints) <= width:
+            break
+        hints = [pair for pair in hints if pair[0] != droppable]
+    return hints

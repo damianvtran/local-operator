@@ -15,7 +15,12 @@ from unittest.mock import patch
 import pytest
 
 from local_operator.session.mcp_status import McpStartupOutcome
-from local_operator.tui.app import BOOT_LAYOUT_CLASS, SLASH_COMMANDS, OperatorApp
+from local_operator.tui.app import (
+    BOOT_LAYOUT_CLASS,
+    PERSIST_HINT,
+    SLASH_COMMANDS,
+    OperatorApp,
+)
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
@@ -2338,10 +2343,9 @@ async def test_a_bare_model_names_the_current_pair_and_the_command_that_keeps_it
         footer = picker.render_text(90).plain.split("\n")[-1]
     # The subject of the sentence: "make THIS the default" needs a this.
     assert "openrouter/deepseek/deepseek-chat" in _unwrapped(text), text
-    assert _unwrapped("/model default") in _unwrapped(text), text
-    assert _unwrapped("boot default") in _unwrapped(text), text
+    assert _unwrapped(PERSIST_HINT) in _unwrapped(text), text
     # …and the list itself, which is the surface the user is actually reading.
-    assert "/model default" in footer, footer
+    assert PERSIST_HINT in footer, footer
 
 
 @pytest.mark.asyncio
@@ -2417,3 +2421,63 @@ async def test_model_default_alone_persists_the_model_already_in_use(
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
     assert (written["hosting"], written["model_name"]) == ("anthropic", "claude-opus-5"), written
     assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+
+
+@pytest.mark.asyncio
+async def test_every_model_default_surface_says_it_the_same_way() -> None:
+    """D14. One instruction, four wordings, on four surfaces a user meets within
+    two keystrokes of each other: "saves this provider and model as the boot
+    default", "to make it the boot default", "saves the boot default", "persists
+    it". A user cannot learn a string that changes every time it is shown.
+
+    All four are checked in ONE test on purpose — the defect is not any single
+    wording, it is the DIVERGENCE, so the assertion has to be that the same
+    sentence reaches every surface. The footer is checked unwrapped and whole,
+    because it is the site that truncates and the one the reviewer called
+    weakest.
+    """
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model")
+        await pilot.pause()
+        await pilot.pause()
+        picker = app.query_one(Editor).model_picker
+        footer = picker.render_text(picker.size.width or 90).plain.split("\n")[-1]
+        bare_notice = _transcript_text(app)
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        receipt = _transcript_text(app)
+        app._run_slash_command("/help")
+        await pilot.pause()
+        help_text = _transcript_text(app)
+
+    # 1. the notice a bare `/model` prints above the list, 2. the switch receipt,
+    # 3. the picker's own footer, 4. the `/help` row.
+    assert _unwrapped(PERSIST_HINT) in _unwrapped(bare_notice), bare_notice
+    assert _unwrapped(PERSIST_HINT) in _unwrapped(receipt), receipt
+    assert PERSIST_HINT in footer, footer
+    assert _unwrapped(PERSIST_HINT) in _unwrapped(help_text), help_text
+    model_row = next(c for c in SLASH_COMMANDS if c.name == "model")
+    assert PERSIST_HINT in model_row.description, model_row.description
+
+    # And the four it replaced are gone from all of them, so there is no second
+    # phrasing left for the user to meet.
+    everything = _unwrapped(bare_notice + receipt + footer + help_text)
+    for stale in (
+        "as the boot default",
+        "to make it the boot default",
+        "saves the boot default",
+        "/model default persists it",
+    ):
+        assert _unwrapped(stale) not in everything, stale
+
+    # The receipt is two clauses now, not a run-on of four separators — and it
+    # still says the two things that made it necessary: the scope, and the access
+    # state of the provider it just switched to.
+    switch_line = next(line for line in _unwrapped(receipt).split("·") if _unwrapped("→") in line)
+    assert _unwrapped("(this session)") in switch_line, switch_line
+    assert _unwrapped("from the next turn") not in _unwrapped(receipt), receipt
+    assert _unwrapped("anthropic logged in") in _unwrapped(receipt), receipt

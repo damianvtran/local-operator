@@ -404,7 +404,26 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
     return row
 
 
-def build_usage_body(reports, width: int, now_ms: float) -> list[Text]:  # noqa: ANN001
+@dataclass(frozen=True)
+class UsageBody:
+    """The scrolling half of the panel, and where a window may stop inside it.
+
+    ``cuts`` holds the row counts a window may END on. A block is
+    heading → (notes) → blank → meters, and only a meter (or the "no windows"
+    line that stands in for one) completes it: a window that stopped a row
+    earlier would name a provider and then show none of its numbers, which is
+    the one thing this card exists to state.
+
+    Carried out of the builder rather than recovered from the rendered rows,
+    because it is knowledge of how the block was BUILT — anything that inferred
+    it from the text afterwards would be a second copy of this shape, guessing.
+    """
+
+    lines: list[Text]
+    cuts: frozenset[int]
+
+
+def build_usage_body(reports, width: int, now_ms: float) -> UsageBody:  # noqa: ANN001
     """The scrolling half of the panel: one block per report.
 
     Column widths are measured over EVERY row rather than per provider, so the
@@ -413,11 +432,14 @@ def build_usage_body(reports, width: int, now_ms: float) -> list[Text]:  # noqa:
     Each block is heading → (notes) → blank → meters. The blank row is what
     makes the heading read as a heading: without it the identity line, the
     account note and the first meter run together as three equal rows, which is
-    the "tight" the card was reported for.
+    the "tight" the card was reported for. The blank is also why the returned
+    :class:`UsageBody` carries its cut points: those three rows are one unit,
+    and a window may not stop part way through them.
     """
     lines: list[Text] = []
+    cuts: set[int] = set()
     if not reports:
-        return lines
+        return UsageBody(lines, frozenset({0}))
 
     columns = _measure_columns(reports, width, now_ms)
 
@@ -430,11 +452,13 @@ def build_usage_body(reports, width: int, now_ms: float) -> list[Text]:  # noqa:
             lines.append(Text(f"  {report.notes}", style=dim))
         if not report.limits:
             lines.append(Text("  no windows reported", style=dim))
+            cuts.add(len(lines))
             continue
         lines.append(Text())
         for limit in report.limits:
             lines.append(_limit_row(limit, columns, now_ms))
-    return lines
+            cuts.add(len(lines))
+    return UsageBody(lines, frozenset(cuts))
 
 
 class UsagePanel(Static):
@@ -553,7 +577,12 @@ class UsagePanel(Static):
         self._scroll_by(delta)
 
     def action_scroll_page(self, delta: int) -> None:
-        self._scroll_by(delta * max(1, self._body_budget()))
+        # A page is what the card is SHOWING, not what it budgeted for: the
+        # window stops at a block boundary, so paging by the budget would step
+        # over the heading that the boundary held back.
+        body = self._body()
+        shown = self._window_end(body, self._body_budget()) - self._offset
+        self._scroll_by(delta * max(1, shown))
 
     def action_scroll_home(self) -> None:
         self._offset = 0
@@ -610,25 +639,25 @@ class UsagePanel(Static):
         return max(1, height - PANEL_HEIGHT_MARGIN - CHROME_ROWS - PANEL_PADDING_ROWS)
 
     def _max_offset(self) -> int:
-        return max(0, len(self._body_lines()) - self._body_budget())
+        return max(0, len(self._body().lines) - self._body_budget())
 
     # -- rendering -----------------------------------------------------------
-    def _body_lines(self) -> list[Text]:
+    def _body(self) -> UsageBody:
         dim = Style(color=theme_mod.semantic_color("dim"))
         if self._error:
-            return [Text(self._error, style=Style(color=theme_mod.semantic_color("danger")))]
+            danger = Style(color=theme_mod.semantic_color("danger"))
+            return UsageBody([Text(self._error, style=danger)], frozenset({1}))
         if self._loading:
-            return [Text("fetching…", style=dim)]
+            return UsageBody([Text("fetching…", style=dim)], frozenset({1}))
         if not self._reports:
             # Two failures look identical in an empty panel and only one is
             # actionable, so the message names both rather than the shorter one.
             target = f"{self._target} reports" if self._target else "no provider reports"
-            return [
-                Text(
-                    f"{target} no usage — no quota endpoint, or no credential for one",
-                    style=dim,
-                )
-            ]
+            line = Text(
+                f"{target} no usage — no quota endpoint, or no credential for one",
+                style=dim,
+            )
+            return UsageBody([line], frozenset({1}))
         return build_usage_body(self._reports, self._content_width(), self._now())
 
     def _title_row(self) -> Text:
@@ -669,29 +698,61 @@ class UsagePanel(Static):
         return [line.plain for line in self._compose_rows()]
 
     def _compose_rows(self) -> list[Text]:
-        body = self._body_lines()
+        body = self._body()
+        lines = body.lines
         budget = self._body_budget()
-        self._offset = max(0, min(self._offset, max(0, len(body) - budget)))
-        window = body[self._offset : self._offset + budget]
-        scrolled = len(body) > budget
+        self._offset = max(0, min(self._offset, max(0, len(lines) - budget)))
+        scrolled = len(lines) > budget
+        window = lines[self._offset : self._window_end(body, budget)]
         rule = Text(
             "─" * self._content_width(), style=Style(color=theme_mod.semantic_color("edge"))
         )
-        # One quiet row between the report and the footer. Without it the tally
-        # and the key hints sit flush against the last meter and read as one
-        # more data row rather than as chrome.
-        rows = [self._title_row(), rule, *window, Text()]
+        rows = [self._title_row(), rule, *window]
+        # Quiet ground between the report and the card's bottom meta, in BOTH
+        # states. Without it the tally and the key hints sit flush against the
+        # last meter and read as one more data row rather than as chrome.
+        #
+        # The rows a block boundary gave back (see _window_end) are quiet HERE,
+        # above the meta, rather than taken off the card. Off the card they would
+        # shrink it, and the card is centred on its own height — it would walk up
+        # and down the screen as a reader scrolled it. Between the position and
+        # the keys they would punch a hole through the middle of two meta rows,
+        # which reads as something failing to render; above the pair the same
+        # rows read as the card's bottom margin. So the frame never moves and
+        # only the interior does.
+        rows.extend(Text() for _ in range(1 + (budget - len(window) if scrolled else 0)))
         if scrolled:
             # The position is part of the CHROME, not a row of the report: a
             # "12 of 30" that scrolled away with the content would be useless
-            # exactly when it is needed.
-            marker = Text(
-                f"{self._offset + len(window)} of {len(body)}",
-                style=Style(color=theme_mod.semantic_color("faint")),
+            # exactly when it is needed. It sits with the key hints because the
+            # two are the same KIND of row — both are statements about the list
+            # rather than entries in it — so they travel together at the bottom.
+            rows.append(
+                Text(
+                    f"{self._offset + len(window)} of {len(lines)}",
+                    style=Style(color=theme_mod.semantic_color("faint")),
+                )
             )
-            rows.append(marker)
         rows.append(self._hint_row(scrolled))
         return rows
+
+    def _window_end(self, body: UsageBody, budget: int) -> int:
+        """Where the window stops: the last row that COMPLETES a block.
+
+        A budget that ran out mid-block left a provider heading — or a heading
+        and the blank under it — as the last thing on the card, announcing a
+        provider and then showing none of its numbers (80x24 landed exactly
+        there). The cut moves back to the end of the last whole block instead.
+
+        A budget too small to hold even one block has nothing to give back, so
+        it keeps the raw cut: the head of a block reads better than a card with
+        an empty body.
+        """
+        end = min(self._offset + budget, len(body.lines))
+        pulled = end
+        while pulled > self._offset and pulled not in body.cuts:
+            pulled -= 1
+        return pulled if pulled > self._offset else end
 
     def _recentre(self, width: int, height: int) -> None:
         """Pull the HOST over the panel and centre the pair on the screen.
@@ -702,6 +763,15 @@ class UsagePanel(Static):
         the panel. Centring therefore cannot be `align: center middle` in the
         stylesheet — that needs the stretched host — and is done here instead,
         against the same measured screen the bars are sized from.
+
+        That screen is ``Screen.size``, which is its CONTENT box — the offset is
+        applied inside the screen's own inset, so the ground this reserves either
+        side is the ground inside the inset, and the painted card is centred on
+        the terminal only because that inset is symmetric. It is, and a frame
+        test pins the painted edges rather than these numbers
+        (``test_the_card_is_centred_on_the_terminal_at_odd_and_even_widths``):
+        comparing an absolute region against this relative box is what made the
+        card look a cell right of centre when the paint is even.
         """
         parent = self.parent
         if parent is None or isinstance(parent, Screen):

@@ -356,7 +356,7 @@ async def test_knowledge_backend_failure_degrades_to_no_listing(
     try:
         warnings: list[str] = []
         hooks = await session_factory._setup_knowledge(
-            MagicMock(), tmp_config_dir, FakeRegistry(tmp_config_dir), warnings
+            MagicMock(), tmp_config_dir, cast(Any, FakeRegistry(tmp_config_dir)), warnings
         )
     finally:
         skills_api.discover_skills = real_discover
@@ -388,7 +388,7 @@ async def test_knowledge_backend_failure_falls_back_to_local_routing(
     warnings: list[str] = []
 
     hooks = await session_factory._setup_knowledge(
-        MagicMock(), tmp_config_dir, FakeRegistry(tmp_config_dir), warnings
+        MagicMock(), tmp_config_dir, cast(Any, FakeRegistry(tmp_config_dir)), warnings
     )
 
     assert hooks.index is not None

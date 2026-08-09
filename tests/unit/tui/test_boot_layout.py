@@ -584,6 +584,53 @@ async def test_the_composition_is_centred_when_the_rows_are_there(size: tuple[in
         assert welcome.bottom == card.y - 1, "one row, not two"
 
 
+#: The one column where the splash's degradation ladder has a step between a
+#: cell and the next one: the block is 9 rows drawn at 21 cells and 19 rows drawn
+#: at 22. Measuring the splash a cell wider than it renders is invisible in the
+#: middle of a tier and decides the whole composition here, which is why the
+#: sweep is pinned at this width rather than at a comfortable one.
+LADDER_EDGE_WIDTH = 25
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", list(range(20, 51, 3)))
+async def test_the_composition_measures_the_splash_at_the_width_it_renders(
+    height: int,
+) -> None:
+    """The block the app centres for is the block the layout engine draws.
+
+    The composition's whole claim is that it can answer the layout engine's own
+    question one step ahead of it, so the two can never disagree. They did: the
+    width handed to ``spare_rows`` subtracted the transcript's padding but not
+    its permanently reserved scrollbar column, so the splash was measured one
+    cell wide. At 25 columns that cell is a tier edge — 19 rows measured for a
+    block that renders 9 — and the frame came out with every one of the missing
+    ten rows piled above the splash: at 25x30, 12 rows of ground above and 1
+    below; at 25x50, 22 and 11; at 25x20 the reserve overshot the other way (0
+    above, 3 below).
+
+    Swept over heights rather than pinned at one, because the error is in a WIDTH
+    and shows up as a mis-split of whatever slack the height provides — a single
+    size would pin one arbitrary point of a wrong line.
+    """
+    app = _make_app()
+    async with app.run_test(size=(LADDER_EDGE_WIDTH, height)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        transcript = app.query_one(TranscriptView)
+        region = transcript.content_region
+        welcome = app.query_one(WelcomeView).region
+        card = app.query_one("#input-shell").region
+
+        assert (
+            welcome.width == region.width - transcript.scrollbar_size_vertical
+        ), "premise: the reserved scrollbar column is not in the transcript's gutter"
+        above = welcome.y - region.y
+        below = (height - 1) - card.bottom  # the screen's own inset is not slack
+        assert above >= 1, "premise: this size has rows to spare"
+        assert abs(above - below) <= 1, (above, below, welcome.height)
+
+
 @pytest.mark.asyncio
 async def test_a_short_terminal_keeps_resting_the_splash_on_the_card() -> None:
     """Centring is CONDITIONAL, and 96x28 is why.

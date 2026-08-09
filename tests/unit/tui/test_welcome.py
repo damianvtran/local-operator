@@ -204,7 +204,7 @@ def test_hint_descriptions_never_truncate_into_nonsense() -> None:
 
 
 def test_height_tiers_shed_in_cost_to_the_user_order() -> None:
-    """The degradation order, pinned at six heights of the SAME facts.
+    """The degradation order, pinned at seven heights of the SAME facts.
 
     The order is by what each step COSTS THE USER, which is deliberately NOT
     plain decoration-before-information:
@@ -212,19 +212,19 @@ def test_height_tiers_shed_in_cost_to_the_user_order() -> None:
     1. a box with room: everything, with the lockup's breathing row;
     2. one row short: the lockup goes FLUSH — one row of air is the cheapest
        thing on the screen;
-    3. tighter: the TIP goes, and the lockup gets its air back. It is the only
-       row here that costs the user nothing permanent — the same tip comes round
-       on the next launch — and it buys two rows, so what is left is EXACTLY the
-       splash as it stood before tips existed, at its own natural height;
-    4. tighter: the air again. The lockup's blank row is still the cheapest
-       concession on the screen, so it is spent twice — once to keep the tip, and
-       again after the tip handed it back;
-    5. tighter: the VERSION row goes. It is the least actionable fact here, and
-       spending it to keep the mark is a better trade than losing the product's
-       identity on the one screen that exists to show it. At a 28-row terminal
-       this single row is exactly the difference;
-    6. tighter still: the mark goes, then the hints last, because the hints are
-       a first-time user's way in.
+    3. tighter: the VERSION row goes. It is the least actionable fact here and
+       the row a first-run user needs least, so it is spent BEFORE the tip —
+       which is also one row, and is the only affordance on the splash the hint
+       table does not already carry;
+    4. tighter: the TIP goes, and the lockup gets its air back. It buys two rows
+       and needs only one, and the same entry comes round on the next launch;
+    5. tighter: the air again. The lockup's blank row is still the cheapest
+       concession on the screen, so it is spent twice;
+    6. tighter: the MARK goes — and steps 3 and 4 are UNDONE, because they were
+       concessions made to keep it. Twelve rows come back for the three they
+       bought, so the tip and the version row return rather than staying spent;
+    7. far shorter: the hints go last, because they are a first-time user's way
+       in.
 
     The credential warning survives all of it — see the test below.
     """
@@ -258,40 +258,45 @@ def test_height_tiers_shed_in_cost_to_the_user_order() -> None:
     assert _has_tip(flush)
     assert f"v{info.version}" in "\n".join(flush)
 
+    # One row tighter: the VERSION row goes, and the tip outlives it. Both are one
+    # row; the build number is the one a user can look up elsewhere.
+    no_version = _lines(info, ROOMY_W, full_h - 2)
+    assert f"v{info.version}" not in "\n".join(no_version)
+    assert _has_tip(no_version), "the tip was spent before the version number"
+    assert _has_mark(no_version)
+    assert _has_hints(no_version)
+
     # One row tighter: the tip goes — two rows, which buys back the air step 2
-    # spent, so the block is exactly the pre-tip splash and every fact is intact.
-    # Everything below here is therefore measured from THIS height.
-    no_tip_h = full_h - 2
+    # spent. Everything below here is therefore measured from THIS height.
+    no_tip_h = full_h - 3
     no_tip = _lines(info, ROOMY_W, no_tip_h)
     assert not _has_tip(no_tip)
     assert _has_mark(no_tip)
     assert _has_hints(no_tip)
-    assert f"v{info.version}" in "\n".join(no_tip)
-    assert len(no_tip) == no_tip_h, "the pre-tip block fills this budget exactly"
+    assert len(no_tip) == no_tip_h, "the block fills this budget exactly"
 
-    # One row tighter: the air goes for the second time, and every fact survives.
+    # One row tighter: the air goes for the second time, and the mark survives.
     reflushed = _lines(info, ROOMY_W, no_tip_h - 1)
     assert _has_mark(reflushed)
     assert _has_hints(reflushed)
-    assert f"v{info.version}" in "\n".join(reflushed)
+    assert not _has_tip(reflushed)
 
-    # One row tighter: the version row is spent to keep the mark.
-    traded = _lines(info, ROOMY_W, no_tip_h - 2)
-    assert _has_mark(traded), "the mark is worth more than the version number"
-    assert f"v{info.version}" not in "\n".join(traded)
-    assert _has_hints(traded)
-
-    # One row tighter again: there is nothing cheap left, so the mark goes.
-    mid = _lines(info, ROOMY_W, no_tip_h - 3)
+    # One row tighter: nothing cheap is left, so the MARK goes — and the two rows
+    # that were spent to keep it come straight back. This is the band an 80x24
+    # terminal lands in, and the old ladder drew it with no tip on it at all.
+    mid = _lines(info, ROOMY_W, no_tip_h - 2)
     assert not _has_mark(mid)
     assert _has_hints(mid)
+    assert _has_tip(mid), "the tip stayed spent for a concession that was refunded"
+    assert f"v{info.version}" in "\n".join(mid)
     assert _has_any_status(mid, info)
 
-    # Far shorter: hints go LAST, after the weak status rows have already been
-    # spent — at seven rows the version row buys them, and only a box too short
-    # for the hint block plus a single status row finally drops them.
+    # Far shorter: hints go LAST, after the weak status rows and the tip have
+    # already been spent — at seven rows the version row buys them, and only a box
+    # too short for the hint block plus a single status row finally drops them.
     keeps_hints = _lines(info, ROOMY_W, 7)
     assert not _has_mark(keeps_hints)
+    assert not _has_tip(keeps_hints)
     assert _has_hints(keeps_hints)
 
     short = _lines(info, ROOMY_W, 6)
@@ -1152,11 +1157,20 @@ async def test_the_rotation_walks_the_whole_ring_and_never_repeats_itself(
     animation_on: None,
 ) -> None:
     """A tip that came up twice running reads as a broken app, and one the ring
-    never reaches might as well not be written — so the walk is checked from
-    wherever the view happened to start, which is not the top of the pool."""
+    never reaches might as well not be written.
+
+    The walk starts one tick in, because the FIRST entry of an appearance is
+    pinned to ``TIPS[0]`` and the ring resumes at a drawn point after it — so the
+    lap being checked here is the one the rotation actually runs, not the handoff
+    into it.
+    """
     app = _make_app(FakeSession())
     async with app.run_test(size=(100, 30)) as pilot:
         welcome = await _settled_welcome(pilot)
+        assert welcome._tip_index == 0, "a launch opened on an arbitrary tip"
+        welcome._tip_tick()
+        assert welcome._tip_index != 0, "the handoff repainted the same sentence"
+
         seen = [welcome._tip_index]
         for _ in range(len(TIPS)):
             welcome._tip_tick()
@@ -1210,3 +1224,81 @@ async def test_the_tip_timer_stops_when_the_view_is_unmounted(animation_on: None
 
         assert welcome._tip_timer is None
         assert rotation._task is None
+
+
+# --- the defects the design round found in the tip ------------------------------
+
+
+def test_no_width_the_row_is_drawn_at_ever_truncates_a_tip() -> None:
+    """D11. The threshold admitted the row at 32 cells and then handed it to the
+    shared ellipsis pass, so every terminal from 32 to 55 columns read half a
+    sentence: `· /resume picks up a recent ses…`.
+
+    Swept over the whole pool at every width from the threshold to 120, because
+    the failure mode is one long entry among twelve — a pool that fits on average
+    is a pool that truncates on rotation.
+    """
+    for width in range(TIP_MIN_WIDTH, 121):
+        for index, tip in enumerate(TIPS):
+            rows = [
+                line.plain.rstrip()
+                for line in build_welcome_lines(_info(), width, 99, tip_index=index)
+            ]
+            drawn = _tip_rows(rows)
+            assert len(drawn) == 1, f"tip {index} is not one row at {width} cells"
+            assert drawn[0].strip() == f"{TIP_GLYPH} {tip}", f"truncated at {width} cells"
+
+
+def test_the_threshold_is_the_width_the_pool_actually_needs() -> None:
+    """The constant is DERIVED, so rewording a tip cannot leave it stale — which
+    is how it came to admit a row 24 cells narrower than its longest entry."""
+    assert TIP_MIN_WIDTH == max(cell_len(f"{TIP_GLYPH} {tip}") for tip in TIPS)
+    # One cell under it there is no row at all, rather than a fragment of one.
+    assert not _tip_rows(_lines(_info(), TIP_MIN_WIDTH - 1, 99))
+
+
+@pytest.mark.asyncio
+async def test_a_24_row_terminal_still_gets_a_tip() -> None:
+    """D16. 80x24 is the classic default and a common split pane, and it saw no
+    tip at any width: the ladder spent the row on a budget that then went on to
+    give up the mark's twelve rows anyway.
+
+    Asserted through the REAL app rather than the builder, because the thing that
+    was broken is the budget the view is handed, not the block it builds. Two
+    settled frames, so what is asserted is the frame that stays.
+    """
+    for width in (80, 100, 120, 190):
+        app = _make_app(FakeSession())
+        async with app.run_test(size=(width, 24)) as pilot:
+            await _settled_welcome(pilot)
+            first = [text for text, _ in _frame(app)]
+            await pilot.pause()
+            second = [text for text, _ in _frame(app)]
+        assert _tip_rows(first), f"no tip at {width}x24"
+        assert first == second, f"the splash was still moving at {width}x24"
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_view_opens_on_the_first_tip_and_only_then_varies(
+    animation_on: None,
+) -> None:
+    """D12. Measured over twelve launches the old start was random ten of those
+    times, so the first thing a first-run user read was an arbitrary entry —
+    "compaction runs itself when the context window fills", before they have a
+    context. The pool is ordered; the row now opens on the entry it is ordered
+    for, and the draw moves to where the ring RESUMES."""
+    starts = set()
+    resumes = set()
+    for _ in range(12):
+        app = _make_app(FakeSession())
+        async with app.run_test(size=(100, 30)) as pilot:
+            welcome = await _settled_welcome(pilot)
+            starts.add(welcome._tip_index)
+            resumes.add(welcome._tip_resume)
+            shown = [row.strip() for row in _tip_rows([text for text, _ in _frame(app)])]
+            assert shown == [f"{TIP_GLYPH} {TIPS[0]}"]
+    assert starts == {0}, "a launch opened on an arbitrary tip"
+    # …and the variation did not simply go away with it: the resume point is
+    # still drawn, and never zero, so the first tick always turns the row over.
+    assert len(resumes) > 1, "the ring resumes at a fixed point, so the pool is unreachable"
+    assert 0 not in resumes

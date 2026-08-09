@@ -110,6 +110,25 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
+
+#: ONE sentence for ONE instruction, carried verbatim by every surface that
+#: mentions ``/model default``: the bare-``/model`` notice, the switch receipt,
+#: the model picker's footer and the ``/help`` row. They used to say it four
+#: different ways within two keystrokes of each other — "saves this provider and
+#: model as the boot default", "to make it the boot default", "saves the boot
+#: default", "persists it" — so a user met a new phrasing on every surface
+#: instead of learning one string.
+#:
+#: Sized by its TIGHTEST site. The picker footer truncates at the card's width
+#: and this clause sits last in it (the access note ahead of it is the one a user
+#: can act on right now), so the sentence has to fit what is left after that note
+#: — measured at 39 cells against a 70-cell footer budget carrying
+#: ``1 hidden — /login <provider>``. That is what pays for the missing articles;
+#: the alternative was a clause that reads better and is not there at 90 columns.
+#: It names the WHAT, which is the half "saves the boot default" dropped: the
+#: default is a provider AND a model, not two settings to hunt for.
+PERSIST_HINT = "/model default saves provider and model"
+
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
 SLASH_COMMANDS: list[SlashCommand] = [
@@ -124,7 +143,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
     ),
     SlashCommand(
         "model",
-        "Switch model (provider/id); /model default persists it",
+        # Terse by necessity — the description column wraps past ~55 cells — but
+        # it still carries PERSIST_HINT verbatim rather than a fifth paraphrase.
+        # The `<provider>/<id>` shape it used to show moved to the tip pool, which
+        # has the room for it (`welcome.TIPS`).
+        f"Switch model; {PERSIST_HINT}",
         aliases=("models",),
     ),
     SlashCommand("provider", "List providers and their login/usage state"),
@@ -139,15 +162,6 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("login", "Authenticate a provider"),
     SlashCommand("logout", "Remove stored provider credentials"),
 ]
-
-
-#: Footer clause carried by every paint of the model list. The picker is the
-#: surface a user is looking at while deciding which model to be on, and it was
-#: the one place that never admitted the decision expires with the session —
-#: ``/model default`` was findable only by already knowing the word. It sits
-#: LAST because the footer truncates: the access note ahead of it is the clause
-#: a user can act on right now.
-PERSIST_FOOTER_HINT = "/model default saves the boot default"
 
 #: ``/loop`` defaults and hard ceiling. A loop spends real tokens per
 #: iteration, so it is bounded by construction — an unbounded "keep going"
@@ -626,8 +640,6 @@ class OperatorApp(App[None]):
         is unavailable and the command says so instead of opening a picker
         whose every choice would fail.
         """
-        import time
-
         from local_operator.paths import config_dir
         from local_operator.resume import RESUME_LATEST, recent_session_rows
 
@@ -898,10 +910,19 @@ class OperatorApp(App[None]):
         # Rows the region above the card would have with NO reserve in it, and the
         # width the splash is drawn at. The transcript's own gutter is part of the
         # sheet's boot layout (it drops its top row there) and part of neither
-        # widget's content height, so it comes out of the budget here.
+        # widget's content height, so it comes out of the budget here. So does the
+        # scrollbar column: `scrollbar-gutter: stable` reserves it permanently
+        # (D27) and `styles.gutter` does not count it, so a width measured without
+        # it is one cell wider than the splash can ever be drawn. One cell is
+        # nothing in the middle of a degradation tier and everything at its edge —
+        # at 25 columns it measured the 22-cell block (19 rows) for a splash that
+        # renders at 21 (9 rows), and centred the frame around ten rows that are
+        # not there. The app and the layout engine can only agree here if this
+        # width is the one the engine will hand the widget.
         gutter = transcript.styles.gutter
         region = max(0, box.height - self._boot_dock_height(dock, box, size) - gutter.height)
-        spare = welcome.spare_rows(region, max(0, box.width - gutter.width))
+        width = max(0, box.width - gutter.width - transcript.scrollbar_size_vertical)
+        spare = welcome.spare_rows(region, width)
         if spare < BOOT_COMPOSITION_MIN_SPARE:
             self._reserve_boot_rows(dock, gap=False, lift=0)
             return
@@ -1630,7 +1651,14 @@ class OperatorApp(App[None]):
         """
         session = self._session
         if not arg:
-            notice(self._persist_hint_notice())
+            # ``_system_notice``, NOT ``notice``: opening the picker is the user
+            # configuring the app, not starting a conversation, and a plain
+            # notice ends the empty state — which collapses the boot
+            # composition and makes the centred prompt unreachable. That is the
+            # same failure a broken MCP server caused before ``_system_notice``
+            # existed; routing a hint about the app's own settings through the
+            # conversation path reintroduced it.
+            self._system_notice(self._persist_hint_notice())
             self._open_model_picker()
             return
         # ``/model default [<provider>/<id>]`` PERSISTS the choice as the boot
@@ -1730,9 +1758,16 @@ class OperatorApp(App[None]):
             # wording. The scope and the one command that widens it belong on the
             # line that announces the switch, not in documentation the user would
             # have to already suspect exists.
+            #
+            # TWO clauses and no more. This carried four separators — a
+            # parenthetical with a comma in it, the access note's ` · `, then a
+            # ` — ` onto a sentence of its own — and wrapped at 80 columns into a
+            # run-on. "(this session)" is the half that answers "for how long";
+            # "from the next turn" answered "starting when", which nothing had
+            # asked and which the very next receipt demonstrates anyway.
             notice(
-                f"model: {old_label} → {session.model_label} (this session, from the "
-                f"next turn){suffix} — /model default to make it the boot default"
+                f"model: {old_label} → {session.model_label} "
+                f"(this session){suffix} — {PERSIST_HINT}"
             )
         if warning:
             notice(warning, "warning")
@@ -1744,13 +1779,14 @@ class OperatorApp(App[None]):
         until ``/model default`` writes it, and that "the default" is a provider
         AND a model, not two separate settings to hunt for. The current label is
         repeated here even though the status band carries it, because it is the
-        subject of the sentence — "make THIS the default" needs a this.
+        subject of the sentence — "make THIS the default" needs a this, and with
+        no session yet there is no this, so the label is all that varies.
         """
         session = self._session
         label = session.model_label if session is not None else ""
         if not label:
-            return "/model default saves the provider and model you pick as the boot default"
-        return f"model: {label} — /model default saves this provider and model as the boot default"
+            return PERSIST_HINT
+        return f"model: {label} — {PERSIST_HINT}"
 
     def _model_access_note(self, provider: str) -> tuple[str, str | None]:
         """``(suffix, warning)`` answering "can I actually run this model now".
@@ -1834,7 +1870,7 @@ class OperatorApp(App[None]):
             # radient" pushed `/login <provider>` off the end at 100 columns, which
             # cost the one clause the user can act on.
             status=_status_line(
-                note, "checking providers…" if self._providers else "", PERSIST_FOOTER_HINT
+                note, "checking providers…" if self._providers else "", PERSIST_HINT
             ),
         )
         if self._providers is not None:
@@ -1851,16 +1887,14 @@ class OperatorApp(App[None]):
             self._editor().model_picker.set_rows(
                 rows,
                 current=self._current_selector(),
-                status=_status_line(
-                    note, f"live model list unavailable: {error}", PERSIST_FOOTER_HINT
-                ),
+                status=_status_line(note, f"live model list unavailable: {error}", PERSIST_HINT),
             )
             return
         rows, note = self._catalogue_rows(entries)
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
-            status=_status_line(note, _catalogue_status(statuses), PERSIST_FOOTER_HINT),
+            status=_status_line(note, _catalogue_status(statuses), PERSIST_HINT),
         )
 
     def _catalogue_rows(self, entries: list["CatalogueEntry"]) -> tuple[list[ModelRow], str]:
