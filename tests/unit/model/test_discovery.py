@@ -128,6 +128,28 @@ _OPENROUTER_BODY = {
     ]
 }
 
+#: Captured from ChatGPT's account-scoped Codex catalogue on 2026-08-09,
+#: trimmed to one selectable row and one internal hidden row.
+_OPENAI_CODEX_BODY = {
+    "models": [
+        {
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6-Sol",
+            "visibility": "list",
+            "context_window": 272_000,
+            "max_context_window": 272_000,
+            "input_modalities": ["text", "image"],
+        },
+        {
+            "slug": "codex-auto-review",
+            "display_name": "Codex Auto Review",
+            "visibility": "hide",
+            "context_window": 272_000,
+            "input_modalities": ["text", "image"],
+        },
+    ]
+}
+
 
 def test_openai_compat_parses_a_captured_openrouter_payload() -> None:
     client = _StubClient([_Response(200, _OPENROUTER_BODY)])
@@ -192,6 +214,49 @@ def test_openai_compat_sends_a_bearer_key_and_omits_it_when_keyless() -> None:
     # provider must send no Authorization at all rather than "Bearer None".
     assert "Authorization" not in keyless.calls[0][1]
     assert keyless.calls[0][0] == "http://localhost:11434/v1/models"
+
+
+def test_openai_oauth_uses_the_account_scoped_codex_catalogue() -> None:
+    """ChatGPT subscription tokens receive 403 from ``api.openai.com/v1/models``.
+
+    The Codex catalogue is the endpoint OpenAI's own client uses for those
+    tokens. It requires the account header and returns ``slug`` rows rather than
+    the public API's ``id`` rows.
+    """
+    client = _StubClient([_Response(200, _OPENAI_CODEX_BODY)])
+    rows = fetch_models(
+        "openai",
+        api_key="chatgpt-token",
+        is_oauth=True,
+        account_id="acct-42",
+        client=client,
+    )
+
+    assert rows is not None
+    assert [(row.id, row.name) for row in rows] == [("gpt-5.6-sol", "GPT-5.6-Sol")]
+    assert rows[0].context_window == 272_000
+    assert rows[0].supports_images is True
+    url, headers, params, _timeout = client.calls[0]
+    assert url == discovery.OPENAI_CHATGPT_MODELS_URL
+    assert headers["Authorization"] == "Bearer chatgpt-token"
+    assert headers["ChatGPT-Account-ID"] == "acct-42"
+    assert params == {"client_version": discovery.OPENAI_MODELS_CLIENT_VERSION}
+
+
+def test_openai_oauth_without_an_account_scope_falls_back_without_a_request() -> None:
+    client = _StubClient([])
+
+    assert (
+        fetch_models(
+            "openai",
+            api_key="chatgpt-token",
+            is_oauth=True,
+            account_id=None,
+            client=client,
+        )
+        is None
+    )
+    assert client.calls == []
 
 
 # -- Anthropic transport ------------------------------------------------------
@@ -917,6 +982,72 @@ def test_available_models_reports_ok_and_merges_the_registry(tmp_path) -> None:
     # Registry-only: the listing did not mention it, and a model the user can run
     # today must not vanish from the picker because of that.
     assert by_id["claude-3-5-sonnet-20241022"].context_window == 200_000
+
+
+def test_openai_oauth_catalogue_is_authoritative_when_available(tmp_path) -> None:
+    """A successful account-scoped response replaces the stale static id list."""
+    client = _StubClient([_Response(200, _OPENAI_CODEX_BODY)])
+
+    models, status = available_models(
+        "openai",
+        api_key="chatgpt-token",
+        is_oauth=True,
+        account_id="acct-42",
+        client=client,
+        cache_dir=tmp_path,
+    )
+
+    assert status == "ok"
+    assert [model.id for model in models] == ["gpt-5.6-sol"]
+    assert "gpt-4o" in static_models("openai"), "fixture no longer proves static ids were pruned"
+
+
+def test_openai_oauth_falls_back_to_static_when_the_endpoint_is_unavailable(tmp_path) -> None:
+    client = _StubClient([_Response(403, {"detail": "forbidden"})])
+
+    models, status = available_models(
+        "openai",
+        api_key="chatgpt-token",
+        is_oauth=True,
+        account_id="acct-42",
+        client=client,
+        cache_dir=tmp_path,
+    )
+
+    assert status == "static"
+    assert {model.id for model in models} == set(static_models("openai"))
+
+
+def test_openai_api_key_and_oauth_catalogues_do_not_share_a_cache(tmp_path) -> None:
+    """An API-key cache must not mask an account's newer OAuth-only models."""
+    client = _StubClient(
+        [
+            _Response(200, {"data": [{"id": "api-only"}]}),
+            _Response(200, _OPENAI_CODEX_BODY),
+        ]
+    )
+
+    available_models(
+        "openai",
+        api_key="sk-api",
+        client=client,
+        cache_dir=tmp_path,
+    )
+    oauth_models, oauth_status = available_models(
+        "openai",
+        api_key="chatgpt-token",
+        is_oauth=True,
+        account_id="acct-42",
+        client=client,
+        cache_dir=tmp_path,
+    )
+
+    assert oauth_status == "ok"
+    assert [model.id for model in oauth_models] == ["gpt-5.6-sol"]
+    assert [call[0] for call in client.calls] == [
+        "https://api.openai.com/v1/models",
+        discovery.OPENAI_CHATGPT_MODELS_URL,
+    ]
 
 
 def test_available_models_serves_a_fresh_cache_without_a_request(tmp_path) -> None:

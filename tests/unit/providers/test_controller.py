@@ -237,6 +237,24 @@ def test_an_env_key_counts_as_a_usable_credential(controller, monkeypatch) -> No
     assert not controller.has_any_credential("openrouter"), "still nothing STORED"
 
 
+@pytest.mark.asyncio
+async def test_openai_listing_credential_carries_the_chatgpt_account_scope(
+    controller, store
+) -> None:
+    store.oauth["openai"] = types.SimpleNamespace(
+        kind="oauth",
+        access_token="chatgpt-token",
+        account_id="acct-42",
+        org_id=None,
+    )
+
+    assert await controller._listing_credential("openai") == (
+        "chatgpt-token",
+        True,
+        "acct-42",
+    )
+
+
 def test_a_keyless_provider_is_usable_with_no_credential_at_all(controller) -> None:
     """Which is the whole point of running a local server."""
     assert controller.is_usable("ollama")

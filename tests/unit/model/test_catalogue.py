@@ -617,12 +617,22 @@ def test_an_env_api_key_beats_a_stored_oauth_row_and_keeps_its_kind(monkeypatch)
     from local_operator.model import configure as configure_mod
 
     monkeypatch.setattr(
-        configure_mod, "_oauth_listing_token", lambda _provider: ("oauth-access-token", True)
+        configure_mod,
+        "_oauth_listing_token",
+        lambda _provider: ("oauth-access-token", True, None),
     )
-    assert configure_mod._catalogue_credential("anthropic") == ("oauth-access-token", True)
+    assert configure_mod._catalogue_credential("anthropic") == (
+        "oauth-access-token",
+        True,
+        None,
+    )
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-explicit")
-    assert configure_mod._catalogue_credential("anthropic") == ("sk-ant-explicit", False)
+    assert configure_mod._catalogue_credential("anthropic") == (
+        "sk-ant-explicit",
+        False,
+        None,
+    )
 
 
 def test_an_oauth_token_from_the_environment_is_not_sent_as_an_api_key(monkeypatch) -> None:
@@ -634,7 +644,35 @@ def test_an_oauth_token_from_the_environment_is_not_sent_as_an_api_key(monkeypat
     monkeypatch.setenv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
 
-    assert configure_mod._catalogue_credential("anthropic") == ("sk-ant-oat-token", True)
+    assert configure_mod._catalogue_credential("anthropic") == (
+        "sk-ant-oat-token",
+        True,
+        None,
+    )
+
+
+def test_stored_openai_oauth_account_scope_reaches_model_discovery(tmp_path, monkeypatch) -> None:
+    from local_operator.model import configure as configure_mod
+    from local_operator.providers.auth_store import AuthStore
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    store = AuthStore()
+    store.upsert_credential(
+        "openai",
+        {
+            "access": "chatgpt-token",
+            "refresh": "refresh-token",
+            "account_id": "acct-42",
+        },
+    )
+    store.close()
+
+    assert configure_mod._catalogue_credential("openai") == (
+        "chatgpt-token",
+        True,
+        "acct-42",
+    )
 
 
 def test_no_key_anywhere_still_resolves(tmp_path, monkeypatch) -> None:

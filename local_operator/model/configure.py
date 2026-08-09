@@ -672,13 +672,12 @@ def _env_secret_is_oauth(secret: str) -> bool:
     return any(value == secret and "OAUTH" in name.upper() for name, value in os.environ.items())
 
 
-def _catalogue_credential(provider: str) -> tuple[str, bool]:
-    """``(secret, is_oauth)`` for a listing call, preferring an explicit key.
+def _catalogue_credential(provider: str) -> tuple[str, bool, str | None]:
+    """``(secret, is_oauth, account_id)`` for a listing call.
 
-    The flag matters and is not cosmetic: Anthropic authenticates an API key with
-    ``x-api-key`` and an OAuth token with ``Authorization: Bearer``, so sending the
-    wrong header shape is a 401 and therefore a model that cannot be described.
-
+    The OAuth flag selects provider-specific auth, while OpenAI additionally
+    requires the stored ChatGPT account id to authorize its current Codex
+    catalogue. Explicit keys keep precedence and are not account-scoped.
     Order is env, then the credential file, then the OAuth store — an explicit
     variable is the operator overriding config for one run, which is the same
     precedence every other key reader in the repo uses. That order was inverted in
@@ -687,12 +686,12 @@ def _catalogue_credential(provider: str) -> tuple[str, bool]:
     """
     key = _catalogue_api_key(provider)
     if key:
-        return key, _env_secret_is_oauth(key)
+        return key, _env_secret_is_oauth(key), None
     return _oauth_listing_token(provider)
 
 
-def _oauth_listing_token(provider: str) -> tuple[str, bool]:
-    """The newest stored token for ``provider``, or ``("", False)``.
+def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
+    """The newest stored token and account scope, or ``("", False, None)``.
 
     Best-effort by construction: an unreadable store, a missing table or a row
     without a token all mean "no listing", never an exception. Opened and closed
@@ -711,7 +710,12 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool]:
         for row in reversed(rows):
             token = str(row.data.get("access") or "")
             if token:
-                return token, row.credential_type == "oauth"
+                account_id = row.data.get("account_id") or row.data.get("org_id")
+                return (
+                    token,
+                    row.credential_type == "oauth",
+                    (str(account_id) if account_id else None),
+                )
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not read a stored %s token for the listing: %s", provider, exc)
     finally:
@@ -720,7 +724,7 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool]:
                 store.close()
             except Exception:  # noqa: BLE001 - closing a broken handle is not fatal
                 pass
-    return "", False
+    return "", False, None
 
 
 def _normalised_id(model_id: str) -> str:
@@ -760,11 +764,12 @@ def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) ->
     try:
         from local_operator.model.discovery import available_models
 
-        secret, is_oauth = _catalogue_credential(provider)
+        secret, is_oauth, account_id = _catalogue_credential(provider)
         rows, status = available_models(
             provider,
             api_key=secret or None,
             is_oauth=is_oauth,
+            account_id=account_id,
         )
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("%s discovery unavailable for %s: %s", provider, model_name, exc)
