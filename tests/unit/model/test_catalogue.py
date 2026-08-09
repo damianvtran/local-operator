@@ -617,12 +617,22 @@ def test_an_env_api_key_beats_a_stored_oauth_row_and_keeps_its_kind(monkeypatch)
     from local_operator.model import configure as configure_mod
 
     monkeypatch.setattr(
-        configure_mod, "_oauth_listing_token", lambda _provider: ("oauth-access-token", True)
+        configure_mod,
+        "_oauth_listing_token",
+        lambda _provider: ("oauth-access-token", True, "account-123"),
     )
-    assert configure_mod._catalogue_credential("anthropic") == ("oauth-access-token", True)
+    assert configure_mod._catalogue_credential("anthropic") == (
+        "oauth-access-token",
+        True,
+        "account-123",
+    )
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-explicit")
-    assert configure_mod._catalogue_credential("anthropic") == ("sk-ant-explicit", False)
+    assert configure_mod._catalogue_credential("anthropic") == (
+        "sk-ant-explicit",
+        False,
+        None,
+    )
 
 
 def test_an_oauth_token_from_the_environment_is_not_sent_as_an_api_key(monkeypatch) -> None:
@@ -634,7 +644,43 @@ def test_an_oauth_token_from_the_environment_is_not_sent_as_an_api_key(monkeypat
     monkeypatch.setenv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
 
-    assert configure_mod._catalogue_credential("anthropic") == ("sk-ant-oat-token", True)
+    assert configure_mod._catalogue_credential("anthropic") == (
+        "sk-ant-oat-token",
+        True,
+        None,
+    )
+
+
+def test_oauth_account_context_reaches_metadata_discovery(monkeypatch) -> None:
+    from local_operator.model import configure as configure_mod
+    from local_operator.model import discovery as discovery_mod
+
+    seen: dict[str, object] = {}
+
+    def fake_available(provider_id, **kwargs):
+        seen.update(kwargs)
+        return [_row("gpt-live", context_window=272_000)], "ok"
+
+    monkeypatch.setattr(
+        configure_mod,
+        "_catalogue_credential",
+        lambda _provider: (_ for _ in ()).throw(AssertionError("used ambient account")),
+    )
+    monkeypatch.setattr(discovery_mod, "available_models", fake_available)
+
+    info = configure_mod._info_from_discovery(
+        "openai",
+        "gpt-live",
+        _bare_info("gpt-live"),
+        catalogue_credential=("oauth-token", True, "account-123"),
+    )
+
+    assert info.context_window == 272_000
+    assert seen == {
+        "api_key": "oauth-token",
+        "is_oauth": True,
+        "account_id": "account-123",
+    }
 
 
 def test_no_key_anywhere_still_resolves(tmp_path, monkeypatch) -> None:
@@ -1087,6 +1133,30 @@ def test_the_resolved_info_is_never_the_registrys_own_object(monkeypatch) -> Non
     assert shipped.context_window == 200_000, "a caller corrupted the shipped registry"
     second = configure_mod.resolve_model_info("anthropic", "claude-3-5-sonnet-20241022")
     assert second.context_window == 200_000, "the memo served the mutated object"
+
+
+def test_the_in_process_memo_is_scoped_to_the_oauth_account(monkeypatch) -> None:
+    from local_operator.model import discovery as discovery_mod
+
+    current = {"account_id": "account-a"}
+
+    def credential(_provider: str) -> tuple[str, bool, str]:
+        return "oauth-token", True, current["account_id"]
+
+    def available(_provider: str, **kwargs):
+        window = 100_000 if kwargs["account_id"] == "account-a" else 200_000
+        return [_row("account-model", context_window=window)], "ok"
+
+    monkeypatch.setattr(configure_mod, "_catalogue_credential", credential)
+    monkeypatch.setattr(discovery_mod, "available_models", available)
+    configure_mod.invalidate_model_info_cache()
+
+    first = configure_mod.resolve_model_info("openai", "account-model")
+    current["account_id"] = "account-b"
+    second = configure_mod.resolve_model_info("openai", "account-model")
+
+    assert first.context_window == 100_000
+    assert second.context_window == 200_000
 
 
 def test_the_memo_can_be_dropped_when_the_cause_of_a_bad_answer_is_fixed(monkeypatch) -> None:

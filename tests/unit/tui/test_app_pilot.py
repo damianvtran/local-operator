@@ -16,8 +16,14 @@ import pytest
 
 from local_operator.harness.types import NoticeEvent
 from local_operator.session.mcp_status import McpStartupOutcome
-from local_operator.tui.app import BOOT_LAYOUT_CLASS, SLASH_COMMANDS, OperatorApp
+from local_operator.tui.app import (
+    BOOT_LAYOUT_CLASS,
+    SLASH_COMMANDS,
+    OperatorApp,
+    _effort_label,
+)
 from local_operator.tui.autocomplete import ArgumentChoice
+from local_operator.tui.events import AssistantMessageEnd, AssistantMessageStart
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.toast import Toast
@@ -38,6 +44,8 @@ class FakeSession:
         self._history: list[Any] = []
         self.preflight_calls = 0
         self.preflight_notice: str | None = None
+        self._model_label = "test/model"
+        self.preflight_model_label: str | None = None
 
     @property
     def session_id(self) -> str:
@@ -53,7 +61,7 @@ class FakeSession:
 
     @property
     def model_label(self) -> str:
-        return "test/model"
+        return self._model_label
 
     @property
     def model(self) -> Any:
@@ -75,6 +83,8 @@ class FakeSession:
 
     async def preflight_usage(self) -> None:
         self.preflight_calls += 1
+        if self.preflight_model_label is not None:
+            self._model_label = self.preflight_model_label
         if self.preflight_notice is not None:
             self.emit(NoticeEvent(text=self.preflight_notice, kind="warning"))
 
@@ -178,22 +188,67 @@ async def test_boot_typing_sends_prompt() -> None:
         assert len(transcript.blocks()) == 1
 
 
-@pytest.mark.asyncio
-async def test_boot_renders_non_blocking_quota_warning() -> None:
-    session = FakeSession()
-    session.preflight_notice = (
-        "anthropic quota exhausted — falling back to openai/gpt-5.3-codex (high effort)"
+def test_fallback_without_explicit_effort_does_not_inherit_reasoning_label() -> None:
+    primary = SimpleNamespace(provider="anthropic", model_id="claude", reasoning=True)
+    fallback = SimpleNamespace(provider="openai", model_id="gpt", reasoning=True)
+    session = SimpleNamespace(
+        model=primary,
+        active_model=fallback,
+        model_label="openai/gpt",
+        reasoning_effort=None,
     )
+
+    assert _effort_label(session) == ""
+
+
+@pytest.mark.asyncio
+async def test_assistant_start_refreshes_a_silently_restored_primary_route() -> None:
+    session = FakeSession()
+    session._model_label = "openai/fallback"
+    app = OperatorApp(lambda: _factory(session))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.on_assistant_message_start(AssistantMessageStart())
+        session._model_label = "anthropic/primary"
+        assert "openai/fallback" in _band(app)
+        app.on_assistant_message_end(AssistantMessageEnd(""))
+        await pilot.pause()
+
+        assert "anthropic/primary" in _band(app)
+        assert "openai/fallback" not in _band(app)
+
+
+@pytest.mark.asyncio
+async def test_boot_renders_quota_fallback_as_a_toast_without_leaving_splash() -> None:
+    session = FakeSession()
+    session.preflight_model_label = "openai/gpt-5.4"
+    session.preflight_notice = "anthropic quota exhausted\nFallback: openai/gpt-5.4 (high effort)"
     app = OperatorApp(lambda: _factory(session))
 
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         await pilot.pause()
 
-        text = _transcript_text(app)
-        assert "anthropic quota exhausted" in text
-        assert "falling back to openai/gpt-5.3-codex (high effort)" in text
+        toast = app.query_one(Toast)
+        assert toast.display is True
+        assert "anthropic quota exhausted" in toast.message
+        assert "Fallback: openai/gpt-5.4 (high effort)" in toast.message
+        assert _transcript_text(app) == ""
+        assert app.query_one(WelcomeView).display is True
+        assert app.screen.has_class(BOOT_LAYOUT_CLASS)
+        assert "openai/gpt-5.4" in _band(app)
         assert session.prompts == []
+
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("h", "i", "enter")
+        await pilot.pause()
+
+        transcript = _transcript_text(app)
+        assert transcript.index("anthropic quota exhausted") < transcript.index("hi")
+        assert len(app.query_one(TranscriptView).blocks()) == 2
+        assert session.prompts == ["hi"]
 
 
 @pytest.mark.asyncio
@@ -913,6 +968,10 @@ class FakeProviderController:
         self.usage_error: Exception | None = None
         self.logins: list[str] = []
         self.logouts: list[str] = []
+        self.session_ids: list[str | None] = []
+
+    def set_session_id(self, session_id: str | None) -> None:
+        self.session_ids.append(session_id)
 
     def login_providers(self) -> list[Any]:
         return [
@@ -997,6 +1056,18 @@ class FakeProviderController:
         if self.usage_error is not None:
             raise self.usage_error
         return self.usage_reports
+
+
+@pytest.mark.asyncio
+async def test_boot_binds_provider_catalogue_to_the_session() -> None:
+    controller = FakeProviderController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+
+    assert controller.session_ids == ["sess"]
 
 
 class _FakeDef:
@@ -2212,6 +2283,7 @@ async def test_resume_replaces_the_visible_transcript(tmp_path, monkeypatch) -> 
     _seed_session(tmp_path, "cafe01")
 
     session = FakeSession()
+    session.preflight_notice = "session A startup warning"
     session._history = [
         SimpleNamespace(role="user", text="history from the current session", tool_calls=None)
     ]
@@ -2252,6 +2324,7 @@ async def test_resume_replaces_the_visible_transcript(tmp_path, monkeypatch) -> 
         assert "/resume cafe01" not in text, text
         assert "resuming session cafe01" not in text, text
         assert "stale event from disposed session" not in text, text
+        assert "session A startup warning" not in text, text
 
 
 @pytest.mark.asyncio

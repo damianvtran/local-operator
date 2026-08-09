@@ -22,11 +22,12 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 import httpx
 
 from local_operator.harness.types import ModelSpec
-from local_operator.model.configure import (  # noqa: F401  (used by callers)
+from local_operator.model.configure import (
     build_model_spec,
+    invalidate_model_info_cache,
 )
 from local_operator.model.discovery import available_models
-from local_operator.model.registry import static_models
+from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import (
     AGGREGATOR_PROVIDERS,
     PROVIDER_REGISTRY,
@@ -90,17 +91,21 @@ class ControllerAuthStore(Protocol):
         self, provider: str | None = None
     ) -> list["StoredCredential"]: ...  # pragma: no cover
 
-    def upsert_credential(
-        self, provider: str, credential: dict[str, Any]
-    ) -> "StoredCredential": ...  # pragma: no cover
+    async def get_api_key(
+        self, provider: str, session_id: str | None = None
+    ) -> str | None: ...  # pragma: no cover
+
+    async def get_oauth_access(
+        self, provider: str, session_id: str | None = None
+    ) -> "OAuthAccess | None": ...  # pragma: no cover
 
     def delete_credentials_for_provider(
         self, provider: str, disabled_cause: str = ...
     ) -> int: ...  # pragma: no cover
 
-    async def get_oauth_access(self, provider: str) -> "OAuthAccess | None": ...  # pragma: no cover
-
-    async def get_api_key(self, provider: str) -> str | None: ...  # pragma: no cover
+    def upsert_credential(
+        self, provider: str, credential: dict[str, Any]
+    ) -> "StoredCredential": ...  # pragma: no cover
 
 
 class ProviderController:
@@ -119,6 +124,11 @@ class ProviderController:
         # used by default; an embedding host (e.g. a Textual app) injects
         # callbacks that yield the terminal before the flow runs.
         self._login_callbacks = login_callbacks
+        # The catalogue and inference stores are separate handles over the same
+        # rows. A shared session id makes their deterministic sticky selection
+        # choose the same OAuth account without sharing mutable process state.
+        self._session_id: str | None = None
+        self._live_model_info: dict[tuple[str, str], ModelInfo] = {}
 
     def set_login_callbacks(self, factory: "LoginCallbackFactory | None") -> None:
         """Install host-specific login callbacks after construction.
@@ -130,6 +140,17 @@ class ProviderController:
         app for the terminal or requires suspending it.
         """
         self._login_callbacks = factory
+
+    def set_session_id(self, session_id: str | None) -> None:
+        """Bind catalogue/usage credential selection to the active session."""
+        if session_id != self._session_id:
+            self._live_model_info.clear()
+        self._session_id = session_id
+
+    def _invalidate_catalogue(self) -> None:
+        """Drop account-bound model metadata after credentials change."""
+        self._live_model_info.clear()
+        invalidate_model_info_cache()
 
     # -- discovery ---------------------------------------------------------
     def login_providers(self) -> list[ProviderDefinition]:
@@ -231,9 +252,9 @@ class ProviderController:
 
     # -- model -------------------------------------------------------------
     def resolve_model(self, provider: str, model_id: str) -> ModelSpec:
-        """Build a ModelSpec for a provider/model pair (raises on unknown
-        provider/hosting). Used by ``/model <provider>/<id>``."""
-        return build_model_spec(provider, model_id)
+        """Build the session-bound spec last offered by the live picker."""
+        info = self._live_model_info.get((provider, model_id))
+        return build_model_spec(provider, model_id, info=info)
 
     # -- login / logout ----------------------------------------------------
     def _default_callbacks(self, definition: ProviderDefinition) -> LoginCallbacks:
@@ -266,6 +287,7 @@ class ProviderController:
                 self.auth_store.upsert_credential(
                     storage, {"key": result, "source": "login", "type": "api_key"}
                 )
+                self._invalidate_catalogue()
                 return f"Stored API key for '{storage}'."
             return f"Login for '{storage}' produced no key; nothing stored."
 
@@ -274,6 +296,7 @@ class ProviderController:
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
+        self._invalidate_catalogue()
         if result.get("grant_note"):
             msg += f" Note: {result['grant_note']}"
         return msg
@@ -291,6 +314,7 @@ class ProviderController:
             )
         if removed == 0:
             raise ValueError(f"No stored credentials for '{provider_id}'.")
+        self._invalidate_catalogue()
         return f"Removed {removed} credential(s) for '{provider_id}'."
 
     # -- usage -------------------------------------------------------------
@@ -384,18 +408,24 @@ class ProviderController:
         one broken provider must not empty the whole list.
         """
         entries: list[CatalogueEntry] = []
+        self._live_model_info.clear()
         statuses: dict[str, str] = {}
         usable = self.usable_providers()
         for definition in PROVIDER_REGISTRY:
             connected = usable is None or definition.id in usable
             api_key: str | None = None
             is_oauth = False
+            account_id: str | None = None
             if connected:
                 try:
-                    api_key, is_oauth = await self._listing_credential(definition.id)
+                    api_key, is_oauth, account_id = await self._listing_credential(definition.id)
                 except Exception:  # noqa: BLE001 — one provider's auth is not fatal
-                    api_key, is_oauth = None, False
-            kwargs: dict[str, Any] = {"api_key": api_key, "is_oauth": is_oauth}
+                    api_key, is_oauth, account_id = None, False, None
+            kwargs: dict[str, Any] = {
+                "api_key": api_key,
+                "is_oauth": is_oauth,
+                "account_id": account_id,
+            }
             if ttl_s is not None:
                 kwargs["ttl_s"] = ttl_s
             # Off the event loop: discovery is synchronous httpx by design (it is
@@ -404,6 +434,15 @@ class ProviderController:
             models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
             statuses[definition.id] = status
             for model in models:
+                self._live_model_info[(definition.id, model.id)] = ModelInfo(
+                    id=model.id,
+                    name=model.name or model.id,
+                    description="",
+                    context_window=model.context_window,
+                    max_tokens=model.max_tokens,
+                    supports_images=model.supports_images,
+                    supports_prompt_cache=bool(model.supports_prompt_cache),
+                )
                 entries.append(
                     CatalogueEntry(
                         provider=definition.id,
@@ -418,34 +457,33 @@ class ProviderController:
                 )
         return entries, statuses
 
-    async def _listing_credential(self, provider: str) -> tuple[str | None, bool]:
-        """``(secret, is_oauth)`` for a model LISTING call.
+    async def _listing_credential(self, provider: str) -> tuple[str | None, bool, str | None]:
+        """``(secret, is_oauth, account_id)`` for a model listing call.
 
-        Separate from the usage path because the two want different things from the
-        same store: usage needs a billing key and gives up without one, while a
-        listing is happy with either an OAuth access token or an API key and is
-        worth attempting with whichever exists. The OAuth branch is reported as
-        such because Anthropic switches header shape on it — `x-api-key` for keys,
-        `Authorization: Bearer` for tokens — and sending the wrong one is a 401.
+        Separate from usage because the two want different things from the same
+        store: listing accepts an OAuth bearer or an API key. The auth kind picks
+        the wire shape (Anthropic headers, OpenAI's ChatGPT Codex endpoint), and
+        OpenAI's endpoint additionally requires the account that pays for the
+        subscription request.
         """
-        access = await self.auth_store.get_oauth_access(provider)
+        access = await self.auth_store.get_oauth_access(provider, self._session_id)
         if access is not None and access.kind == "oauth" and access.access_token:
-            return access.access_token, True
+            return access.access_token, True, access.account_id or access.org_id
         if access is not None and access.access_token:
-            return access.access_token, False
+            return access.access_token, False, None
         try:
-            stored = await self.auth_store.get_api_key(provider)
+            stored = await self.auth_store.get_api_key(provider, self._session_id)
         except Exception:  # noqa: BLE001 — a refresh failure just means no listing
             stored = None
         # The environment is the last tier of the same cascade the stream uses, so
         # a key set there has to reach the listing too: otherwise the provider a
         # session is ACTUALLY RUNNING ON is the one whose catalogue stays empty.
-        return stored or resolve_env_key(provider), False
+        return stored or resolve_env_key(provider), False, None
 
     async def _fetch_one(self, client: httpx.AsyncClient, provider: str) -> UsageReport | None:
         if not usage_supported(provider):
             return None
-        access = await self.auth_store.get_oauth_access(provider)
+        access = await self.auth_store.get_oauth_access(provider, self._session_id)
         access_token: str | None = None
         api_key: str | None = None
         account_id: str | None = None
@@ -456,7 +494,7 @@ class ProviderController:
             api_key = access.access_token
         if api_key is None:
             try:
-                api_key = await self.auth_store.get_api_key(provider)
+                api_key = await self.auth_store.get_api_key(provider, self._session_id)
             except Exception:  # noqa: BLE001 — a refresh failure is not fatal here
                 api_key = None
         if not access_token and not api_key:

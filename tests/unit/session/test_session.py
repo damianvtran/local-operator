@@ -68,14 +68,35 @@ class PreflightStream(ScriptedStream):
         super().__init__([[StreamEndEvent(stop_reason="stop")]])
         self.notice_handler = None
         self.preflight_models: list[ModelSpec] = []
+        self.active_model_label: str | None = None
+        self.active_reasoning_effort: str | None = None
+        self.active_model_spec: ModelSpec | None = None
+        self.primary_models: list[ModelSpec] = []
 
     def set_notice_handler(self, handler) -> None:
         self.notice_handler = handler
 
+    def set_primary_model(self, model: ModelSpec) -> None:
+        self.primary_models.append(model)
+        self.active_model_label = None
+        self.active_reasoning_effort = None
+        self.active_model_spec = None
+
     async def preflight_usage(self, model: ModelSpec) -> None:
         self.preflight_models.append(model)
+        self.active_model_label = "openai/gpt-5.4"
+        self.active_reasoning_effort = "high"
+        self.active_model_spec = ModelSpec(
+            provider="openai",
+            model_id="gpt-5.4",
+            context_window=272_000,
+            reasoning_effort="high",
+        )
         assert self.notice_handler is not None
-        await self.notice_handler("anthropic quota low — falling back to openai", "warning")
+        await self.notice_handler(
+            "anthropic quota low\nFallback: openai/gpt-5.4 (high effort)",
+            "warning",
+        )
 
 
 def echo_tool(executed: list[str], delay: float = 0.0, name: str = "echo") -> AgentTool:
@@ -158,9 +179,22 @@ async def test_usage_preflight_warns_without_starting_model_turn(tmp_path):
 
     assert stream.preflight_models == [MODEL]
     assert stream.requests == []
+    assert session.model_label == "openai/gpt-5.4"
+    assert session.reasoning_effort == "high"
+    assert session.active_model == stream.active_model_spec
+    assert session.active_model.context_window == 272_000
     assert [event.type for event in events] == ["notice"]
     assert isinstance(events[0], NoticeEvent)
-    assert events[0].text == "anthropic quota low — falling back to openai"
+    assert events[0].text == "anthropic quota low\nFallback: openai/gpt-5.4 (high effort)"
+    await session.prompt("hi")
+    assert stream.requests[0].model == stream.active_model_spec
+    assert stream.requests[0].model.context_window == 272_000
+
+    switched = ModelSpec(provider="anthropic", model_id="claude-sonnet-5", context_window=1_000_000)
+    session.set_model(switched)
+    assert stream.primary_models == [switched]
+    assert session.model_label == "anthropic/claude-sonnet-5"
+    assert session.active_model == switched
 
 
 @pytest.mark.asyncio

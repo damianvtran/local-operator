@@ -694,6 +694,26 @@ async def _prepare(
     # --- model + stream fn (stream B contracts) ---------------------------
     from local_operator.env import get_env_config
     from local_operator.model.configure import configure_model, create_stream_fn
+    from local_operator.providers.auth_store import AuthStore
+
+    auth_store = AuthStore(credential_manager=credential_manager)
+    catalogue_credential: tuple[str | None, bool, str | None] = (None, False, None)
+    try:
+        access = await auth_store.get_oauth_access(hosting, transcript_dir.name)
+        if access is not None and access.access_token:
+            catalogue_credential = (
+                access.access_token,
+                access.kind == "oauth",
+                access.account_id or access.org_id,
+            )
+        else:
+            catalogue_credential = (
+                await auth_store.get_api_key(hosting, transcript_dir.name),
+                False,
+                None,
+            )
+    except Exception:  # noqa: BLE001 - metadata lookup must never block startup
+        pass
 
     chat_kwargs: dict[str, Any] = {}
     if agent is not None:
@@ -706,13 +726,11 @@ async def _prepare(
         model_name=model_name,
         credential_manager=credential_manager,
         env_config=get_env_config(),
+        catalogue_credential=catalogue_credential,
         **chat_kwargs,
     )
     spec = model_configuration.spec
 
-    from local_operator.providers.auth_store import AuthStore
-
-    auth_store = AuthStore(credential_manager=credential_manager)
     stream_fn = create_stream_fn(
         auth_store,
         settings=config_manager.get_config().values,

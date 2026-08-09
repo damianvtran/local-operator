@@ -17,8 +17,10 @@ and dispatching to the right wire client through
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import functools
+import hashlib
 import inspect
 import logging
 import os
@@ -213,7 +215,13 @@ _NO_SAMPLING_PARAMS = re.compile(
 )
 
 
-def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = None) -> ModelSpec:
+def build_model_spec(
+    hosting: str,
+    model_name: str,
+    info: ModelInfo | None = None,
+    *,
+    catalogue_credential: tuple[str | None, bool, str | None] | None = None,
+) -> ModelSpec:
     """Derive a harness ``ModelSpec`` from the model's resolved metadata.
 
     Resolution goes through :func:`resolve_model_info`, NOT ``get_model_info``.
@@ -233,7 +241,11 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     canonical = "test" if hosting == "noop" else hosting
     if info is None:
         try:
-            info = resolve_model_info(canonical, model_name)
+            info = resolve_model_info(
+                canonical,
+                model_name,
+                catalogue_credential=catalogue_credential,
+            )
         except Exception:  # noqa: BLE001 - metadata is never worth a failed start
             info = None
 
@@ -673,12 +685,16 @@ def _env_secret_is_oauth(secret: str) -> bool:
     return any(value == secret and "OAUTH" in name.upper() for name, value in os.environ.items())
 
 
-def _catalogue_credential(provider: str) -> tuple[str, bool]:
-    """``(secret, is_oauth)`` for a listing call, preferring an explicit key.
+def _catalogue_credential(provider: str) -> tuple[str, bool, str | None]:
+    """``(secret, is_oauth, account_id)`` for a live listing call.
 
     The flag matters and is not cosmetic: Anthropic authenticates an API key with
     ``x-api-key`` and an OAuth token with ``Authorization: Bearer``, so sending the
     wrong header shape is a 401 and therefore a model that cannot be described.
+    OpenAI's subscription catalogue also needs the account id both as a request
+    header and as cache isolation; omitting it can serve one login's picker rows
+    to another and leaves fallback context metadata on the stale static default.
+
 
     Order is env, then the credential file, then the OAuth store — an explicit
     variable is the operator overriding config for one run, which is the same
@@ -688,12 +704,12 @@ def _catalogue_credential(provider: str) -> tuple[str, bool]:
     """
     key = _catalogue_api_key(provider)
     if key:
-        return key, _env_secret_is_oauth(key)
+        return key, _env_secret_is_oauth(key), None
     return _oauth_listing_token(provider)
 
 
-def _oauth_listing_token(provider: str) -> tuple[str, bool]:
-    """The newest stored token for ``provider``, or ``("", False)``.
+def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
+    """The newest stored token, its kind and subscription account context.
 
     Best-effort by construction: an unreadable store, a missing table or a row
     without a token all mean "no listing", never an exception. Opened and closed
@@ -712,7 +728,8 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool]:
         for row in reversed(rows):
             token = str(row.data.get("access") or "")
             if token:
-                return token, row.credential_type == "oauth"
+                account_id = str(row.data.get("account_id") or "").strip() or None
+                return token, row.credential_type == "oauth", account_id
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not read a stored %s token for the listing: %s", provider, exc)
     finally:
@@ -721,7 +738,25 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool]:
                 store.close()
             except Exception:  # noqa: BLE001 - closing a broken handle is not fatal
                 pass
-    return "", False
+    return "", False, None
+
+
+def _catalogue_credential_cache_key(provider: str) -> str:
+    """Non-secret identity separating in-process listing metadata.
+
+    Disk documents are already subscription-scoped. The lru above them must use
+    the same boundary or an account switch can keep another login's context and
+    capabilities for a full TTL. Hash bare secrets rather than retaining them in
+    cache keys or diagnostics; OAuth account ids are non-secret and authoritative.
+    """
+    secret, is_oauth, account_id = _catalogue_credential(provider)
+    if account_id:
+        return f"oauth:{account_id}"
+    if secret:
+        kind = "oauth" if is_oauth else "key"
+        digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:12]
+        return f"{kind}:{digest}"
+    return "anonymous"
 
 
 def _normalised_id(model_id: str) -> str:
@@ -742,7 +777,13 @@ def _normalised_id(model_id: str) -> str:
     return trimmed.casefold()
 
 
-def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) -> ModelInfo:
+def _info_from_discovery(
+    provider: str,
+    model_name: str,
+    fallback: ModelInfo,
+    *,
+    catalogue_credential: tuple[str | None, bool, str | None] | None = None,
+) -> ModelInfo:
     """Fill ``fallback``'s gaps from the provider's own live model listing.
 
     Never raises, and never returns worse data than it was given: every field is
@@ -761,11 +802,16 @@ def _info_from_discovery(provider: str, model_name: str, fallback: ModelInfo) ->
     try:
         from local_operator.model.discovery import available_models
 
-        secret, is_oauth = _catalogue_credential(provider)
+        secret, is_oauth, account_id = (
+            catalogue_credential
+            if catalogue_credential is not None
+            else _catalogue_credential(provider)
+        )
         rows, status = available_models(
             provider,
             api_key=secret or None,
             is_oauth=is_oauth,
+            account_id=account_id,
         )
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("%s discovery unavailable for %s: %s", provider, model_name, exc)
@@ -860,16 +906,18 @@ def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
 
 
 @functools.lru_cache(maxsize=64)
-def _resolve_model_info_cached(provider: str, model_id: str, _bucket: int) -> ModelInfo:
+def _resolve_model_info_cached(
+    provider: str,
+    model_id: str,
+    _bucket: int,
+    _credential_key: str,
+) -> ModelInfo:
     """Memoized body of :func:`resolve_model_info`.
 
-    ``_bucket`` is unused by the logic and present only to expire the memo: it
-    is part of the cache KEY, so when the caller's bucket advances every entry
-    for the previous one becomes unreachable and `lru_cache` evicts it in due
-    course. Without it a bare `lru_cache` outlives the disk TTL entirely, and a
-    long-lived process (the HTTP server, a scheduler worker) would pin whatever
-    metadata it saw at boot for as long as it ran — the disk cache would refresh
-    underneath it and nothing would ever read the new numbers.
+    ``_bucket`` bounds staleness in time; ``_credential_key`` bounds it by the
+    provider account that supplied the listing. Both are key-only inputs: the
+    body resolves the actual secret only on a miss, so the lru never retains a
+    bearer token.
     """
     canonical = "test" if provider == "noop" else provider
     info = _registry_fallback(canonical, model_id)
@@ -902,7 +950,12 @@ def invalidate_model_info_cache() -> None:
     _resolve_model_info_cached.cache_clear()
 
 
-def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
+def resolve_model_info(
+    provider: str,
+    model_id: str,
+    *,
+    catalogue_credential: tuple[str | None, bool, str | None] | None = None,
+) -> ModelInfo:
     """A model's real metadata: static registry first, catalogue to fill gaps.
 
     THE one resolution path, so the numbers a session runs on and the numbers a
@@ -938,7 +991,31 @@ def resolve_model_info(provider: str, model_id: str) -> ModelInfo:
     resolve many models in one process. The copy is a few dozen field assignments
     against the ~25ms JSON parse this memo exists to avoid.
     """
-    info = _resolve_model_info_cached(provider, model_id, int(time.time() // DEFAULT_TTL_S))
+    canonical = "test" if provider == "noop" else provider
+    fallback = _registry_fallback(canonical, model_id)
+    if catalogue_credential is not None:
+        info = (
+            _info_from_discovery(
+                canonical,
+                model_id,
+                fallback,
+                catalogue_credential=catalogue_credential,
+            )
+            if _needs_enrichment(fallback)
+            else fallback
+        )
+        return info.model_copy(deep=True)
+    credential_key = (
+        _catalogue_credential_cache_key(canonical)
+        if canonical == "openai" and _needs_enrichment(fallback)
+        else ""
+    )
+    info = _resolve_model_info_cached(
+        provider,
+        model_id,
+        int(time.time() // DEFAULT_TTL_S),
+        credential_key,
+    )
     return info.model_copy(deep=True)
 
 
@@ -961,6 +1038,7 @@ def configure_model(
     presence_penalty: Optional[float] = None,
     stop: Optional[list[str]] = None,
     seed: Optional[int] = None,
+    catalogue_credential: tuple[str | None, bool, str | None] | None = None,
 ) -> ModelConfiguration:
     """Configure a model for ``hosting``.
 
@@ -1010,7 +1088,11 @@ def configure_model(
         # compaction sizes itself off a 128k fallback on a 1M model and cost
         # cannot be reported at all. `resolve_model_info` fills the gap from a
         # disk-cached catalogue: one HTTP call a day, and never a blocked start.
-        model_info = resolve_model_info(canonical, model_name)
+        model_info = resolve_model_info(
+            canonical,
+            model_name,
+            catalogue_credential=catalogue_credential,
+        )
 
     spec = build_model_spec(canonical, model_name, model_info)
     # Sampling rides on the ModelSpec: the loop builds its ChatRequest without
@@ -1097,6 +1179,43 @@ class SessionStreamFn:
         """Mark the next model call as a user-message boundary."""
         self._message_boundary_pending = True
 
+    def set_primary_model(self, model: ModelSpec) -> None:
+        """Reset fallback state immediately when the session changes model.
+
+        Waiting for the next preflight leaves every persistent model label on the
+        old fallback after ``/model`` reports success. The new primary is already
+        the effective route, so clear the old route synchronously and let the
+        next message perform a fresh usage check for this selector.
+        """
+        self._route_state.primary_spec = model
+        self._primary_selector = f"{model.provider}/{model.model_id}"
+        self._route_state.clear()
+        self._usage_checked_selector = None
+        self._usage_checked_at = 0.0
+        self._message_boundary_pending = True
+
+    @property
+    def active_model_label(self) -> str | None:
+        """Provider/model actually receiving requests, or ``None`` for primary."""
+        target = self._route_state.active
+        return target.selector if target is not None else None
+
+    @property
+    def active_reasoning_effort(self) -> str | None:
+        """Fallback route's explicit effort, when the route carries one."""
+        target = self._route_state.active
+        return target.effort if target is not None else None
+
+    @property
+    def active_model_spec(self) -> ModelSpec | None:
+        """Resolved metadata for the session-selected fallback account."""
+        return self._route_state.active_spec
+
+    @property
+    def effective_model_spec(self) -> ModelSpec | None:
+        """Current account-resolved spec for primary or fallback."""
+        return self._route_state.active_spec or self._route_state.primary_spec
+
     async def _notice(self, text: str, kind: str = "warning") -> None:
         if self._notice_handler is None:
             return
@@ -1106,7 +1225,7 @@ class SessionStreamFn:
 
     async def _on_route_change(self, target: Any, reason: str) -> None:
         effort = f" ({target.effort} effort)" if target.effort else ""
-        await self._notice(f"{reason} — falling back to {target.selector}{effort}")
+        await self._notice(f"{reason}\nFallback: {target.selector}{effort}")
 
     def _fallback_targets(self, model: ModelSpec) -> list[Any]:
         from local_operator.providers.failover import (
@@ -1165,6 +1284,60 @@ class SessionStreamFn:
             FallbackTarget(f"{model.provider}/{model.model_id}", model.reasoning_effort)
         )
 
+    async def _set_effective_primary(self, model: ModelSpec, access: Any) -> None:
+        """Bind primary metadata to the credential preflight actually selected."""
+        from local_operator.providers.failover import FallbackTarget, spec_for_target
+
+        target = FallbackTarget(
+            f"{model.provider}/{model.model_id}",
+            model.reasoning_effort,
+        )
+        credential = (
+            access.access_token,
+            access.kind == "oauth",
+            access.account_id or access.org_id,
+        )
+        self._route_state.primary_spec = await asyncio.to_thread(
+            spec_for_target,
+            model,
+            target,
+            catalogue_credential=credential,
+        )
+
+    async def _activate_fallback(
+        self,
+        primary: ModelSpec,
+        target: Any,
+        reason: str,
+    ) -> None:
+        """Activate a fallback with metadata from this session's credential."""
+        from local_operator.providers.failover import parse_selector, spec_for_target
+
+        provider, _model_id = parse_selector(target.selector)
+        try:
+            access = await self._auth_store.get_oauth_access(provider, self._session_id)
+            if access is not None:
+                credential = (
+                    access.access_token,
+                    access.kind == "oauth",
+                    access.account_id or access.org_id,
+                )
+            else:
+                credential = (
+                    await self._auth_store.get_api_key(provider, self._session_id),
+                    False,
+                    None,
+                )
+        except Exception:  # noqa: BLE001 - metadata cannot make failover unavailable
+            credential = (None, False, None)
+        spec = await asyncio.to_thread(
+            spec_for_target,
+            primary,
+            target,
+            catalogue_credential=credential,
+        )
+        await self._route_state.activate(target, reason, spec=spec)
+
     async def preflight_usage(self, model: ModelSpec) -> None:
         """Check reliable OAuth quota once per user-message boundary.
 
@@ -1216,11 +1389,23 @@ class SessionStreamFn:
                         different_provider=True,
                     )
                     if fallback is not None:
-                        await self._route_state.activate(
+                        reasons = self._auth_store.blocked_reasons(
+                            [row.id for row in rows],
+                            storage,
+                        )
+                        if reasons:
+                            diagnosis = "; ".join(reasons)
+                        else:
+                            diagnosis = (
+                                "all credentials are in backoff after a previous provider error"
+                            )
+                        await self._activate_fallback(
+                            model,
                             fallback,
-                            f"{model.provider} credentials temporarily unavailable",
+                            f"{model.provider} unavailable: {diagnosis}",
                         )
                 return
+            await self._set_effective_primary(model, access)
             if access.kind != "oauth" or access.credential_id in attempted_ids:
                 return
             attempted_ids.add(access.credential_id)
@@ -1260,7 +1445,8 @@ class SessionStreamFn:
                         "no configured model fallback is available"
                     )
                     return
-                await self._route_state.activate(
+                await self._activate_fallback(
+                    model,
                     fallback,
                     f"{model.provider} {condition}{remaining} for {model.model_id}",
                 )
@@ -1296,6 +1482,7 @@ class SessionStreamFn:
                     access.credential_id,
                     storage,
                     block_ms=block_ms,
+                    reason=f"{condition}{remaining}",
                 )
                 await self._notice(
                     f"{model.provider} {condition}{remaining} — trying another "
@@ -1310,8 +1497,10 @@ class SessionStreamFn:
                     access.credential_id,
                     storage,
                     block_ms=block_ms,
+                    reason=f"{condition}{remaining}",
                 )
-            await self._route_state.activate(
+            await self._activate_fallback(
+                model,
                 fallback,
                 f"{model.provider} {condition}{remaining}",
             )

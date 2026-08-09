@@ -426,7 +426,12 @@ async def test_transport_fallback_cooldown_skips_quota_probe(tmp_path) -> None:
 async def test_startup_preflight_warns_when_primary_credentials_are_blocked(tmp_path) -> None:
     store = AuthStore(tmp_path / "auth.db")
     account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
-    store.block_credential(account.id, "anthropic", block_ms=60_000)
+    store.block_credential(
+        account.id,
+        "anthropic",
+        block_ms=60_000,
+        reason="quota exhausted (0% remaining)",
+    )
     store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
     stream = create_stream_fn(
         store,
@@ -446,10 +451,18 @@ async def test_startup_preflight_warns_when_primary_credentials_are_blocked(tmp_
             await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
         fetch.assert_not_called()
         assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+        assert stream.active_model_label == "openai/gpt-5.3-codex"
+        assert stream.active_model_spec is not None
+        assert stream.active_model_spec.provider == "openai"
+        assert stream.active_model_spec.model_id == "gpt-5.3-codex"
         assert notices == [
-            "anthropic credentials temporarily unavailable — "
-            "falling back to openai/gpt-5.3-codex"
+            "anthropic unavailable: quota exhausted (0% remaining)\n"
+            "Fallback: openai/gpt-5.3-codex"
         ]
+        switched = ModelSpec(provider="openai", model_id="gpt-5.4")
+        stream.set_primary_model(switched)
+        assert stream.active_model_label is None
+        assert stream.active_model_spec is None
     finally:
         await stream.close()
         store.close()

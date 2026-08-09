@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS auth_credential_blocks (
   provider_key TEXT NOT NULL,
   block_scope TEXT NOT NULL DEFAULT '',
   blocked_until_ms INTEGER NOT NULL,
+  block_reason TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (credential_id, provider_key, block_scope)
 );
@@ -144,6 +145,18 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     return None
 
 
+def _refresh_block_reason(error: AuthStoreError) -> str:
+    """Secret-safe diagnosis retained after an OAuth refresh failure."""
+    detail = " ".join(str(error).split())
+    if detail.startswith("No refresh capability"):
+        return detail[:240]
+    if "disappeared during refresh" in detail:
+        return "OAuth credential disappeared during refresh"
+    # Provider exceptions can embed request headers or token-bearing response
+    # bodies. Keep the actionable category, never the untrusted payload.
+    return "OAuth credential refresh failed"
+
+
 class AuthStore:
     """Credential persistence + the 7-step cascade.
 
@@ -188,6 +201,24 @@ class AuthStore:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.executescript(_SCHEMA)
+        # ``CREATE TABLE IF NOT EXISTS`` does not evolve an existing database.
+        # Keep the backoff diagnosis beside its expiry so a later process can say
+        # quota/auth/rate-limit rather than losing the provider's original error.
+        block_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(auth_credential_blocks)")
+        }
+        if "block_reason" not in block_columns:
+            try:
+                conn.execute(
+                    "ALTER TABLE auth_credential_blocks "
+                    "ADD COLUMN block_reason TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError as exc:
+                # Two lop processes may migrate the same WAL database after
+                # both inspected the old schema. The winner's column is enough;
+                # every other ALTER failure is a real migration error.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         conn.commit()
         for path in (
             self._db_path,
@@ -362,18 +393,26 @@ class AuthStore:
         provider: str,
         block_scope: str = "",
         block_ms: int = DEFAULT_BLOCK_MS,
+        reason: str = "",
     ) -> None:
-        """Record a backoff keyed by ``provider:type``."""
+        """Record a backoff keyed by ``provider:type``, retaining its diagnosis."""
         credential = self.get_credential(credential_id)
         provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
         until = self._now_ms() + max(1000, int(block_ms))
         self._conn.execute(
             "INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope,"
-            " blocked_until_ms, updated_at) VALUES (?, ?, ?, ?, ?)"
+            " blocked_until_ms, block_reason, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(credential_id, provider_key, block_scope)"
             " DO UPDATE SET blocked_until_ms = excluded.blocked_until_ms, "
-            "updated_at = excluded.updated_at",
-            (credential_id, provider_key, block_scope, until, self._now_ms()),
+            "block_reason = excluded.block_reason, updated_at = excluded.updated_at",
+            (
+                credential_id,
+                provider_key,
+                block_scope,
+                until,
+                " ".join(reason.split())[:300],
+                self._now_ms(),
+            ),
         )
         self._conn.commit()
 
@@ -386,6 +425,28 @@ class AuthStore:
             (credential_id, provider_key),
         ).fetchone()
         return bool(row and row[0] > self._now_ms())
+
+    def blocked_reasons(self, credential_ids: list[int], provider: str) -> list[str]:
+        """Distinct active backoff diagnoses for the named credentials.
+
+        Old rows created before the reason column migrated legitimately return no
+        text. Callers must describe that as an unknown prior provider failure,
+        never infer quota from the mere existence of a block.
+        """
+        reasons: list[str] = []
+        for credential_id in credential_ids:
+            credential = self.get_credential(credential_id)
+            provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
+            row = self._conn.execute(
+                "SELECT block_reason FROM auth_credential_blocks"
+                " WHERE credential_id = ? AND provider_key = ? AND block_scope = ''"
+                " AND blocked_until_ms > ?",
+                (credential_id, provider_key, self._now_ms()),
+            ).fetchone()
+            reason = str(row[0]).strip() if row and row[0] else ""
+            if reason and reason not in reasons:
+                reasons.append(reason)
+        return reasons
 
     def clear_blocks(self, credential_id: int) -> None:
         self._conn.execute(
@@ -591,8 +652,12 @@ class AuthStore:
         for row in self._selection_order(oauth_rows, provider, session_id):
             try:
                 creds = await self._ensure_oauth_fresh(row, force=force_refresh)
-            except AuthStoreError:
-                self.block_credential(row.id, provider)  # try a sibling
+            except AuthStoreError as error:
+                self.block_credential(
+                    row.id,
+                    provider,
+                    reason=_refresh_block_reason(error),
+                )  # try a sibling
                 continue
             key_fn = definition.get_api_key if definition else None
             key = key_fn(creds) if key_fn else creds.get("access")
@@ -689,6 +754,7 @@ class AuthStore:
         from local_operator.providers.failover import (
             is_invalidated_credential_error,
             is_usage_limit_error,
+            provider_error_summary,
             retry_after_ms_from_error,
         )
 
@@ -705,7 +771,12 @@ class AuthStore:
         usage_limited = is_usage_limit_error(error)
         if failing is not None:
             retry_after = retry_after_ms_from_error(error)
-            self.block_credential(failing.id, provider, block_ms=max(block_ms, retry_after or 0))
+            self.block_credential(
+                failing.id,
+                provider,
+                block_ms=max(block_ms, retry_after or 0),
+                reason=provider_error_summary(error),
+            )
             if usage_limited:
                 # Sticky preserved: same account stays first after backoff.
                 pass

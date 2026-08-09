@@ -28,6 +28,7 @@ from local_operator.tui.widgets.toast import (
     TOAST_MIN_WIDTH,
     Toast,
     format_mcp_startup,
+    format_notice_toast,
     toast_max_width,
 )
 from tests.unit.tui.conftest import TCSS_PATH
@@ -114,6 +115,23 @@ def test_several_failures_coalesce_into_one_two_line_message() -> None:
     text, _duration = payload
     assert text.plain.count("\n") == 1
     assert text.plain.split("\n")[1] == "failed: linear, slack"
+
+
+def test_provider_notice_is_bounded_to_two_physical_rows() -> None:
+    text = format_notice_toast(
+        "anthropic usage quota exhausted: "
+        + "weighted tokens are unavailable for this billing period " * 4
+        + "\nFallback: openai/gpt-5.4 (high effort)",
+        "warning",
+        max_cells=30,
+    )
+
+    lines = text.plain.splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("! anthropic")
+    assert lines[1].startswith("Fallback: openai/gpt-5.4")
+    assert all(cell_len(line) <= 30 for line in lines)
+    assert lines[0].endswith("…")
 
 
 def _fills(text) -> dict[str, str]:  # type: ignore[no-untyped-def]

@@ -154,6 +154,46 @@ def format_mcp_startup(
     return text, TOAST_FAILURE_MS if outcome.failed else TOAST_DEFAULT_MS
 
 
+def format_notice_toast(
+    message: str,
+    kind: str,
+    max_cells: int = TOAST_MAX_WIDTH - TOAST_PADDING_CELLS,
+) -> Text:
+    """A warning/error notice bounded to two single-cell-clamped lines.
+
+    Provider payloads are deliberately retained in full for the later
+    transcript, but an overlay cannot inherit their unbounded length: one verbose
+    HTTP error would otherwise grow a screen-tall card over the splash. Route
+    notices put ``Fallback: …`` on their last line; preserve that decision while
+    truncating the diagnosis above it.
+    """
+    lines = [" ".join(line.split()) for line in message.splitlines() if line.strip()]
+    diagnosis = lines[0] if lines else "Provider warning"
+    fallback = next(
+        (line for line in reversed(lines[1:]) if line.lower().startswith("fallback:")),
+        lines[1] if len(lines) > 1 else "",
+    )
+    semantic = "danger" if kind == "error" else "warning"
+    glyph = "✗" if kind == "error" else "!"
+
+    text = Text()
+    text.append(
+        f"{glyph} ",
+        style=Style(color=theme_mod.semantic_color(semantic), bold=True),
+    )
+    text.append(
+        truncate_cells(diagnosis, max(1, max_cells - 2)),
+        style=Style(color=theme_mod.semantic_color("fg")),
+    )
+    if fallback:
+        text.append("\n")
+        text.append(
+            truncate_cells(fallback, max(1, max_cells)),
+            style=Style(color=theme_mod.semantic_color("fg")),
+        )
+    return text
+
+
 def _semantic(outcome: McpStartupOutcome) -> str:
     """The toast's lamp colour, derived through the band's own rule so the two
     surfaces can never disagree about what state they are reporting."""

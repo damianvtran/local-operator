@@ -705,11 +705,16 @@ class WelcomeView(Static):
         self.display = visible
         self._sync_pulse_timer()
         if visible:
-            self._poll()
+            self.refresh_info()
         else:
             self._sync_timer()
 
+    def refresh_info(self) -> None:
+        """Refresh session facts immediately after an external route change."""
+        self._poll()
+
     def _poll(self) -> None:
+        """Re-read session facts and retire polling once they are complete."""
         info = self._info_source()
         if info != self._info:
             self._info = info

@@ -437,7 +437,26 @@ class Session:
 
     @property
     def model_label(self) -> str:
-        return f"{self._model.provider}/{self._model.model_id}"
+        """Provider/model currently receiving requests, including fallback."""
+        active = getattr(self._stream_fn, "active_model_label", None)
+        return active or f"{self._model.provider}/{self._model.model_id}"
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        """Explicit effort shown for the active route."""
+        active = getattr(self._stream_fn, "active_model_label", None)
+        if active:
+            return getattr(self._stream_fn, "active_reasoning_effort", None)
+        return self._model.reasoning_effort
+
+    @property
+    def active_model(self) -> ModelSpec:
+        """Effective account-resolved route spec, including fallback."""
+        return (
+            getattr(self._stream_fn, "effective_model_spec", None)
+            or getattr(self._stream_fn, "active_model_spec", None)
+            or self._model
+        )
 
     @property
     def model(self) -> ModelSpec:
@@ -459,15 +478,17 @@ class Session:
         return list(self._context.messages)
 
     def set_model(self, model: ModelSpec) -> None:
-        """Swap the model spec mid-session.
+        """Swap the model spec mid-session and retire any active fallback.
 
         The loop reads ``config.model`` fresh on every turn, so the new spec
-        takes effect from the next turn onward. Hosts use this for per-request
-        overrides that are not part of the agent record — the FastAPI server
-        applies ``ChatRequest.options`` (temperature / top_p) this way, since
-        sampling rides on the spec (see ``model/configure.build_model_spec``).
+        takes effect from the next turn onward. The stream owns sticky fallback
+        state, however; reset it synchronously so status and picker feedback
+        cannot continue naming the old route until that turn begins.
         """
         self._model = model
+        set_primary_model = getattr(self._stream_fn, "set_primary_model", None)
+        if callable(set_primary_model):
+            set_primary_model(model)
 
     @property
     def goal(self) -> str:
@@ -725,9 +746,15 @@ class Session:
                 blocks = await blocks
             self._context.system_blocks = list(blocks)
             self._context.tool_context = self._build_tool_context()
+            preflight = getattr(self._stream_fn, "preflight_usage", None)
+            if callable(preflight):
+                result = preflight(self._model)
+                if inspect.isawaitable(result):
+                    await result
+            effective_model = self.active_model
 
             config = LoopConfig(
-                model=self._model,
+                model=effective_model,
                 convert_to_llm=self._convert_to_llm,
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,

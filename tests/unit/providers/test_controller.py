@@ -24,6 +24,8 @@ class FakeAuthStore:
         self._next_id = 1
         self.api_keys: dict[str, str] = {}
         self.oauth: dict[str, object] = {}
+        self.oauth_session_ids: list[tuple[str, str | None]] = []
+        self.api_session_ids: list[tuple[str, str | None]] = []
 
     def list_credentials(self, provider=None):
         rows = (
@@ -50,10 +52,12 @@ class FakeAuthStore:
         self.rows = [r for r in self.rows if r["provider"] != provider]
         return before - len(self.rows)
 
-    async def get_oauth_access(self, provider):
+    async def get_oauth_access(self, provider, session_id=None):
+        self.oauth_session_ids.append((provider, session_id))
         return self.oauth.get(provider)
 
-    async def get_api_key(self, provider):
+    async def get_api_key(self, provider, session_id=None):
+        self.api_session_ids.append((provider, session_id))
         return self.api_keys.get(provider)
 
 
@@ -280,6 +284,49 @@ def test_a_reseller_is_flagged_so_the_picker_can_prefer_the_direct_route(
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     for entry in controller.static_catalogue():
         assert entry.aggregated == (entry.provider in ("openrouter", "radient")), entry
+
+
+@pytest.mark.asyncio
+async def test_live_catalogue_and_resolved_spec_use_the_session_account(
+    controller, store, monkeypatch
+) -> None:
+    from local_operator.model.discovery import DiscoveredModel
+    from local_operator.providers import controller as controller_mod
+
+    store.upsert_credential(
+        "openai",
+        {
+            "access": "oauth-token",
+            "refresh": "refresh-token",
+            "account_id": "account-a",
+        },
+    )
+    store.oauth["openai"] = types.SimpleNamespace(
+        kind="oauth",
+        access_token="oauth-token",
+        account_id="account-a",
+        org_id=None,
+    )
+
+    def available(provider: str, **kwargs):
+        if provider == "openai":
+            assert kwargs["account_id"] == "account-a"
+            return [
+                DiscoveredModel(
+                    id="plan-model",
+                    name="Plan Model",
+                    context_window=333_000,
+                )
+            ], "ok"
+        return [], "empty"
+
+    monkeypatch.setattr(controller_mod, "available_models", available)
+    controller.set_session_id("session-a")
+
+    entries, _statuses = await controller.live_catalogue(ttl_s=0)
+    assert ("openai", "session-a") in store.oauth_session_ids
+    assert any(entry.selector == "openai/plan-model" for entry in entries)
+    assert controller.resolve_model("openai", "plan-model").context_window == 333_000
 
 
 def test_usable_providers_agrees_with_is_usable_in_one_store_read(

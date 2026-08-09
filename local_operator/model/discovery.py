@@ -34,6 +34,7 @@ disk speed and a listing outage is invisible for as long as the cache holds.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import math
 import time
@@ -68,6 +69,14 @@ ANTHROPIC_VERSION = "2023-06-01"
 #: Claude Pro/Max OAuth tokens are only accepted alongside this beta opt-in --
 #: the same pairing the chat client and the token refresh already use.
 ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20"
+
+#: ChatGPT subscription OAuth cannot call the public ``api.openai.com/v1/models``
+#: endpoint; the same bearer that serves Codex inference lists its models here.
+#: ``client_version=0.0.0`` is the OpenAI Codex source-build version and is
+#: deliberately not local-operator's unrelated package version. The backend uses
+#: this value for compatibility filtering.
+CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models"
+CODEX_MODELS_CLIENT_VERSION = "0.0.0"
 
 #: Gemini's ``v1`` surface omits ``inputTokenLimit`` on newer models, and
 #: ``v1beta`` is the version the generation client already talks to, so the two
@@ -126,7 +135,14 @@ PUBLIC_LISTING_PROVIDERS = frozenset({"openrouter", "radient"})
 #: ``ok`` fetched live now, ``cached`` served a stored document, ``static``
 #: registry only, ``unauthenticated`` needs a credential it was not given,
 #: ``empty`` the provider answered and listed nothing.
-ListingStatus = Literal["ok", "cached", "static", "unauthenticated", "empty"]
+ListingStatus = Literal[
+    "ok",
+    "cached",
+    "static",
+    "unavailable",
+    "unauthenticated",
+    "empty",
+]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -184,6 +200,7 @@ class _FetchContext:
     base_url: str
     api_key: str | None
     is_oauth: bool
+    account_id: str | None
     client: httpx.Client
     timeout: float
 
@@ -421,13 +438,69 @@ def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | Non
     )
 
 
+def _row_from_codex_entry(entry: Mapping[str, object]) -> DiscoveredModel | None:
+    """One picker-visible model from ChatGPT's Codex catalogue.
+
+    This endpoint is richer than OpenAI's public ``/v1/models``: it carries the
+    context window and input modalities used by the connected subscription. It
+    does not quote token prices because a ChatGPT plan is quota-billed rather
+    than per-token billed, so prices stay unknown unless the static registry has
+    a published value for the same id.
+    """
+    if _first_str(entry.get("visibility")).lower() != "list":
+        return None
+    model_id = _first_str(entry.get("slug"))
+    if not model_id:
+        return None
+    modalities = entry.get("input_modalities")
+    supports_images = (
+        any(
+            isinstance(modality, str) and modality.strip().lower() == "image"
+            for modality in modalities
+        )
+        if isinstance(modalities, (list, tuple))
+        else None
+    )
+    return DiscoveredModel(
+        id=model_id,
+        name=_first_str(entry.get("display_name")),
+        context_window=_first_positive_int(
+            entry.get("context_window"),
+            entry.get("max_context_window"),
+        ),
+        supports_images=supports_images,
+    )
+
+
 def _fetch_openai_compat(ctx: _FetchContext) -> list[DiscoveredModel] | None:
-    """``GET {base_url}/models`` for every OpenAI-shaped gateway."""
+    """List an OpenAI-shaped provider, including ChatGPT subscription OAuth."""
     headers = {"Accept": "application/json"}
     if ctx.api_key:
-        # Bearer serves both API keys and OAuth access tokens on this wire, so
-        # ``is_oauth`` needs no branch here; Anthropic is the wire that differs.
         headers["Authorization"] = f"Bearer {ctx.api_key}"
+    if ctx.provider_id == "openai" and ctx.is_oauth:
+        # ChatGPT OAuth tokens are rejected by the public Models API. The Codex
+        # endpoint is the model authority for the subscription-backed inference
+        # path this same token uses.
+        headers.update(
+            {
+                "originator": "local-operator",
+                "User-Agent": "local-operator",
+            }
+        )
+        if ctx.account_id:
+            headers["ChatGPT-Account-Id"] = ctx.account_id
+        body = _get_json(
+            ctx,
+            CODEX_MODELS_URL,
+            headers=headers,
+            params={"client_version": CODEX_MODELS_CLIENT_VERSION},
+        )
+        entries = _entry_list(body, "models") if body is not None else None
+        if entries is None:
+            return None
+        rows = (_row_from_codex_entry(entry) for entry in entries)
+        return [row for row in rows if row is not None]
+
     body = _get_json(ctx, f"{ctx.base_url}/models", headers=headers, params={})
     if body is None:
         return None
@@ -698,6 +771,7 @@ def fetch_models(
     *,
     api_key: str | None,
     is_oauth: bool = False,
+    account_id: str | None = None,
     base_url: str | None = None,
     client: httpx.Client | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
@@ -716,6 +790,7 @@ def fetch_models(
         api_key: API key or OAuth access token; ``None`` for keyless hosts.
         is_oauth: ``api_key`` is an OAuth access token, which changes the header
             scheme on the Anthropic wire.
+        account_id: ChatGPT account id paired with an OpenAI OAuth bearer.
         base_url: Overrides the registry base (proxies, local gateways).
         client: Reused HTTP client. When omitted, one is created and closed here;
             a caller listing several providers should pass one so the connection
@@ -725,6 +800,8 @@ def fetch_models(
             issues one request, so for them it is also the per-request ceiling.
     """
     definition = get_provider_definition(provider_id)
+    if is_oauth and definition is not None and definition.store_credentials_as:
+        definition = get_provider_definition(definition.store_credentials_as) or definition
     transport = _TRANSPORTS.get(definition.id) if definition is not None else None
     if definition is None or transport is None:
         return None
@@ -744,6 +821,7 @@ def fetch_models(
                 base_url=resolved_base,
                 api_key=api_key,
                 is_oauth=is_oauth,
+                account_id=account_id,
                 client=active,
                 timeout=timeout,
             )
@@ -894,17 +972,18 @@ def _merge_name(live_name: str, static_name: str, model_id: str) -> str:
     return candidate
 
 
-def _cache_key(provider_id: str) -> str:
-    """Cache document name for a provider's listing.
+def _cache_key(provider_id: str, *, is_oauth: bool, account_id: str | None) -> str:
+    """Cache document name for one provider listing and credential surface.
 
-    ``.listing`` rather than the bare provider id because an earlier release
-    cached a differently-shaped document -- the provider client's raw
-    ``list_models()`` payload -- under ``<provider>.models.json``. Reusing that
-    name would hand this reader a document it cannot interpret and, since the
-    payload is written before anything maps it, serve the failure as a fresh cache
-    hit for a full day. The old documents are unreachable by name and
-    ``catalogue.purge_legacy_documents`` deletes them.
+    ``.listing`` separates this shape from legacy raw ``list_models()`` payloads.
+    OpenAI needs a second split: API keys list the public API catalogue, while
+    ChatGPT OAuth lists the plan-specific Codex catalogue. The account id is
+    hashed so switching plans cannot serve another account's availability from
+    cache and the private identifier never reaches a filename.
     """
+    if provider_id == "openai" and is_oauth:
+        identity = hashlib.sha256((account_id or "unknown").encode()).hexdigest()[:12]
+        return f"{provider_id}.codex.{identity}.listing"
     return f"{provider_id}.listing"
 
 
@@ -974,6 +1053,7 @@ def available_models(
     *,
     api_key: str | None,
     is_oauth: bool = False,
+    account_id: str | None = None,
     base_url: str | None = None,
     ttl_s: float = DEFAULT_TTL_S,
     cache_dir: Path | None = None,
@@ -989,12 +1069,10 @@ def available_models(
     entirely.
 
     Returns:
-        ``(models, status)``, where status is ``"ok"`` (fetched live just now),
-        ``"cached"`` (served a stored document because the fetch failed or was
-        skipped as still fresh), ``"static"`` (registry only -- no listing
-        endpoint, or no cache and no successful fetch), ``"unauthenticated"``
-        (the provider needs a credential to list and none was supplied) or
-        ``"empty"`` (the provider answered and listed no models).
+        ``(models, status)``: ``"ok"`` fetched live; ``"cached"`` used a stored
+        listing; ``"static"`` means no listing endpoint exists; ``"unavailable"``
+        means a reachable listing failed without a cache; ``"unauthenticated"``
+        needs a credential; and ``"empty"`` is an authoritative zero-row answer.
     """
     rows = _static_rows(provider_id)
     try:
@@ -1003,6 +1081,7 @@ def available_models(
             rows,
             api_key=api_key,
             is_oauth=is_oauth,
+            account_id=account_id,
             base_url=base_url,
             ttl_s=ttl_s,
             cache_dir=cache_dir,
@@ -1014,7 +1093,9 @@ def available_models(
         # means a cache or coding fault. Even then the picker has to open: the
         # registry alone is a usable answer, a traceback is not.
         logger.debug("falling back to the static registry for %s: %s", provider_id, exc)
-        return merge_models(rows, None), "static"
+        definition = get_provider_definition(provider_id)
+        has_transport = definition is not None and _TRANSPORTS.get(definition.id) is not None
+        return merge_models(rows, None), ("unavailable" if has_transport else "static")
 
 
 def _available_models(
@@ -1023,6 +1104,7 @@ def _available_models(
     *,
     api_key: str | None,
     is_oauth: bool,
+    account_id: str | None,
     base_url: str | None,
     ttl_s: float,
     cache_dir: Path | None,
@@ -1030,6 +1112,8 @@ def _available_models(
     timeout: float,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
     definition = get_provider_definition(provider_id)
+    if is_oauth and definition is not None and definition.store_credentials_as:
+        definition = get_provider_definition(definition.store_credentials_as) or definition
     transport = _TRANSPORTS.get(definition.id) if definition is not None else None
     if definition is None or transport is None:
         return merge_models(rows, None), "static"
@@ -1060,6 +1144,7 @@ def _available_models(
             definition.id,
             api_key=api_key,
             is_oauth=is_oauth,
+            account_id=account_id,
             base_url=resolved_base,
             client=client,
             timeout=timeout,
@@ -1073,7 +1158,7 @@ def _available_models(
         }
 
     capture = listing_capture_version(definition.id)
-    key = _cache_key(definition.id)
+    key = _cache_key(definition.id, is_oauth=is_oauth, account_id=account_id)
     payload = cached_listing(key, fetch, ttl_s=ttl_s, cache_dir=cache_dir)
     live_rows = _rows_from_payload(payload, capture)
     if live_rows is None:
@@ -1087,20 +1172,23 @@ def _available_models(
             # produced three consecutive `static` results and zero fetches.
             # Dropping it costs one refetch.
             invalidate(key, cache_dir=cache_dir)
-            # RE-ENTER once. Dropping the document without retrying meant the
-            # fetch that was supposed to replace it never ran: `cached_listing`
-            # had already served this call from a fresh hit, so the thunk was
-            # never invoked, and the answer fell through to the registry's static
-            # rows — of which an aggregator has NONE. Offline that is an empty
-            # model list on every start; online it memoises a session booted at
-            # default context, no prompt cache and zero prices.
+            # Re-enter once: the first call served the malformed fresh document
+            # without invoking the fetch thunk.
             payload = cached_listing(key, fetch, ttl_s=ttl_s, cache_dir=cache_dir)
             live_rows = _rows_from_payload(payload, capture)
         if live_rows is None:
-            # Neither a listing nor a cache: the registry is all there is.
-            return merge_models(rows, None), "static"
+            # The registry remains usable offline, but the status tells the
+            # picker it is provisional rather than entitlement-authoritative.
+            return merge_models(rows, None), "unavailable"
 
-    merged = merge_models(rows, live_rows)
+    if definition.id == "openai":
+        # OpenAI's API-key and subscription catalogues are entitlement lists,
+        # not partial metadata overlays. Re-adding registry rows absent from the
+        # response resurrects explicitly hidden or unavailable models.
+        listed_static = {row.id: rows[row.id] for row in live_rows if row.id in rows}
+        merged = merge_models(listed_static, live_rows)
+    else:
+        merged = merge_models(rows, live_rows)
     if not fetched:
         return merged, "cached"
     return merged, ("empty" if not live_rows else "ok")

@@ -80,7 +80,12 @@ from local_operator.tui.widgets.editor import (
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
-from local_operator.tui.widgets.toast import Toast, format_mcp_startup
+from local_operator.tui.widgets.toast import (
+    TOAST_FAILURE_MS,
+    Toast,
+    format_mcp_startup,
+    format_notice_toast,
+)
 from local_operator.tui.widgets.todo_panel import TodoPanel
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.trajectory import TrajectoryScreen
@@ -286,6 +291,9 @@ class OperatorApp(App[None]):
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
         self._streaming_block: AssistantBlock | None = None
+        # MessageStart is emitted before stream preflight. The first event after
+        # it is the earliest frame allowed to read the effective route.
+        self._post_preflight_model_refresh_pending = False
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
         # `_tool_cards`, which holds calls that are RUNNING: a composing row has
@@ -293,6 +301,10 @@ class OperatorApp(App[None]):
         # an update for a running tool land on a row that had not started.
         self._composing_cards: dict[str, ToolCard] = {}
         self._welcome: WelcomeView | None = None
+        # Warnings must not collapse the splash, but a transient overlay must
+        # not be the only copy. Flush these full-fidelity notices immediately
+        # before the first user block makes the transcript the active view.
+        self._deferred_welcome_notices: list[tuple[str, NoticeKind]] = []
         # Whatever held focus when the usage panel opened, so closing it returns
         # the user to the composer they were typing in rather than to nothing.
         # The approval card follows the same discipline for the same reason.
@@ -470,6 +482,11 @@ class OperatorApp(App[None]):
             self._on_boot_failed(error)
             return
         self._session = session
+        set_provider_session = getattr(self._providers, "set_session_id", None)
+        if callable(set_provider_session):
+            # The picker and stream use separate AuthStore handles. The shared
+            # id is their stable account-selection contract in multi-login setups.
+            set_provider_session(session.session_id)
         # Approvals must be answered ON SCREEN from here on: the factory's
         # default gate reads stdin, which this app has taken over, so leaving it
         # installed hangs the first write/exec tool call forever.
@@ -477,9 +494,8 @@ class OperatorApp(App[None]):
         self._controller = EventController(session, self)
         self._controller.subscribe()
         # The app is already painted and subscribed, so quota I/O cannot delay
-        # first paint and any warning lands in the transcript. This is an
-        # optional session capability so lightweight hosts do not need to fake
-        # network preflight; failure must never become another startup gate.
+        # first paint. Startup warnings stay in the splash toast rather than
+        # becoming the first conversation block.
         usage_preflight = getattr(session, "preflight_usage", None)
         if callable(usage_preflight):
             try:
@@ -487,12 +503,8 @@ class OperatorApp(App[None]):
             except Exception:
                 pass
         assert self._status is not None
-        self._status.update(
-            model_label=session.model_label,
-            effort=_effort_label(session),
-            context_window=_context_window(session),
-            conversation_name=session.conversation_name,
-        )
+        self._refresh_model_display()
+        self._status.update(conversation_name=session.conversation_name)
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
         self._render_resumed_history(session)
@@ -592,6 +604,10 @@ class OperatorApp(App[None]):
         # question that is no longer on screen and nothing could answer it.
         self._approval = None
         if replace_transcript:
+            # Deferred splash notices belong to the conversation whose boot
+            # produced them. A pre-prompt /resume must not replay session A's
+            # warning ahead of session B's first historical UserBlock.
+            self._deferred_welcome_notices.clear()
             # Clearing after controller detachment keeps old-session events out
             # of the replacement conversation. Use the view's public reset so
             # streaming, tool-card, approval, and welcome-state
@@ -1444,6 +1460,11 @@ class OperatorApp(App[None]):
         back; it simply lands under the splash, exactly as the ``/clear`` receipt
         does.
         """
+        if isinstance(block, UserBlock) and self._deferred_welcome_notices:
+            pending, self._deferred_welcome_notices = self._deferred_welcome_notices, []
+            transcript = self.query_one(TranscriptView)
+            for body, kind in pending:
+                transcript.append_block(NoticeBlock(body, kind))
         if ends_empty_state:
             self._set_welcome_visible(False)
         self.query_one(TranscriptView).append_block(block)
@@ -2672,6 +2693,8 @@ class OperatorApp(App[None]):
             # not as "free".
             cost_text = "$—"
         self._status.update(
+            model_label=self._session.model_label if self._session is not None else None,
+            effort=_effort_label(self._session) if self._session is not None else None,
             streaming=False,
             context_tokens=context_tokens,
             context_window=_context_window(self._session),
@@ -2732,6 +2755,7 @@ class OperatorApp(App[None]):
         standalone "interrupted" notice: each card it marks already says so, and
         naming the tool that stopped is the more useful of the two statements.
         """
+        self._refresh_model_after_preflight()
         # Composing rows count too: a turn that ends while the model is still
         # dictating a call leaves a row that will never start, and leaving it
         # "live" strands a spinner on a finished turn.
@@ -2756,6 +2780,7 @@ class OperatorApp(App[None]):
         Deferring the mount to the first delta costs nothing: the block carries
         no state of its own before it has text, so there is nothing to hold.
         """
+        self._post_preflight_model_refresh_pending = True
         self._streaming_block = None
 
     def _ensure_streaming_block(self) -> AssistantBlock:
@@ -2768,6 +2793,7 @@ class OperatorApp(App[None]):
         return block
 
     def on_assistant_delta(self, message: AssistantDelta) -> None:
+        self._refresh_model_after_preflight()
         # Empty deltas are not text: flushing one would mount a block that then
         # sits blank until real content lands, which is the hole this avoids.
         if not message.text:
@@ -2775,6 +2801,7 @@ class OperatorApp(App[None]):
         self._ensure_streaming_block().update_text(message.text)
 
     def on_assistant_message_end(self, message: AssistantMessageEnd) -> None:
+        self._refresh_model_after_preflight()
         # An empty authoritative text is not an instruction to erase what
         # streamed. Adopting it unconditionally destroyed the prose the deltas
         # had already painted and left an empty block mounted in its place; the
@@ -2801,6 +2828,7 @@ class OperatorApp(App[None]):
         screen held completely still while a large `write` streamed, and the only
         reasonable reading of that frame was that the agent had hung.
         """
+        self._refresh_model_after_preflight()
         event = message.event
         card = self._composing_cards.get(event.tool_call_id)
         if card is None:
@@ -2810,6 +2838,7 @@ class OperatorApp(App[None]):
         card.set_composing(event.argument_bytes, event.tool_name)
 
     def on_tool_started(self, message: ToolStarted) -> None:
+        self._refresh_model_after_preflight()
         event = message.event
         # Adopt the row that announced this call rather than mounting a second
         # one: the composing card already sits in the right place in the ledger,
@@ -2871,7 +2900,43 @@ class OperatorApp(App[None]):
         else:
             card.mark_done(result_text, details)
 
+    def _refresh_model_display(self) -> None:
+        """Repaint every model label from the session's effective route."""
+        session = self._session
+        if session is None:
+            return
+        if self._status is not None:
+            self._status.update(
+                model_label=session.model_label,
+                effort=_effort_label(session),
+                context_window=_context_window(session),
+            )
+        if self._welcome is not None:
+            self._welcome.refresh_info()
+
+    def _refresh_model_after_preflight(self) -> None:
+        """Repaint once, on the first event emitted after stream preflight."""
+        if not self._post_preflight_model_refresh_pending:
+            return
+        self._post_preflight_model_refresh_pending = False
+        self._refresh_model_display()
+
     def on_notice_posted(self, message: NoticePosted) -> None:
+        self._post_preflight_model_refresh_pending = False
+        # Route-change notices arrive after the stream switched its effective
+        # model. Refresh chrome before rendering the diagnosis so the fallback
+        # sentence and the persistent model label can never disagree.
+        self._refresh_model_display()
+        welcome = self._welcome
+        if welcome is not None and bool(welcome.display) and message.kind in ("warning", "error"):
+            kind = cast(NoticeKind, message.kind)
+            self._deferred_welcome_notices.append((message.text, kind))
+            toast = self.query_one(Toast)
+            toast.show(
+                format_notice_toast(message.text, message.kind, toast.content_cells),
+                duration_ms=TOAST_FAILURE_MS,
+            )
+            return
         self._append_block(NoticeBlock(message.text, message.kind))
 
     def on_compaction_started(self, message: CompactionStarted) -> None:
@@ -2911,13 +2976,15 @@ class OperatorApp(App[None]):
 
 
 def _model_spec(session) -> Any | None:
-    """The session's active ``ModelSpec``, or ``None`` when it has none.
+    """The session's effective ``ModelSpec``, or ``None`` when it has none.
 
     Defensive because the TUI also runs against reduced hosts — embedders
     and the pilot fakes supply a session without the spec accessor — and a
     status segment must degrade to "unknown" rather than take the app down.
     """
-    return getattr(session, "model", None)
+    if session is None:
+        return None
+    return getattr(session, "active_model", None) or getattr(session, "model", None)
 
 
 def _context_window(session) -> int:
@@ -2933,19 +3000,23 @@ def _context_window(session) -> int:
 def _effort_label(session) -> str:
     """The model's reasoning-effort label, or "" when it has none.
 
-    ``ModelSpec.reasoning_effort`` is read first so a provider-level effort
-    knob shows its actual level ("high") the moment the spec grows one.
-    Until then the only reasoning signal on the spec is the boolean, and a
-    model that reasons at the provider's default effort is reported as
-    ``reasoning`` — non-reasoning models render nothing, which is what makes
-    the segment's presence informative.
+    An explicit active-route effort wins. Without one, a fallback must stay
+    silent rather than inherit either the primary model's effort or the target
+    model's generic reasoning capability. Only the primary route may fall back
+    to the boolean ``reasoning`` signal.
     """
     spec = _model_spec(session)
     if spec is None:
         return ""
-    explicit = getattr(spec, "reasoning_effort", None)
-    if explicit:
-        return str(explicit).strip().lower()
+    effective = getattr(session, "reasoning_effort", None)
+    if effective:
+        return str(effective).strip().lower()
+    primary_spec = getattr(session, "model", None) or spec
+    primary = f"{getattr(primary_spec, 'provider', '')}/" f"{getattr(primary_spec, 'model_id', '')}"
+    if getattr(session, "model_label", primary) != primary:
+        # A fallback with no explicit effort must not inherit the primary
+        # provider's label; silence is the only honest answer.
+        return ""
     return "reasoning" if getattr(spec, "reasoning", False) else ""
 
 

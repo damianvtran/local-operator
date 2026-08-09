@@ -4,6 +4,7 @@ rotation, blocking. No network: fakes for the refresh capability."""
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -167,7 +168,12 @@ async def test_oauth_auto_refresh_with_skew(
 async def test_force_refresh_failure_blocks_and_raises(
     store: AuthStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store.upsert_credential("openai", _oauth())
+    store.upsert_credential(
+        "openai", _oauth(refresh="r1", access="a1") | {"account_id": "account-1"}
+    )
+    store.upsert_credential(
+        "openai", _oauth(refresh="r2", access="a2") | {"account_id": "account-2"}
+    )
 
     async def bad_refresh(creds: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("idp down")
@@ -175,6 +181,9 @@ async def test_force_refresh_failure_blocks_and_raises(
     monkeypatch.setattr(store, "_refresh_fn", lambda provider: bad_refresh)
     with pytest.raises(AuthStoreError):
         await store.get_api_key("openai", force_refresh=True)
+    rows = store.list_credentials("openai")
+    reasons = store.blocked_reasons([row.id for row in rows], "openai")
+    assert reasons == ["OAuth credential refresh failed"]
 
 
 async def test_session_stickiness(store: AuthStore) -> None:
@@ -188,11 +197,46 @@ async def test_session_stickiness(store: AuthStore) -> None:
     assert {await store.get_api_key("openai") for _ in range(4)} == {"k1", "k2"}
 
 
+async def test_existing_block_table_migrates_reason_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "empty-config"))
+    db_path = tmp_path / "auth.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE auth_credential_blocks ("
+        "credential_id INTEGER NOT NULL, provider_key TEXT NOT NULL, "
+        "block_scope TEXT NOT NULL DEFAULT '', blocked_until_ms INTEGER NOT NULL, "
+        "updated_at INTEGER NOT NULL, "
+        "PRIMARY KEY (credential_id, provider_key, block_scope))"
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = AuthStore(db_path=db_path)
+    try:
+        columns = {
+            str(row[1])
+            for row in migrated._conn.execute("PRAGMA table_info(auth_credential_blocks)")
+        }
+        assert "block_reason" in columns
+    finally:
+        migrated.close()
+
+
 async def test_blocking_backoff(store: AuthStore) -> None:
     row = store.upsert_credential("openai", {"key": "k1", "type": "api_key"})
     assert not store.is_blocked(row.id, "openai")
-    store.block_credential(row.id, "openai", block_ms=60_000)
+    store.block_credential(
+        row.id,
+        "openai",
+        block_ms=60_000,
+        reason="rate limit (HTTP 429): quota reset pending",
+    )
     assert store.is_blocked(row.id, "openai")
+    assert store.blocked_reasons([row.id], "openai") == [
+        "rate limit (HTTP 429): quota reset pending"
+    ]
     assert await store.get_api_key("openai") is None  # only credential blocked
     store.clear_blocks(row.id)
     assert await store.get_api_key("openai") == "k1"

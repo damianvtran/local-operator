@@ -27,6 +27,7 @@ from local_operator.providers.failover import (
     expand_fallback_candidates,
     expand_fallback_targets,
     is_direct_credential_rotation_error,
+    provider_error_summary,
     resolve_chain,
     resolve_next_key,
     spec_for_target,
@@ -34,6 +35,28 @@ from local_operator.providers.failover import (
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.mark.asyncio
+async def test_provider_error_summary_exposes_actionable_category_and_detail() -> None:
+    assert (
+        provider_error_summary(
+            ProviderError(
+                429,
+                "  You have  0 weighted tokens left \n for this period. ",
+                retryable=True,
+            )
+        )
+        == "rate limit reached (HTTP 429): You have 0 weighted tokens left for this period."
+    )
+    assert (
+        provider_error_summary(ProviderError(401, "Unauthorized", auth_error=True))
+        == "authentication failed (HTTP 401): Unauthorized"
+    )
+    assert provider_error_summary(
+        ProviderError(403, "insufficient permissions", auth_error=True)
+    ).startswith("authentication failed (HTTP 403)")
+    assert provider_error_summary(RuntimeError("")) == "provider error"
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +373,7 @@ class _FnClient:
 async def test_stream_fallback_chain_walks_to_next_model() -> None:
     """Primary 500s (non-auth); the fallback selector takes over."""
     specs_seen: list[ModelSpec] = []
+    route_changes: list[tuple[str, str]] = []
 
     async def client_for(spec: ModelSpec) -> Any:
         specs_seen.append(spec)
@@ -361,9 +385,215 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
 
     settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
     auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
-    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+    route_state = FailoverRouteState(
+        on_change=lambda target, reason: route_changes.append((target.selector, reason))
+    )
+    got = [
+        event
+        async for event in stream_with_failover(
+            _request(),
+            auth,
+            settings,
+            client_for,
+            route_state=route_state,
+        )
+    ]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+    assert route_changes == [
+        ("anthropic/claude-x", "openai provider service error (HTTP 500): boom")
+    ]
+
+
+async def test_openai_fallback_spec_uses_the_session_selected_oauth_account(
+    monkeypatch,
+) -> None:
+    from local_operator.model import discovery as discovery_mod
+    from local_operator.model.discovery import DiscoveredModel
+    from local_operator.providers.auth_store import OAuthAccess
+
+    seen_catalogue: list[tuple[str | None, str | None]] = []
+    specs_seen: list[ModelSpec] = []
+
+    def available(provider: str, **kwargs):
+        if provider == "openai":
+            seen_catalogue.append((kwargs["api_key"], kwargs["account_id"]))
+            return [
+                DiscoveredModel(
+                    id="plan-model",
+                    name="Plan Model",
+                    context_window=444_000,
+                )
+            ], "ok"
+        return [], "empty"
+
+    monkeypatch.setattr(discovery_mod, "available_models", available)
+
+    class TwoAccountAuth:
+        async def get_oauth_access(
+            self, provider: str, session_id: str | None = None, **kwargs: Any
+        ) -> OAuthAccess:
+            assert session_id == "session-b"
+            if provider == "openai":
+                return OAuthAccess(
+                    access_token="token-b",
+                    credential_id=2,
+                    account_id="account-b",
+                )
+            return OAuthAccess(
+                access_token="anthropic-key",
+                credential_id=1,
+                kind="api_key",
+            )
+
+        async def get_api_key(
+            self,
+            provider: str,
+            session_id: str | None = None,
+            *,
+            force_refresh: bool = False,
+        ) -> str | None:
+            return None
+
+        def rotate_sibling(self, *args, **kwargs):
+            return False
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(spec)
+        if spec.provider == "anthropic":
+            return ScriptedClient(ProviderError(400, "primary rejected", retryable=False))
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    route_state = FailoverRouteState()
+    _ = [
+        event
+        async for event in stream_with_failover(
+            _request("anthropic", "claude-primary"),
+            TwoAccountAuth(),
+            {
+                "retry": {
+                    "fallbackChains": {
+                        "default": ["openai/plan-model"],
+                    }
+                }
+            },
+            client_for,
+            session_id="session-b",
+            route_state=route_state,
+        )
+    ]
+
+    assert seen_catalogue == [("token-b", "account-b")]
+    assert specs_seen[-1].context_window == 444_000
+    assert route_state.active_spec == specs_seen[-1]
+
+
+async def test_primary_oauth_rotation_rebuilds_account_bound_model_spec(
+    monkeypatch,
+) -> None:
+    from local_operator.model import discovery as discovery_mod
+    from local_operator.model.discovery import DiscoveredModel
+    from local_operator.providers.auth_store import OAuthAccess
+
+    current = "a"
+    attempts: list[tuple[str | None, int]] = []
+
+    def available(provider: str, **kwargs):
+        assert provider == "openai"
+        window = 100_000 if kwargs["account_id"] == "account-a" else 200_000
+        return [DiscoveredModel(id="plan-model", context_window=window)], "ok"
+
+    monkeypatch.setattr(discovery_mod, "available_models", available)
+
+    class RotatingOAuthAuth:
+        async def get_oauth_access(
+            self,
+            provider: str,
+            session_id: str | None = None,
+            *,
+            force_refresh: bool = False,
+        ) -> OAuthAccess:
+            assert provider == "openai"
+            assert session_id == "session-b"
+            return OAuthAccess(
+                access_token=f"token-{current}",
+                credential_id=1 if current == "a" else 2,
+                account_id=f"account-{current}",
+            )
+
+        async def get_api_key(
+            self,
+            provider: str,
+            session_id: str | None = None,
+            *,
+            force_refresh: bool = False,
+        ) -> str | None:
+            return None
+
+        def rotate_sibling(self, *args, **kwargs):
+            nonlocal current
+            current = "b"
+            return True
+
+    async def stream(request, api_key, oauth_access):
+        attempts.append((api_key, request.model.context_window))
+        if api_key == "token-a":
+            raise ProviderError(401, "expired", auth_error=True)
+        yield StreamEndEvent(stop_reason="stop")
+
+    route_state = FailoverRouteState()
+    _ = [
+        event
+        async for event in stream_with_failover(
+            _request("openai", "plan-model"),
+            RotatingOAuthAuth(),
+            {"retry": {"baseDelayMs": 1}},
+            lambda spec: _FnClient(stream),
+            session_id="session-b",
+            route_state=route_state,
+        )
+    ]
+
+    assert attempts == [("token-a", 100_000), ("token-b", 200_000)]
+    assert route_state.primary_spec is not None
+    assert route_state.primary_spec.context_window == 200_000
+
+
+async def test_fallback_notice_matches_the_provider_that_lacks_auth() -> None:
+    route_changes: list[tuple[str, str]] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        if spec.provider == "openai":
+            return ScriptedClient(ProviderError(500, "primary down", retryable=True))
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "fallbackChains": {
+                "default": ["anthropic/claude-x", "xai/grok-next"],
+            },
+        }
+    }
+    route_state = FailoverRouteState(
+        on_change=lambda target, reason: route_changes.append((target.selector, reason))
+    )
+
+    _ = [
+        event
+        async for event in stream_with_failover(
+            _request(),
+            FakeAuth({"openai": ["k1"], "xai": ["k2"]}),
+            settings,
+            client_for,
+            route_state=route_state,
+        )
+    ]
+
+    assert route_changes[-1] == (
+        "xai/grok-next",
+        "anthropic provider request failed: No API key configured for provider 'anthropic'",
+    )
 
 
 async def test_fallback_chain_deduplicates_current_model_and_effort() -> None:

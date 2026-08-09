@@ -194,6 +194,198 @@ def test_openai_compat_sends_a_bearer_key_and_omits_it_when_keyless() -> None:
     assert keyless.calls[0][0] == "http://localhost:11434/v1/models"
 
 
+def test_openai_oauth_uses_the_codex_catalogue_and_filters_picker_rows() -> None:
+    client = _StubClient(
+        [
+            _Response(
+                200,
+                {
+                    "models": [
+                        {
+                            "slug": "gpt-5.6-sol",
+                            "display_name": "GPT-5.6-Sol",
+                            "description": "Latest frontier agentic coding model.",
+                            "context_window": 272_000,
+                            "supported_in_api": True,
+                            "visibility": "list",
+                            "priority": 1,
+                            "input_modalities": ["text", "image"],
+                        },
+                        {
+                            "slug": "gpt-5.6-sol-wm",
+                            "display_name": "GPT-5.6-Sol-WM",
+                            "context_window": 272_000,
+                            "supported_in_api": False,
+                            "visibility": "hide",
+                            "priority": 2,
+                        },
+                        {
+                            "slug": "codex-auto-review",
+                            "display_name": "Codex Auto Review",
+                            "context_window": 272_000,
+                            "supported_in_api": True,
+                            "visibility": "hide",
+                            "priority": 3,
+                        },
+                    ]
+                },
+            )
+        ]
+    )
+
+    rows = fetch_models(
+        "openai",
+        api_key="oauth-token",
+        is_oauth=True,
+        account_id="acct-123",
+        client=client,
+    )
+
+    assert rows is not None
+    assert [(row.id, row.name, row.context_window) for row in rows] == [
+        ("gpt-5.6-sol", "GPT-5.6-Sol", 272_000)
+    ]
+    assert rows[0].supports_images is True
+    url, headers, params, _ = client.calls[0]
+    assert url == discovery.CODEX_MODELS_URL
+    assert headers["Authorization"] == "Bearer oauth-token"
+    assert headers["ChatGPT-Account-Id"] == "acct-123"
+    assert headers["originator"] == "local-operator"
+    assert params == {"client_version": discovery.CODEX_MODELS_CLIENT_VERSION}
+
+
+def test_openai_available_models_does_not_resurrect_hidden_static_rows(tmp_path) -> None:
+    client = _StubClient(
+        [
+            _Response(
+                200,
+                {
+                    "models": [
+                        {
+                            "slug": "gpt-5.6-sol",
+                            "visibility": "list",
+                            "context_window": 272_000,
+                        },
+                        {
+                            "slug": "gpt-4o",
+                            "visibility": "hide",
+                            "context_window": 128_000,
+                        },
+                    ]
+                },
+            )
+        ]
+    )
+
+    rows, status = available_models(
+        "openai",
+        api_key="oauth-token",
+        is_oauth=True,
+        account_id="acct-123",
+        client=client,
+        cache_dir=tmp_path,
+    )
+
+    assert status == "ok"
+    assert [row.id for row in rows] == ["gpt-5.6-sol"]
+
+
+def test_openai_device_oauth_uses_canonical_transport_cache_and_entitlements(
+    tmp_path,
+) -> None:
+    client = _StubClient(
+        [
+            _Response(
+                200,
+                {
+                    "models": [
+                        {
+                            "slug": "device-plan-model",
+                            "visibility": "list",
+                            "context_window": 272_000,
+                        },
+                        {
+                            "slug": "gpt-4o",
+                            "visibility": "hide",
+                            "context_window": 128_000,
+                        },
+                    ]
+                },
+            )
+        ]
+    )
+
+    rows, status = available_models(
+        "openai-device",
+        api_key="oauth-token",
+        is_oauth=True,
+        account_id="acct-device",
+        client=client,
+        cache_dir=tmp_path,
+    )
+
+    assert status == "ok"
+    assert [row.id for row in rows] == ["device-plan-model"]
+    assert client.calls[0][0] == discovery.CODEX_MODELS_URL
+    assert len(list(tmp_path.glob("openai.codex.*.listing.json"))) == 1
+
+
+def test_openai_oauth_catalogue_cache_is_scoped_to_the_subscription(tmp_path) -> None:
+    client = _StubClient(
+        [
+            _Response(
+                200,
+                {
+                    "models": [
+                        {
+                            "slug": "account-a-model",
+                            "visibility": "list",
+                            "context_window": 100_000,
+                        }
+                    ]
+                },
+            ),
+            _Response(
+                200,
+                {
+                    "models": [
+                        {
+                            "slug": "account-b-model",
+                            "visibility": "list",
+                            "context_window": 200_000,
+                        }
+                    ]
+                },
+            ),
+        ]
+    )
+
+    account_a, status_a = available_models(
+        "openai",
+        api_key="oauth-token",
+        is_oauth=True,
+        account_id="acct-a",
+        client=client,
+        cache_dir=tmp_path,
+    )
+    account_b, status_b = available_models(
+        "openai",
+        api_key="oauth-token",
+        is_oauth=True,
+        account_id="acct-b",
+        client=client,
+        cache_dir=tmp_path,
+    )
+
+    assert status_a == status_b == "ok"
+    assert account_a[0].id == "account-a-model"
+    assert account_b[0].id == "account-b-model"
+    assert "account-b-model" not in {row.id for row in account_a}
+    assert "account-a-model" not in {row.id for row in account_b}
+    assert len(client.calls) == 2
+    assert len(list(tmp_path.glob("openai.codex.*.listing.json"))) == 2
+
+
 # -- Anthropic transport ------------------------------------------------------
 
 
@@ -950,13 +1142,13 @@ def test_available_models_reports_cached_when_a_stale_refetch_fails(tmp_path) ->
     assert by_id["claude-opus-5"].context_window == 1_000_000
 
 
-def test_available_models_reports_static_when_a_cold_fetch_fails(tmp_path) -> None:
+def test_available_models_reports_unavailable_when_a_cold_fetch_fails(tmp_path) -> None:
     client = _StubClient([httpx.ConnectError("offline")])
     models, status = available_models(
         "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path
     )
 
-    assert status == "static"
+    assert status == "unavailable"
     # Still usable offline: the registry alone is a working picker.
     assert {row.id for row in models} == set(static_models("anthropic"))
 
@@ -1034,7 +1226,7 @@ def test_available_models_survives_a_broken_cache_layer(tmp_path, monkeypatch) -
 
     # A model picker must open even when the layer beneath it is broken; a
     # traceback here would take the whole session down.
-    assert status == "static"
+    assert status == "unavailable"
     assert {row.id for row in models} == set(static_models("anthropic"))
 
 

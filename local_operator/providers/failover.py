@@ -100,6 +100,39 @@ def is_usage_limit_error(error: BaseException) -> bool:
     )
 
 
+def provider_error_summary(error: BaseException) -> str:
+    """Stable, user-readable reason retained while a credential is blocked.
+
+    Provider payloads vary from a useful sentence to a bare HTTP code. Collapse
+    whitespace and classify the cases an operator can act on, while preserving a
+    bounded provider detail when it adds information. This string is persisted in
+    the credential backoff row, so a later session can explain why every account
+    is unavailable instead of replacing the original diagnosis with "temporary".
+    """
+    if not isinstance(error, ProviderError):
+        detail = " ".join(str(error).split())[:240]
+        return detail or "provider error"
+
+    detail = " ".join(error.message.split())[:240]
+    lowered = detail.lower()
+    if is_auth_error(error):
+        category = "authentication failed"
+    elif is_usage_limit_error(error):
+        if any(marker in lowered for marker in ("quota", "usage", "insufficient")):
+            category = "usage quota exhausted"
+        else:
+            category = "rate limit reached"
+    elif error.status is not None and error.status >= 500:
+        category = "provider service error"
+    else:
+        category = "provider request failed"
+
+    status = f" (HTTP {error.status})" if error.status is not None else ""
+    if not detail or category in lowered:
+        return f"{category}{status}"
+    return f"{category}{status}: {detail}"
+
+
 def is_invalidated_credential_error(error: BaseException) -> bool:
     """The credential was EXPLICITLY revoked by the IdP — soft-delete worthy.
 
@@ -437,6 +470,8 @@ class FailoverRouteState:
     """
 
     active: FallbackTarget | None = None
+    active_spec: ModelSpec | None = None
+    primary_spec: ModelSpec | None = None
     on_change: RouteChangeHandler | None = None
     primary_retry_at_ms: int = 0
 
@@ -446,12 +481,15 @@ class FailoverRouteState:
         reason: str,
         *,
         cooldown_ms: int = 0,
+        spec: ModelSpec | None = None,
     ) -> None:
         if cooldown_ms > 0:
             self.primary_retry_at_ms = max(
                 self.primary_retry_at_ms,
                 int(time.time() * 1000) + cooldown_ms,
             )
+        if spec is not None:
+            self.active_spec = spec
         if self.active == target:
             return
         self.active = target
@@ -467,6 +505,7 @@ class FailoverRouteState:
 
     def clear(self) -> None:
         self.active = None
+        self.active_spec = None
         self.primary_retry_at_ms = 0
 
 
@@ -475,7 +514,12 @@ def parse_selector(selector: str) -> tuple[str, str]:
     return provider, model_id
 
 
-def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
+def spec_for_target(
+    base: ModelSpec,
+    target: FallbackTarget,
+    *,
+    catalogue_credential: tuple[str | None, bool, str | None] | None = None,
+) -> ModelSpec:
     """Build the fallback model's OWN spec, then carry only sampling choices.
 
     Cloning the primary spec kept its base URL, context window and capabilities;
@@ -485,7 +529,10 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
     """
     from local_operator.model.configure import build_model_spec
 
-    target_spec = build_model_spec(*parse_selector(target.selector))
+    target_spec = build_model_spec(
+        *parse_selector(target.selector),
+        catalogue_credential=catalogue_credential,
+    )
     return target_spec.model_copy(
         update={
             "temperature": base.temperature,
@@ -612,6 +659,7 @@ async def stream_with_failover(
         targets = targets[targets.index(route_state.active) :]
 
     last_error: ProviderError | None = None
+    last_failed_provider: str | None = None
     clients: dict[tuple[str, str | None], "WireClient"] = {}
     rng = random.Random()
 
@@ -621,23 +669,10 @@ async def stream_with_failover(
             raise ProviderError(None, signal.reason or "aborted", retryable=False)
 
         provider, _model_id = parse_selector(selector)
-        spec = request.model if target == primary_target else spec_for_target(request.model, target)
         route_key = (selector, target.effort)
         client = clients.get(route_key)
-        if client is None:
-            built = client_for(spec)
-            client = await built if inspect.isawaitable(built) else built
-            clients[route_key] = client
-        current_request = (
-            request if target == primary_target else request.model_copy(update={"model": spec})
-        )
-        if route_state is not None and target != primary_target:
-            cooldown_ms = max(60_000, last_error.retry_after_ms or 0) if last_error else 60_000
-            await route_state.activate(
-                target,
-                "provider failure",
-                cooldown_ms=cooldown_ms,
-            )
+        spec = request.model
+        current_request = request
         state = AuthRetryKeyState()
         error: BaseException | None = None
         access: "OAuthAccess | None" = None  # credential record for this attempt
@@ -659,11 +694,47 @@ async def stream_with_failover(
                 if access is None and error is not None:
                     break  # rotation exhausted for this provider
                 if access is None and not _provider_allows_missing(provider):
-                    last_error = last_error or ProviderError(
+                    last_error = ProviderError(
                         None, f"No API key configured for provider '{provider}'", retryable=False
                     )
                     break
                 error = None
+                credential = (
+                    (
+                        access.access_token,
+                        access.kind == "oauth",
+                        access.account_id or access.org_id,
+                    )
+                    if access is not None
+                    else (None, False, None)
+                )
+                spec = await asyncio.to_thread(
+                    spec_for_target,
+                    request.model,
+                    target,
+                    catalogue_credential=credential,
+                )
+                current_request = request.model_copy(update={"model": spec})
+                if target == primary_target:
+                    if route_state is not None:
+                        route_state.primary_spec = spec
+                elif route_state is not None:
+                    cooldown_ms = (
+                        max(60_000, last_error.retry_after_ms or 0) if last_error else 60_000
+                    )
+                    diagnosis = (
+                        provider_error_summary(last_error) if last_error else "provider unavailable"
+                    )
+                    await route_state.activate(
+                        target,
+                        f"{last_failed_provider or request.model.provider} {diagnosis}",
+                        cooldown_ms=cooldown_ms,
+                        spec=spec,
+                    )
+            if client is None:
+                built = client_for(spec)
+                client = await built if inspect.isawaitable(built) else built
+                clients[route_key] = client
             retry_same_key = False
             key = access.access_token if access is not None else None
 
@@ -719,6 +790,7 @@ async def stream_with_failover(
                 continue
 
         # Provider exhausted — walk on to the next fallback selector.
+        last_failed_provider = provider
 
     if last_error is not None:
         raise last_error
