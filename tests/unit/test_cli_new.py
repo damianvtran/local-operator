@@ -767,6 +767,38 @@ def test_main_preflight_missing_api_key(
     assert called["factory"] is False
 
 
+def test_preflight_accepts_stored_oauth_under_temporary_backoff(
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """A transient refresh failure must not become a false missing-key error.
+
+    Stream-time failover owns the temporary block and the next refresh. Startup
+    only needs to know that the OAuth credential exists, so the user can still
+    reach the TUI and `/login` if the provider ultimately rejects it.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_OAUTH_TOKEN", raising=False)
+    store = AuthStore()
+    credential = store.upsert_credential(
+        "anthropic",
+        {
+            "access": "expired-access",
+            "refresh": "refresh-token",
+            "expires": 0,
+            "account_id": "account-id",
+        },
+    )
+    store.block_credential(credential.id, "anthropic")
+    store.close()
+
+    assert cli._preflight_api_key("anthropic", _bare_credential_manager()) is None
+    assert capsys.readouterr().err == ""
+
+
 def test_main_preflight_env_key_passes(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

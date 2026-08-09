@@ -282,6 +282,40 @@ def test_a_tool_without_a_diff_expands_to_its_raw_output() -> None:
     assert "one" in content and "three" in content
 
 
+def test_web_search_expansion_uses_structured_page_metadata() -> None:
+    """The model's bounded text must not impoverish the human expansion."""
+    card = ToolCard("t", "web_search", {"query": "python release"})
+    card.mark_done(
+        "Provider: duckduckgo (credential-free)",
+        {
+            "provider": "duckduckgo",
+            "auth_mode": "credential-free",
+            "sources": [
+                {
+                    "title": "Python 3.13 release",
+                    "url": "https://python.org/downloads/release/python-3130/",
+                    "snippet": "Release notes and downloads for Python 3.13.",
+                }
+            ],
+        },
+    )
+
+    # Search sources are primary content, so their disclosure stays visible
+    # without requiring hover or prior knowledge of generic card controls.
+    assert EXPAND_HINT in card._build_row(120).plain
+    card.toggle_expanded()
+    content = card._build_content(120)
+
+    assert "Python 3.13 release" in content.plain
+    assert "https://python.org/downloads/release/python-3130/" in content.plain
+    assert "Release notes and downloads for Python 3.13." in content.plain
+    assert "Ask Operator to open result N with browser" in content.plain
+    assert _style_at(content, "Python 3.13 release").bold is True
+    assert (
+        _style_at(content, "https://python.org").color != _style_at(content, "Release notes").color
+    )
+
+
 # --- the one-line guarantee ------------------------------------------------
 
 

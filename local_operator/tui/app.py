@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
 
 from rich.console import Group
 from rich.style import Style
@@ -148,6 +148,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         aliases=("models",),
     ),
     SlashCommand("provider", "List providers and their login/usage state"),
+    SlashCommand("search", "Configure web search providers and load balancing"),
     SlashCommand("accounts", "List stored credentials"),
     SlashCommand("usage", "Show provider usage quota"),
     SlashCommand("goal", "Show, set, or clear the session goal"),
@@ -512,6 +513,16 @@ class OperatorApp(App[None]):
         session.set_approval_handler(self.request_tool_approval)
         self._controller = EventController(session, self)
         self._controller.subscribe()
+        # The app is already painted and subscribed, so quota I/O cannot delay
+        # first paint and any warning lands in the transcript. This is an
+        # optional session capability so lightweight hosts do not need to fake
+        # network preflight; failure must never become another startup gate.
+        usage_preflight = getattr(session, "preflight_usage", None)
+        if callable(usage_preflight):
+            try:
+                await cast(Callable[[], Awaitable[None]], usage_preflight)()
+            except Exception:
+                pass
         assert self._status is not None
         self._status.update(
             model_label=session.model_label,
@@ -1636,6 +1647,8 @@ class OperatorApp(App[None]):
             self._cmd_model(arg, notice)
         elif command == "/provider":
             self._cmd_providers(notice)
+        elif command == "/search":
+            self._cmd_search(arg, notice)
         elif command == "/accounts":
             self._cmd_accounts(notice)
         elif command == "/usage":
@@ -2131,6 +2144,142 @@ class OperatorApp(App[None]):
             notice(f"loop finished after {completed} iteration(s)")
 
     # -- providers / accounts / usage --------------------------------------
+    def _cmd_search(self, arg: str, notice: NoticeFn) -> None:
+        """``/search`` status plus non-secret provider toggles.
+
+        Secret entry stays in the normal terminal command. Textual's editor is
+        transcript-visible, so accepting an API key here would persist it in
+        clear text and hand it to the model on the next turn.
+        """
+        from local_operator.config import ConfigManager
+        from local_operator.credentials import CredentialManager
+        from local_operator.paths import config_dir
+        from local_operator.web_search.models import (
+            PROVIDER_IDS,
+            SearchProviderId,
+            SearchStrategy,
+        )
+        from local_operator.web_search.providers import provider_statuses
+        from local_operator.web_search.service import (
+            load_search_settings,
+            set_provider_enabled,
+            set_provider_order,
+            set_search_enabled,
+            set_search_strategy,
+        )
+
+        manager = ConfigManager(config_dir())
+        credentials = CredentialManager(config_dir())
+        words = arg.split()
+        try:
+            if not words:
+                settings = load_search_settings(manager)
+                statuses = provider_statuses(settings, credentials)
+                labels = {status.id: status.label for status in statuses}
+                strategy = settings.strategy.replace("_", " ").title()
+                order = " → ".join(labels[value] for value in settings.providers)
+                items: list[tuple[str, str]] = [
+                    (
+                        "Web search",
+                        f"{'On' if settings.enabled else 'Off'} · {strategy} · "
+                        f"{order or 'No providers'}",
+                    )
+                ]
+                for status in statuses:
+                    enabled = "enabled" if status.enabled else "disabled"
+                    available = "available" if status.available else "setup needed"
+                    items.append((status.label, f"{enabled} · {available} · {status.detail}"))
+                items.extend(
+                    [
+                        ("toggle", "/search on|off · /search enable|disable <provider>"),
+                        (
+                            "balance",
+                            "/search balance round_robin|ordered · " "/search order <providers…>",
+                        ),
+                        (
+                            "setup (shell)",
+                            "local-operator search setup tavily --oauth|--api-key",
+                        ),
+                        (
+                            "API keys (shell)",
+                            "local-operator search setup <provider> --api-key",
+                        ),
+                        (
+                            "SearXNG (shell)",
+                            "local-operator search setup searxng --endpoint <url>",
+                        ),
+                    ]
+                )
+                self._append_block(RichBlock(_tree_listing(items)))
+                return
+
+            command = words[0].lower()
+            if command in ("on", "off") and len(words) == 1:
+                set_search_enabled(manager, command == "on")
+                notice(
+                    f"web search {command}; /reload "
+                    f"{'adds' if command == 'on' else 'removes'} the tool"
+                )
+                return
+            if command in ("enable", "disable") and len(words) == 2:
+                provider = words[1].lower()
+                if provider not in PROVIDER_IDS:
+                    notice(f"unknown search provider: {provider}", "warning")
+                    return
+                set_provider_enabled(
+                    manager,
+                    cast(SearchProviderId, provider),
+                    command == "enable",
+                )
+                notice(f"{provider} {command}d; applies to the next search")
+                return
+            if command == "balance" and len(words) == 2:
+                strategy = words[1].lower()
+                if strategy not in ("round_robin", "ordered"):
+                    notice("search balance must be round_robin or ordered", "warning")
+                    return
+                set_search_strategy(manager, cast(SearchStrategy, strategy))
+                notice(f"search balance: {strategy}")
+                return
+            if command == "order" and len(words) >= 2:
+                provider_words = [word.lower().strip(",") for word in words[1:]]
+                unknown = [word for word in provider_words if word not in PROVIDER_IDS]
+                if unknown:
+                    notice(f"unknown search provider: {unknown[0]}", "warning")
+                    return
+                providers: list[SearchProviderId] = [
+                    cast(SearchProviderId, word) for word in provider_words
+                ]
+                set_provider_order(manager, providers)
+                notice("search order: " + ", ".join(providers))
+                return
+            if command == "setup" and len(words) == 2:
+                provider = words[1].lower()
+                if provider not in PROVIDER_IDS:
+                    notice(f"unknown search provider: {provider}", "warning")
+                    return
+                if provider == "tavily":
+                    notice(
+                        "run in a shell: local-operator search setup tavily "
+                        "--oauth (or --api-key)"
+                    )
+                elif provider == "searxng":
+                    notice(
+                        "run in a shell: local-operator search setup searxng " "--endpoint <url>"
+                    )
+                elif provider in ("brave", "exa", "serpapi", "perplexity"):
+                    notice(f"run in a shell: local-operator search setup {provider} " "--api-key")
+                else:
+                    notice("DuckDuckGo needs no setup; use /search enable duckduckgo")
+                return
+            notice(
+                "usage: /search [on|off|enable <provider>|disable <provider>|"
+                "balance <round_robin|ordered>|order <providers…>|setup <provider>]",
+                "warning",
+            )
+        except Exception as error:
+            notice(f"search configuration failed: {error}", "error")
+
     def _cmd_providers(self, notice: NoticeFn) -> None:
         """``/provider`` — list loginable providers and their state."""
         if self._providers is None:

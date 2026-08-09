@@ -406,6 +406,10 @@ def add_server(
 ) -> int:
     """Add one server to the scoped mcp.json (``mcp add``).
 
+    ``oauth=True`` writes the canonical HTTP auth block used by the SDK's
+    dynamic client-registration flow. It is rejected for stdio because that
+    transport owns authentication inside its child process.
+
     Returns an exit code: 0 on success, 1 on a validation or duplicate error
     (the message is printed to stderr so the CLI can report it).
     """
@@ -454,6 +458,48 @@ def add_server(
     if name in servers:
         print(f"error: server {name!r} already exists in {path}", file=sys.stderr)
         return 1
+    servers[name] = raw
+    try:
+        _write_json_atomic(path, doc)
+    except OSError as exc:
+        print(f"error: could not write {path}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def set_http_oauth_server(
+    name: str,
+    url: str,
+    *,
+    scope: str = "global",
+    cwd: str | os.PathLike[str] | None = None,
+) -> int:
+    """Atomically create or replace one scoped OAuth HTTP server.
+
+    Provider setup is intentionally idempotent: a same-name non-OAuth entry
+    must be repaired rather than reported as configured or rejected as a
+    duplicate. Imported and higher-priority configs remain outside this
+    mutation boundary; callers must first ensure this scope is effective.
+    """
+    import sys
+
+    raw: dict[str, Any] = {
+        "type": "http",
+        "url": url,
+        "auth": {"type": "oauth"},
+    }
+    errors = validate_server_config(name, _coerce_server_config(raw))
+    if errors:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    path = _scope_path(cwd, scope)
+    doc = _read_json(path) or {}
+    servers = doc.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+        doc["mcpServers"] = servers
     servers[name] = raw
     try:
         _write_json_atomic(path, doc)
