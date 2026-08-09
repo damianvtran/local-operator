@@ -203,106 +203,61 @@ def test_hint_descriptions_never_truncate_into_nonsense() -> None:
 # --- pure geometry: height tiers ---------------------------------------------
 
 
-def test_height_tiers_shed_in_cost_to_the_user_order() -> None:
-    """The degradation order, pinned at seven heights of the SAME facts.
+def test_height_tiers_only_add_sections_as_the_budget_grows() -> None:
+    """The height ladder is monotonic, not a set of reversible concessions.
 
-    The order is by what each step COSTS THE USER, which is deliberately NOT
-    plain decoration-before-information:
+    The old "refund when the mark is dropped" special case made 80x24 show the
+    version and tip, 80x25 lose both in exchange for the mark, and 80x27 regain
+    only the tip. A ladder promises that more room means at least the content
+    already visible. Pin that contract across EVERY height, then pin the order
+    in which the optional sections first become affordable:
 
-    1. a box with room: everything, with the lockup's breathing row;
-    2. one row short: the lockup goes FLUSH — one row of air is the cheapest
-       thing on the screen;
-    3. tighter: the VERSION row goes. It is the least actionable fact here and
-       the row a first-run user needs least, so it is spent BEFORE the tip —
-       which is also one row, and is the only affordance on the splash the hint
-       table does not already carry;
-    4. tighter: the TIP goes, and the lockup gets its air back. It buys two rows
-       and needs only one, and the same entry comes round on the next launch;
-    5. tighter: the air again. The lockup's blank row is still the cheapest
-       concession on the screen, so it is spent twice;
-    6. tighter: the MARK goes — and steps 3 and 4 are UNDONE, because they were
-       concessions made to keep it. Twelve rows come back for the three they
-       bought, so the tip and the version row return rather than staying spent;
-    7. far shorter: the hints go last, because they are a first-time user's way
-       in.
-
-    The credential warning survives all of it — see the test below.
+    keys → tip → version → wordmark → mark.
     """
     info = _info()
-    # The natural block height. The builder returns the block and nothing else —
-    # no padding rows — so at a box taller than the content the row count IS the
-    # content extent, and the widget reports exactly this as its height.
     roomy = _lines(info, ROOMY_W, 99)
-    drawn = [i for i, row in enumerate(roomy) if row.strip()]
-    full_h = drawn[-1] - drawn[0] + 1
-    # 12 logo (mark 10 + blank + wordmark) + 1 blank + 4 status + 1 blank
-    # + 3 hints + 1 blank + 1 tip
-    assert full_h == 23
-    assert len(roomy) == full_h, "no padding rows: the block is all the builder draws"
+    drawn = [index for index, row in enumerate(roomy) if row.strip()]
+    full_height = drawn[-1] - drawn[0] + 1
+    assert full_height == 23
+    assert len(roomy) == full_height, "the block returns content, never canvas padding"
 
-    # A box of exactly the natural height keeps everything: the budget is what
-    # the block may SPEND, and nothing is held back for a gap the input panel's
-    # own top padding row already provides.
-    exact = _lines(info, ROOMY_W, full_h)
-    assert _has_mark(exact)
-    assert _has_hints(exact)
-    assert _has_tip(exact)
-    assert f"v{info.version}" in "\n".join(exact)
-    assert len(exact) == full_h
+    def sections(height: int) -> frozenset[str]:
+        lines = _lines(info, ROOMY_W, height)
+        text = "\n".join(lines)
+        visible: set[str] = set()
+        if _has_hints(lines):
+            visible.add("keys")
+        if _has_tip(lines):
+            visible.add("tip")
+        if f"v{info.version}" in text:
+            visible.add("version")
+        if _has_spaced_wordmark(lines):
+            visible.add("wordmark")
+        if _has_mark(lines):
+            visible.add("mark")
+        return frozenset(visible)
 
-    # One row short: the lockup goes flush — one row of air is the cheapest thing
-    # on the screen, and every fact survives, tip included.
-    flush = _lines(info, ROOMY_W, full_h - 1)
-    assert _has_mark(flush)
-    assert _has_hints(flush)
-    assert _has_tip(flush)
-    assert f"v{info.version}" in "\n".join(flush)
+    previous: frozenset[str] = frozenset()
+    first_seen: dict[str, int] = {}
+    for height in range(1, full_height + 1):
+        current = sections(height)
+        assert previous <= current, (height, previous - current, previous, current)
+        for section in current - previous:
+            first_seen[section] = height
+        previous = current
 
-    # One row tighter: the VERSION row goes, and the tip outlives it. Both are one
-    # row; the build number is the one a user can look up elsewhere.
-    no_version = _lines(info, ROOMY_W, full_h - 2)
-    assert f"v{info.version}" not in "\n".join(no_version)
-    assert _has_tip(no_version), "the tip was spent before the version number"
-    assert _has_mark(no_version)
-    assert _has_hints(no_version)
+    order = ("keys", "tip", "version", "wordmark", "mark")
+    thresholds = [first_seen[name] for name in order]
+    assert all(left < right for left, right in zip(thresholds, thresholds[1:]))
+    assert previous == frozenset(order)
 
-    # One row tighter: the tip goes — two rows, which buys back the air step 2
-    # spent. Everything below here is therefore measured from THIS height.
-    no_tip_h = full_h - 3
-    no_tip = _lines(info, ROOMY_W, no_tip_h)
-    assert not _has_tip(no_tip)
-    assert _has_mark(no_tip)
-    assert _has_hints(no_tip)
-    assert len(no_tip) == no_tip_h, "the block fills this budget exactly"
-
-    # One row tighter: the air goes for the second time, and the mark survives.
-    reflushed = _lines(info, ROOMY_W, no_tip_h - 1)
-    assert _has_mark(reflushed)
-    assert _has_hints(reflushed)
-    assert not _has_tip(reflushed)
-
-    # One row tighter: nothing cheap is left, so the MARK goes — and the two rows
-    # that were spent to keep it come straight back. This is the band an 80x24
-    # terminal lands in, and the old ladder drew it with no tip on it at all.
-    mid = _lines(info, ROOMY_W, no_tip_h - 2)
-    assert not _has_mark(mid)
-    assert _has_hints(mid)
-    assert _has_tip(mid), "the tip stayed spent for a concession that was refunded"
-    assert f"v{info.version}" in "\n".join(mid)
-    assert _has_any_status(mid, info)
-
-    # Far shorter: hints go LAST, after the weak status rows and the tip have
-    # already been spent — at seven rows the version row buys them, and only a box
-    # too short for the hint block plus a single status row finally drops them.
-    keeps_hints = _lines(info, ROOMY_W, 7)
-    assert not _has_mark(keeps_hints)
-    assert not _has_tip(keeps_hints)
-    assert _has_hints(keeps_hints)
-
-    short = _lines(info, ROOMY_W, 6)
-    assert not _has_mark(short)
-    assert not _has_hints(short)
-    assert _has_any_status(short, info)
+    # The last decorative concession is still one row of air inside the lockup:
+    # exact height draws it; one row short keeps every CONTENT section and merely
+    # flushes the mark against the wordmark.
+    exact = _lines(info, ROOMY_W, full_height)
+    flush = _lines(info, ROOMY_W, full_height - 1)
+    assert sections(full_height) == sections(full_height - 1)
+    assert len(exact) == len(flush) + 1
 
 
 def test_status_rows_shed_lowest_priority_first_and_the_warning_never() -> None:

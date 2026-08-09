@@ -47,7 +47,12 @@ from local_operator.tui.app import (
 )
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import GAP_CLASS, NoticeBlock, TranscriptView
-from local_operator.tui.widgets.welcome import WelcomeView
+from local_operator.tui.widgets.welcome import (
+    LOGO_MARK,
+    TIPS,
+    WORDMARK_SPACED,
+    WelcomeView,
+)
 
 TCSS = Path(__file__).parent.parent.parent.parent / "local_operator" / "tui" / "local_operator.tcss"
 
@@ -513,10 +518,14 @@ async def test_notices_under_the_splash_never_scroll_the_region(notices: int) ->
 
 
 @pytest.mark.asyncio
-async def test_the_mark_survives_two_failed_servers_at_the_tightest_size() -> None:
-    """96x28 is where the block wants the whole region, so it is where the budget
-    shows: two failing servers cost three rows (a row each plus the separator), and
-    the ladder spends the version number rather than the product's own mark."""
+async def test_notices_spend_the_mark_before_existing_information() -> None:
+    """Two startup failures consume rows from the splash's region.
+
+    The old refund ladder spent version and tip to preserve the mark, then
+    restored them only when an even shorter box dropped the mark. The strict
+    ladder keeps everything the user could already read and spends the largest
+    decoration first: wordmark, version, tip and keys survive; the mark yields.
+    """
     app = _make_app()
     async with app.run_test(size=(96, 28)) as pilot:
         await pilot.pause()
@@ -525,9 +534,42 @@ async def test_the_mark_survives_two_failed_servers_at_the_tightest_size() -> No
         app._system_notice("MCP two failed: command not found", "error")
         await _settle(pilot)
         frame = "\n".join(_rows(app))
-        assert "l o c a l   o p e r a t o r" in frame, "the wordmark"
-        assert "▄█████▄" in frame, "the mark's first row — the one that scrolled away"
+        assert "l o c a l   o p e r a t o r" in frame
+        assert "▄█████▄" not in frame
+        assert "v0.16.1" in frame
+        assert "/help" in frame
+        assert "/resume picks up a recent session where you left off" in frame
         assert frame.count("failed: command not found") == 2
+
+
+@pytest.mark.asyncio
+async def test_more_terminal_height_never_removes_welcome_content() -> None:
+    """D18 lives in the coupling between the terminal and the widget's budget.
+
+    A pure builder test cannot catch the app handing that builder a surprising
+    region. Walk every height around the classic 24-row terminal in the REAL app
+    and read the composited frame: once a section appears, it never disappears.
+    """
+    previous: frozenset[str] = frozenset()
+    for height in range(14, 34):
+        app = _make_app()
+        async with app.run_test(size=(80, height)) as pilot:
+            await pilot.pause()
+            await _settle(pilot)
+            frame = "\n".join(_rows(app))
+        current = frozenset(
+            name
+            for name, visible in (
+                ("keys", "/help" in frame),
+                ("tip", TIPS[0] in frame),
+                ("version", "v0." in frame),
+                ("wordmark", WORDMARK_SPACED in frame),
+                ("mark", LOGO_MARK[0] in frame),
+            )
+            if visible
+        )
+        assert previous <= current, (height, previous - current, previous, current)
+        previous = current
 
 
 @pytest.mark.asyncio

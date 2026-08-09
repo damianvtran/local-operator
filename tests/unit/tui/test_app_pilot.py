@@ -2349,6 +2349,33 @@ async def test_a_bare_model_names_the_current_pair_and_the_command_that_keeps_it
 
 
 @pytest.mark.asyncio
+async def test_rejected_model_commands_keep_the_boot_composition() -> None:
+    """A typo changed no state and must not permanently collapse the splash."""
+    session = _SwitchableSession()
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        welcome = app.query_one(WelcomeView)
+        for command in ("/model missing-slash", "/model bogus-provider/model"):
+            app._run_slash_command(command)
+            await pilot.pause()
+            assert welcome.display is True, command
+            assert app.screen.has_class("boot"), command
+
+
+def test_help_uses_one_column_wider_than_every_command_name() -> None:
+    """The two longest aliases used to consume the literal 14-cell column and
+    glue directly onto descriptions: `/model, /modelsSwitch model…`."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    rows = _renderable_plain(app._help_block().renderable).splitlines()
+    for command in SLASH_COMMANDS:
+        names = ", ".join(f"/{name}" for name in command.names)
+        row = next(row for row in rows if row.startswith(names))
+        assert row[len(names) :].startswith("  "), row
+
+
+@pytest.mark.asyncio
 async def test_a_switch_admits_it_is_session_only_and_names_the_persist_command() -> None:
     """A switch that looks permanent and is not is the actual bug: the old
     "(next turn)" said WHEN it applied and never said for how long, so the next
@@ -2425,16 +2452,13 @@ async def test_model_default_alone_persists_the_model_already_in_use(
 
 @pytest.mark.asyncio
 async def test_every_model_default_surface_says_it_the_same_way() -> None:
-    """D14. One instruction, four wordings, on four surfaces a user meets within
-    two keystrokes of each other: "saves this provider and model as the boot
-    default", "to make it the boot default", "saves the boot default", "persists
-    it". A user cannot learn a string that changes every time it is shown.
+    """D14. One instruction had four wordings on four surfaces a user meets
+    within two keystrokes. The canonical sentence now names the consequence —
+    future sessions — rather than merely saying an unspecified pair is saved.
 
-    All four are checked in ONE test on purpose — the defect is not any single
-    wording, it is the DIVERGENCE, so the assertion has to be that the same
-    sentence reaches every surface. The footer is checked unwrapped and whole,
-    because it is the site that truncates and the one the reviewer called
-    weakest.
+    The defect is the divergence, so all four surfaces are checked together.
+    The footer is checked unwrapped and whole because it is the tightest site:
+    an instruction that is consistent only after truncation is not consistent.
     """
     session = _SwitchableSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))

@@ -264,10 +264,10 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 TIPS: tuple[str, ...] = (
     "/resume picks up a recent session where you left off",
     "/model <provider>/<id> switches this session only",
-    "/model default saves provider and model",
+    "/model default saves this for new sessions",
     "/usage shows how much provider quota is left",
     "/approvals <ask|auto> sets whether tools ask first",
-    "Type as the agent works — the message sends next step",
+    "Type as the agent works — it is sent at the next step",
     "esc stops the agent without ending the session",
     "Ask for parallel work and the agent fans out subagents",
     "Compaction runs itself when the context window fills",
@@ -664,79 +664,97 @@ def build_welcome_lines(
     if width <= 0 or height <= 0:
         return []
 
-    logo = _logo_lines(width, mark_color=mark_color)
+    # Split the lockup into independently affordable sections. The wordmark is
+    # one row; the mark is ten. Treating both as one boolean let one extra
+    # terminal row suddenly buy the whole lockup by throwing away the version
+    # and tip: 80x24 showed both facts, 80x25 showed neither, and 80x27 bought
+    # the tip back. More room must never remove content.
+    #
+    # Start with the FLUSH lockup. Its optional row of air is admitted only
+    # after the mark itself; otherwise the decorative gap could keep the mark
+    # out at the exact-height 28-row launch.
+    flush_logo = _logo_lines(width, flush=True, mark_color=mark_color)
+    if width >= MARK_WIDTH:
+        wordmark = flush_logo[-1:]
+        mark = flush_logo[:-1]
+    else:
+        wordmark = flush_logo
+        mark = []
+
     status_full = _status_rows(info, width)
-    status = list(status_full)
+    # Version is the only status row in the visible ladder. Model, cwd and the
+    # credential warning are the facts the app needs to answer "can I start?";
+    # if even those do not fit, their existing priorities shed cwd then model,
+    # leaving the actionable warning last.
+    status_without_version = [row for row in status_full if row[0] != _PRIORITY_VERSION]
+    status = list(status_without_version)
     hints = _hint_lines(width)
     tip = _tip_lines(width, tip_index)
-    show_logo = True
-    show_hints = True
-    show_tip = bool(tip)
+    show_hints = False
+    show_tip = False
+    show_wordmark = False
+    show_mark = False
+    show_mark_air = False
 
-    def total(rows: int) -> int:
-        # One blank row joins each visible section to the status rows.
+    def total(rows: int | None = None) -> int:
+        """Rows occupied by the currently admitted sections."""
+        status_rows = len(status) if rows is None else rows
+        logo_rows = (
+            (len(mark) if show_mark else 0)
+            + (1 if show_mark_air else 0)
+            + (len(wordmark) if show_wordmark else 0)
+        )
         return (
-            rows
-            + (len(logo) + 1 if show_logo else 0)
+            status_rows
+            + logo_rows
+            + (1 if logo_rows else 0)
             + (len(hints) + 1 if show_hints else 0)
             + (len(tip) + 1 if show_tip else 0)
         )
 
-    # The block may fill its budget to the last row. It used to hold one row
-    # back so it never touched the input panel below it, and that reserve is now
-    # the panel's own top padding row — an always-present blank row inside the
-    # panel's fill, which is a gap the block cannot spend on content and cannot
-    # accidentally lose. Asking for `height - 1` here would just buy a second
-    # copy of that gap at the price of the version row.
+    # A STRICT addition ladder:
     #
-    # Escalate by what each step COSTS THE USER, which is not the same as
-    # decoration-before-information:
+    #   essential status → keys → tip → version → wordmark → mark
     #
-    # 1. tighten the lockup — costs one row of air.
-    # 2. drop the weakest status row — the version number, the least actionable
-    #    thing on the screen and the one row a first-run user needs least.
-    # 3. drop the tip, and hand that row of air straight back. It goes AFTER the
-    #    version number, not before: it is one row against that row's one, it is
-    #    the only affordance here the hint table does not already carry, and it
-    #    is the newest thing on the splash — a build number is what the user can
-    #    look up, a tip is what they cannot. Shedding it second was what made a
-    #    28-row terminal the floor for seeing one at all.
-    # 4. tighten the lockup again. The blank row is still the cheapest concession
-    #    on the screen, so it is spent twice rather than once.
-    # 5. drop the mark — and with it the reason steps 2 and 3 happened. Twelve
-    #    rows come back for the three they bought, so both concessions are UNDONE
-    #    and then re-made against the budget that is actually left. Without this
-    #    the tip was collateral damage of a concession made ten rows later: every
-    #    terminal too short for the lockup — 80x24, the classic default and a
-    #    common split pane — drew a splash with no tip on it, which is the one
-    #    outcome that defeats a rotating tip entirely.
-    # 6. drop the hints — a first-time user's way in, so it goes last.
-    def drop_weakest_status() -> None:
-        """Shed the lowest-priority status row, never the last one standing."""
-        if len(status) > 1:
-            status.pop(min(range(len(status)), key=lambda index: status[index][0]))
+    # Each step is admitted only if it fits while keeping every earlier one.
+    # Therefore a taller terminal can only add a section; it can never trade two
+    # useful rows for a larger decoration. This is intentionally boring — no
+    # "refund" special case whose truth changes when the mark crosses its tier.
+    while len(status) > 1 and total() > height:
+        status.pop(min(range(len(status)), key=lambda index: status[index][0]))
 
-    if total(len(status)) > height:
-        logo = _logo_lines(width, flush=True, mark_color=mark_color)
-    if total(len(status)) > height:
-        drop_weakest_status()
-    if total(len(status)) > height and show_tip:
-        show_tip = False
-        logo = _logo_lines(width, mark_color=mark_color)
-    if total(len(status)) > height:
-        logo = _logo_lines(width, flush=True, mark_color=mark_color)
-    if total(len(status)) > height:
-        show_logo = False
-        show_tip = bool(tip)
-        status = list(status_full)
-        if total(len(status)) > height:
-            drop_weakest_status()
-        if total(len(status)) > height and show_tip:
-            show_tip = False
-    if total(len(status)) > height:
+    show_hints = bool(hints)
+    if total() > height:
         show_hints = False
-    while len(status) > 1 and total(len(status)) > height:
-        drop_weakest_status()
+    show_tip = bool(tip) and show_hints
+    if total() > height:
+        show_tip = False
+
+    # A later rung is considered only after every available earlier rung was
+    # admitted. Otherwise a seven-row box could skip the tip, then spend its one
+    # remaining row on the version; an eight-row box would add the tip by
+    # dropping that version — still a content loss, merely lower in the ladder.
+    earlier_complete = show_hints and (not tip or show_tip)
+    version_available = len(status_full) > len(status_without_version)
+    version_admitted = not version_available
+    if earlier_complete and version_available and status == status_without_version:
+        old_status = status
+        status = list(status_full)
+        if total() > height:
+            status = old_status
+        else:
+            version_admitted = True
+
+    show_wordmark = bool(wordmark) and earlier_complete and version_admitted
+    if total() > height:
+        show_wordmark = False
+    # The mark is meaningful only as the upper half of the wordmark lockup.
+    show_mark = bool(mark) and show_wordmark
+    if total() > height:
+        show_mark = False
+    show_mark_air = show_mark and width >= LOGO_FULL_MIN_WIDTH
+    if total() > height:
+        show_mark_air = False
 
     # One shared pad across the status stack and the hint stack, so the splash has
     # a single left edge below the wordmark whatever the model label turns out to
@@ -744,8 +762,13 @@ def build_welcome_lines(
     # sharing the pad would left-align the mark against the text blocks.
     status_lines, hints = _center_blocks([[line for _, line in status], hints], width)
     lines: list[Text] = []
-    if show_logo:
-        lines.extend(logo)
+    if show_mark:
+        lines.extend(mark)
+        if show_mark_air:
+            lines.append(Text(""))
+    if show_wordmark:
+        lines.extend(wordmark)
+    if show_mark or show_wordmark:
         lines.append(Text(""))
     lines.extend(status_lines)
     if show_hints:

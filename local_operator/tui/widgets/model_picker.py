@@ -35,10 +35,13 @@ from textual.widgets import Static
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
 
-#: Cursor glyph and its gutter. Identical to the command picker's, because the
-#: two lists appear in the same place and a different caret would read as a
-#: different kind of control.
-_CURSOR = "›"
+#: Cursor glyph and its gutter. Identical to the command picker's and the
+#: session picker's, because all three lists appear in the same place and a
+#: different caret would read as a different kind of control. This said
+#: "identical" while shipping ``›`` against the others' ``❯`` — three pickers,
+#: two glyphs — until the round that put four cards on one ramp made them a
+#: family and the divergence had to be settled.
+_CURSOR = "❯"
 _GUTTER_CELLS = 2
 
 #: One cell of breathing room at the right edge, matching the transcript's.

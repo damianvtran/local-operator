@@ -376,6 +376,14 @@ UsagePanel {
     color: $lo-fg;
 }
 
+/* On a terminal too short for the card's normal two-row vertical gutter, the
+ * widget spends the decoration rather than cover the docked prompt. The class
+ * is set from the SAME `_fit()` result that pins the height, so CSS and Python
+ * cannot disagree about whether those rows exist. Horizontal breathing stays. */
+UsagePanel.-squeezed {
+    padding: 0 2;
+}
+
 /* ---- welcome view (new-session empty state) --------------------------- *
  *
  * Lives INSIDE the transcript, so it is handed exactly the region above the

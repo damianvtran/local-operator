@@ -120,14 +120,11 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: instead of learning one string.
 #:
 #: Sized by its TIGHTEST site. The picker footer truncates at the card's width
-#: and this clause sits last in it (the access note ahead of it is the one a user
-#: can act on right now), so the sentence has to fit what is left after that note
-#: — measured at 39 cells against a 70-cell footer budget carrying
-#: ``1 hidden — /login <provider>``. That is what pays for the missing articles;
-#: the alternative was a clause that reads better and is not there at 90 columns.
-#: It names the WHAT, which is the half "saves the boot default" dropped: the
-#: default is a provider AND a model, not two settings to hunt for.
-PERSIST_HINT = "/model default saves provider and model"
+#: and this clause sits after the access note, so it has to be complete and short.
+#: "Saves provider and model" named the payload but not why it mattered; "saves
+#: this for new sessions" names the consequence, fits the same slot, and includes
+#: the article the clipped phrase lacked.
+PERSIST_HINT = "/model default saves this for new sessions"
 
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
@@ -1673,7 +1670,10 @@ class OperatorApp(App[None]):
         persist_default = lowered == "default" or lowered.startswith("default ")
         target = arg[len("default ") :].strip() if persist_default else arg
         if session is None or not hasattr(session, "set_model"):
-            notice("session is still starting…", "warning")
+            # A rejected command changed nothing, so the conversation has not
+            # started: `_system_notice` keeps the boot composition intact where
+            # `notice` would collapse it for a typo.
+            self._system_notice("session is still starting…", "warning")
             return
         if persist_default and not target:
             # Bare ``/model default`` means "keep the one I am on". Demanding the
@@ -1684,30 +1684,32 @@ class OperatorApp(App[None]):
             # app can do for itself off the session's own label.
             target = session.model_label
             if not target:
-                notice("usage: /model default <provider>/<model-id>", "warning")
+                self._system_notice("usage: /model default <provider>/<model-id>", "warning")
                 return
         provider, sep, model_id = target.partition("/")
         if not sep or not model_id:
-            notice(
+            self._system_notice(
                 "usage: /model <provider>/<model-id> (e.g. openrouter/deepseek/deepseek-chat)",
                 "warning",
             )
             return
         provider = provider.lower()  # build_model_spec is case-insensitive
         if self._providers is None:
-            notice("provider controller unavailable — cannot infer model spec", "warning")
+            self._system_notice(
+                "provider controller unavailable — cannot infer model spec", "warning"
+            )
             return
         # Validate the provider BEFORE switching. resolve_model does not raise
         # on an unknown provider — it returns a spec with base_url=None — so a
         # typo would silently reconfigure the session and only fail on the next
         # turn, reading as a network/auth error instead of a typo.
         if self._providers.provider(provider) is None:
-            notice(f"unknown provider: {provider} — see /provider", "warning")
+            self._system_notice(f"unknown provider: {provider} — see /provider", "warning")
             return
         try:
             spec = self._providers.resolve_model(provider, model_id)
         except Exception as error:  # unresolvable hosting/model pair
-            notice(f"cannot resolve {provider}: {error}", "error")
+            self._system_notice(f"cannot resolve {provider}: {error}", "error")
             return
         old_label = session.model_label
         session.set_model(spec)
@@ -1988,7 +1990,10 @@ class OperatorApp(App[None]):
         """
         session = self._session
         if session is None or not hasattr(session, "set_goal"):
-            notice("session is still starting…", "warning")
+            # A rejected command changed nothing, so the conversation has not
+            # started: `_system_notice` keeps the boot composition intact where
+            # `notice` would collapse it for a typo.
+            self._system_notice("session is still starting…", "warning")
             return
         if not arg:
             current = session.goal
@@ -2017,7 +2022,10 @@ class OperatorApp(App[None]):
                 notice("no loop is running")
             return
         if session is None:
-            notice("session is still starting…", "warning")
+            # A rejected command changed nothing, so the conversation has not
+            # started: `_system_notice` keeps the boot composition intact where
+            # `notice` would collapse it for a typo.
+            self._system_notice("session is still starting…", "warning")
             return
         if self._loop_running:
             notice("a loop is already running — /loop stop to cancel", "warning")
@@ -2575,15 +2583,21 @@ class OperatorApp(App[None]):
             notice(f"logout failed: {error}", "error")
 
     def _help_block(self) -> RichBlock:
-        """Two-column help: command muted padded 10, description dim (D16)."""
+        """Two-column help with a gutter wider than every command name."""
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
+        named_commands = [
+            (", ".join(f"/{name}" for name in command.names), command) for command in SLASH_COMMANDS
+        ]
+        # A literal 14 worked until `/model, /models` and `/resume, /recall`
+        # became the two rows this feature rewrote. Both exceeded the floor and
+        # glued straight onto their descriptions. Derive one shared column and
+        # preserve the two-cell gutter for every row.
+        name_width = max((len(names) for names, _ in named_commands), default=0) + 2
         lines = []
-        for command in SLASH_COMMANDS:
-
-            names = ", ".join(f"/{name}" for name in command.names)
+        for names, command in named_commands:
             line = Text()
-            line.append(names.ljust(14), style=muted)
+            line.append(names.ljust(name_width), style=muted)
             line.append(command.description, style=dim)
             lines.append(line)
         # Where the logs went. Console logging is off while the TUI owns the
@@ -2594,7 +2608,7 @@ class OperatorApp(App[None]):
         log_file = current_log_file()
         if log_file is not None:
             footer = Text()
-            footer.append("logs".ljust(14), style=muted)
+            footer.append("logs".ljust(name_width), style=muted)
             footer.append(str(log_file), style=dim)
             lines.append(Text())
             lines.append(footer)

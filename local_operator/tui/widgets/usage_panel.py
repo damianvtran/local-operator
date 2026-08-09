@@ -70,17 +70,31 @@ TIER_INDENT = "  "
 
 #: Panel geometry. The width cap is a measure, not a fraction of the terminal:
 #: a label, a bar and two numbers need about seventy cells and gain nothing from
-#: two hundred. The margins keep the card off the screen's own edge padding.
+#: two hundred. The width margin keeps the card off the screen's edge padding.
 PANEL_MAX_WIDTH = 76
 PANEL_MIN_WIDTH = 32
 PANEL_WIDTH_MARGIN = 4
-PANEL_HEIGHT_MARGIN = 4
+
+#: Ground the card keeps between itself and the two surfaces it floats between:
+#: one row under the screen's top inset, one row above the docked input panel.
+#: The card's fill is an elevation step, and a step flush against the input
+#: panel's fill reads as two stacked bars rather than a card lifted off the page.
+#:
+#: Advisory rather than reserved — it comes off the rows the card may use, and
+#: the one-row body floor overrides it on a terminal too short to grant both.
+PANEL_HEIGHT_MARGIN = 2
 
 #: Rows the pinned chrome costs: the title, the rule under it, the blank row
-#: that separates the report from the footer, and the hint row itself. The
-#: spacer is chrome rather than a body row because it must survive scrolling —
-#: a footer that sits flush against the last meter reads as one more data row.
-CHROME_ROWS = 4
+#: that separates the report from the footer, the ``N of M`` position, and the
+#: hint row itself. The spacer is chrome rather than a body row because it must
+#: survive scrolling — a footer that sits flush against the last meter reads as
+#: one more data row.
+#:
+#: The position row is counted even though it is drawn only when the report
+#: SCROLLS, because scrolling is exactly when the budget binds: a card sized
+#: without it came out one row taller than the space it had been measured
+#: against, and that row landed on the docked prompt.
+CHROME_ROWS = 5
 
 #: Inner padding, as CELLS across (``padding: 1 2`` → 2 left + 2 right) and
 #: ROWS down (1 top + 1 bottom). Both are declared here as well as in the
@@ -92,6 +106,13 @@ CHROME_ROWS = 4
 #: a row of quiet at the top and bottom is what does that.
 PANEL_PADDING_CELLS = 4
 PANEL_PADDING_ROWS = 2
+
+#: Rows above the dock at which the card can still afford its vertical gutter.
+#: Below it the gutter is dropped (the ``-squeezed`` class in the stylesheet),
+#: because the alternative is a card that covers the prompt: the margin, chrome,
+#: one body row and gutter are the smallest useful card, and the gutter is the
+#: only decorative part. A terminal that short has no breathing room to protect.
+SQUEEZE_ROWS = PANEL_HEIGHT_MARGIN + CHROME_ROWS + PANEL_PADDING_ROWS + 1
 
 #: Keys the panel offers, in the order the hint row prints them. Data rather
 #: than a literal string so the hints and the bindings cannot drift apart.
@@ -628,15 +649,56 @@ class UsagePanel(Static):
     def _content_width(self) -> int:
         return max(1, self.panel_width() - PANEL_PADDING_CELLS)
 
-    def _body_budget(self) -> int:
-        """Rows the scrolling half may use, after the chrome and the screen.
+    def _rows_above_dock(self) -> int:
+        """Rows the card may occupy: the ground ABOVE the docked input panel.
 
-        The card's own padding rows come out of this budget too: they are part
-        of the height the widget pins, so a body measured without them would
-        overflow the screen by exactly the gutter.
+        NOT "the screen height less a constant". The prompt is DOCKED, so the
+        layout engine reserves its rows before it offers the rest to anything
+        else, and how many it takes is a function of the editor's line count,
+        the subagent/todo band and the boot layout — five rows to ten across the
+        sizes the tests sweep. Measured against a constant instead, the card ran
+        over the prompt at every size once the report was long enough to scroll:
+        ``❯  Message Local Ope  24 windows · ↑↓ scroll`` sharing one row (D19).
+
+        The absolute and relative boxes are reconciled HERE and handed back as a
+        COUNT, so no caller can mix them: ``region`` is absolute while
+        ``screen.size`` is the content box that ``Screen { padding: 1 }`` insets,
+        and subtracting one from the other is what made a centred card look a
+        cell off-centre in an earlier round.
+
+        The bound is read off whatever is docked rather than off an id: the
+        invariant is "the card covers no docked surface", and a rule that names
+        ``#input-dock`` would go quietly back to overlapping if the dock were
+        ever renamed. Hosts with nothing docked (the widget-only test app) get
+        the whole content box, which is the same answer by the same rule.
         """
-        _, height = self._screen_size()
-        return max(1, height - PANEL_HEIGHT_MARGIN - CHROME_ROWS - PANEL_PADDING_ROWS)
+        try:
+            screen = self.screen
+        except NoScreen:
+            return self._screen_size()[1]
+        content = screen.content_region
+        ceiling = content.bottom
+        for sibling in screen.children:
+            if sibling.display and sibling.styles.dock == "bottom":
+                ceiling = min(ceiling, sibling.region.y)
+        return max(1, ceiling - content.y)
+
+    def _fit(self) -> tuple[int, int, int]:
+        """``(rows above the dock, gutter rows, body budget)`` — one measurement.
+
+        The three travel together because they are one sum: the pinned height a
+        scrolled card settles at is exactly ``budget + CHROME_ROWS + gutter``, and
+        that has to come out no greater than the rows above the dock. Splitting
+        the terms across methods that each re-measure is how the budget and the
+        height came to disagree by the position row in the first place.
+        """
+        rows = self._rows_above_dock()
+        gutter = PANEL_PADDING_ROWS if rows >= SQUEEZE_ROWS else 0
+        return rows, gutter, max(1, rows - PANEL_HEIGHT_MARGIN - CHROME_ROWS - gutter)
+
+    def _body_budget(self) -> int:
+        """Rows the scrolling half may use, after the chrome and the dock."""
+        return self._fit()[2]
 
     def _max_offset(self) -> int:
         return max(0, len(self._body().lines) - self._body_budget())
@@ -704,9 +766,11 @@ class UsagePanel(Static):
         self._offset = max(0, min(self._offset, max(0, len(lines) - budget)))
         scrolled = len(lines) > budget
         window = lines[self._offset : self._window_end(body, budget)]
-        rule = Text(
-            "─" * self._content_width(), style=Style(color=theme_mod.semantic_color("edge"))
-        )
+        # ``edge`` is tuned against the app ground; the raised overlay ground
+        # needs one raised step to preserve the same intentionally quiet ratio.
+        faint = Style(color=theme_mod.semantic_color("faint"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        rule = Text("─" * self._content_width(), style=faint)
         rows = [self._title_row(), rule, *window]
         # Quiet ground between the report and the card's bottom meta, in BOTH
         # states. Without it the tally and the key hints sit flush against the
@@ -723,16 +787,16 @@ class UsagePanel(Static):
         rows.extend(Text() for _ in range(1 + (budget - len(window) if scrolled else 0)))
         if scrolled:
             # The position is part of the CHROME, not a row of the report: a
-            # "12 of 30" that scrolled away with the content would be useless
+            # counter that scrolled away with the content would be useless
             # exactly when it is needed. It sits with the key hints because the
             # two are the same KIND of row — both are statements about the list
             # rather than entries in it — so they travel together at the bottom.
-            rows.append(
-                Text(
-                    f"{self._offset + len(window)} of {len(lines)}",
-                    style=Style(color=theme_mod.semantic_color("faint")),
-                )
-            )
+            position = Text()
+            position.append("showing ", style=faint)
+            position.append(str(self._offset + len(window)), style=dim)
+            position.append(" of ", style=faint)
+            position.append(str(len(lines)), style=dim)
+            rows.append(position)
         rows.append(self._hint_row(scrolled))
         return rows
 
@@ -755,33 +819,31 @@ class UsagePanel(Static):
         return pulled if pulled > self._offset else end
 
     def _recentre(self, width: int, height: int) -> None:
-        """Pull the HOST over the panel and centre the pair on the screen.
+        """Centre the host in the ground ABOVE the docked input panel.
 
         The host is ``width: auto`` so it hugs this card, exactly as the toast's
         does: a widget owns its whole region and Textual blanks all of it, so a
         stretched host on the overlay layer erases the transcript either side of
-        the panel. Centring therefore cannot be `align: center middle` in the
-        stylesheet — that needs the stretched host — and is done here instead,
-        against the same measured screen the bars are sized from.
+        the panel. Centring therefore cannot be ``align: center middle`` in the
+        stylesheet — that needs the stretched host — and is done here instead.
 
-        That screen is ``Screen.size``, which is its CONTENT box — the offset is
-        applied inside the screen's own inset, so the ground this reserves either
-        side is the ground inside the inset, and the painted card is centred on
-        the terminal only because that inset is symmetric. It is, and a frame
-        test pins the painted edges rather than these numbers
-        (``test_the_card_is_centred_on_the_terminal_at_odd_and_even_widths``):
-        comparing an absolute region against this relative box is what made the
-        card look a cell right of centre when the paint is even.
+        Horizontally the symmetric screen inset cancels, which a painted-frame
+        test pins. Vertically there is NO such cancellation: the input is docked
+        at the bottom. Centring against the whole screen put the lower half of a
+        tall card on top of the prompt even though ``_fit`` had correctly sized
+        it for the rows above that dock (D19). The same available-row count must
+        therefore size AND place the card.
         """
         parent = self.parent
         if parent is None or isinstance(parent, Screen):
             # A panel mounted straight onto the screen would shift the whole app
             # sideways, which is louder than an off-centre popup.
             return
-        screen_width, screen_height = self._screen_size()
+        screen_width, _ = self._screen_size()
+        rows_above_dock = self._rows_above_dock()
         parent.styles.offset = (
             max(0, (screen_width - width) // 2),
-            max(0, (screen_height - height) // 2),
+            max(0, (rows_above_dock - height) // 2),
         )
 
     def _repaint(self) -> None:
@@ -799,8 +861,12 @@ class UsagePanel(Static):
         # The padding rows are ADDED BACK here (and to the centring height):
         # Textual sizes border-box, so pinning the row count alone would give
         # the gutter the last two content rows and clip the hint row off the
-        # bottom of the card.
-        outer_height = len(rows) + PANEL_PADDING_ROWS
+        # bottom of the card. At extreme heights ``_fit`` deliberately drops
+        # that gutter; the class changes the stylesheet and the arithmetic as
+        # one decision rather than merely pretending the padding disappeared.
+        _, gutter, _ = self._fit()
+        self.set_class(gutter == 0, "-squeezed")
+        outer_height = len(rows) + gutter
         self.styles.height = outer_height
         self._recentre(width, outer_height)
         out = Text()

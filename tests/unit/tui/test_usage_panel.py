@@ -18,6 +18,7 @@ from textual.containers import Container
 
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.usage_panel import (
     BAR_UNKNOWN,
     PANEL_PADDING_ROWS,
@@ -482,7 +483,7 @@ async def test_the_footer_is_separated_from_the_last_meter() -> None:
 #: The position marker, matched as a whole row. It is the first row of the
 #: card's bottom meta, so the tests below find the end of the report by finding
 #: it (and fall back to the key hints when there is nothing to scroll).
-_MARKER = re.compile(r"^\d+ of \d+$")
+_MARKER = re.compile(r"^showing \d+ of \d+$")
 
 
 def _report_rows(rows: list[str]) -> list[str]:
@@ -654,3 +655,29 @@ async def test_the_card_is_centred_on_the_terminal_at_odd_and_even_widths(
     assert painted == card.width, (painted, card)
     slack = width - painted
     assert (left, right) == (slack // 2, slack - slack // 2), (left, right, painted)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(120, 40), (100, 30), (120, 24), (80, 24), (80, 16), (80, 14)])
+async def test_a_scrolled_card_never_covers_the_input_prompt(
+    size: tuple[int, int],
+) -> None:
+    """D19 was visible only after the card had enough data to scroll.
+
+    Drive the REAL app and compare the painted widgets' absolute regions. The
+    old screen-centred placement overlapped the editor by two rows even though
+    the body budget was correct; at 80x24 its footer rendered as
+    ``❯  24 windows · ↑↓ scroll`` on the prompt's own row.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.display = True
+        panel.show_reports(_many_reports())
+        for _ in range(4):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+
+    assert not panel.region.overlaps(editor.region), (size, panel.region, editor.region)
+    assert panel.region.bottom <= editor.region.y

@@ -661,3 +661,52 @@ async def test_clicking_the_chrome_or_the_backdrop_resumes_nothing() -> None:
         # And below the card entirely.
         assert screen._index_at(_At(region.x + 4, region.y + region.height + 2)) is None
         assert chosen == []
+
+
+@pytest.mark.asyncio
+async def test_the_card_never_outgrows_a_narrow_terminal() -> None:
+    """The minimum width is a PREFERENCE; the terminal is not. Applying the
+    floor unconditionally returned a 30-cell content box inside 4 cells of
+    padding on a 30-column screen — a 38-wide card, rule and header cut."""
+    rows = [_row("abc123def456", "a session")]
+    for width in (24, 30, 34, 40, 50):
+        app = _PickerHost(rows)
+        async with app.run_test(size=(width, 30)) as pilot:
+            screen = await app.open_picker()
+            await pilot.pause()
+            for line in screen.render_lines_for_test():
+                assert cell_len(line) <= width, (width, cell_len(line), line)
+
+
+@pytest.mark.asyncio
+async def test_typing_a_long_filter_does_not_grow_the_card() -> None:
+    """The body is `width: auto`, so an unbounded filter echo made the card
+    grow — and shift, since it is centred — with every character typed, moving
+    the list under the eye of the person searching it."""
+    rows = [_row("abc123def456", "a session")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(80, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        before = max(cell_len(line) for line in screen.render_lines_for_test())
+        for char in "a" * 60:
+            await pilot.press(char)
+        await pilot.pause()
+        after = max(cell_len(line) for line in screen.render_lines_for_test())
+    assert after == before, (before, after)
+
+
+def test_a_right_click_never_resumes_a_session() -> None:
+    """The action behind a click disposes the live session and reboots; a
+    context-menu click must not reach it."""
+    screen = SessionPickerScreen([_row("a1", "one")], NOW)
+    resumed: list[str] = []
+    screen.dismiss = lambda value=None: resumed.append(value)  # type: ignore[assignment]
+
+    class _RightClick:
+        button = 3
+        screen_x = 0
+        screen_y = 0
+
+    screen.on_click(_RightClick())
+    assert resumed == []
