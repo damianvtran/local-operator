@@ -6,12 +6,15 @@ It provides default configurations and methods to update them.
 
 import argparse
 import sys
+from copy import deepcopy
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Dict
 
 import yaml
+
+from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
 
 
 def _version_tuple(raw: str) -> tuple[int, ...]:
@@ -133,6 +136,23 @@ DEFAULT_CONFIG = Config(
             "hosting": "",
             "model_name": "",
             "auto_save_conversation": False,
+            # One ordered cascade for every text-model call. Entries may be
+            # "provider/model" strings or {provider, model, effort} mappings;
+            # usage-aware switching is opt-in because it spends one lightweight
+            # quota request at user-message boundaries.
+            "retry": {
+                "enabled": True,
+                "maxRetries": 10,
+                "baseDelayMs": 500,
+                "modelFallback": True,
+                "usageAwareFallback": False,
+                "usageReservePercent": 10,
+                "fallbackChains": {},
+            },
+            # Search is useful on first run without a credential: DuckDuckGo
+            # and Tavily keyless are both bounded fallbacks, so the default
+            # rotates between them rather than depending on one free service.
+            "web_search": dict(DEFAULT_WEB_SEARCH_CONFIG),
             # Ceilings on the ephemeral session store (see
             # local_operator.session.retention). Any of the three set to 0
             # disables that dimension; all three at 0 restores the unbounded
@@ -190,10 +210,12 @@ class ConfigManager:
         """
         if not self.config_file.exists():
             self.config_dir.mkdir(parents=True, exist_ok=True)
-            return DEFAULT_CONFIG
+            # DEFAULT_CONFIG is process-global; every manager needs its own
+            # nested values so one setup command cannot change later sessions.
+            return Config(deepcopy(vars(DEFAULT_CONFIG)))
 
         with open(self.config_file, "r", encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f) or vars(DEFAULT_CONFIG)
+            config_dict = yaml.safe_load(f) or deepcopy(vars(DEFAULT_CONFIG))
 
             # Check if config version is older than current version
             config_version = config_dict.get("version", "0.0.0")
@@ -212,12 +234,12 @@ class ConfigManager:
 
             # Fill in any missing values with defaults
             if "values" not in config_dict:
-                config_dict["values"] = vars(DEFAULT_CONFIG)["values"]
+                config_dict["values"] = deepcopy(vars(DEFAULT_CONFIG)["values"])
             else:
                 default_values = vars(DEFAULT_CONFIG)["values"]
                 for key, value in default_values.items():
                     if key not in config_dict["values"]:
-                        config_dict["values"][key] = value
+                        config_dict["values"][key] = deepcopy(value)
 
             return Config(config_dict)
 
@@ -237,7 +259,7 @@ class ConfigManager:
         if "version" not in config:
             config["version"] = DEFAULT_CONFIG.version
         if "metadata" not in config:
-            config["metadata"] = DEFAULT_CONFIG.metadata
+            config["metadata"] = deepcopy(DEFAULT_CONFIG.metadata)
 
         # Ensure created_at and last_modified are included
         if "created_at" not in config["metadata"]:

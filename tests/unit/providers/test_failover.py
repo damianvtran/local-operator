@@ -19,13 +19,17 @@ from local_operator.harness.types import (
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
     AuthRetryKeyState,
+    FailoverRouteState,
+    FallbackTarget,
     ProviderError,
     RetrySettings,
     backoff_delay_ms,
     expand_fallback_candidates,
+    expand_fallback_targets,
     is_direct_credential_rotation_error,
     resolve_chain,
     resolve_next_key,
+    spec_for_target,
     stream_with_failover,
 )
 
@@ -175,6 +179,35 @@ def test_expand_candidates_never_emits_current_selector() -> None:
     assert candidates == ["anthropic/claude"]
 
 
+def test_structured_fallback_entry_carries_effort() -> None:
+    targets = expand_fallback_targets(
+        "anthropic/claude-opus-5",
+        [{"provider": "openai", "model": "gpt-5.3-codex", "effort": "high"}],
+    )
+    assert targets == [FallbackTarget("openai/gpt-5.3-codex", "high")]
+    spec = spec_for_target(
+        ModelSpec(
+            provider="anthropic",
+            model_id="claude-opus-5",
+            base_url="https://api.anthropic.com",
+        ),
+        targets[0],
+    )
+    assert spec.provider == "openai"
+    assert spec.base_url == "https://api.openai.com/v1"
+    assert spec.reasoning_effort == "high"
+
+
+def test_invalid_structured_effort_is_not_silently_dropped() -> None:
+    assert (
+        expand_fallback_targets(
+            "anthropic/claude",
+            [{"provider": "openai", "model": "gpt-5", "effort": "turbo"}],
+        )
+        == []
+    )
+
+
 def test_retry_settings_from_config() -> None:
     settings = RetrySettings.from_settings(
         {
@@ -191,6 +224,8 @@ def test_retry_settings_from_config() -> None:
     assert settings.base_delay_ms == 250
     assert settings.model_fallback is False
     assert settings.fallback_chains == {"default": ["a/b"]}
+    assert settings.usage_aware_fallback is False
+    assert settings.usage_reserve_percent == 10
     empty = RetrySettings.from_settings(None)
     assert empty.enabled and empty.max_retries == 10 and empty.base_delay_ms == 500
 
@@ -329,6 +364,78 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
     got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+
+
+async def test_fallback_chain_deduplicates_current_model_and_effort() -> None:
+    specs_seen: list[str] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}/{spec.reasoning_effort}")
+        if spec.provider == "openai":
+            return ScriptedClient(ProviderError(400, "unavailable"))
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    request = _request()
+    request = request.model_copy(
+        update={"model": request.model.model_copy(update={"reasoning_effort": "low"})}
+    )
+    settings = {
+        "retry": {
+            "fallbackChains": {
+                "default": [
+                    {"provider": "openai", "model": "gpt-4o", "effort": "low"},
+                    {"provider": "anthropic", "model": "claude-x", "effort": "high"},
+                ]
+            }
+        }
+    }
+
+    _ = [
+        event
+        async for event in stream_with_failover(
+            request,
+            FakeAuth({"openai": ["k1"], "anthropic": ["k2"]}),
+            settings,
+            client_for,
+        )
+    ]
+    assert specs_seen == ["openai/gpt-4o/low", "anthropic/claude-x/high"]
+
+
+async def test_successful_fallback_stays_pinned_for_same_message() -> None:
+    """A tool loop must not probe the exhausted primary before every model call."""
+    specs_seen: list[str] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        if spec.provider == "openai":
+            return ScriptedClient(ProviderError(400, "model unavailable"))
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    settings = {
+        "retry": {
+            "fallbackChains": {
+                "default": [{"provider": "anthropic", "model": "claude-opus-5", "effort": "high"}]
+            }
+        }
+    }
+    state = FailoverRouteState()
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+
+    for _ in range(2):
+        _ = [
+            event
+            async for event in stream_with_failover(
+                _request(), auth, settings, client_for, route_state=state
+            )
+        ]
+
+    assert specs_seen == [
+        "openai/gpt-4o",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-opus-5",
+    ]
+    assert state.active == FallbackTarget("anthropic/claude-opus-5", "high")
 
 
 async def test_stream_exhaustion_raises_last_error() -> None:
