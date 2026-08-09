@@ -35,7 +35,7 @@ import inspect
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.loop import AgentLoop, LoopContext
@@ -256,6 +256,12 @@ class Session:
     ) -> None:
         self._model = model
         self._stream_fn = stream_fn
+        notice_bridge = getattr(self._stream_fn, "set_notice_handler", None)
+        if callable(notice_bridge):
+            # The stream owns provider routing; the session owns ordered event
+            # delivery. Binding the two here lets every front end receive quota
+            # and fallback notices without teaching the harness loop providers.
+            notice_bridge(self._stream_notice)
         self._tools = list(tools)
         self._transcript = transcript
         self._session_id = session_id or transcript.directory.name
@@ -502,6 +508,19 @@ class Session:
         """Exposed so the wake tool can list/create/cancel schedules."""
         return self._wake
 
+    async def preflight_usage(self) -> None:
+        """Run the stream's message-boundary quota check without starting a turn.
+
+        The TUI calls this after subscribing, so an exhausted default provider
+        becomes a visible warning while startup itself remains successful.
+        """
+        preflight = getattr(self._stream_fn, "preflight_usage", None)
+        if not callable(preflight):
+            return
+        result = preflight(self._model)
+        if inspect.isawaitable(result):
+            await result
+
     # -- driving turns --------------------------------------------------------
     async def prompt(self, text: str) -> None:
         """Run one user turn to completion (awaitable) or raise.
@@ -616,6 +635,14 @@ class Session:
 
         return _unsubscribe
 
+    async def _stream_notice(
+        self,
+        text: str,
+        kind: Literal["info", "warning", "error"] = "warning",
+    ) -> None:
+        """Bridge provider-routing diagnostics onto the session event stream."""
+        await self._emit(NoticeEvent(text=text, kind=kind))
+
     async def _emit(self, event: AgentEvent) -> None:
         for handler in list(self._handlers):
             try:
@@ -648,6 +675,9 @@ class Session:
         The generation stamp on the emitted end is the one from the start that
         opened the run, so the TUI's supersede guard still pairs them.
         """
+        begin_message = getattr(self._stream_fn, "begin_message", None)
+        if callable(begin_message):
+            begin_message()
         self._turn_task = asyncio.current_task()
         try:
             await self._run_turn(initial)

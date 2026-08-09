@@ -476,6 +476,16 @@ class OperatorApp(App[None]):
         session.set_approval_handler(self.request_tool_approval)
         self._controller = EventController(session, self)
         self._controller.subscribe()
+        # The app is already painted and subscribed, so quota I/O cannot delay
+        # first paint and any warning lands in the transcript. This is an
+        # optional session capability so lightweight hosts do not need to fake
+        # network preflight; failure must never become another startup gate.
+        usage_preflight = getattr(session, "preflight_usage", None)
+        if callable(usage_preflight):
+            try:
+                await cast(Callable[[], Awaitable[None]], usage_preflight)()
+            except Exception:
+                pass
         assert self._status is not None
         self._status.update(
             model_label=session.model_label,
