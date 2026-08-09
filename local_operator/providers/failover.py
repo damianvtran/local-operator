@@ -307,6 +307,13 @@ def expand_fallback_candidates(selector: str, chain: Sequence[str]) -> list[str]
 
 BACKOFF_CAP_MS = 8000
 BACKOFF_JITTER_FRACTION = 0.25
+# Interactive sessions must never disappear into a provider's quota-reset
+# window. A 429 can carry Retry-After values of many minutes or hours; sleeping
+# that duration before credential rotation makes the TUI look hung and prevents
+# configured fallback models from running. Short throttles get one same-key
+# retry, while long waits rotate or surface immediately.
+MAX_USAGE_RETRY_AFTER_MS = 30_000
+MAX_SAME_CREDENTIAL_USAGE_RETRIES = 1
 
 
 def backoff_delay_ms(base_delay_ms: int, attempt: int, *, rng: random.Random | None = None) -> int:
@@ -314,6 +321,20 @@ def backoff_delay_ms(base_delay_ms: int, attempt: int, *, rng: random.Random | N
     raw = min(base_delay_ms * (2 ** max(0, attempt - 1)), BACKOFF_CAP_MS)
     jitter_source = rng or random
     return max(0, int(raw - raw * BACKOFF_JITTER_FRACTION * jitter_source.random()))
+
+
+def _same_credential_retry_allowed(
+    error: ProviderError,
+    transport_retries: int,
+    retry: "RetrySettings",
+) -> bool:
+    if not error.retryable:
+        return False
+    if not is_usage_limit_error(error):
+        return transport_retries < retry.max_retries
+    if (error.retry_after_ms or 0) > MAX_USAGE_RETRY_AFTER_MS:
+        return False
+    return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_USAGE_RETRIES)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -525,9 +546,10 @@ async def stream_with_failover(
                 last_error = exc
                 if not retry.enabled:
                     raise
-                if exc.retryable and transport_retries < retry.max_retries:
-                    # Transport-retryable: back off on the SAME credential
-                    # BEFORE any rotation (PR-06).
+                if _same_credential_retry_allowed(exc, transport_retries, retry):
+                    # 5xx/network-style failures use the configured budget.
+                    # Rate limits retry once only when the advertised delay is
+                    # short; long quota resets rotate or surface immediately.
                     transport_retries += 1
                     delay = max(
                         exc.retry_after_ms or 0,

@@ -408,6 +408,8 @@ class FakeMcpManager:
         self.callback: Callable[[list[Any]], Any] | None = None
         self._configured = list(configured or [])
         self._connected = list(connected or [])
+        self.tools: list[Any] = []
+        self.meta: dict[str, dict[str, Any]] = {}
 
     def set_on_tools_changed(self, cb) -> None:
         self.callback = cb
@@ -417,6 +419,27 @@ class FakeMcpManager:
 
     def get_connected_servers(self) -> list[str]:
         return sorted(self._connected)
+
+    def get_connection_status(self, name: str) -> str:
+        return "connected" if name in self._connected else "disconnected"
+
+    def get_server_config(self, name: str):
+        if name not in self._configured:
+            return None
+        return SimpleNamespace(model_extra={}, url=f"https://{name}.example/mcp", command=None)
+
+    def get_tools(self) -> list[Any]:
+        return list(self.tools)
+
+    def get_server_tools(self, name: str) -> list[Any]:
+        return [
+            tool
+            for tool in self.tools
+            if (self.meta.get(tool.name) or {}).get("server_name") == name
+        ]
+
+    def get_tool_meta(self, tool_name: str):
+        return self.meta.get(tool_name)
 
     async def disconnect_all(self) -> None:
         self.disconnected += 1
@@ -452,7 +475,7 @@ class FakeSessionShell(Session):
 
 
 @pytest.mark.asyncio
-async def test_mcp_merge_on_tools_changed_and_dispose(monkeypatch) -> None:
+async def test_mcp_tools_stay_lazy_across_live_updates_and_dispose(monkeypatch) -> None:
     builtin = MagicMock(name="builtin_tool")
     session = FakeSessionShell()
     session.tools = [builtin]
@@ -466,13 +489,14 @@ async def test_mcp_merge_on_tools_changed_and_dispose(monkeypatch) -> None:
 
     result = await wire_mcp_into_session(session, [builtin], ".")
     assert result is manager
-    assert session.tools == [builtin, mcp_tool]  # merged at load
+    # Discovery records MCP tools but does not put their schemas in the model.
+    assert session.tools == [builtin]
 
-    # Live updates re-merge with builtins first.
+    # Unselected tools remain absent when a server publishes a live update.
     late = MagicMock(name="late_tool")
     assert manager.callback is not None
     manager.callback([late])
-    assert session.tools == [builtin, late]
+    assert session.tools == [builtin]
     manager.callback([])
     assert session.tools == [builtin]
 
@@ -481,6 +505,61 @@ async def test_mcp_merge_on_tools_changed_and_dispose(monkeypatch) -> None:
     await session.dispose()
     assert session.disposed == 1
     assert manager.disconnected == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_detail_read_activates_exactly_one_schema_in_the_live_session(
+    monkeypatch,
+) -> None:
+    from local_operator.harness.types import AgentTool
+
+    async def never_execute(*args, **kwargs):
+        raise AssertionError("activation must not execute the MCP tool")
+
+    builtin = MagicMock(name="builtin_tool")
+    selected = AgentTool(
+        name="mcp__linear_get_user",
+        description="Return the authenticated Linear user",
+        parameters={"type": "object", "properties": {}},
+        approval_tier="read",
+        execute=never_execute,
+    )
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    manager = FakeMcpManager(configured=["linear"], connected=["linear"])
+    manager.tools = [selected]
+    manager.meta[selected.name] = {
+        "server_name": "linear",
+        "mcp_tool_name": "get_user",
+        "deferred": False,
+    }
+    hooks = session_factory._KnowledgeHooks()
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [selected], []
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    await wire_mcp_into_session(session, [builtin], ".", hooks)
+    assert session.tools == [builtin]
+    block = await session_factory._select_knowledge_block(hooks, "")
+    assert "- linear: Remote MCP server at linear.example." in block
+    assert hooks.mcp_resolver is not None
+
+    listing = hooks.mcp_resolver("mcp://linear")
+    assert listing is not None and "get_user" in listing
+    assert session.tools == [builtin]
+
+    detail = hooks.mcp_resolver("mcp://linear/get_user")
+    assert detail is not None and "mcp__linear_get_user" in detail
+    assert session.tools == [builtin, selected]
+
+    replacement = selected.model_copy(update={"description": "Updated description"})
+    manager.tools = [replacement]
+    manager.meta[replacement.name] = manager.meta[selected.name]
+    assert manager.callback is not None
+    manager.callback([replacement])
+    assert session.tools == [builtin, replacement]
 
 
 @pytest.mark.asyncio
@@ -892,15 +971,12 @@ def test_a_named_id_survives_a_stat_that_fails(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_merge_keeps_session_capability_tools(monkeypatch) -> None:
-    """M1 regression: the MCP merge base is the session's LIVE inventory, not
-    the factory's pre-merge list. A session carries capability tools
-    (task/wait/jobs/wake) merged at construction; an MCP merge or refresh
-    that rebuilt from the factory list would drop them."""
+async def test_lazy_mcp_refresh_keeps_session_capability_tools(monkeypatch) -> None:
+    """Lazy MCP updates must preserve the session's live capability inventory."""
     builtin = MagicMock(name="builtin_tool")
     capability = MagicMock(name="task_tool")
     session = FakeSessionShell()
-    session.tools = [builtin, capability]  # the post-construction inventory
+    session.tools = [builtin, capability]
     manager = FakeMcpManager()
     mcp_tool = MagicMock(name="mcp_tool")
 
@@ -911,11 +987,10 @@ async def test_mcp_merge_keeps_session_capability_tools(monkeypatch) -> None:
 
     result = await wire_mcp_into_session(session, [builtin], ".")
     assert result is manager
-    # Both the capability tool and the MCP tool survive the initial merge.
-    assert set(session.tools) == {builtin, capability, mcp_tool}
+    assert set(session.tools) == {builtin, capability}
 
-    # A live MCP refresh ALSO keeps the capability tool (was dropped before).
+    # An unselected live MCP update does not add a schema or drop capabilities.
     late = MagicMock(name="late_tool")
     assert manager.callback is not None
     manager.callback([late])
-    assert set(session.tools) == {builtin, capability, late}
+    assert set(session.tools) == {builtin, capability}

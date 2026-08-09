@@ -368,6 +368,8 @@ class _KnowledgeHooks:
     skills_by_name: dict[str, Skill] = field(default_factory=dict)
     guides_by_name: dict[str, Skill] = field(default_factory=dict)
     frozen_block: str | None = None
+    mcp_resolver: Callable[[str], str | None] | None = None
+    mcp_catalogue: Callable[[], str] | None = None
 
 
 def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
@@ -506,37 +508,41 @@ async def _setup_knowledge(
 
 
 async def _select_knowledge_block(hooks: _KnowledgeHooks, query: str) -> str:
-    """Freeze the first task's selected guide/skill descriptions for the session."""
+    """Freeze selected knowledge plus the bounded MCP catalogue for the session."""
     if hooks.frozen_block is not None:
         return hooks.frozen_block
-    query = query.strip()
-    if not query:
-        hooks.frozen_block = ""
-        return ""
 
-    picked = await hooks.index.select(query) if hooks.index is not None else []
-    if hooks.agent_hint_index is not None:
-        matching_agents = await hooks.agent_hint_index.select(query, k=1)
-        agents_guide = hooks.guides_by_name.get("agents")
-        if matching_agents and agents_guide is not None and agents_guide not in picked:
-            picked.append(agents_guide)
-            picked.sort(
-                key=lambda item: (
-                    item.resource_type,
-                    item.name.lower(),
-                    item.name,
-                    str(item.file_path),
+    picked: list[Skill] = []
+    query = query.strip()
+    if query:
+        picked = await hooks.index.select(query) if hooks.index is not None else []
+        if hooks.agent_hint_index is not None:
+            matching_agents = await hooks.agent_hint_index.select(query, k=1)
+            agents_guide = hooks.guides_by_name.get("agents")
+            if matching_agents and agents_guide is not None and agents_guide not in picked:
+                picked.append(agents_guide)
+                picked.sort(
+                    key=lambda item: (
+                        item.resource_type,
+                        item.name.lower(),
+                        item.name,
+                        str(item.file_path),
+                    )
                 )
-            )
 
     from local_operator.skills.api import render_block
 
-    hooks.frozen_block = render_block(picked)
+    sections = [section for section in [render_block(picked)] if section]
+    if hooks.mcp_catalogue is not None:
+        catalogue = hooks.mcp_catalogue()
+        if catalogue:
+            sections.append(catalogue)
+    hooks.frozen_block = "\n\n".join(sections)
     return hooks.frozen_block
 
 
 def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | None]:
-    """Chain ``guide://`` and ``skill://`` without mixing their namespaces."""
+    """Chain lazy knowledge protocols without mixing their namespaces."""
     from local_operator.guides import make_guide_resolver
     from local_operator.skills.api import make_skill_resolver
 
@@ -547,7 +553,12 @@ def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | No
         guide_result = guide_resolver(url)
         if guide_result is not None:
             return guide_result
-        return skill_resolver(url)
+        skill_result = skill_resolver(url)
+        if skill_result is not None:
+            return skill_result
+        if hooks.mcp_resolver is not None:
+            return hooks.mcp_resolver(url)
+        return None
 
     return resolver
 
@@ -565,6 +576,7 @@ class _SessionPlan:
 
     session_kwargs: dict[str, Any]
     system_blocks_provider: Callable[[], Awaitable[list[str]]]
+    knowledge_hooks: _KnowledgeHooks
     auth_store: AuthStore | None = None
 
 
@@ -768,6 +780,7 @@ async def _prepare(
     return _SessionPlan(
         session_kwargs=session_kwargs,
         system_blocks_provider=system_blocks_provider,
+        knowledge_hooks=hooks,
         auth_store=auth_store,
     )
 
@@ -776,42 +789,31 @@ async def wire_mcp_into_session(
     session: Session,
     builtin_tools: list[AgentTool],
     cwd: str,
+    knowledge_hooks: _KnowledgeHooks | None = None,
     auth_store: AuthStore | None = None,
     *,
     has_ui: bool = False,
 ) -> McpManager | None:
-    """Load MCP tools and merge them into a constructed session (MCP-20).
+    """Discover MCPs but expose their schemas only after explicit reads.
 
-    Steps (orchestrator duty, all lazy-imported):
+    Startup connects and caches servers exactly as before, but the session
+    begins with its non-MCP tools only. A bounded ``<mcps>`` catalogue tells
+    the model which servers exist. ``read mcp://<server>`` lists tools without
+    loading schemas; ``read mcp://<server>/<tool>`` activates exactly one tool.
+    Live list-changed events refresh only schemas the model already selected.
+    This keeps an unused MCP server at O(server names), not O(all tool schemas),
+    on every provider request.
 
-    1. ``discover_and_load_mcp_tools(cwd)`` — startup-gated discovery;
-       returns ``(manager, tools, errors)``. Tools include deferred ones
-       that await their connection inside ``execute`` (established semantics).
-    2. Merge into the live inventory via ``session.refresh_tools`` — the
-       committed hook: full merged set (builtins + capabilities + MCP),
-       effective from the next model call, even mid-turn. The merge BASE is
-       the session's own construction-time inventory (``session._tools``,
-       which carries the session-capability tools like task/wait/jobs that
-       the factory list predates); ``builtin_tools`` is only a fallback for
-       a host that constructed the session with an empty inventory.
-    3. ``manager.set_on_tools_changed`` re-merges on server
-       connect/disconnect/list-changed so the inventory tracks MCP state.
-    4. Record the structured outcome on ``session.mcp_startup`` so a front end
-       can render it (see session/mcp_status.py).
-
-    ``has_ui`` selects how failures are ANNOUNCED, never whether they are
-    recorded. Under a full-screen TUI a stderr line is written to a terminal
-    that is showing the alternate screen buffer: at best it is swallowed, at
-    worst it lands mid-frame and corrupts the composed output. So the warnings
-    are printed only for the headless callers (``exec``, the plain REPL, the
-    scheduler) that have a real stdout to print to, and the TUI reads
-    ``session.mcp_startup`` instead.
-
-    ANY failure degrades to zero MCP tools with a warning — MCP is
-    enrichment, never a startup requirement. Returns the manager (caller
-    owns its disposal via :func:`attach_mcp_dispose`) or ``None``.
+    ``has_ui`` selects how failures are announced, never whether they are
+    recorded. Full-screen clients read ``session.mcp_startup``; headless callers
+    get the warning on stderr. Any failure degrades to an empty catalogue, so
+    MCP enrichment never becomes a session startup requirement. Returns the
+    manager for the caller to dispose, or ``None``.
     """
     from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
+
+    if knowledge_hooks is None:
+        knowledge_hooks = _KnowledgeHooks()
 
     try:
         from local_operator.mcp import discover_and_load_mcp_tools
@@ -884,24 +886,39 @@ async def wire_mcp_into_session(
         tool_count=len(mcp_tools),
     )
 
-    # The NON-MCP base for every MCP merge: the session's construction-time
-    # inventory (builtins + session-capability tools like task/wait/jobs/wake).
-    # The factory's `builtin_tools` argument predates the capability merge, so
-    # it must not be the base — that is the MCP-20 wipe bug (a refresh dropped
-    # task/wait/jobs the moment MCP changed). Snapshot it BEFORE the first MCP
-    # merge adds MCP tools, so the callback below stays free of old MCP rows.
+    # Snapshot the NON-MCP base before any lazy activation. Session capability
+    # tools (task/wait/jobs/wake) live here even though ``builtin_tools``
+    # predates them, so the session inventory remains the authoritative base.
     base_inventory = list(
         getattr(session, "_tools", None) or getattr(session, "tools", None) or builtin_tools
     )
+    enabled_origins: set[tuple[str, str]] = set()
 
-    merged = list(base_inventory) + list(mcp_tools)
-    if mcp_tools:
-        session.refresh_tools(merged)
+    def selected_tools(source: list[AgentTool]) -> list[AgentTool]:
+        selected: list[AgentTool] = []
+        for tool in source:
+            meta = manager.get_tool_meta(tool.name) or {}
+            origin = (str(meta.get("server_name", "")), str(meta.get("mcp_tool_name", "")))
+            if origin in enabled_origins:
+                selected.append(tool)
+        return selected
+
+    def refresh_selected(source: list[AgentTool]) -> None:
+        session.refresh_tools(list(base_inventory) + selected_tools(source))
+
+    def activate(server_name: str, raw_tool_name: str) -> None:
+        enabled_origins.add((server_name, raw_tool_name))
+        refresh_selected(manager.get_tools())
+
+    from local_operator.mcp.resources import make_mcp_resolver, render_mcp_catalogue
+
+    knowledge_hooks.mcp_resolver = make_mcp_resolver(manager, activate)
+    knowledge_hooks.mcp_catalogue = lambda: render_mcp_catalogue(manager)
 
     def on_tools_changed(new_mcp_tools: list[AgentTool]) -> None:
-        # The manager's callback type tolerates sync handlers; refresh_tools
-        # is the atomic swap point (loop re-reads the inventory per call).
-        session.refresh_tools(list(base_inventory) + list(new_mcp_tools))
+        # Reconnects and tools/list_changed can replace AgentTool objects. Keep
+        # the selected origins and swap in only their fresh schemas.
+        refresh_selected(new_mcp_tools)
 
     manager.set_on_tools_changed(on_tools_changed)
     return manager
@@ -1000,6 +1017,7 @@ async def create_session(
         session,
         list(plan.session_kwargs["tools"]),
         effective_cwd,
+        knowledge_hooks=plan.knowledge_hooks,
         auth_store=plan.auth_store,
         has_ui=has_ui,
     )
