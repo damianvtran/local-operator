@@ -2229,12 +2229,12 @@ class OperatorApp(App[None]):
             self._append_block(NoticeBlock("usage panel unavailable", "warning"))
             return
         self._usage_focus_restore = self.focused
-        panel.start_fetch(target)
+        generation = panel.start_fetch(target)
         panel.focus()
         # A second command replaces the first request. Without exclusivity a slow
         # response can overwrite the newer provider's report.
         self.run_worker(
-            self._fetch_usage_worker(target or None),
+            self._fetch_usage_worker(target or None, generation),
             thread=False,
             group="usage",
             exclusive=True,
@@ -2247,8 +2247,8 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — the panel is optional chrome
             return None
 
-    async def _fetch_usage_worker(self, provider: str | None) -> None:
-        """Worker that fetches usage and hands the reports to the panel.
+    async def _fetch_usage_worker(self, provider: str | None, generation: int) -> None:
+        """Fetch usage and paint only if this request still owns the panel.
 
         A failure is reported INSIDE the panel rather than as a transcript
         notice: the panel is what has focus and what carries the key that
@@ -2262,13 +2262,14 @@ class OperatorApp(App[None]):
         except Exception as error:
             if panel is None:
                 self._append_block(NoticeBlock(f"usage fetch failed: {error}", "error"))
-            else:
+            elif panel.accepts_request(generation):
                 panel.show_error(f"usage fetch failed: {error}")
             return
         if panel is None:
             self._append_block(NoticeBlock("usage panel unavailable", "warning"))
             return
-        panel.show_reports(reports)
+        if panel.accepts_request(generation):
+            panel.show_reports(reports)
 
     def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
         """``r`` in the panel — re-run the same fetch behind the same view."""
@@ -2279,9 +2280,9 @@ class OperatorApp(App[None]):
         if panel is None:
             return
         target = panel.target
-        panel.start_fetch(target)
+        generation = panel.start_fetch(target)
         self.run_worker(
-            self._fetch_usage_worker(target or None),
+            self._fetch_usage_worker(target or None, generation),
             thread=False,
             group="usage",
             exclusive=True,

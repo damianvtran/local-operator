@@ -1280,6 +1280,31 @@ async def test_dismissed_usage_request_cannot_reopen_the_panel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_usage_result_ready_between_close_and_dismiss_handler_is_ignored() -> None:
+    """Closing invalidates the request synchronously, before the app can receive
+    the dismissal message and cancel its worker."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    ctrl = _ControlledUsageController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        await ctrl.first_started.wait()
+
+        # This is the exact cross-queue gap inside `action_dismiss`: the panel is
+        # already closed, while the app has not yet handled `UsageDismissed`.
+        panel.close()
+        ctrl.first_release.set()
+        for _ in range(4):
+            await pilot.pause()
+
+        assert not ctrl.first_cancelled
+        assert not panel.is_open
+
+
+@pytest.mark.asyncio
 async def test_usage_refresh_supersedes_a_slower_request() -> None:
     """A stale first response must not overwrite the report returned by the
     refresh that replaced it."""

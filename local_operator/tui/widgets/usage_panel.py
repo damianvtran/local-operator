@@ -518,6 +518,11 @@ class UsagePanel(Static):
         self._error = ""
         self._target = ""
         self._fetched_ms: float | None = None
+        # A monotonic identity for the network request allowed to paint this
+        # surface. Textual messages and workers run on separate queues, so worker
+        # cancellation alone cannot close the gap between `close()` and the app
+        # receiving `UsageDismissed`.
+        self._request_generation = 0
         self._clock: float = 0.0
         # Screen size plus the live bottom-dock ceiling used for the last
         # paint. The dock can grow without resizing this overlay, so Textual
@@ -526,18 +531,20 @@ class UsagePanel(Static):
         self.display = False
 
     # -- state ---------------------------------------------------------------
-    def start_fetch(self, target: str = "") -> None:
-        """Show the panel in its loading state.
+    def start_fetch(self, target: str = "") -> int:
+        """Show the panel in its loading state and return this request's identity.
 
         Opened BEFORE the request rather than after it: the fetch crosses the
         network for every logged-in provider, and a command that does nothing
         visible for two seconds reads as a command that did nothing.
         """
+        self._request_generation += 1
         self._loading = True
         self._error = ""
         self._target = target
         self.display = True
         self._repaint()
+        return self._request_generation
 
     def show_reports(self, reports, *, now_ms: float | None = None) -> None:  # noqa: ANN001
         """Install a finished fetch and paint it."""
@@ -556,8 +563,13 @@ class UsagePanel(Static):
         self.display = True
         self._repaint()
 
+    def accepts_request(self, generation: int) -> bool:
+        """Whether a worker result still belongs to the visible request."""
+        return self.is_open and generation == self._request_generation
+
     def close(self) -> None:
         """Hide the panel and forget the scroll position."""
+        self._request_generation += 1
         self._loading = False
         self._offset = 0
         self.display = False
