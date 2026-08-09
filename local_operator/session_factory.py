@@ -731,6 +731,7 @@ async def _prepare(
         # overrides ride above the project file and process environment, and
         # values stay out of the system prompt (read on demand, not baked).
         variables=_build_variable_store(effective_cwd, config_manager),
+        web_search_settings=config_manager.get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
 

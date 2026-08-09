@@ -78,7 +78,7 @@ This project is proudly open source under the MIT license. We believe AI tools s
 - **Asynchronous Execution**: Safe code execution with async/await pattern
 - **Environment Configuration**: Uses credential manager for API key management
 - **Image Generation**: Create and modify images using the FLUX.1 model from FAL AI
-- **Web Search**: Search the web for information using Tavily or SERP API
+- **Web Search**: Load-balanced search across DuckDuckGo, Tavily, Perplexity, Brave, Exa, SerpApi, or SearXNG
 
 The Local Operator provides a command-line interface where you can:
 
@@ -158,15 +158,53 @@ To run Local Operator with a 3rd party cloud-hosted LLM model, you need to have 
   playwright install
   ```
 
-- 📌 (Optional) Enabling Web Search
+- 📌 (Optional) Configuring Web Search
 
-  To enable web search, you will need to get a free SERP API key from [SerpApi](https://serpapi.com/users/sign_up). On the free plan, you get 100 credits per month which is generally sufficient for light to moderate personal use. The agent uses a web search tool integrated with SERP API to fetch information from the web if you have the `SERP_API_KEY` set up in the Local Operator credentials. The agent can still browse the web without it, though information access will be less efficient.
+  Web search works on first run: DuckDuckGo and Tavily's documented keyless
+  endpoint are enabled and requests rotate between them. If one provider is
+  rate-limited, challenged, or unavailable, the same request falls through to
+  the next enabled provider.
 
-  1.  Get your API key and then configure the `SERP_API_KEY` credential:
+  ```bash
+  local-operator search list
+  local-operator search test "Python 3.13 release notes"
+  local-operator search enable perplexity
+  local-operator search disable duckduckgo
+  local-operator search order tavily,perplexity,duckduckgo
+  local-operator search balance round_robin  # or: ordered
+  local-operator search off                  # `on` restores the master switch
+  ```
 
-      ```bash
-      local-operator credential update <SERP_API_KEY>
-      ```
+  The same non-secret controls are available inside the TUI with `/search`.
+  Provider setup is explicit:
+
+  ```bash
+  local-operator search setup tavily --oauth
+  local-operator search setup tavily --api-key
+  local-operator search setup brave --api-key
+  local-operator search setup searxng --url https://search.example.com
+  ```
+
+  Tavily OAuth adds the official remote MCP server and uses its connected
+  `tavily-search` tool from the built-in load-balancing chain. Start or reload a
+  session to complete sign-in. Without OAuth, Tavily uses `TAVILY_API_KEY` when
+  configured and its rate-limited keyless mode otherwise.
+
+  | Provider | Access | Default |
+  | --- | --- | --- |
+  | DuckDuckGo | Credential-free HTML search | Enabled |
+  | Tavily | Keyless, `TAVILY_API_KEY`, or OAuth MCP | Enabled |
+  | Perplexity | Anonymous search or `PERPLEXITY_API_KEY` | Disabled |
+  | Brave | `BRAVE_API_KEY` | Disabled |
+  | Exa | `EXA_API_KEY` | Disabled |
+  | SerpApi | `SERPAPI_API_KEY` (legacy `SERP_API_KEY` also works) | Disabled |
+  | SearXNG | Self-hosted endpoint URL | Disabled |
+
+  Model context is capped at 6,000 characters, with shorter per-answer and
+  per-snippet limits. Complete source URLs are retained whenever a result is
+  included; the agent can open one with `browser` for the full page. In the TUI,
+  expand a completed `web_search` card to see each candidate's page name, URL,
+  and short provider-supplied snippet.
 
 - 📌 (Optional) Enabling Image Generation
 
@@ -344,24 +382,28 @@ local-operator config list
 
 ### 🔐 Credentials
 
-Credentials are stored in the `~/.local-operator/credentials.yml` file. Credentials can be updated at any time by running `local-operator credential update <credential_name>`.
+Credentials are stored in `~/.local-operator/.env`. Update them with `local-operator credential update <credential_name>` or use `local-operator search setup <provider> --api-key`.
 
 Example:
 
 ```bash
-local-operator credential update SERP_API_KEY
+local-operator credential update SERPAPI_API_KEY
 ```
 
 To clear a credential, use the following command:
 
 ```bash
-local-operator credential delete SERP_API_KEY
+local-operator credential delete SERPAPI_API_KEY
 ```
 
-- `SERP_API_KEY`: The API key for the SERP API from [SerpApi](https://serpapi.com/users/sign_up). This is used to search the web for information. This is required for the agent to be able to do real time searches of the web using search engines. The agent can still browse the web without it, though information access will be less efficient.
-
-- `TAVILY_API_KEY`: The API key for the Tavily API from [Tavily](https://tavily.com/signup). Alternative to SERP API with pay as you go pricing. The per unit cost is lower
-  for personal use if you go over the SERP API 100 requests per month limit. The disadvantage is that the search results are not based off of Google like SERP API so the search depth is not as extensive. Good for if you have run into the SERP API limit for the month.
+- `SERPAPI_API_KEY`: SerpApi key for Google-backed results. The legacy
+  `SERP_API_KEY` name remains accepted.
+- `TAVILY_API_KEY`: Tavily key for account-backed limits; Tavily also supports
+  keyless requests and `local-operator search setup tavily --oauth`.
+- `PERPLEXITY_API_KEY`: Perplexity Sonar API key; anonymous search remains
+  available without one when the provider is enabled.
+- `BRAVE_API_KEY`: Brave Search API key.
+- `EXA_API_KEY`: Exa semantic search API key.
 
 - `FAL_API_KEY`: The API key for the FAL AI API from [FAL AI](https://fal.ai/dashboard/keys). This enables image generation capabilities using the FLUX.1 text-to-image model. With this key, the agent can generate images from text descriptions and modify existing images based on prompts. The FAL AI API provides high-quality image generation with various customization options like image size, guidance scale, and inference steps.
 

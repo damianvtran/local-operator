@@ -282,6 +282,33 @@ def test_a_tool_without_a_diff_expands_to_its_raw_output() -> None:
     assert "one" in content and "three" in content
 
 
+def test_web_search_expansion_uses_structured_page_metadata() -> None:
+    """The model's bounded text must not impoverish the human expansion."""
+    card = ToolCard("t", "web_search", {"query": "python release"})
+    card.mark_done(
+        "Provider: duckduckgo (credential-free)",
+        {
+            "provider": "duckduckgo",
+            "auth_mode": "credential-free",
+            "sources": [
+                {
+                    "title": "Python 3.13 release",
+                    "url": "https://python.org/downloads/release/python-3130/",
+                    "snippet": "Release notes and downloads for Python 3.13.",
+                }
+            ],
+        },
+    )
+
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+
+    assert "Python 3.13 release" in content
+    assert "https://python.org/downloads/release/python-3130/" in content
+    assert "Release notes and downloads for Python 3.13." in content
+    assert "Open a result URL with browser" in content
+
+
 # --- the one-line guarantee ------------------------------------------------
 
 

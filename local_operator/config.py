@@ -13,6 +13,8 @@ from typing import Any, Dict
 
 import yaml
 
+from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
+
 
 def _version_tuple(raw: str) -> tuple[int, ...]:
     """Parse a dotted version into ints for ordering.
@@ -133,6 +135,10 @@ DEFAULT_CONFIG = Config(
             "hosting": "",
             "model_name": "",
             "auto_save_conversation": False,
+            # Search is useful on first run without a credential: DuckDuckGo
+            # and Tavily keyless are both bounded fallbacks, so the default
+            # rotates between them rather than depending on one free service.
+            "web_search": dict(DEFAULT_WEB_SEARCH_CONFIG),
             # Ceilings on the ephemeral session store (see
             # local_operator.session.retention). Any of the three set to 0
             # disables that dimension; all three at 0 restores the unbounded

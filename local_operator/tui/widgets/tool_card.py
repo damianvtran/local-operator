@@ -184,6 +184,10 @@ OUTPUT_INDENT = 2
 #: transcript into a scroll trap. The head is kept (it carries the command's
 #: framing) and the remainder is announced on a dim marker row.
 EXPAND_MAX_LINES = 40
+#: Search details are persisted separately from the token-bounded model text.
+#: The expansion gets enough of each provider snippet to identify the page,
+#: while the source URL remains the path to the complete document.
+SEARCH_EXPANDED_SNIPPET_CHARS = 360
 #: Last-resort width for a card built before it has been laid out. Content
 #: rendered at this width is corrected by the first resize.
 FALLBACK_WIDTH = 80
@@ -338,6 +342,36 @@ def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
         return value if value > 0 else 0
 
     return (_count(details.get("added")), _count(details.get("removed")))
+
+
+def _search_result_output(details: dict[str, Any] | None) -> list[str]:
+    """Structured web-search rows: provider, page name, URL, and short snippet."""
+    if not isinstance(details, dict):
+        return []
+    sources = details.get("sources")
+    if not isinstance(sources, list) or not sources:
+        return []
+
+    provider = _strip_control_sequences(str(details.get("provider") or "search"))
+    auth_mode = _strip_control_sequences(str(details.get("auth_mode") or ""))
+    lines = [f"Provider: {provider}" + (f" ({auth_mode})" if auth_mode else ""), "Sources:"]
+    for index, source in enumerate(sources, start=1):
+        if not isinstance(source, dict):
+            continue
+        title = _strip_control_sequences(
+            " ".join(str(source.get("title") or "Untitled result").split())
+        )
+        url = _strip_control_sequences(" ".join(str(source.get("url") or "").split()))
+        snippet = _strip_control_sequences(" ".join(str(source.get("snippet") or "").split()))
+        lines.append(f"{index}. {title}")
+        if url:
+            lines.append(f"   {url}")
+        if snippet:
+            if len(snippet) > SEARCH_EXPANDED_SNIPPET_CHARS:
+                snippet = snippet[: SEARCH_EXPANDED_SNIPPET_CHARS - 1].rstrip() + "…"
+            lines.append(f"   {snippet}")
+    lines.append("Open a result URL with browser to read the full page.")
+    return lines
 
 
 def _clamp_runs(runs: list[tuple[str, Style]], limit: int) -> list[tuple[str, Style]]:
@@ -673,16 +707,19 @@ class ToolCard(TranscriptBlock):
             self._refresh_row()
 
     def _absorb_result(self, result_text: str, details: dict[str, Any] | None) -> None:
-        """Capture the payload the expansion and the diff counters read.
+        """Capture the expansion payload and diff counters.
 
-        The write/edit tools report a rendered unified diff under
-        ``details["diff"]``; when present, that diff is what the expanded card
-        reveals (coloured per line), and the raw output is not also shown —
-        one story per card. Plain-output tools (bash, read) have no diff and
-        expand to their cleaned output as before.
+        Web search is rendered from structured details, not the model-facing
+        text: the latter is deliberately token-capped, while the expansion
+        must reliably retain every candidate's page name, URL, and snippet.
+        Write/edit tools prefer their rendered diff; all other tools expand to
+        cleaned result text.
         """
         self._added, self._removed = _diff_counts(details)
-        self._output = self._clean_output(result_text)
+        search_output = (
+            _search_result_output(details) if self.tool_name.lower() == "web_search" else []
+        )
+        self._output = search_output or self._clean_output(result_text)
         diff = details.get("diff") if isinstance(details, dict) else None
         if isinstance(diff, list) and diff:
             self._diff = [str(line) for line in diff]

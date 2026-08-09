@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
 
 from rich.console import Group
 from rich.style import Style
@@ -122,6 +122,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     ),
     SlashCommand("model", "Show or switch model (provider/id)", aliases=("models",)),
     SlashCommand("provider", "List providers and their login/usage state"),
+    SlashCommand("search", "Configure web search providers and load balancing"),
     SlashCommand("accounts", "List stored credentials"),
     SlashCommand("usage", "Show provider usage quota"),
     SlashCommand("goal", "Show, set, or clear the session goal"),
@@ -1465,6 +1466,8 @@ class OperatorApp(App[None]):
             self._cmd_model(arg, notice)
         elif command == "/provider":
             self._cmd_providers(notice)
+        elif command == "/search":
+            self._cmd_search(arg, notice)
         elif command == "/accounts":
             self._cmd_accounts(notice)
         elif command == "/usage":
@@ -1885,6 +1888,107 @@ class OperatorApp(App[None]):
             notice(f"loop finished after {completed} iteration(s)")
 
     # -- providers / accounts / usage --------------------------------------
+    def _cmd_search(self, arg: str, notice: NoticeFn) -> None:
+        """``/search`` status plus non-secret provider toggles.
+
+        Secret entry stays in the normal terminal command. Textual's editor is
+        transcript-visible, so accepting an API key here would persist it in
+        clear text and hand it to the model on the next turn.
+        """
+        from local_operator.config import ConfigManager
+        from local_operator.credentials import CredentialManager
+        from local_operator.paths import config_dir
+        from local_operator.web_search.models import (
+            PROVIDER_IDS,
+            SearchProviderId,
+            SearchStrategy,
+        )
+        from local_operator.web_search.providers import provider_statuses
+        from local_operator.web_search.service import (
+            load_search_settings,
+            set_provider_enabled,
+            set_provider_order,
+            set_search_enabled,
+            set_search_strategy,
+        )
+
+        manager = ConfigManager(config_dir())
+        credentials = CredentialManager(config_dir())
+        words = arg.split()
+        try:
+            if not words:
+                settings = load_search_settings(manager)
+                items: list[tuple[str, str]] = [
+                    (
+                        "web search",
+                        f"{'on' if settings.enabled else 'off'} · "
+                        f"{settings.strategy} · "
+                        f"{', '.join(settings.providers) or 'no providers'}",
+                    )
+                ]
+                for status in provider_statuses(settings, credentials):
+                    enabled = "enabled" if status.enabled else "disabled"
+                    ready = "ready" if status.available else "setup needed"
+                    items.append((status.id, f"{enabled} · {ready} · {status.detail}"))
+                items.append(("setup", "local-operator search setup <provider>"))
+                self._append_block(RichBlock(_tree_listing(items)))
+                return
+
+            command = words[0].lower()
+            if command in ("on", "off") and len(words) == 1:
+                set_search_enabled(manager, command == "on")
+                notice(
+                    f"web search {command}; /reload "
+                    f"{'adds' if command == 'on' else 'removes'} the tool"
+                )
+                return
+            if command in ("enable", "disable") and len(words) == 2:
+                provider = words[1].lower()
+                if provider not in PROVIDER_IDS:
+                    notice(f"unknown search provider: {provider}", "warning")
+                    return
+                set_provider_enabled(
+                    manager,
+                    cast(SearchProviderId, provider),
+                    command == "enable",
+                )
+                notice(f"{provider} {command}d; applies to the next search")
+                return
+            if command == "balance" and len(words) == 2:
+                strategy = words[1].lower()
+                if strategy not in ("round_robin", "ordered"):
+                    notice("search balance must be round_robin or ordered", "warning")
+                    return
+                set_search_strategy(manager, cast(SearchStrategy, strategy))
+                notice(f"search balance: {strategy}")
+                return
+            if command == "order" and len(words) >= 2:
+                provider_words = [word.lower().strip(",") for word in words[1:]]
+                unknown = [word for word in provider_words if word not in PROVIDER_IDS]
+                if unknown:
+                    notice(f"unknown search provider: {unknown[0]}", "warning")
+                    return
+                providers: list[SearchProviderId] = [
+                    cast(SearchProviderId, word) for word in provider_words
+                ]
+                set_provider_order(manager, providers)
+                notice("search order: " + ", ".join(providers))
+                return
+            if command == "setup" and len(words) == 2:
+                provider = words[1].lower()
+                if provider not in PROVIDER_IDS:
+                    notice(f"unknown search provider: {provider}", "warning")
+                    return
+                notice(f"run: local-operator search setup {provider}")
+                return
+            notice(
+                "usage: /search [on|off|enable <provider>|disable <provider>|"
+                "balance <round_robin|ordered>|order <providers…>|setup <provider>]",
+                "warning",
+            )
+        except Exception as error:
+            notice(f"search configuration failed: {error}", "error")
+
     def _cmd_providers(self, notice: NoticeFn) -> None:
         """``/provider`` — list loginable providers and their state."""
         if self._providers is None:
