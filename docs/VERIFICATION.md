@@ -1229,7 +1229,7 @@ upgrade and is the one deferred surface, recorded rather than hacked.
 ## The stuck LO-on-LO session: root cause, cap, and recovery (2026-08-09)
 
 A long feature session (id `cb76cb39d6c7`, `openai/gpt-5.4` via the radient
-proxy) ran ~390 tool calls, stalled, and (at the time) could not be resumed.
+proxy) ran ~173 tool-use turns / 215 tool messages, stalled, and (at the time) could not be resumed.
 This is the diagnosis, the fix, and the measured recovery — plus the
 token/context-efficiency numbers for the subagent engine that the
 investigation surfaced.
@@ -1239,7 +1239,7 @@ investigation surfaced.
 The session's transcript (`~/.local-operator/sessions/cb76cb39d6c7/transcript.jsonl`)
 shows **zero compaction events** while context grew monotonically
 3.7k → **249,636 tokens** across 173 assistant calls, ~24.7M total
-cache_read tokens (avg +1,421/call, ~99.9% cache rate). The provider then
+cache_read tokens (avg +1,421/call, ~99.0% aggregate cache rate). The provider then
 started returning `stop_reason="aborted"` at ~250k (the first abort came
 mid-batch right after an `edit` tool result; the next turn after an 85s
 stall aborted again).
@@ -1260,8 +1260,8 @@ unrecoverable at the time; it's since been fixed.
   instead of an inline-cloned formula.
 - The user's `config.yml` sets `max_threshold_tokens: 250000` so a long
   session compacts before the provider's ~250k abort knee. Capped replay of
-  the stuck session would now compact at ~255k instead of 600k.
-- Regression `test_thresholds.py::test_resolve_threshold_tokens_caps_the_default_at_max`.
+  the stuck session would now compact at exactly 250_000 instead of 600k.
+- Regression `test_thresholds.py::test_max_threshold_tokens_caps_the_section_c_default`.
 - Review: round 1 approved with **no blockers**, round 2 APPROVE (MCP-capability
   wipe bug found and fixed in the same PR — see below).
 
@@ -1291,7 +1291,7 @@ round-trip review work:
 | Mechanism | omp-style guarantee | local-operator, verified live |
 |---|---|---|
 | Compaction + snapcompact | fires before the provider's ceiling | now bounded by `max_threshold_tokens`; engages at `min(0.8w, cap)` |
-| Cache-stable system prefix | stable prefix hits provider cache | stable session + tool-merged prefix; ~99.9% cache rate on the stuck session |
+| Cache-stable system prefix | stable prefix hits provider cache | stable session + tool-merged prefix; ~99.0% aggregate cache rate on the stuck session |
 | Semantic skill freeze | frozen skill text stays cached | one-shot child clones the parent's context; no per-call skill re-derivation |
 | Token-estimate LRU | bounded tool payloads | range-coverage supersede blanks fully-covered read ranges on load (78,272 tokens reclaimed on the stuck session; 1 prune journaled) |
 
