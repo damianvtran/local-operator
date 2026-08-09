@@ -451,7 +451,15 @@ async def _search_exa(
     response = await client.post(
         "https://api.exa.ai/search",
         headers={"Content-Type": "application/json", "x-api-key": key},
-        json={"query": query, "numResults": limit, "type": "auto", "contents": {"text": True}},
+        json={
+            "query": query,
+            "numResults": limit,
+            "type": "auto",
+            # Exa can return whole page text here, but downloading it only to
+            # truncate it wastes latency and context. Query-grounded summaries
+            # are the provider-native short snippet contract the UI needs.
+            "contents": {"summary": {"query": query}},
+        },
     )
     _ensure_success("Exa", response)
     payload = response.json()
@@ -463,7 +471,7 @@ async def _search_exa(
             source := _source(
                 title=item.get("title"),
                 url=item.get("url"),
-                snippet=item.get("text"),
+                snippet=item.get("summary"),
                 published_date=item.get("publishedDate"),
             )
         )
