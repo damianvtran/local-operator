@@ -2193,3 +2193,37 @@ async def test_resume_at_latest_passes_the_sentinel_verbatim(tmp_path, monkeypat
         await pilot.pause()
         await pilot.pause()
         assert boots == ["@latest"], boots
+
+
+@pytest.mark.asyncio
+async def test_a_tall_usage_overlay_never_scrolls_the_screen_or_steals_width() -> None:
+    """A floating overlay must leave the layout beneath it alone.
+
+    It did not. The `/usage` card is sized by the widget and positioned by an
+    offset on the `toast` layer; layers keep it out of the FLOW, but nothing
+    kept it out of the SCROLLABLE REGION. A card taller than its resting
+    offset allowed pushed the screen's virtual height past its size, so
+    Textual drew a screen scrollbar — which the app has no use for (the
+    transcript is the scrolling surface and the input is docked) and which
+    cost two cells of width, reflowing the transcript behind a popup that is
+    supposed to change nothing. `overflow: hidden` on `Screen` is the guard.
+    """
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+    from tests.unit.tui.test_usage_panel import _many_reports
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        width_before = app.screen.size.width
+        panel = app.query_one(UsagePanel)
+        panel.display = True
+        # Deliberately taller than the terminal so the overlay MUST overflow.
+        panel.show_reports(_many_reports())
+        await pilot.pause()
+        await pilot.pause()
+        assert app.screen.show_vertical_scrollbar is False
+        assert app.screen.size.width == width_before
+        # And the card's own content box still gets every row it composed:
+        # the pinned height carries the padding, it does not eat the footer.
+        assert panel.size.height == len(panel.render_lines_for_test())

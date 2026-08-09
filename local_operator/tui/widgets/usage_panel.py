@@ -76,11 +76,22 @@ PANEL_MIN_WIDTH = 32
 PANEL_WIDTH_MARGIN = 4
 PANEL_HEIGHT_MARGIN = 4
 
-#: Rows the pinned chrome costs: the title, the rule under it, and the hint row.
-CHROME_ROWS = 3
+#: Rows the pinned chrome costs: the title, the rule under it, the blank row
+#: that separates the report from the footer, and the hint row itself. The
+#: spacer is chrome rather than a body row because it must survive scrolling —
+#: a footer that sits flush against the last meter reads as one more data row.
+CHROME_ROWS = 4
 
-#: One cell of padding inside the card, matching the toast's.
-PANEL_PADDING_CELLS = 2
+#: Inner padding, as CELLS across (``padding: 1 2`` → 2 left + 2 right) and
+#: ROWS down (1 top + 1 bottom). Both are declared here as well as in the
+#: stylesheet because the widget SIZES ITSELF: Textual's width/height are
+#: border-box, so the panel must add the padding back when it pins its own
+#: height and subtract it when it measures the content that has to fit. A
+#: single-cell gutter is what made the card read as cramped against the text
+#: it floats over — the overlay needs to feel lifted off the transcript, and
+#: a row of quiet at the top and bottom is what does that.
+PANEL_PADDING_CELLS = 4
+PANEL_PADDING_ROWS = 2
 
 #: Keys the panel offers, in the order the hint row prints them. Data rather
 #: than a literal string so the hints and the bindings cannot drift apart.
@@ -398,6 +409,11 @@ def build_usage_body(reports, width: int, now_ms: float) -> list[Text]:  # noqa:
 
     Column widths are measured over EVERY row rather than per provider, so the
     bars of two providers line up and the whole panel can be read as one table.
+
+    Each block is heading → (notes) → blank → meters. The blank row is what
+    makes the heading read as a heading: without it the identity line, the
+    account note and the first meter run together as three equal rows, which is
+    the "tight" the card was reported for.
     """
     lines: list[Text] = []
     if not reports:
@@ -415,6 +431,7 @@ def build_usage_body(reports, width: int, now_ms: float) -> list[Text]:  # noqa:
         if not report.limits:
             lines.append(Text("  no windows reported", style=dim))
             continue
+        lines.append(Text())
         for limit in report.limits:
             lines.append(_limit_row(limit, columns, now_ms))
     return lines
@@ -572,9 +589,14 @@ class UsagePanel(Static):
         return max(1, self.panel_width() - PANEL_PADDING_CELLS)
 
     def _body_budget(self) -> int:
-        """Rows the scrolling half may use, after the chrome and the screen."""
+        """Rows the scrolling half may use, after the chrome and the screen.
+
+        The card's own padding rows come out of this budget too: they are part
+        of the height the widget pins, so a body measured without them would
+        overflow the screen by exactly the gutter.
+        """
         _, height = self._screen_size()
-        return max(1, height - PANEL_HEIGHT_MARGIN - CHROME_ROWS)
+        return max(1, height - PANEL_HEIGHT_MARGIN - CHROME_ROWS - PANEL_PADDING_ROWS)
 
     def _max_offset(self) -> int:
         return max(0, len(self._body_lines()) - self._body_budget())
@@ -616,7 +638,6 @@ class UsagePanel(Static):
         stats = collect_stats(self._reports).describe() if self._reports else ""
         if stats:
             row.append(stats, style=dim)
-            row.append("   ", style=faint)
         for key, what in KEY_HINTS:
             # Scroll keys are only offered when there is something to scroll: a
             # hint for a key that does nothing teaches the user to distrust the
@@ -645,7 +666,10 @@ class UsagePanel(Static):
         rule = Text(
             "─" * self._content_width(), style=Style(color=theme_mod.semantic_color("edge"))
         )
-        rows = [self._title_row(), rule, *window]
+        # One quiet row between the report and the footer. Without it the tally
+        # and the key hints sit flush against the last meter and read as one
+        # more data row rather than as chrome.
+        rows = [self._title_row(), rule, *window, Text()]
         if scrolled:
             # The position is part of the CHROME, not a row of the report: a
             # "12 of 30" that scrolled away with the content would be useless
@@ -690,8 +714,14 @@ class UsagePanel(Static):
         # too tall, and this widget is repainted on every keystroke that scrolls
         # it — a card that grew by a row per keypress would crawl down the
         # screen while being read.
-        self.styles.height = len(rows)
-        self._recentre(width, len(rows))
+        #
+        # The padding rows are ADDED BACK here (and to the centring height):
+        # Textual sizes border-box, so pinning the row count alone would give
+        # the gutter the last two content rows and clip the hint row off the
+        # bottom of the card.
+        outer_height = len(rows) + PANEL_PADDING_ROWS
+        self.styles.height = outer_height
+        self._recentre(width, outer_height)
         out = Text()
         for index, row in enumerate(rows):
             if index:

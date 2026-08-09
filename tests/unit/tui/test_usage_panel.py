@@ -18,6 +18,7 @@ from textual.containers import Container
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.tui.widgets.usage_panel import (
     BAR_UNKNOWN,
+    PANEL_PADDING_ROWS,
     UsagePanel,
     binding_limit,
     build_usage_body,
@@ -420,3 +421,51 @@ async def test_the_panel_says_it_is_fetching_before_the_first_result() -> None:
     async with _panel_app() as panel:
         panel.start_fetch("")
         assert "fetching…" in "\n".join(panel.render_lines_for_test())
+
+
+@pytest.mark.asyncio
+async def test_the_card_reserves_its_padding_rows_so_nothing_is_clipped() -> None:
+    """The widget pins its own height, and Textual sizes border-box: pinning
+    the ROW COUNT alone would hand the gutter the last two rows and cut the
+    hint row off the bottom of the card. The pinned height is therefore the
+    rows PLUS the padding.
+
+    The resulting CONTENT box is asserted against the real stylesheet in
+    ``test_app_pilot`` — this host deliberately loads no CSS, so the padding
+    it must survive only exists there.
+    """
+    async with _panel_app() as panel:
+        panel.show_reports([_report(_percent("a:5h", "5 hour", 5.0, shared=True))])
+        rows = panel.render_lines_for_test()
+        assert panel.styles.height is not None
+        assert panel.styles.height.value == len(rows) + PANEL_PADDING_ROWS
+
+
+@pytest.mark.asyncio
+async def test_a_report_block_separates_its_heading_from_its_meters() -> None:
+    """Heading → (note) → blank → meters. Without the blank, the identity
+    line, the account note and the first meter render as three equal rows and
+    the block reads as an undifferentiated wall."""
+    lines = _lines(
+        [
+            _report(
+                _percent("a:5h", "5 hour", 5.0, shared=True),
+                notes="extra usage disabled",
+            )
+        ]
+    )
+    assert lines[0].startswith("anthropic")
+    assert lines[1].strip() == "extra usage disabled"
+    assert lines[2] == ""  # the breathing row
+    assert "5 hour" in lines[3]
+
+
+@pytest.mark.asyncio
+async def test_the_footer_is_separated_from_the_last_meter() -> None:
+    """The tally/keys footer is chrome. Flush against the last meter it reads
+    as one more row of the report."""
+    async with _panel_app() as panel:
+        panel.show_reports([_report(_percent("a:5h", "5 hour", 5.0, shared=True))])
+        rows = panel.render_lines_for_test()
+    assert rows[-1].startswith("1 window")  # the footer
+    assert rows[-2] == ""  # the quiet row above it

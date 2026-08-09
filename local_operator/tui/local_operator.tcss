@@ -53,6 +53,16 @@ Screen {
      * else stays on `default` (Textual's name for the unset layer), so this
      * declaration changes no existing placement. */
     layers: default toast;
+    /* The screen itself NEVER scrolls: the transcript is the scrolling
+     * surface and the input panel is docked, so a scrollbar here can only
+     * come from a floating overlay. It did. A tall `/usage` card (or any
+     * overlay taller than its resting offset allows) pushed the screen's
+     * virtual height past its size, which drew a scrollbar the app has no
+     * use for AND cost two cells of width — the transcript reflowed behind
+     * a popup that is supposed to leave the layout alone. Layers stop the
+     * overlay taking a row in the FLOW; only this stops it extending the
+     * scrollable region. */
+    overflow: hidden;
 }
 
 /* Transcript takes all the space above the input panel. One cell of edge
@@ -352,10 +362,16 @@ Toast {
     height: auto;
 }
 
+/* `padding: 1 2`, not `0 1`: this card floats OVER the transcript, so its
+ * gutter is the only thing separating the report from the text underneath it.
+ * One cell was not enough for the panel to read as lifted — the rows touched
+ * the fill's edge and the whole card looked cramped. The widget mirrors both
+ * numbers in PANEL_PADDING_CELLS/ROWS because it sizes itself (Textual's
+ * width/height are border-box), so a change here MUST change those. */
 UsagePanel {
     width: auto;
     height: auto;
-    padding: 0 1;
+    padding: 1 2;
     background: $lo-overlay;
     color: $lo-fg;
 }
