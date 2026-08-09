@@ -396,8 +396,8 @@ class ToolContext(BaseModel):
     session_id: str = ""
     agent_id: str = ""
     has_ui: bool = False
-    # Resolver hook for internal URLs (``skill://...``); returns content or
-    # None when the URL is not handled. Installed by the session.
+    # Resolver hook for lazy internal URLs (``skill://`` and ``guide://``);
+    # returns content or None when the URL is not handled. Installed by session.
     resolve_internal_url: Callable[[str], str | None] | None = None
     # Approval callback: returns True when the user approved. Tools with an
     # approval tier call this before mutating side effects.

@@ -3,22 +3,21 @@
 Why this module exists: ``cli.py`` (interactive + exec), ``exec_worker.py``
 (detached background runs) and later the server facade all need the SAME
 wiring from parsed args plus the three legacy managers to a harness
-:class:`~local_operator.session.protocol.SessionProtocol`. Centralising the
-wiring here keeps the precedence rules, the transcript-directory policy, the
-skills integration, and the lazy-import discipline in exactly one place.
+:class:`~local_operator.session.protocol.SessionProtocol`. Centralizing this
+wiring keeps precedence rules, transcript-directory policy, lazy knowledge
+integration, and the lazy-import discipline in exactly one place.
 
 Constraints honored here (docs/REWRITE.md):
 
-- No module-level imports of providers / session internals / skills / TUI.
-  Every engine import happens inside functions, so importing this module is
-  cheap and stays valid while parallel rewrite streams are mid-flight.
+- No module-level imports of providers / session internals / semantic indexes /
+  TUI. Every engine import happens inside functions, so importing this module
+  is cheap and stays valid while parallel rewrite streams are mid-flight.
 - Hosting/model resolution precedence: **agent > CLI flag > config file**
   (the legacy bootstrap order, minus the server-only request overrides).
-- Skills are wired end-to-end (orchestrator integration duty): discovery +
-  index build at session creation, per-turn semantic selection inside the
-  system-blocks provider, and the ``skill://`` resolver adapter handed to
-  both the tools context and the session. ANY skills failure degrades to
-  "no skills" with a warning — never a crashed startup.
+- User skills and packaged guides are wired end-to-end: discovery + index build
+  at session creation, first-task semantic selection, and chained
+  ``skill://``/``guide://`` resolution. Any knowledge failure degrades to an
+  empty listing with a warning — never a crashed startup.
 
 ``create_session`` is async: the TUI's committed factory contract is
 ``Callable[[], Awaitable[SessionProtocol]]`` and the eager skill-index build
@@ -355,122 +354,200 @@ def _build_variable_store(cwd: str, config_manager: ConfigManager) -> VariableSt
 
 
 @dataclass
-class _SkillsHooks:
-    """Shared mutable state for skills wiring: the built index, the name map,
-    and the session-frozen skills block (the first prompt selects; later
-    turns reuse it so the system prefix stays byte-stable)."""
+class _KnowledgeHooks:
+    """Session-owned semantic knowledge and progressive-disclosure resolvers.
+
+    User skills and packaged guides share one index. Registered agent metadata
+    gets a separate local-only index: it can select the generic agents guide,
+    but names and descriptions never enter the prompt or a remote embedding
+    request. The selected block freezes after the first task for cache stability.
+    """
 
     index: SkillIndex | None = None
-    by_name: dict[str, Skill] = field(default_factory=dict)
+    agent_hint_index: SkillIndex | None = None
+    skills_by_name: dict[str, Skill] = field(default_factory=dict)
+    guides_by_name: dict[str, Skill] = field(default_factory=dict)
     frozen_block: str | None = None
 
 
-async def _setup_skills(
-    credential_manager: CredentialManager, config_dir: Path, warnings_out: list[str]
-) -> _SkillsHooks:
-    """Discovery + index build at session creation (orchestrator duty).
+def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
+    """Build bounded, local-only routing rows from meaningful agent metadata.
 
-    Steps: roots from ``skills.api.default_skill_roots``, discovery, backend
-    selection (API when an embeddings key exists, else the offline local
-    embedder), ``SkillIndex`` + eager ``await index.build()``. On ANY failure
-    this returns empty hooks and records a warning — skills are optional
-    enrichment, never a startup requirement.
+    A registry can grow indefinitely, and descriptions are user content. Each
+    row is capped before hashing/embedding and the first 512 deterministic rows
+    are used. Empty autosave-style profiles provide no routing signal and are
+    skipped. The rows are never rendered by ``render_block``.
     """
-    hooks = _SkillsHooks()
+    from local_operator.skills.discovery import Skill
+
     try:
+        agents = sorted(
+            agent_registry.list_agents(),
+            key=lambda agent: (str(agent.name).lower(), str(agent.name), str(agent.id)),
+        )[:512]
+    except Exception:  # noqa: BLE001 — hints are optional enrichment
+        return []
+
+    hints: list[Skill] = []
+    agents_dir = Path(agent_registry.config_dir) / "agents"
+    for agent in agents:
+        semantic_parts = [
+            sanitize_prompt_line(str(agent.description or "")),
+            " ".join(sanitize_prompt_line(str(tag)) for tag in (agent.tags or [])),
+            " ".join(sanitize_prompt_line(str(category)) for category in (agent.categories or [])),
+        ]
+        semantic = " ".join(part for part in semantic_parts if part).strip()
+        if not semantic:
+            continue
+        agent_dir = agents_dir / str(agent.id)
+        hints.append(
+            Skill(
+                name=f"registered-agent-{agent.id}",
+                description=f"{sanitize_prompt_line(str(agent.name))}: {semantic}"[:512],
+                file_path=agent_dir / "agent.yml",
+                base_dir=agent_dir,
+                source=str(agents_dir),
+                resource_type="agent_hint",
+            )
+        )
+    return hints
+
+
+async def _setup_knowledge(
+    credential_manager: CredentialManager,
+    config_dir: Path,
+    agent_registry: AgentRegistry,
+    warnings_out: list[str],
+) -> _KnowledgeHooks:
+    """Discover and index user skills, packaged guides, and private agent hints.
+
+    Guide bodies are release resources and therefore exist in every install;
+    only their short descriptions join the ordinary skill descriptions sent to
+    the configured semantic backend. Agent hints always use ``LocalEmbedder``.
+    Any layer can fail independently without making session startup fail.
+    """
+    hooks = _KnowledgeHooks()
+    try:
+        from local_operator.guides import discover_guides
         from local_operator.skills.api import (
             SkillIndex,
             default_backend_from_env,
             default_skill_roots,
             discover_skills,
         )
+        from local_operator.skills.embeddings import LocalEmbedder
 
         skills, discovery_warnings = discover_skills(default_skill_roots(Path.cwd()))
         warnings_out.extend(discovery_warnings)
-        hooks.by_name = {skill.name: skill for skill in skills}
-        if not skills:
-            return hooks
+        guides = discover_guides()
+        hooks.skills_by_name = {skill.name: skill for skill in skills}
+        hooks.guides_by_name = {guide.name: guide for guide in guides}
+        resources = sorted(
+            [*skills, *guides],
+            key=lambda item: (
+                item.resource_type,
+                item.name.lower(),
+                item.name,
+                str(item.file_path),
+            ),
+        )
 
         def get_credential(key: str) -> str | None:
             secret = credential_manager.get_credential(key)
             value = secret.get_secret_value() if secret else ""
             return value or None
 
-        backend = default_backend_from_env(get_credential)
-        try:
-            hooks.index = SkillIndex(skills, backend, cache_dir=config_dir / "cache")
-            await hooks.index.build()
-            warnings_out.extend(hooks.index.warnings)
-        except Exception as exc:  # noqa: BLE001 — degradation is the contract
-            # An unreachable or 500-ing embeddings endpoint degrades SEMANTIC
-            # SELECTION only. by_name — the map behind every skill:// read —
-            # has no embedding dependency and must stay populated, or a
-            # backend outage would turn every skill read into "Unknown
-            # skill" for the whole session.
-            warnings_out.append(
-                f"Skill selection unavailable, continuing with static listing: {exc}"
-            )
-            hooks.index = None
-    except Exception as exc:  # noqa: BLE001 — degradation is the contract
-        warnings_out.append(f"Skills unavailable, continuing without them: {exc}")
-        hooks.index = None
-        hooks.by_name = {}
+        if resources:
+            backend = default_backend_from_env(get_credential)
+            try:
+                hooks.index = SkillIndex(resources, backend, cache_dir=config_dir / "cache")
+                await hooks.index.build()
+                warnings_out.extend(hooks.index.warnings)
+            except Exception as exc:  # noqa: BLE001 — direct reads still work
+                hooks.index = None
+                if not isinstance(backend, LocalEmbedder):
+                    warnings_out.append(
+                        f"Knowledge embedding backend failed; using local routing: {exc}"
+                    )
+                    try:
+                        hooks.index = SkillIndex(
+                            resources,
+                            LocalEmbedder(),
+                            cache_dir=config_dir / "cache",
+                        )
+                        await hooks.index.build()
+                    except Exception as fallback_exc:  # noqa: BLE001
+                        warnings_out.append(
+                            "Knowledge selection unavailable, continuing without routing: "
+                            f"{fallback_exc}"
+                        )
+                        hooks.index = None
+                else:
+                    warnings_out.append(
+                        f"Knowledge selection unavailable, continuing without routing: {exc}"
+                    )
+
+        agent_hints = _registered_agent_hints(agent_registry)
+        if agent_hints and "agents" in hooks.guides_by_name:
+            try:
+                hooks.agent_hint_index = SkillIndex(
+                    agent_hints,
+                    LocalEmbedder(),
+                    cache_dir=config_dir / "cache",
+                )
+                await hooks.agent_hint_index.build()
+            except Exception as exc:  # noqa: BLE001 — generic guide routing remains
+                warnings_out.append(f"Registered-agent semantic hints unavailable: {exc}")
+                hooks.agent_hint_index = None
+    except Exception as exc:  # noqa: BLE001 — knowledge is optional enrichment
+        warnings_out.append(f"Knowledge guides unavailable, continuing without them: {exc}")
+        hooks = _KnowledgeHooks()
     return hooks
 
 
-async def _select_skills_block(hooks: _SkillsHooks, query: str) -> str:
-    """Session-frozen semantic selection: the FIRST prompt selects, later
-    turns reuse the frozen block.
-
-    Per-turn re-selection is incompatible with prompt caching: the skills
-    block sits in the system prefix, and any change to it invalidates the
-    entire conversation after it on every turn (the cache bench measured
-    ~40% stability under per-turn churn). The reference engine resolves this
-    by selecting at session start and letting the agent pull deeper context
-    via skill:// reads (progressive disclosure) — the same contract here: the
-    frozen listing names the relevant skills, the read tool fetches their
-    bodies.
-    Every failure degrades to an empty block.
-    """
+async def _select_knowledge_block(hooks: _KnowledgeHooks, query: str) -> str:
+    """Freeze the first task's selected guide/skill descriptions for the session."""
     if hooks.frozen_block is not None:
         return hooks.frozen_block
     query = query.strip()
-    if not query or hooks.index is None:
+    if not query:
         hooks.frozen_block = ""
         return ""
+
+    picked = await hooks.index.select(query) if hooks.index is not None else []
+    if hooks.agent_hint_index is not None:
+        matching_agents = await hooks.agent_hint_index.select(query, k=1)
+        agents_guide = hooks.guides_by_name.get("agents")
+        if matching_agents and agents_guide is not None and agents_guide not in picked:
+            picked.append(agents_guide)
+            picked.sort(
+                key=lambda item: (
+                    item.resource_type,
+                    item.name.lower(),
+                    item.name,
+                    str(item.file_path),
+                )
+            )
+
     from local_operator.skills.api import render_block
 
-    picked = await hooks.index.select(query)
     hooks.frozen_block = render_block(picked)
     return hooks.frozen_block
 
 
-def _make_skill_resolver(hooks: _SkillsHooks) -> Callable[[str], str | None]:
-    """Build the ``skill://`` resolver for tools + session.
+def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | None]:
+    """Chain ``guide://`` and ``skill://`` without mixing their namespaces."""
+    from local_operator.guides import make_guide_resolver
+    from local_operator.skills.api import make_skill_resolver
 
-    Prefers the skills stream's ``make_skill_resolver`` adapter (which
-    catches ``ValueError`` and returns the error text as content); falls
-    back to an equivalent local adapter until that lands. Non-skill URLs
-    return ``None`` so callers can chain resolvers.
-    """
-    try:
-        from local_operator.skills.api import (
-            make_skill_resolver,  # type: ignore[attr-defined]
-        )
-
-        return make_skill_resolver(hooks.by_name)
-    except (ImportError, AttributeError):
-        pass
+    guide_resolver = make_guide_resolver(hooks.guides_by_name)
+    skill_resolver = make_skill_resolver(hooks.skills_by_name)
 
     def resolver(url: str) -> str | None:
-        if not url.startswith("skill://"):
-            return None
-        from local_operator.skills.protocol import resolve_skill_url
-
-        try:
-            return resolve_skill_url(url, hooks.by_name)
-        except ValueError as exc:
-            return str(exc)
+        guide_result = guide_resolver(url)
+        if guide_result is not None:
+            return guide_result
+        return skill_resolver(url)
 
     return resolver
 
@@ -494,17 +571,17 @@ class _SessionPlan:
 def _make_system_blocks_provider(
     tools: list[AgentTool],
     transcript: Transcript,
-    hooks: _SkillsHooks,
+    hooks: _KnowledgeHooks,
     cwd: str | None = None,
     goal_state: "GoalState | None" = None,
 ) -> Callable[[], Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
     Session awaits the result (committed tolerance for awaitable providers),
-    so the async skill selection can live inside. Block layout comes from
+    so semantic knowledge selection can live inside. Block layout comes from
     ``prompts_api.build_system_blocks``: stable head (instructions, inventory,
-    env) then the session-frozen skills block last, so the cache prefix stays
-    warm.
+    env) then the session-frozen guide/skill block last, so the cache prefix
+    stays warm.
 
     ``goal_state`` is the SAME holder the session facade exposes through
     ``set_goal``, which is how a ``/goal`` edit reaches the next turn's
@@ -516,12 +593,12 @@ def _make_system_blocks_provider(
 
         query = _latest_user_query(transcript)
         try:
-            skills_block = await _select_skills_block(hooks, query)
+            knowledge_block = await _select_knowledge_block(hooks, query)
         except Exception:  # noqa: BLE001 — never break the turn
-            skills_block = ""
+            knowledge_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
         goal = goal_state.text if goal_state is not None else ""
-        return build_system_blocks(tools, skills_block, _env_details(cwd), date_str, goal=goal)
+        return build_system_blocks(tools, knowledge_block, _env_details(cwd), date_str, goal=goal)
 
     return provider
 
@@ -630,14 +707,16 @@ async def _prepare(
         session_id=transcript_dir.name,
     )
 
-    # --- tools + skills (streams A and C) ---------------------------------
+    # --- tools + lazy knowledge (streams A and C) --------------------------
     from local_operator.harness.types import ToolContext
     from local_operator.tools.registry import create_tools
 
     config_dir = Path(agent_registry.config_dir)
-    skill_warnings: list[str] = []
-    hooks = await _setup_skills(credential_manager, config_dir, skill_warnings)
-    for warning in skill_warnings:
+    knowledge_warnings: list[str] = []
+    hooks = await _setup_knowledge(
+        credential_manager, config_dir, agent_registry, knowledge_warnings
+    )
+    for warning in knowledge_warnings:
         print(f"\033[1;33mWarning: {warning}\033[0m", file=sys.stderr)
 
     request_approval = _make_request_approval(yolo)
@@ -680,7 +759,9 @@ async def _prepare(
         yolo=yolo,
         has_ui=has_ui,
         cwd=effective_cwd,
-        skill_resolver=_make_skill_resolver(hooks),
+        # Session keeps the historical parameter name, but the chained
+        # resolver handles both guide:// and skill:// without namespace leaks.
+        skill_resolver=_make_knowledge_resolver(hooks),
         request_approval=request_approval,
         goal_state=goal_state,
     )

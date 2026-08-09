@@ -126,7 +126,7 @@ dev = [
 include = ["local_operator*"]
 
 [tool.setuptools.package-data]
-local_operator = ["prompts_md/*.md", "tui/*.tcss"]
+local_operator = ["prompts_md/*.md", "guides/*/*.md", "tui/*.tcss"]
 
 [project.urls]
 Homepage = "https://github.com/damianvtran/local-operator"

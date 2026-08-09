@@ -80,7 +80,14 @@ class FakeRegistry:
 
 
 def _args(**overrides) -> argparse.Namespace:
-    base = dict(hosting=None, model=None, agent_name=None, agent_id=None, yolo=False, train=False)
+    base = dict(
+        hosting=None,
+        model=None,
+        agent_name=None,
+        agent_id=None,
+        yolo=False,
+        train=False,
+    )
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -102,19 +109,26 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_resolve_precedence_agent_wins() -> None:
     agent = cast("AgentData", SimpleNamespace(hosting="anthropic", model="claude"))
     args = _args(hosting="openai", model="gpt-4o")
-    config = cast("ConfigManager", FakeConfigManager({"hosting": "ollama", "model_name": "llama3"}))
+    config = cast(
+        "ConfigManager",
+        FakeConfigManager({"hosting": "ollama", "model_name": "llama3"}),
+    )
     assert resolve_hosting_model(agent, args, config) == ("anthropic", "claude")
 
 
 def test_resolve_precedence_flag_beats_config() -> None:
     args = _args(hosting="openai", model="gpt-4o")
-    config = cast("ConfigManager", FakeConfigManager({"hosting": "ollama", "model_name": "llama3"}))
+    config = cast(
+        "ConfigManager",
+        FakeConfigManager({"hosting": "ollama", "model_name": "llama3"}),
+    )
     assert resolve_hosting_model(None, args, config) == ("openai", "gpt-4o")
 
 
 def test_resolve_precedence_config_fallback() -> None:
     config = cast(
-        "ConfigManager", FakeConfigManager({"hosting": "kimi", "model_name": "moonshot-v1-8k"})
+        "ConfigManager",
+        FakeConfigManager({"hosting": "kimi", "model_name": "moonshot-v1-8k"}),
     )
     assert resolve_hosting_model(None, _args(), config) == ("kimi", "moonshot-v1-8k")
 
@@ -157,7 +171,9 @@ def test_coerce_compaction_passthrough_none_and_typed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dict_compaction_config_flows_through_prompt(tmp_config_dir: Path) -> None:
+async def test_dict_compaction_config_flows_through_prompt(
+    tmp_config_dir: Path,
+) -> None:
     """CL-01 acceptance: ``values.compaction`` as a raw dict (what a real
     ConfigManager returns from YAML) reaches Session and a full prompt runs
     without AttributeError."""
@@ -306,13 +322,14 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
     assert len(Transcript(agent_dir).entries()) > 0  # appended this time
 
 
-# --- Skills degradation --------------------------------------------------------------
+# --- Lazy knowledge degradation ------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_skills_backend_failure_degrades_to_no_skills(tmp_config_dir: Path, capsys) -> None:
-    """CL-18: a backend that raises during index build must degrade to
-    no-skills + a warning, never crash session creation."""
+async def test_knowledge_backend_failure_degrades_to_no_listing(
+    tmp_config_dir: Path, capsys
+) -> None:
+    """A broken semantic backend must not break packaged-guide direct reads."""
     import local_operator.skills.api as skills_api
 
     class BoomBackend:
@@ -338,12 +355,48 @@ async def test_skills_backend_failure_degrades_to_no_skills(tmp_config_dir: Path
     )
     try:
         warnings: list[str] = []
-        hooks = await session_factory._setup_skills(MagicMock(), tmp_config_dir, warnings)
+        hooks = await session_factory._setup_knowledge(
+            MagicMock(), tmp_config_dir, FakeRegistry(tmp_config_dir), warnings
+        )
     finally:
         skills_api.discover_skills = real_discover
         skills_api.SkillIndex = real_index
     assert hooks.index is None
-    assert any("embedder exploded" in w or "Skills unavailable" in w for w in warnings)
+    assert any("embedder exploded" in warning or "Knowledge" in warning for warning in warnings)
+
+
+@pytest.mark.asyncio
+async def test_knowledge_backend_failure_falls_back_to_local_routing(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import local_operator.skills.api as skills_api
+
+    class FailingBackend:
+        dim = 8
+        default_threshold = 0.1
+        model = "broken"
+        base_url = "https://broken.invalid"
+
+        async def embed(self, texts):
+            raise RuntimeError("remote embeddings unavailable")
+
+    monkeypatch.setattr(
+        skills_api,
+        "default_backend_from_env",
+        lambda get_credential, env=None: FailingBackend(),
+    )
+    warnings: list[str] = []
+
+    hooks = await session_factory._setup_knowledge(
+        MagicMock(), tmp_config_dir, FakeRegistry(tmp_config_dir), warnings
+    )
+
+    assert hooks.index is not None
+    block = await session_factory._select_knowledge_block(
+        hooks, "set the default provider and model configuration"
+    )
+    assert "- configuration:" in block
+    assert any("using local routing" in warning for warning in warnings)
 
 
 # --- MCP merge + dispose folding ------------------------------------------------------
@@ -431,7 +484,9 @@ async def test_mcp_merge_on_tools_changed_and_dispose(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_outcome_is_recorded_on_the_session_for_a_ui_to_read(monkeypatch) -> None:
+async def test_mcp_outcome_is_recorded_on_the_session_for_a_ui_to_read(
+    monkeypatch,
+) -> None:
     """A ``print`` to stderr is invisible under a full-screen TUI (alternate
     screen buffer) or corrupts the frame. The structured outcome is recorded on
     the session instead, and it keys failures on the BARE server name — the
@@ -487,7 +542,9 @@ async def test_the_stderr_warning_is_kept_for_headless_and_dropped_under_a_ui(
 
 
 @pytest.mark.asyncio
-async def test_a_hard_discovery_failure_still_degrades_to_zero_mcp_tools(monkeypatch) -> None:
+async def test_a_hard_discovery_failure_still_degrades_to_zero_mcp_tools(
+    monkeypatch,
+) -> None:
     """MCP is enrichment, never a startup requirement. The failure is recorded as
     reportable (unlike a missing SDK, reaching here means the user HAS an MCP
     setup and it is not working), and the session still comes up."""
@@ -770,13 +827,26 @@ def test_resume_latest_with_no_sessions_is_an_honest_error(tmp_path: Path) -> No
     registry = FakeRegistry(tmp_path)
     with pytest.raises(resume_mod.ResumeNotFound, match="no previous session"):
         session_factory._transcript_dir_and_agent_id(
-            None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
+            None,
+            _args(resume=resume_mod.RESUME_LATEST),
+            cast("AgentRegistry", registry),
         )
 
 
 @pytest.mark.parametrize(
     "requested",
-    ["nope", "..", "../../etc", "sub/dir", "", ".", "C:", "C:sessions", "a\\b", "/etc/passwd"],
+    [
+        "nope",
+        "..",
+        "../../etc",
+        "sub/dir",
+        "",
+        ".",
+        "C:",
+        "C:sessions",
+        "a\\b",
+        "/etc/passwd",
+    ],
 )
 def test_resume_id_must_be_a_single_path_component(tmp_path: Path, requested: str) -> None:
     """The id comes straight from argv and is used to build a path.

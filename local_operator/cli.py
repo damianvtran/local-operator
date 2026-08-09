@@ -213,7 +213,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
     config_subparsers = config_parser.add_subparsers(dest="config_command")
     # Open command
     config_subparsers.add_parser(
-        "open", help="Open the configuration file in the default editor", parents=[parent_parser]
+        "open",
+        help="Open the configuration file in the default editor",
+        parents=[parent_parser],
     )
     # Edit command
     config_edit_parser = config_subparsers.add_parser(
@@ -272,7 +274,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Name of the agent to create",
     )
     delete_parser = agents_subparsers.add_parser(
-        "delete", help="Delete an agent (local by name or Radient by ID)", parents=[parent_parser]
+        "delete",
+        help="Delete an agent (local by name or Radient by ID)",
+        parents=[parent_parser],
     )
     delete_group = delete_parser.add_mutually_exclusive_group(required=True)
     delete_group.add_argument(
@@ -405,10 +409,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     mcp_parser = subparsers.add_parser("mcp", help="Manage MCP servers", parents=[parent_parser])
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
     mcp_subparsers.add_parser(
-        "list", help="List configured MCP servers (all sources merged)", parents=[parent_parser]
+        "list",
+        help="List configured MCP servers (all sources merged)",
+        parents=[parent_parser],
     )
     mcp_add_parser = mcp_subparsers.add_parser(
-        "add", help="Add an MCP server (stdio command or http/sse URL)", parents=[parent_parser]
+        "add",
+        help="Add an MCP server (stdio command or http/sse URL)",
+        parents=[parent_parser],
     )
     mcp_add_parser.add_argument("name", type=str, help="Server name")
     mcp_add_parser.add_argument(
@@ -429,7 +437,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Environment variable KEY=VALUE for the stdio server (repeatable)",
     )
     mcp_add_parser.add_argument(
-        "--url", type=str, default=None, help="HTTP/SSE server URL (alternative to --command)"
+        "--url",
+        type=str,
+        default=None,
+        help="HTTP/SSE server URL (alternative to --command)",
     )
     mcp_add_parser.add_argument(
         "--scope",
@@ -439,7 +450,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Config scope to write (default: global ~/.local-operator/mcp.json)",
     )
     mcp_remove_parser = mcp_subparsers.add_parser(
-        "remove", help="Remove an MCP server from a config scope", parents=[parent_parser]
+        "remove",
+        help="Remove an MCP server from a config scope",
+        parents=[parent_parser],
     )
     mcp_remove_parser.add_argument("name", type=str, help="Server name to remove")
     mcp_remove_parser.add_argument(
@@ -693,8 +706,14 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
         print(f"\033[1;32m{left_bar}   • ID: {agent.id}\033[0m")
         print(f"\033[1;32m{left_bar}   • Created: {agent.created_date}\033[0m")
         print(f"\033[1;32m{left_bar}   • Version: {agent.version}\033[0m")
-        print(f"\033[1;32m{left_bar}   • Hosting: {agent.hosting or "default"}\033[0m")
-        print(f"\033[1;32m{left_bar}   • Model: {agent.model or "default"}\033[0m")
+        print(f"\033[1;32m{left_bar}   • Hosting: {agent.hosting or 'default'}\033[0m")
+        print(f"\033[1;32m{left_bar}   • Model: {agent.model or 'default'}\033[0m")
+        if agent.description:
+            print(f"\033[1;32m{left_bar}   • Description: {agent.description}\033[0m")
+        if agent.tags:
+            print(f"\033[1;32m{left_bar}   • Tags: {', '.join(agent.tags)}\033[0m")
+        if agent.categories:
+            print(f"\033[1;32m{left_bar}   • Categories: {', '.join(agent.categories)}\033[0m")
         if not is_last:
             print("\033[1;32m│ │\033[0m")
 
@@ -939,12 +958,18 @@ def _apply_run_in(run_in: Optional[str]) -> Optional[int]:
         return None
     run_in_path = Path(run_in).resolve()
     if not run_in_path.is_dir():
-        print(f"\n\033[1;31mError: Invalid working directory: {run_in}\033[0m", file=sys.stderr)
+        print(
+            f"\n\033[1;31mError: Invalid working directory: {run_in}\033[0m",
+            file=sys.stderr,
+        )
         return -1
     os.chdir(run_in_path)
     # These are OPERATOR notices, not data: they must go to stderr so they
     # never interleave into the `exec --json` event stream on stdout.
-    print(f"\n\033[1;32mSetting working directory to: {run_in_path}\033[0m", file=sys.stderr)
+    print(
+        f"\n\033[1;32mSetting working directory to: {run_in_path}\033[0m",
+        file=sys.stderr,
+    )
     return None
 
 
@@ -1241,7 +1266,10 @@ def main() -> int:
                     now = time.time()
                     print("recent sessions (newest first):", file=sys.stderr)
                     for session_id, mtime in available:
-                        print(f"  {session_id}   {format_age(now - mtime)}", file=sys.stderr)
+                        print(
+                            f"  {session_id}   {format_age(now - mtime)}",
+                            file=sys.stderr,
+                        )
                 return 1
 
         os.environ["LOCAL_OPERATOR_DEBUG"] = "true" if args.debug else "false"

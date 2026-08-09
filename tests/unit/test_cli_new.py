@@ -172,14 +172,19 @@ def test_agents_create_positional(parser: argparse.ArgumentParser) -> None:
     ],
 )
 def test_agents_delete_dests(
-    parser: argparse.ArgumentParser, argv: list[str], name: str | None, agent_id: str | None
+    parser: argparse.ArgumentParser,
+    argv: list[str],
+    name: str | None,
+    agent_id: str | None,
 ) -> None:
     args = parser.parse_args(argv)
     assert args.name == name
     assert args.agent_id == agent_id
 
 
-def test_agents_delete_requires_exclusive_choice(parser: argparse.ArgumentParser) -> None:
+def test_agents_delete_requires_exclusive_choice(
+    parser: argparse.ArgumentParser,
+) -> None:
     with pytest.raises(SystemExit):
         parser.parse_args(["agents", "delete"])
     with pytest.raises(SystemExit):
@@ -399,6 +404,28 @@ def test_agents_list_command_empty() -> None:
     assert agents_list_command(argparse.Namespace(page=1, perpage=10), registry) == 0
 
 
+def test_agents_list_reveals_routing_metadata_only_when_called(capsys) -> None:
+    registry = MagicMock()
+    agent = MagicMock()
+    agent.name = "Database specialist"
+    agent.id = "db-1"
+    agent.created_date = "now"
+    agent.version = "1.0.0"
+    agent.hosting = ""
+    agent.model = ""
+    agent.description = "Tunes PostgreSQL queries"
+    agent.tags = ["postgresql"]
+    agent.categories = ["performance"]
+    registry.list_agents.return_value = [agent]
+
+    assert agents_list_command(argparse.Namespace(page=1, perpage=10), registry) == 0
+
+    output = capsys.readouterr().out
+    assert "Description: Tunes PostgreSQL queries" in output
+    assert "Tags: postgresql" in output
+    assert "Categories: performance" in output
+
+
 def test_agents_create_command_calls_registry() -> None:
     registry = MagicMock()
     created = MagicMock(name="AgentX", id="id-1", created_date="now", version="1.0.0")
@@ -505,7 +532,10 @@ def test_main_interactive_tty_uses_tui(
     fake_tui = types.ModuleType("local_operator.tui")
 
     async def fake_run_tui(
-        session_factory, theme_name: str = "dark", provider_controller=None, resume_factory=None
+        session_factory,
+        theme_name: str = "dark",
+        provider_controller=None,
+        resume_factory=None,
     ) -> int:
         seen["theme"] = theme_name
         seen["session"] = await session_factory()
@@ -682,7 +712,10 @@ def test_main_preflight_env_key_passes(
     fake_tui = types.ModuleType("local_operator.tui")
 
     async def fake_run_tui(
-        session_factory, theme_name="dark", provider_controller=None, resume_factory=None
+        session_factory,
+        theme_name="dark",
+        provider_controller=None,
+        resume_factory=None,
     ) -> int:
         seen.setdefault("provider_controller", provider_controller)
         await session_factory()
@@ -715,7 +748,10 @@ def test_tui_flag_forces_tui_on_non_tty(
     fake_tui = types.ModuleType("local_operator.tui")
 
     async def fake_run_tui(
-        session_factory, theme_name="dark", provider_controller=None, resume_factory=None
+        session_factory,
+        theme_name="dark",
+        provider_controller=None,
+        resume_factory=None,
     ) -> int:
         seen.setdefault("provider_controller", provider_controller)
         seen["ran"] = True

@@ -1,39 +1,17 @@
-"""Semantic skill index: embed skill descriptions, select the relevant ones.
+"""Semantic index for skills, packaged guides, and private routing hints.
 
-This is the deliberate divergence from the common static approach, which lists ALL skill
-descriptions in the system prompt every turn. Here, each turn embeds the user
-message and injects ONLY the top-k descriptions scoring above a threshold
-(docs/REWRITE.md §C). The prompt cost becomes O(relevant skills) instead of
-O(total skills), and the volatile skills block stays small.
+Only short names and descriptions selected above an absolute similarity
+threshold enter the system tail. Full skill and guide bodies stay behind their
+respective URL protocols. Registered-agent hints share the vector machinery but
+are never rendered; they can surface the generic agents guide without exposing
+the registry itself.
 
-Layout:
-
-- ``build()`` embeds ``"<name>: <description>"`` per skill into one
-  :class:`~local_operator.skills.vectors.VectorMatrix` built ONCE and reused
-  for every ``select()`` (vectors are L2-normalized, so inner product ==
-  cosine).
-- Vectors persist at ``cache_dir/<identity>.skills.vec`` with a matching
-  ``<identity>.meta.json``; the identity digest covers the skill roots and
-  the backend (class, model, base_url — not dim; see ``_identity_digest``)
-  so different projects and different embedding models never share a file.
-  Meta records the content
-  hash over the ORDERED ``(name, description, file_path, mtime)`` sequence
-  plus the exact name order; both must match on load (miss → rebuild). The
-  content hash is ALSO embedded inside the vector blob and re-verified after
-  load — meta and vectors can only ever describe each other.
-- ``select()`` never breaks startup: if the primary backend raises, it
-  degrades to the offline :class:`LocalEmbedder` first (memoized for the
-  index lifetime); only if the local fallback also fails does it return ALL
-  non-hidden skills (the static behavior), recording a warning.
-
-Concurrency model: ONE process owns a cache directory at a time. Writes are
-atomic per file (temp file + ``os.replace``, meta last) and the embedded hash
-catches any interleaved leftover, but two processes racing on one directory
-can still ping-pong rebuilds — sessions get private cache dirs for this
-reason.
-
-``hide`` skills are excluded from listings but NOT from reads — the
-``skill://`` protocol resolves them regardless of selection.
+Vectors persist at ``cache_dir/<identity>.skills.vec``. The content hash covers
+the ordered resource type, name, description, file path, and mtime; the matrix
+row order and backend identity must also match before a cache is reused.
+Selection degrades from the configured embedding backend to the deterministic
+local embedder, then to a static listing. Hidden resources remain directly
+readable but never appear in semantic results.
 """
 
 from __future__ import annotations
@@ -53,19 +31,17 @@ logger = logging.getLogger(__name__)
 
 
 def _content_hash(skills: Sequence[Skill]) -> str:
-    """Stable identity of the indexed content, ORDER-sensitive.
+    """Stable identity of indexed resources, including their protocol kind.
 
-    Covers ``(name, description, file_path, mtime)`` in LIST ORDER: matrix
-    rows are positional, so the same skill set in a different order is a
-    different index. Editing a SKILL.md, renaming a skill, swapping roots,
-    or reordering invalidates the cache; a pure rescan of identical content
-    in identical order reuses it.
-
+    Rows are positional. Editing a body, changing a routing description,
+    moving a resource between ``skill``/``guide``/``agent_hint``, or reordering
+    the list must invalidate the matrix.
     """
     digest = hashlib.sha256()
     for skill in skills:
         mtime = skill.file_path.stat().st_mtime_ns if skill.file_path.exists() else 0
         entry = (
+            skill.resource_type,
             skill.name,
             skill.description,
             str(skill.file_path),
@@ -124,23 +100,30 @@ def _backend_meta(backend: EmbeddingBackend) -> Mapping[str, object]:
 
 
 def render_block(skills: list[Skill]) -> str:
-    """Render the volatile ``<skills>`` system-prompt block.
+    """Render selected guides and skills without rendering private hints.
 
-    Exact wire format — one ``- name: description`` line per skill inside
-    a ``<skills>`` tag, preceded by the hard "MUST read before proceeding"
-    rule. Returns ``""`` for an empty list so the volatile block disappears
-    entirely rather than emitting an empty tag.
+    Skill-only output remains byte-compatible. The stable base prompt owns the
+    ``guide://`` protocol rule, so a selected guide costs only its name and
+    short routing description here.
     """
-    if not skills:
-        return ""
-    lines = [
-        "Skills are specialized knowledge. If one matches your task, you MUST read "
-        "`skill://<name>` before proceeding.",
-        "<skills>",
-    ]
-    lines.extend(f"- {skill.name}: {skill.description}" for skill in skills)
-    lines.append("</skills>")
-    return "\n".join(lines)
+    guides = [item for item in skills if item.resource_type == "guide"]
+    user_skills = [item for item in skills if item.resource_type == "skill"]
+    sections: list[str] = []
+    if guides:
+        lines = ["<guides>"]
+        lines.extend(f"- {guide.name}: {guide.description}" for guide in guides)
+        lines.append("</guides>")
+        sections.append("\n".join(lines))
+    if user_skills:
+        lines = [
+            "Skills are specialized knowledge. If one matches your task, you MUST read "
+            "`skill://<name>` before proceeding.",
+            "<skills>",
+        ]
+        lines.extend(f"- {skill.name}: {skill.description}" for skill in user_skills)
+        lines.append("</skills>")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
 
 
 class SkillIndex:
@@ -202,7 +185,7 @@ class SkillIndex:
         return self.cache_dir / f"{self._cache_stem()}.meta.json"
 
     async def build(self, backend: EmbeddingBackend | None = None) -> None:
-        """Embed all skills, using the persisted cache when it matches.
+        """Embed all routable resources, using the persisted cache when it matches.
 
         ``backend`` defaults to the index's own backend; the degradation
         ladder passes the local fallback here when the primary fails. Cache
@@ -224,7 +207,7 @@ class SkillIndex:
         if len(vectors) != len(self.skills):
             raise RuntimeError(
                 f"Embedding backend returned {len(vectors)} vectors for "
-                f"{len(self.skills)} skills"
+                f"{len(self.skills)} resources"
             )
         matrix = VectorMatrix.from_vectors(vectors)
         synthetic = False
