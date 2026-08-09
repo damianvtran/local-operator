@@ -112,6 +112,37 @@ async def test_wait_returns_final_output_when_job_completes(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_wait_spills_large_subagent_handoff_without_losing_it(tmp_path, monkeypatch):
+    """One verbose child must not consume an unbounded slice of parent context."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    report = "\n".join(f"review finding {index}: {'x' * 120}" for index in range(400))
+
+    async def verbose_runner(job_id: str, signal: Any, report_progress) -> str:
+        return report
+
+    manager = AsyncJobManager()
+    job_id = manager.register("task", "verbose review", verbose_runner)
+    context = ToolContext(cwd=str(tmp_path), session_id="parent", jobs=manager)
+    tools = _tools(context)
+
+    waited = await _call(tools, "wait", {"job_id": job_id, "wait_ms": 1000}, context)
+
+    assert waited.is_error is False
+    assert waited.details is not None
+    spill = waited.details["spill"]
+    assert spill["complete"] is True
+    assert spill["handle"] in waited.text
+    assert len(waited.text) < builtin.TOOL_OUTPUT_LIMIT_CHARS + 1_000
+    stored = builtin.get_store().read_lines(spill["handle"])
+    assert stored is not None
+    lines, _total = stored
+    recovered = "\n".join(lines)
+    assert "review finding 0:" in recovered
+    assert "review finding 399:" in recovered
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
 async def test_wait_bounded_by_wait_ms_times_out(tmp_path):
     manager = AsyncJobManager()
     context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager, subagent_launcher=None)
