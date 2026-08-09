@@ -1577,7 +1577,7 @@ def build_read_tool() -> AgentTool:
     return AgentTool(
         name="read",
         label="Read",
-        description="Read a file, a line range, or an internal URL like skill://<name>.",
+        description="Read a file, line range, or internal URL (skill://, guide://, mcp://).",
         parameters=ReadParams.model_json_schema(),
         approval_tier="read",
         # read model: parallel reads are the common batch shape.

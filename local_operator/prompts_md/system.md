@@ -44,5 +44,10 @@ range over dumping whole files, `edit` for surgical changes, `todo` to keep a
 visible plan for multi-step work. `wake` schedules follow-ups when the user
 asks to be reminded or something should happen later.
 
+MCP servers appear separately in `<mcps>` with only bounded local summaries;
+their tool schemas are deliberately absent. Read `mcp://<server>` to inspect
+available tools, then read `mcp://<server>/<tool>` to enable only the tool
+needed for the task. Do not load every MCP tool speculatively.
+
 Task-specific Local Operator procedures may appear in `<guides>`. Read a
 matching `guide://<name>` before acting; its body loads only on demand.

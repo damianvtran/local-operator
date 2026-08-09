@@ -396,6 +396,74 @@ async def test_transport_retries_honor_budget_same_key_first() -> None:
     assert len(auth.rotations) == 1  # rotation only after the budget is spent
 
 
+async def test_long_rate_limit_retry_after_rotates_without_sleep(monkeypatch) -> None:
+    """A quota-reset header must not freeze an interactive session for minutes."""
+    attempts: list[str | None] = []
+    sleeps: list[int] = []
+
+    def rate_limited(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts.append(api_key)
+        raise ProviderError(429, "quota reset pending", retryable=True, retry_after_ms=600_000)
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(rate_limited)
+
+    auth = FakeAuth({"openai": ["k1", "k2"]})
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(
+            _request(),
+            auth,
+            {"retry": {"baseDelayMs": 1, "maxRetries": 10, "fallbackChains": {}}},
+            client_for,
+        ):
+            pass
+
+    assert excinfo.value.status == 429
+    assert attempts == ["k1", "k2"]
+    assert sleeps == []
+    assert [key for _provider, key in auth.rotations] == ["k1", "k2"]
+
+
+async def test_short_rate_limit_retries_once_per_credential(monkeypatch) -> None:
+    """Brief throttles get one chance, not the generic ten-retry budget."""
+    attempts: list[str | None] = []
+    sleeps: list[int] = []
+
+    def rate_limited(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts.append(api_key)
+        raise ProviderError(429, "brief throttle", retryable=True, retry_after_ms=5)
+
+    async def record_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", record_sleep)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(rate_limited)
+
+    auth = FakeAuth({"openai": ["k1", "k2"]})
+    with pytest.raises(ProviderError):
+        async for _ in stream_with_failover(
+            _request(),
+            auth,
+            {"retry": {"baseDelayMs": 1, "maxRetries": 10, "fallbackChains": {}}},
+            client_for,
+        ):
+            pass
+
+    assert attempts == ["k1", "k1", "k2", "k2"]
+    assert len(sleeps) == 2
+
+
 async def test_403_rotates_once_per_credential_no_double_rotation() -> None:
     """PR-04/26: a 403 must go through resolve_next_key ONLY — one
     rotate_sibling per failed credential, never the old direct double rotate."""
