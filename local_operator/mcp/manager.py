@@ -571,6 +571,15 @@ class McpManager:
             tools.extend(server_tools)
         return sorted(tools, key=lambda tool: tool.name)
 
+    def get_server_tools(self, name: str) -> list[AgentTool]:
+        """One server's registered tools, sorted without exposing internals.
+
+        Lazy MCP discovery uses this public view to render ``mcp://`` resources
+        and activate selected schemas. Returning a copy prevents resolver code
+        from mutating the manager's live inventory.
+        """
+        return sorted(self._tools_by_server.get(name, ()), key=lambda tool: tool.name)
+
     def get_connection(self, name: str) -> ServerConnection | None:
         return self._connections.get(name)
 
