@@ -16,7 +16,9 @@ transcript-directory decision, so the rule has one definition.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import NamedTuple
 
 #: ``--resume`` with no id. A sentinel rather than a second boolean flag so the
 #: whole "which session" decision stays ONE value threaded through one parameter.
@@ -26,6 +28,15 @@ RESUME_LATEST = "@latest"
 #: recency ordering is read from: a directory's own mtime moves for reasons that
 #: are not turns (retention sweeps touch it), so it is not the clock to use.
 TRANSCRIPT_NAME = "transcript.jsonl"
+
+#: How much of the opening message a session name may keep. Long enough to tell
+#: two days' work apart, short enough that a column of them still scans.
+NAME_MAX_CHARS = 64
+
+#: Bytes of a transcript the name scan will read before giving up. A name is a
+#: convenience; a pathological first line (a pasted file, a base64 image) must
+#: not turn opening the picker into reading megabytes off disk for every row.
+NAME_SCAN_BYTES = 64_000
 
 
 class ResumeNotFound(Exception):
@@ -128,3 +139,110 @@ def format_age(seconds: float) -> str:
         if seconds >= size:
             return f"{int(seconds // size)}{unit} ago"
     return "just now"
+
+
+class SessionRow(NamedTuple):
+    """One pickable conversation: what it was about, when, and its id.
+
+    The id alone is what the recovery list used to offer, and a column of
+    12-hex strings is not something anyone recognises their own work in. The
+    name is the part a human picks by; the id is what the machine resumes.
+    """
+
+    id: str
+    mtime: float
+    name: str
+
+
+def session_name(session_dir: Path, *, max_chars: int = NAME_MAX_CHARS) -> str:
+    """A conversation's display name: its opening user message, on one line.
+
+    Read from the TRANSCRIPT rather than from a stored title because there is
+    no stored title: ``ConversationName`` lives in memory for the life of a
+    session and is never journalled, so the only per-session name on disk is
+    what the user actually typed first. That turns out to be the better name
+    anyway — it is the thing the user remembers about the session.
+
+    Deliberately tolerant. This runs over every session directory to paint a
+    picker, so a transcript that is truncated, half-written by a session still
+    running, or corrupt yields ``""`` and a nameless row rather than taking
+    the picker down. The scan also stops at the first user message and at
+    :data:`NAME_SCAN_BYTES`, so it costs one short read per session instead of
+    a full parse of a file that can be hundreds of kilobytes.
+    """
+    transcript = session_dir / TRANSCRIPT_NAME
+    scanned = 0
+    try:
+        with transcript.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                scanned += len(line)
+                if scanned > NAME_SCAN_BYTES:
+                    return ""
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    # A partial final line is normal for a session that is
+                    # still running: the writer appends, we may read mid-write.
+                    continue
+                if not isinstance(entry, dict) or entry.get("type") != "message":
+                    continue
+                payload = entry.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                # ``role`` is matched EXACTLY: a tool result is also a
+                # four-character role and carries the tool's output, which
+                # would name the conversation after a directory listing.
+                if payload.get("role") != "user":
+                    continue
+                text = _first_text(payload.get("content"))
+                if text:
+                    return _condense(text, max_chars)
+    except OSError:
+        return ""
+    return ""
+
+
+def _first_text(content: object) -> str:
+    """The first text part of a persisted message's content list."""
+    if not isinstance(content, list):
+        return ""
+    for part in content:
+        if isinstance(part, dict):
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                return text
+    return ""
+
+
+def _condense(text: str, max_chars: int) -> str:
+    """One line, no runs of whitespace, ellipsised at ``max_chars``.
+
+    A prompt is usually several lines and often starts with a pasted block;
+    the picker has one row per session, so the name has to survive being cut.
+    """
+    flat = " ".join(text.split())
+    if len(flat) <= max_chars:
+        return flat
+    # Cut on a word boundary when one is close to the limit, so the name ends
+    # on a word rather than mid-token.
+    cut = flat[: max_chars - 1]
+    spaced = cut.rsplit(" ", 1)[0]
+    if len(spaced) >= max_chars - 12:
+        cut = spaced
+    return cut.rstrip(" ,.;:") + "…"
+
+
+def recent_session_rows(config_dir: Path, limit: int = 10) -> list[SessionRow]:
+    """:class:`SessionRow` per resumable session, newest first.
+
+    Layered over :func:`recent_sessions` rather than replacing it: the CLI's
+    recovery listing wants only ``(id, mtime)`` and must stay as cheap as it
+    is, while the picker pays one extra short read per row for the name.
+    """
+    return [
+        SessionRow(session_id, mtime, session_name(config_dir / "sessions" / session_id))
+        for session_id, mtime in recent_sessions(config_dir, limit)
+    ]

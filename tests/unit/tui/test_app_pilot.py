@@ -7,6 +7,7 @@ paints first, then awaits the session in a worker.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -18,6 +19,7 @@ from local_operator.tui.app import BOOT_LAYOUT_CLASS, SLASH_COMMANDS, OperatorAp
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.toast import Toast
+from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from local_operator.tui.widgets.welcome import WelcomeView
@@ -2106,23 +2108,49 @@ def _resume_factory(boots: list[str]):
     return resume_factory
 
 
-def _seed_session(tmp_path: Path, session_id: str) -> None:
+def _seed_session(tmp_path: Path, session_id: str, prompt: str = "") -> None:
     """Lay down one resumable session transcript under a temp config dir.
 
     ``recent_sessions`` globs ``<config_dir>/sessions/*`` for transcripts, so
     a real file is the only honest way to make the listing and the resume
     both resolve — same convention the ``--resume`` CLI path trusts.
+
+    ``prompt`` writes a real opening user message, which is what the picker
+    names the row by; without one the session is legitimately nameless.
     """
     sess_dir = tmp_path / "sessions" / session_id
     sess_dir.mkdir(parents=True, exist_ok=True)
-    (sess_dir / "transcript.jsonl").write_text("")
+    body = ""
+    if prompt:
+        body = (
+            json.dumps(
+                {
+                    "id": "e1",
+                    "ts": 0,
+                    "type": "message",
+                    "payload": {
+                        "kind": "message",
+                        "role": "user",
+                        "content": [{"text": prompt}],
+                    },
+                }
+            )
+            + "\n"
+        )
+    (sess_dir / "transcript.jsonl").write_text(body)
 
 
 @pytest.mark.asyncio
-async def test_resume_lists_recent_sessions_without_a_boot(tmp_path, monkeypatch) -> None:
-    """A bare ``/resume`` lists resumable sessions rather than resuming one."""
+async def test_a_bare_resume_opens_the_picker_naming_each_session(tmp_path, monkeypatch) -> None:
+    """A bare ``/resume`` opens the picker instead of printing ids.
+
+    The old behaviour dumped ``<hex id>  3h ago`` rows into the transcript,
+    which pushed the conversation up, could not be navigated, and left the
+    user to retype an id read off the scrollback. The picker is a two-way
+    surface and names each row by its opening message.
+    """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    _seed_session(tmp_path, "aabbcc")
+    _seed_session(tmp_path, "aabbcc", prompt="Make an asteroids game")
 
     session = FakeSession()
     boots: list[str] = []
@@ -2130,7 +2158,7 @@ async def test_resume_lists_recent_sessions_without_a_boot(tmp_path, monkeypatch
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
     )
-    async with app.run_test(size=(80, 24)) as pilot:
+    async with app.run_test(size=(90, 24)) as pilot:
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
@@ -2138,9 +2166,58 @@ async def test_resume_lists_recent_sessions_without_a_boot(tmp_path, monkeypatch
         await pilot.pause()
         await pilot.pause()
         assert boots == [], "a bare /resume must not boot a session"
-        text = _transcript_text(app)
-        assert "aabbcc" in text, text
-        assert "recent sessions" in text, text
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen)
+        card = "\n".join(picker.render_lines_for_test())
+        # Named by the opening message, not just listed by id.
+        assert "Make an asteroids game" in card, card
+        assert "aabbcc" in card, card
+
+
+@pytest.mark.asyncio
+async def test_choosing_in_the_picker_resumes_that_session(tmp_path, monkeypatch) -> None:
+    """Enter on a row is what actually resumes it — the picker's whole job."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "aabbcc", prompt="the only session")
+
+    session = FakeSession()
+    boots: list[str] = []
+    app = OperatorApp(
+        lambda: _factory(session),
+        resume_factory=_resume_factory(boots),
+    )
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+    assert boots == ["aabbcc"], boots
+
+
+@pytest.mark.asyncio
+async def test_escaping_the_picker_resumes_nothing(tmp_path, monkeypatch) -> None:
+    """A cancelled picker leaves the session on screen exactly as it was."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "aabbcc", prompt="the only session")
+
+    session = FakeSession()
+    boots: list[str] = []
+    app = OperatorApp(
+        lambda: _factory(session),
+        resume_factory=_resume_factory(boots),
+    )
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+    assert boots == [], boots
 
 
 @pytest.mark.asyncio
@@ -2227,3 +2304,116 @@ async def test_a_tall_usage_overlay_never_scrolls_the_screen_or_steals_width() -
         # And the card's own content box still gets every row it composed:
         # the pinned height carries the padding, it does not eat the footer.
         assert panel.size.height == len(panel.render_lines_for_test())
+
+
+# --- the boot default: is it settable, and did it land -----------------------
+
+
+def _unwrapped(text: str) -> str:
+    """Text with all whitespace removed.
+
+    The transcript wraps a notice to the widget's width, breaking both prose and
+    a tmp-dir path across lines. Comparing what was WRITTEN with what was
+    RENDERED has to ignore the wrap, or the assertion is really about whichever
+    terminal size the test happened to pick.
+    """
+    return "".join(text.split())
+
+
+@pytest.mark.asyncio
+async def test_a_bare_model_names_the_current_pair_and_the_command_that_keeps_it() -> None:
+    """The complaint this closes: nothing on the model surfaces said a default
+    existed, so `/model default` was reachable only by already knowing the word.
+    Both the notice above the list and the list's own footer now say it."""
+    session = _SwitchableSession()
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model")
+        await pilot.pause()
+        await pilot.pause()
+        text = _transcript_text(app)
+        picker = app.query_one(Editor).model_picker
+        footer = picker.render_text(90).plain.split("\n")[-1]
+    # The subject of the sentence: "make THIS the default" needs a this.
+    assert "openrouter/deepseek/deepseek-chat" in _unwrapped(text), text
+    assert _unwrapped("/model default") in _unwrapped(text), text
+    assert _unwrapped("boot default") in _unwrapped(text), text
+    # …and the list itself, which is the surface the user is actually reading.
+    assert "/model default" in footer, footer
+
+
+@pytest.mark.asyncio
+async def test_a_switch_admits_it_is_session_only_and_names_the_persist_command() -> None:
+    """A switch that looks permanent and is not is the actual bug: the old
+    "(next turn)" said WHEN it applied and never said for how long, so the next
+    launch coming back on the old model read as the switch having been lost."""
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        text = _transcript_text(app)
+    assert _unwrapped("this session") in _unwrapped(text), text
+    assert _unwrapped("/model default") in _unwrapped(text), text
+    # The access clause is unchanged by the new one sharing the line.
+    assert _unwrapped("anthropic logged in") in _unwrapped(text), text
+
+
+@pytest.mark.asyncio
+async def test_model_default_confirms_both_keys_and_the_file_it_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare "saved" is a claim the user cannot check without relaunching.
+    The provider is the half that rides along silently — it is written from the
+    selector's left side and never typed as a setting of its own."""
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # A file on disk, so ConfigManager builds its own Config rather than handing
+    # back (and mutating) the module-level DEFAULT_CONFIG singleton.
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model default anthropic/claude-opus-5")
+        await pilot.pause()
+        text = _transcript_text(app)
+    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert written["hosting"] == "anthropic", written
+    assert written["model_name"] == "claude-opus-5", written
+    # What it wrote, under the names the config file uses…
+    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+    # …and where, so the user can go and read or undo it.
+    assert str(tmp_path / "config.yml") in _unwrapped(text), text
+
+
+@pytest.mark.asyncio
+async def test_model_default_alone_persists_the_model_already_in_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sentence a user has right after switching is "make THIS the default".
+    Answering it used to mean retyping the selector back at the app, which is the
+    transcription step that made the default feel like a separate, hidden system."""
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _SwitchableSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        app._run_slash_command("/model default")
+        await pilot.pause()
+        text = _transcript_text(app)
+    written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert (written["hosting"], written["model_name"]) == ("anthropic", "claude-opus-5"), written
+    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text

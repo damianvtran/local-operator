@@ -469,3 +469,46 @@ async def test_the_footer_is_separated_from_the_last_meter() -> None:
         rows = panel.render_lines_for_test()
     assert rows[-1].startswith("1 window")  # the footer
     assert rows[-2] == ""  # the quiet row above it
+
+
+class _Wheel:
+    """The only thing the scroll handlers use from a Textual event."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+@pytest.mark.asyncio
+async def test_the_mouse_wheel_scrolls_the_report_and_clamps() -> None:
+    """The card is read, not picked from, so the wheel moves the WINDOW. It
+    clamps at both ends for the same reason the keys do: a quota list has a
+    top and a bottom that mean something."""
+    async with _panel_app() as panel:
+        panel.show_reports(_many_reports())
+        assert panel.view_offset == 0
+        panel.on_mouse_scroll_down(_Wheel())
+        assert panel.view_offset == 1
+        for _ in range(500):
+            panel.on_mouse_scroll_down(_Wheel())
+        bottom = panel.view_offset
+        assert bottom > 1
+        panel.on_mouse_scroll_down(_Wheel())
+        assert panel.view_offset == bottom  # clamped, never wrapped
+        for _ in range(500):
+            panel.on_mouse_scroll_up(_Wheel())
+        assert panel.view_offset == 0
+
+
+@pytest.mark.asyncio
+async def test_the_wheel_is_stopped_so_the_transcript_behind_stays_put() -> None:
+    """The card floats over the conversation; an un-stopped wheel would move
+    both surfaces for one gesture."""
+    async with _panel_app() as panel:
+        panel.show_reports(_many_reports())
+        down, up = _Wheel(), _Wheel()
+        panel.on_mouse_scroll_down(down)
+        panel.on_mouse_scroll_up(up)
+    assert down.stopped and up.stopped

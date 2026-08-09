@@ -412,6 +412,21 @@ class ModelPicker(Static):
         self._scroll_to_selection()
         self._repaint()
 
+    def scroll_rows(self, delta: int) -> None:
+        """Move the highlight by ``delta`` rows for a WHEEL notch, clamped.
+
+        Deliberately not :meth:`move`: that wraps, which is right for an arrow
+        key (a deliberate, discrete press) and wrong for a wheel. A scroll
+        gesture that silently teleports from the bottom of a 300-model list
+        back to the top reads as the list having reset itself — the same
+        reason :meth:`page` clamps.
+        """
+        if not self._matches:
+            return
+        self._selected = max(0, min(len(self._matches) - 1, self._selected + delta))
+        self._scroll_to_selection()
+        self._repaint()
+
     def choose(self, index: int) -> None:
         """Highlight ``index`` and hand its row to the editor."""
         if not 0 <= index < len(self._matches):
@@ -600,6 +615,18 @@ class ModelPicker(Static):
         index = self._index_at(event.y)
         if index is not None:
             self.choose(index)
+
+    # The wheel is stopped here rather than left to bubble: this card floats
+    # over the transcript, and without `stop()` a scroll aimed at the list
+    # also scrolls the conversation behind it, which moves two surfaces for
+    # one gesture.
+    def on_mouse_scroll_down(self, event) -> None:  # noqa: ANN001 - Textual event type
+        event.stop()
+        self.scroll_rows(1)
+
+    def on_mouse_scroll_up(self, event) -> None:  # noqa: ANN001 - Textual event type
+        event.stop()
+        self.scroll_rows(-1)
 
     def _index_at(self, y: int) -> int | None:
         """Match index under a widget-relative row, or None for the footer."""

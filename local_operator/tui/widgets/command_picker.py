@@ -555,6 +555,27 @@ class CommandPicker(Static):
         self._scroll_to_selection()
         self._repaint()
 
+    def scroll_rows(self, delta: int) -> None:
+        """Move the highlight by ``delta`` rows for a WHEEL notch, clamped.
+
+        Deliberately not :meth:`move`: that wraps, which suits a discrete
+        arrow press and not a scroll gesture — a wheel that teleports from the
+        last row back to the first reads as the menu having reset itself.
+
+        ``_chosen_by_hand`` is set for the same reason :meth:`move` sets it: a
+        wheel notch is the user reading the list and landing on a row, which
+        is exactly the deliberate choice the ambiguity check looks for.
+        """
+        if not self._matches:
+            return
+        target = max(0, min(len(self._matches) - 1, self._selected + delta))
+        if target == self._selected:
+            return
+        self._selected = target
+        self._chosen_by_hand = True
+        self._scroll_to_selection()
+        self._repaint()
+
     def dismiss(self) -> None:
         """Hide the picker for the CURRENT word without touching the text."""
         self._dismissed_query = self._query
@@ -583,6 +604,17 @@ class CommandPicker(Static):
         index = self._index_at(event.y)
         if index is not None:
             self.choose(index)
+
+    # Stopped for the same reason the click is: the menu floats over the
+    # transcript, so a wheel left to bubble scrolls the conversation behind
+    # it as well — two surfaces moving for one gesture.
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        event.stop()
+        self.scroll_rows(1)
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        event.stop()
+        self.scroll_rows(-1)
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
         index = self._index_at(event.y)

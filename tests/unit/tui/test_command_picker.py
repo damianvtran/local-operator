@@ -231,7 +231,13 @@ def test_primary_column_aligns_descriptions() -> None:
     # this width. "List MCP servers" was neither — `mcp` is the 13th of 15
     # commands and never rendered, which the old subset-tolerant assertion
     # silently accepted.
-    probes = ("List all commands", "Quit the app", "Show or switch model (provider/id)")
+    #
+    # Taken from the command table rather than written out: descriptions get
+    # reworded whenever a command gains a capability (``/model`` and
+    # ``/resume`` both changed in one afternoon), and an alignment test that
+    # is not about wording must not fail for it. The first three commands are
+    # always inside the window.
+    probes = tuple(command.description for command in SLASH_COMMANDS[:3])
     rows = [row.plain for row in picker.render_rows(200)]
     text = "\n".join(rows)
     missing = [probe for probe in probes if probe not in text]
@@ -1354,3 +1360,69 @@ async def test_the_names_align_with_the_text_the_editor_is_completing() -> None:
         typed = next(line for line in lines if "/login" in line)
         row = next(line for line in lines if "alibaba" in line)
         assert typed.index("/login") == row.index("alibaba")
+
+
+# -- mouse wheel -------------------------------------------------------------
+
+
+class _Wheel:
+    """The only thing the scroll handlers use from a Textual event."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_the_wheel_moves_the_highlight_one_row_at_a_time() -> None:
+    picker = _picker(SLASH_COMMANDS)
+    picker.sync("/")
+    assert picker.selected_index == 0
+    picker.on_mouse_scroll_down(_Wheel())
+    assert picker.selected_index == 1
+    picker.on_mouse_scroll_up(_Wheel())
+    assert picker.selected_index == 0
+
+
+def test_the_wheel_clamps_where_the_arrows_wrap() -> None:
+    """``move`` wraps, which suits a discrete arrow press. A wheel gesture that
+    jumped from the last command back to the first reads as the menu having
+    reset itself."""
+    picker = _picker(SLASH_COMMANDS)
+    picker.sync("/")
+    last = len(picker.suggestions()) - 1
+    for _ in range(last + 10):
+        picker.on_mouse_scroll_down(_Wheel())
+    assert picker.selected_index == last
+    for _ in range(last + 10):
+        picker.on_mouse_scroll_up(_Wheel())
+    assert picker.selected_index == 0
+    # The arrow key still wraps: the wheel path must not have changed it.
+    picker.move(-1)
+    assert picker.selected_index == last
+
+
+def test_the_wheel_scrolls_the_argument_submenu_too() -> None:
+    """The same widget renders a command's ARGUMENT choices, so the submenu
+    has to scroll by the same gesture — it is the surface the user is looking
+    at when they reach for the wheel."""
+    picker = _argument_picker(PROVIDER_CHOICES)
+    assert len(picker.suggestions()) > 1
+    picker.on_mouse_scroll_down(_Wheel())
+    assert picker.selected_index == 1
+
+
+def test_the_wheel_is_stopped_so_the_transcript_behind_stays_put() -> None:
+    picker = _picker(SLASH_COMMANDS)
+    picker.sync("/")
+    down, up = _Wheel(), _Wheel()
+    picker.on_mouse_scroll_down(down)
+    picker.on_mouse_scroll_up(up)
+    assert down.stopped and up.stopped
+
+
+def test_the_wheel_on_a_closed_picker_is_a_no_op() -> None:
+    picker = _picker(SLASH_COMMANDS)
+    picker.on_mouse_scroll_down(_Wheel())  # must not raise
+    assert picker.suggestions() == []

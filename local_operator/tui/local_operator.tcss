@@ -682,3 +682,33 @@ TrajectoryScreen .trajectory {
     color: $lo-fg;
 }
 
+
+/* ── /resume session picker ────────────────────────────────────────────── *
+ *
+ * The same floating read surface as the trajectory modal (overlay ramp,
+ * borderless, content-sized, Esc to dismiss) because it answers the same
+ * shape of question — read a list, pick a row. It differs in being two-way:
+ * it owns a cursor and hands an id back to the caller.
+ *
+ * `max-width` rather than a fixed width so an 80-column terminal gets the
+ * card it can hold; the widget measures its own columns against PICKER_WIDTH
+ * and truncates the name, which is the one column that can give up cells. */
+SessionPickerScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+SessionPickerScreen .session-picker {
+    width: auto;
+    height: auto;
+    max-width: 80;
+    max-height: 80%;
+    background: $lo-overlay;
+    padding: 1 2;
+}
+
+#session-picker-body {
+    width: auto;
+    height: auto;
+    color: $lo-fg;
+}

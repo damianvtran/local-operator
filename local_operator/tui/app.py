@@ -79,6 +79,7 @@ from local_operator.tui.widgets.editor import (
 )
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
+from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.toast import Toast, format_mcp_startup
 from local_operator.tui.widgets.todo_panel import TodoPanel
@@ -117,10 +118,14 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("reload", "Retry starting the session"),
     SlashCommand(
         "resume",
-        "List recent sessions, or resume one (id)",
+        "Pick a past conversation to resume, or resume one (id)",
         aliases=("recall",),
     ),
-    SlashCommand("model", "Show or switch model (provider/id)", aliases=("models",)),
+    SlashCommand(
+        "model",
+        "Switch model (provider/id); /model default persists it",
+        aliases=("models",),
+    ),
     SlashCommand("provider", "List providers and their login/usage state"),
     SlashCommand("accounts", "List stored credentials"),
     SlashCommand("usage", "Show provider usage quota"),
@@ -134,6 +139,14 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("logout", "Remove stored provider credentials"),
 ]
 
+
+#: Footer clause carried by every paint of the model list. The picker is the
+#: surface a user is looking at while deciding which model to be on, and it was
+#: the one place that never admitted the decision expires with the session —
+#: ``/model default`` was findable only by already knowing the word. It sits
+#: LAST because the footer truncates: the access note ahead of it is the clause
+#: a user can act on right now.
+PERSIST_FOOTER_HINT = "/model default saves the boot default"
 
 #: ``/loop`` defaults and hard ceiling. A loop spends real tokens per
 #: iteration, so it is bounded by construction — an unbounded "keep going"
@@ -164,6 +177,12 @@ JOB_POLL_INTERVAL_S = 1.0
 #: little longer because our first press also has to be READ — it prints the
 #: resume command — where omp's only clears the editor.)
 DOUBLE_INTERRUPT_WINDOW_S = 1.5
+
+#: Sessions the ``/resume`` picker offers. Higher than the recovery listing's
+#: ten because the picker can scroll and filter, and a conversation from a
+#: fortnight ago is exactly the one worth searching for; low enough that
+#: opening it never costs more than a few dozen short transcript reads.
+RESUME_PICKER_LIMIT = 50
 
 #: Class the Screen carries while the session has no content. It selects the
 #: boot layout in the stylesheet (centred, clamped input card) and is flipped in
@@ -584,44 +603,64 @@ class OperatorApp(App[None]):
         await self._boot_session()
 
     def _cmd_resume(self, arg: str, notice: NoticeFn) -> None:
-        """``/resume`` — list recent sessions; ``/resume <id>`` — resume one.
+        """``/resume`` — pick a conversation; ``/resume <id>`` — resume one.
 
-        A bare ``/resume`` lists the resumable sessions (newest first, with
-        age) as a notice — the pickable list the recovery question actually
-        needs, in the same grammar ``--resume`` reports on exit. An id (or the
-        ``@latest`` sentinel) rebinds the session factory to one that boots
-        THAT session and reloads, so the TUI can jump between conversations
-        without a shell round-trip. Without a CLI-provided resume factory the
-        resume path is unavailable and only the listing is offered.
+        A bare ``/resume`` opens :class:`SessionPickerScreen`: choosing a past
+        conversation is a two-way question, so it gets a surface that can hold
+        a cursor and hand an answer back, rather than a block of ids printed
+        into the transcript that the user then has to read and retype. Rows
+        are named by their opening message, because a column of hex ids is not
+        something anyone recognises their own work in.
+
+        An explicit id (or the ``@latest`` sentinel) skips the picker
+        entirely — a user who already knows which session they want, or who is
+        replaying a command from their shell history, should not be made to
+        answer a prompt. Without a CLI-provided resume factory the resume path
+        is unavailable and the command says so instead of opening a picker
+        whose every choice would fail.
         """
+        import time
+
         from local_operator.paths import config_dir
-        from local_operator.resume import RESUME_LATEST, format_age, recent_sessions
+        from local_operator.resume import RESUME_LATEST, recent_session_rows
 
         if self._resume_factory is None:
             notice("resume requires a resume-capable launcher — see CLI", "warning")
-        recent = recent_sessions(config_dir(), limit=10)
-        if not recent:
-            notice("no previous sessions to resume", "warning")
             return
+
         if not arg:
-            now = float(__import__("time").time())
-            lines = ["recent sessions — /resume <id> to open one:"]
-            for session_id, mtime in recent:
-                lines.append(f"  {session_id}   {format_age(now - mtime)}")
-            notice("\n".join(lines), "note")
+            rows = recent_session_rows(config_dir(), limit=RESUME_PICKER_LIMIT)
+            if not rows:
+                notice("no previous sessions to resume", "warning")
+                return
+
+            def _resume_choice(session_id: str | None) -> None:
+                # Dismissed with Esc (or on an empty filter) — the session on
+                # screen is left exactly as it was, with nothing said: a
+                # cancelled picker is not an event worth a transcript line.
+                if session_id:
+                    self._resume_session(session_id, notice)
+
+            self.push_screen(SessionPickerScreen(rows, time.time()), _resume_choice)
             return
+
         # ``@latest`` is the oldest part of the CLI vocabulary (--resume
         # accepts it), so the sentinel must survive verbatim: resume.py only
         # resolves the newest session on an EXACT ``RESUME_LATEST`` match.
         # A bare arg is the same request, spelled the way a user would type it
         # without remembering the symbol.
-        resume_id = arg.strip() or RESUME_LATEST
+        self._resume_session(arg.strip() or RESUME_LATEST, notice)
+
+    def _resume_session(self, resume_id: str, notice: NoticeFn) -> None:
+        """Rebind the factory to ``resume_id`` and reboot onto that session.
+
+        Shared by the picker and by ``/resume <id>`` so both paths reload
+        identically. Failures inside the new factory surface through
+        ``_on_boot_failed`` exactly as a bad ``--resume`` does.
+        """
         if self._resume_factory is None:
             notice("resume unavailable: no resume-capable launcher", "warning")
             return
-        # Rebind the factory so the reload boots the named session, then reuse
-        # the same teardown/reboot path as /reload. Failures inside the new
-        # factory surface through _on_boot_failed exactly as a bad --resume does.
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         notice(f"resuming session {resume_id}…")
         self.run_worker(self._reload_session(), thread=False, group="session")
@@ -1505,12 +1544,19 @@ class OperatorApp(App[None]):
         on the status band, and the question a user actually has at that moment is
         "which models can I switch to", which they had no way to ask. The label is
         still reported, as the picker's current-row marker.
+
+        Every route out of here names ``/model default``, because a switch is
+        SESSION-scoped and does not look it. The user who picks a model has just
+        answered "which model do I want", the app confirms the switch, and nothing
+        on screen says the next launch comes back on the old one — so the command
+        that fixes that was reachable only by already knowing it existed.
         """
         session = self._session
         if not arg:
+            notice(self._persist_hint_notice())
             self._open_model_picker()
             return
-        # ``/model default <provider>/<id>`` PERSISTS the choice as the boot
+        # ``/model default [<provider>/<id>]`` PERSISTS the choice as the boot
         # default (config ``hosting`` + ``model_name``), so later launches
         # open on it. Distinct from ``/model <p>/<id>``, which only switches
         # the running session: the user phrase "make this the default" has no
@@ -1518,14 +1564,23 @@ class OperatorApp(App[None]):
         # am I on". Writing config here keeps the one-word habit — ``/model
         # default openrouter/deepseek/deepseek-chat`` — and the live switch
         # stays available on the same command.
-        persist_default = arg.lower().startswith("default ")
+        lowered = arg.lower()
+        persist_default = lowered == "default" or lowered.startswith("default ")
         target = arg[len("default ") :].strip() if persist_default else arg
-        if persist_default and not target:
-            notice("usage: /model default <provider>/<model-id>", "warning")
-            return
         if session is None or not hasattr(session, "set_model"):
             notice("session is still starting…", "warning")
             return
+        if persist_default and not target:
+            # Bare ``/model default`` means "keep the one I am on". Demanding the
+            # selector back was the gap behind "how do I even set a default": the
+            # sentence a user has right after switching is "make THIS the
+            # default", and answering it by retyping
+            # `openrouter/deepseek/deepseek-chat` is a transcription exercise the
+            # app can do for itself off the session's own label.
+            target = session.model_label
+            if not target:
+                notice("usage: /model default <provider>/<model-id>", "warning")
+                return
         provider, sep, model_id = target.partition("/")
         if not sep or not model_id:
             notice(
@@ -1552,6 +1607,7 @@ class OperatorApp(App[None]):
         old_label = session.model_label
         session.set_model(spec)
         persist_result: str | None = None
+        saved_to = ""
         if persist_default:
             # Persist as the boot default. Written independently of the live
             # switch above so the two stay composable (``/model default p/m``
@@ -1568,6 +1624,7 @@ class OperatorApp(App[None]):
                 manager = ConfigManager(config_dir())
                 manager.set_config_value("hosting", provider)
                 manager.set_config_value("model_name", model_id)
+                saved_to = _home_relative(str(manager.config_file))
             except Exception as error:  # config write failure
                 persist_result = f"model switched, but could not save default: {error}"
         if self._status is not None:
@@ -1583,11 +1640,40 @@ class OperatorApp(App[None]):
         if persist_result is not None:
             notice(persist_result, "warning")
         elif persist_default:
-            notice(f"default model saved: {provider}/{model_id} (next launch){suffix}")
+            # Names both halves, the file and the keys. "saved" alone is a claim
+            # the user cannot check without quitting and relaunching, and the
+            # PROVIDER is the half that rides along silently — it is written from
+            # the selector's left side, never typed as its own setting.
+            notice(
+                f"boot default saved to {saved_to}: hosting {provider}, "
+                f"model_name {model_id} (used from the next launch){suffix}"
+            )
         else:
-            notice(f"model: {old_label} → {session.model_label} (next turn){suffix}")
+            # "(next turn)" alone read as permanent — the complaint behind this
+            # wording. The scope and the one command that widens it belong on the
+            # line that announces the switch, not in documentation the user would
+            # have to already suspect exists.
+            notice(
+                f"model: {old_label} → {session.model_label} (this session, from the "
+                f"next turn){suffix} — /model default to make it the boot default"
+            )
         if warning:
             notice(warning, "warning")
+
+    def _persist_hint_notice(self) -> str:
+        """The line a bare ``/model`` prints above the list.
+
+        It says the one thing the picker cannot: that a pick is session-scoped
+        until ``/model default`` writes it, and that "the default" is a provider
+        AND a model, not two separate settings to hunt for. The current label is
+        repeated here even though the status band carries it, because it is the
+        subject of the sentence — "make THIS the default" needs a this.
+        """
+        session = self._session
+        label = session.model_label if session is not None else ""
+        if not label:
+            return "/model default saves the provider and model you pick as the boot default"
+        return f"model: {label} — /model default saves this provider and model as the boot default"
 
     def _model_access_note(self, provider: str) -> tuple[str, str | None]:
         """``(suffix, warning)`` answering "can I actually run this model now".
@@ -1670,7 +1756,9 @@ class OperatorApp(App[None]):
             # every other clause is background — "cached: anthropic, openrouter,
             # radient" pushed `/login <provider>` off the end at 100 columns, which
             # cost the one clause the user can act on.
-            status=_status_line(note, "checking providers…" if self._providers else ""),
+            status=_status_line(
+                note, "checking providers…" if self._providers else "", PERSIST_FOOTER_HINT
+            ),
         )
         if self._providers is not None:
             self.run_worker(self._refresh_catalogue(), thread=False, group="catalogue")
@@ -1686,14 +1774,16 @@ class OperatorApp(App[None]):
             self._editor().model_picker.set_rows(
                 rows,
                 current=self._current_selector(),
-                status=_status_line(note, f"live model list unavailable: {error}"),
+                status=_status_line(
+                    note, f"live model list unavailable: {error}", PERSIST_FOOTER_HINT
+                ),
             )
             return
         rows, note = self._catalogue_rows(entries)
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
-            status=_status_line(note, _catalogue_status(statuses)),
+            status=_status_line(note, _catalogue_status(statuses), PERSIST_FOOTER_HINT),
         )
 
     def _catalogue_rows(self, entries: list["CatalogueEntry"]) -> tuple[list[ModelRow], str]:
@@ -2985,3 +3075,17 @@ def _status_line(*bits: str) -> str:
     seam from the one beside it.
     """
     return " · ".join(bit for bit in bits if bit)
+
+
+def _home_relative(path: str) -> str:
+    """``~/.local-operator/config.yml`` rather than the full ``/Users/…`` form.
+
+    The prefix is the same on every machine and costs a third of the line the
+    confirmation has to spend saying WHERE it wrote. A path outside the home
+    tree — the ``LOCAL_OPERATOR_CONFIG_DIR`` override, a test's tmp dir — is
+    left absolute, because there is no shorter honest rendering of it.
+    """
+    home = os.path.expanduser("~")
+    if home in ("", "/") or not path.startswith(home + os.sep):
+        return path
+    return "~" + path[len(home) :]

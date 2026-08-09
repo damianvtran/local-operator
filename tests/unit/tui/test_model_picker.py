@@ -382,3 +382,63 @@ def test_slash_argument_hands_over_on_the_terminating_space(text: str, expected)
     knowing about the other: `slash_context` is live while the word is open, this
     takes over the instant a space terminates it."""
     assert slash_argument(text, MODEL_COMMANDS) == expected
+
+
+# -- mouse wheel -------------------------------------------------------------
+
+
+class _Wheel:
+    """The only thing the scroll handlers use from a Textual event."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_the_wheel_moves_the_highlight_one_row_at_a_time() -> None:
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows())
+    picker.open("")
+    first = picker.selected_index
+    picker.on_mouse_scroll_down(_Wheel())
+    assert picker.selected_index == first + 1
+    picker.on_mouse_scroll_up(_Wheel())
+    assert picker.selected_index == first
+
+
+def test_the_wheel_clamps_where_the_arrows_wrap() -> None:
+    """``move`` wraps, which suits a discrete arrow press. A wheel that
+    teleported from the last model to the first reads as the catalogue
+    resetting itself, so the scroll path clamps like paging does."""
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows())
+    picker.open("")
+    for _ in range(len(_rows()) + 10):
+        picker.on_mouse_scroll_down(_Wheel())
+    assert picker.selected_index == len(picker.suggestions()) - 1
+    for _ in range(len(_rows()) + 10):
+        picker.on_mouse_scroll_up(_Wheel())
+    assert picker.selected_index == 0
+    # The arrow key still wraps — the wheel change must not have altered it.
+    picker.move(-1)
+    assert picker.selected_index == len(picker.suggestions()) - 1
+
+
+def test_the_wheel_is_stopped_so_the_transcript_behind_stays_put() -> None:
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows())
+    picker.open("")
+    down, up = _Wheel(), _Wheel()
+    picker.on_mouse_scroll_down(down)
+    picker.on_mouse_scroll_up(up)
+    assert down.stopped and up.stopped
+
+
+def test_the_wheel_on_an_empty_list_is_a_no_op() -> None:
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows([])
+    picker.open("")
+    picker.on_mouse_scroll_down(_Wheel())  # must not raise
+    assert picker.suggestions() == []

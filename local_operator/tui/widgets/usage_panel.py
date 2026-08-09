@@ -563,6 +563,17 @@ class UsagePanel(Static):
         self._offset = self._max_offset()
         self._repaint()
 
+    # The wheel scrolls the report the same rows the arrow keys do. Stopped
+    # here because the card floats over the transcript: left to bubble, one
+    # gesture would scroll both the quota table and the conversation behind it.
+    def on_mouse_scroll_down(self, event) -> None:  # noqa: ANN001 - Textual event type
+        event.stop()
+        self._scroll_by(1)
+
+    def on_mouse_scroll_up(self, event) -> None:  # noqa: ANN001 - Textual event type
+        event.stop()
+        self._scroll_by(-1)
+
     def _scroll_by(self, delta: int) -> None:
         """Scroll, CLAMPED rather than wrapping.
 
