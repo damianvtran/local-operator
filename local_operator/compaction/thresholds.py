@@ -85,6 +85,18 @@ class CompactionSettings(BaseModel):
     threshold_tokens: int = Field(
         default=-1, description="Explicit token trigger; > 0 wins over percent."
     )
+    max_threshold_tokens: int = Field(
+        default=600_000,
+        description=(
+            "Ceiling on the RESOLVED default threshold when no explicit trigger"
+            " is set. Providers routinely advertise a context window far larger"
+            " than the aggregate serving path can actually sustain (a 1.05M"
+            " advertisement whose requests start aborting around 250k is the"
+            " case that motivated this knob), and the default threshold of"
+            " min(window*0.8, 600k) inherits the advertisement's optimism. This"
+            " caps the threshold before that optimism reaches the trigger math."
+        ),
+    )
     auto_continue: bool = Field(
         default=True,
         description="Schedule a continuation prompt after a successful post-turn pass.",
@@ -146,7 +158,11 @@ def resolve_threshold_tokens(window_tokens: int, settings: CompactionSettings) -
        - defaulted reserve that is impossible for this window — the 15%
          proportional recovery (same clamp);
        - defaulted reserve, feasible window — the docs/REWRITE.md §C default:
-         ``clamp(min(int(w * 0.8), 600_000), 1, w - 1)``.
+         ``clamp(min(int(w * 0.8), 600_000, max_threshold_tokens), 1, w - 1)``;
+         the ``max_threshold_tokens`` tail caps a provider-advertised window
+         whose practical serving ceiling is far lower than the raw
+         advertisement (the LO-on-LO session that stalled at ~250k on a
+         1.05M-advertised model motivated it).
     """
     if window_tokens <= 0:
         return 0
@@ -163,7 +179,9 @@ def resolve_threshold_tokens(window_tokens: int, settings: CompactionSettings) -
     if effective >= window_tokens - proportional or effective >= window_tokens:
         # Defaulted reserve is impossible for this window: 15% recovery.
         return max(1, min(window_tokens - proportional, window_tokens - 1))
-    default_threshold = min(int(window_tokens * 0.8), DEFAULT_THRESHOLD_CAP_TOKENS)
+    default_threshold = min(
+        int(window_tokens * 0.8), DEFAULT_THRESHOLD_CAP_TOKENS, settings.max_threshold_tokens
+    )
     return max(1, min(default_threshold, window_tokens - 1))
 
 

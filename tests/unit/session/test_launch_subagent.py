@@ -158,3 +158,43 @@ async def test_launch_subagent_cancels_on_parent_dispose(tmp_path, monkeypatch):
     await parent.dispose()
     assert (job := parent.jobs.get(job_id)) is not None
     assert job.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_child_inherits_parent_compaction_settings(tmp_path, monkeypatch):
+    """A long-running review child must not bypass the operator's compaction
+    budget. Live finding: a one-shot child ran 48 requests / 1.5M tokens on
+    the default 600k-cap threshold while the parent's cap was 250k. The child
+    Session must receive the parent's compaction settings."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.harness import subagent as subagent_mod
+
+    capped = CompactionSettings(max_threshold_tokens=250_000)
+    stream = OneShotStream()
+    parent = make_session(tmp_path, stream, compaction_settings=capped)
+
+    # Capture the child session constructed by the runner.
+    built_children: list[Session] = []
+    orig_build = subagent_mod._build_child_session
+
+    async def captured_build(*a, **kw):
+        child = await orig_build(*a, **kw)
+        built_children.append(child)
+        return child
+
+    subagent_mod._build_child_session = captured_build
+
+    job_id = parent._launch_subagent(label="sub", prompt="review")
+    await wait_for(lambda: parent.jobs.get(job_id) is not None)
+    await wait_for(
+        lambda: (job := parent.jobs.get(job_id)) is not None and job.status == "completed"
+    )
+
+    assert built_children, "the runner must construct a child session"
+    child = built_children[0]
+    assert child._compaction_settings is not None
+    assert child._compaction_settings.max_threshold_tokens == 250_000
+    assert child._compaction_settings == capped
+    await parent.dispose()
