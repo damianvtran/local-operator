@@ -184,6 +184,10 @@ OUTPUT_INDENT = 2
 #: transcript into a scroll trap. The head is kept (it carries the command's
 #: framing) and the remainder is announced on a dim marker row.
 EXPAND_MAX_LINES = 40
+#: Search details are persisted separately from the token-bounded model text.
+#: The expansion gets enough of each provider snippet to identify the page,
+#: while the source URL remains the path to the complete document.
+SEARCH_EXPANDED_SNIPPET_CHARS = 360
 #: Last-resort width for a card built before it has been laid out. Content
 #: rendered at this width is corrected by the first resize.
 FALLBACK_WIDTH = 80
@@ -338,6 +342,36 @@ def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
         return value if value > 0 else 0
 
     return (_count(details.get("added")), _count(details.get("removed")))
+
+
+def _search_result_output(details: dict[str, Any] | None) -> list[str]:
+    """Structured web-search rows: provider, page name, URL, and short snippet."""
+    if not isinstance(details, dict):
+        return []
+    sources = details.get("sources")
+    if not isinstance(sources, list) or not sources:
+        return []
+
+    provider = _strip_control_sequences(str(details.get("provider") or "search"))
+    auth_mode = _strip_control_sequences(str(details.get("auth_mode") or ""))
+    lines = [f"Provider: {provider}" + (f" ({auth_mode})" if auth_mode else ""), "Sources:"]
+    for index, source in enumerate(sources, start=1):
+        if not isinstance(source, dict):
+            continue
+        title = _strip_control_sequences(
+            " ".join(str(source.get("title") or "Untitled result").split())
+        )
+        url = _strip_control_sequences(" ".join(str(source.get("url") or "").split()))
+        snippet = _strip_control_sequences(" ".join(str(source.get("snippet") or "").split()))
+        lines.append(f"{index}. {title}")
+        if url:
+            lines.append(f"   {url}")
+        if snippet:
+            if len(snippet) > SEARCH_EXPANDED_SNIPPET_CHARS:
+                snippet = snippet[: SEARCH_EXPANDED_SNIPPET_CHARS - 1].rstrip() + "…"
+            lines.append(f"   {snippet}")
+    lines.append("Ask Operator to open result N with browser for the full page.")
+    return lines
 
 
 def _clamp_runs(runs: list[tuple[str, Style]], limit: int) -> list[tuple[str, Style]]:
@@ -673,16 +707,19 @@ class ToolCard(TranscriptBlock):
             self._refresh_row()
 
     def _absorb_result(self, result_text: str, details: dict[str, Any] | None) -> None:
-        """Capture the payload the expansion and the diff counters read.
+        """Capture the expansion payload and diff counters.
 
-        The write/edit tools report a rendered unified diff under
-        ``details["diff"]``; when present, that diff is what the expanded card
-        reveals (coloured per line), and the raw output is not also shown —
-        one story per card. Plain-output tools (bash, read) have no diff and
-        expand to their cleaned output as before.
+        Web search is rendered from structured details, not the model-facing
+        text: the latter is deliberately token-capped, while the expansion
+        must reliably retain every candidate's page name, URL, and snippet.
+        Write/edit tools prefer their rendered diff; all other tools expand to
+        cleaned result text.
         """
         self._added, self._removed = _diff_counts(details)
-        self._output = self._clean_output(result_text)
+        search_output = (
+            _search_result_output(details) if self.tool_name.lower() == "web_search" else []
+        )
+        self._output = search_output or self._clean_output(result_text)
         diff = details.get("diff") if isinstance(details, dict) else None
         if isinstance(diff, list) and diff:
             self._diff = [str(line) for line in diff]
@@ -981,6 +1018,8 @@ class ToolCard(TranscriptBlock):
             return row
         if self._diff:
             self._append_diff_body(row, width)
+        elif self.tool_name.lower() == "web_search" and self._output:
+            self._append_search_body(row, width)
         elif self._output:
             self._append_output_body(row, width)
         return row
@@ -1003,6 +1042,35 @@ class ToolCard(TranscriptBlock):
         hidden = len(self._output) - len(shown)
         if hidden > 0:
             marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(marker, line_width), style=dim)
+
+    def _append_search_body(self, row: Text, width: int) -> None:
+        """Search expansion hierarchy: titles lead, URLs signal, snippets recede."""
+        fg = Style(color=theme_mod.semantic_color("fg"), bold=True)
+        signal = Style(color=theme_mod.semantic_color("signal"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        shown = self._output[:EXPAND_MAX_LINES]
+        for line in shown:
+            stripped = line.strip()
+            if stripped.startswith(("http://", "https://")):
+                ink = signal
+            elif stripped[:1].isdigit() and ". " in stripped:
+                ink = fg
+            elif stripped.startswith(("Provider:", "Sources:")):
+                ink = dim
+            else:
+                # Snippets and the actionable footer must meet normal-text
+                # contrast; ``dim`` is reserved for structural metadata.
+                ink = muted
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(line, line_width), style=ink)
+        hidden = len(self._output) - len(shown)
+        if hidden > 0:
+            marker = f"… {hidden} more search line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
@@ -1133,12 +1201,10 @@ class ToolCard(TranscriptBlock):
         slot_token = "dim"
         remaining = max(0, width - prefix_cells - status_cells - 2)
         if self.can_expand():
-            # Offered under the pointer or under keyboard focus, silent at
-            # rest. A settled transcript is content, not a wall of controls:
-            # printing ⟨expand⟩ on every row costs ~9 cells of permanent
-            # chrome on the common 80-column terminal, and the row's ground
-            # already lifts on :hover and :focus to say it is a target.
-            if self._hovered or self._focused:
+            # Generic tool output stays quiet until the row is targeted. Search
+            # sources are the primary result, not diagnostics, so their
+            # disclosure remains visible at rest and in colorless terminals.
+            if self.tool_name.lower() == "web_search" or self._hovered or self._focused:
                 offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
                 if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
                     slot = offer
