@@ -26,6 +26,17 @@ Remote HTTP or SSE server:
 local-operator mcp add example --url https://example.com/mcp
 ```
 
+For a hosted server that uses OAuth, mark it explicitly and complete the
+interactive login. The browser eventually redirects to a loopback URL; if the
+page cannot connect, paste that full URL back into the waiting terminal. Local
+Operator stores the resulting token in its credential database and reuses it
+in future sessions:
+
+```bash
+local-operator mcp add linear --url https://mcp.linear.app/mcp --oauth
+local-operator mcp login linear
+```
+
 Add `--scope project` to write `<cwd>/.local-operator/mcp.json`; the default global scope writes `~/.local-operator/mcp.json`. Use repeated `--env KEY=VALUE` only when the server must receive that variable. Do not put long-lived secrets in committed project configuration.
 
 Check and remove entries:

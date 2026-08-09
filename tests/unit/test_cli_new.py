@@ -298,6 +298,16 @@ def test_mcp_subcommands(parser: argparse.ArgumentParser) -> None:
     args = parser.parse_args(["mcp", "add", "web", "--url", "https://mcp.example.com"])
     assert args.url == "https://mcp.example.com"
     assert args.scope == "global"
+    assert args.oauth is False
+
+    oauth_args = parser.parse_args(
+        ["mcp", "add", "linear", "--url", "https://mcp.linear.app/mcp", "--oauth"]
+    )
+    assert oauth_args.oauth is True
+
+    login_args = parser.parse_args(["mcp", "login", "linear"])
+    assert login_args.mcp_command == "login"
+    assert login_args.name == "linear"
 
     args = parser.parse_args(["mcp", "remove", "files", "--scope", "project"])
     assert args.mcp_command == "remove"
@@ -499,6 +509,65 @@ def test_main_exec_dispatch(
     assert exec_args.background is False
     assert exec_args.agent_name is None
     assert exec_args.train is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_login_connects_and_disconnects_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    config = types.SimpleNamespace(auth=types.SimpleNamespace(type="oauth"))
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"linear": config}, {"linear": tmp_path / "mcp.json"}),
+    )
+    instances: list[Any] = []
+
+    class FakeManager:
+        def __init__(self, cwd: Path) -> None:
+            self.cwd = cwd
+            self.disconnected = False
+            instances.append(self)
+
+        async def connect_configured_server(
+            self, name: str, *, timeout_ms: float | None = None
+        ) -> Any:
+            assert name == "linear"
+            assert timeout_ms == 600_000
+            return types.SimpleNamespace(tools=[object(), object()])
+
+        async def disconnect_all(self) -> None:
+            self.disconnected = True
+
+    monkeypatch.setattr("local_operator.mcp.manager.McpManager", FakeManager)
+
+    assert await cli._mcp_login_server("linear", tmp_path) == 0
+    assert instances[0].cwd == tmp_path
+    assert instances[0].disconnected is True
+    assert "discovered 2 tools" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("argv", "handler"),
+    [
+        (["login"], "login_command"),
+        (["logout", "openai"], "logout_command"),
+        (["login-status"], "login_status_command"),
+        (["mcp", "list"], "mcp_command"),
+    ],
+)
+def test_main_management_command_dispatch(
+    argv: list[str],
+    handler: str,
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = MagicMock(return_value=23)
+    monkeypatch.setattr(cli, handler, called)
+    monkeypatch.setattr(sys, "argv", ["program", *argv])
+
+    assert main() == 23
+    called.assert_called_once()
 
 
 def test_main_exception_banner(tmp_home: Path, quiet_env: None, capsys) -> None:

@@ -38,7 +38,9 @@ class FakeSession:
     """ClientSession stand-in: records calls, returns canned results."""
 
     def __init__(
-        self, call_result: CallToolResult | None = None, raise_on_call: Exception | None = None
+        self,
+        call_result: CallToolResult | None = None,
+        raise_on_call: Exception | None = None,
     ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.call_result = call_result or CallToolResult(
@@ -86,6 +88,38 @@ def project(tmp_path: Path) -> Path:
     return tmp_path
 
 
+class TestSingleServerConnection:
+    @pytest.mark.asyncio
+    async def test_connect_configured_server_targets_only_named_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {'
+            '"only": {"type": "http", "url": "https://example.com/mcp"},'
+            '"other": {"type": "stdio", "command": "other-cmd"}'
+            "}}",
+            encoding="utf-8",
+        )
+        manager = McpManager(str(tmp_path))
+        attempted: list[tuple[str, float | None]] = []
+
+        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+            attempted.append((name, cfg.timeout))
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+
+        conn = await manager.connect_configured_server("only", timeout_ms=600_000)
+        assert conn.name == "only"
+        assert attempted == [("only", 600_000)]
+        assert manager.get_connection("only") is conn
+        assert manager.get_connection("other") is None
+        with pytest.raises(Exception, match="not configured"):
+            await manager.connect_configured_server("missing")
+        await manager.disconnect_all()
+
+
 class TestFastStartupGate:
     @pytest.mark.asyncio
     async def test_instant_live_slow_deferred_from_cache(
@@ -95,7 +129,13 @@ class TestFastStartupGate:
         cache = McpToolCache(tmp_path / "cache.db")
         cache.put(
             "slow",
-            [{"name": "search", "description": "cached search", "inputSchema": {"type": "object"}}],
+            [
+                {
+                    "name": "search",
+                    "description": "cached search",
+                    "inputSchema": {"type": "object"},
+                }
+            ],
         )
         manager = McpManager(str(project), tool_cache=cache)
 
@@ -170,7 +210,10 @@ class TestFastStartupGate:
 
         slow_release.set()
         await asyncio.sleep(0.02)  # let the continuation run
-        assert [t.name for t in manager.get_tools()] == ["mcp__fast_search", "mcp__slow_search"]
+        assert [t.name for t in manager.get_tools()] == [
+            "mcp__fast_search",
+            "mcp__slow_search",
+        ]
         await manager.disconnect_all()
 
     @pytest.mark.asyncio

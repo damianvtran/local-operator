@@ -400,6 +400,7 @@ def add_server(
     env: dict[str, str] | None = None,
     url: str | None = None,
     headers: dict[str, str] | None = None,
+    oauth: bool = False,
     scope: str = "global",
     cwd: str | os.PathLike[str] | None = None,
 ) -> int:
@@ -411,10 +412,16 @@ def add_server(
     import sys
 
     if command and url:
-        print("error: pass either command (stdio) or url (http), not both", file=sys.stderr)
+        print(
+            "error: pass either command (stdio) or url (http), not both",
+            file=sys.stderr,
+        )
         return 1
     if not command and not url:
         print("error: a server needs a command (stdio) or a url (http)", file=sys.stderr)
+        return 1
+    if oauth and not url:
+        print("error: OAuth is supported only for remote HTTP servers", file=sys.stderr)
         return 1
 
     raw: dict[str, Any]
@@ -428,6 +435,8 @@ def add_server(
         raw = {"type": "http", "url": url}
         if headers:
             raw["headers"] = headers
+        if oauth:
+            raw["auth"] = {"type": "oauth"}
 
     cfg = _coerce_server_config(raw)
     errors = validate_server_config(name, cfg)
