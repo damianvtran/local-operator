@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 from rich.cells import cell_len
+from textual.app import App, ComposeResult
 
 from local_operator.tui.widgets.command_picker import slash_argument
 from local_operator.tui.widgets.model_picker import (
@@ -442,3 +443,46 @@ def test_the_wheel_on_an_empty_list_is_a_no_op() -> None:
     picker.open("")
     picker.on_mouse_scroll_down(_Wheel())  # must not raise
     assert picker.suggestions() == []
+
+
+@pytest.mark.asyncio
+async def test_large_degraded_catalogue_leads_with_current_family_and_status() -> None:
+    """At 80x24 a thousand-row list must answer what is running and what the
+    catalogue failed to load before the user scrolls."""
+    current = ModelRow("anthropic", "claude-opus-5", connected=True)
+    siblings = [
+        ModelRow("anthropic", "claude-sonnet-4", connected=True),
+        ModelRow("anthropic", "claude-haiku-4", connected=True),
+    ]
+    bulk = [
+        ModelRow("openrouter", f"vendor/model-{index}", connected=True, aggregated=True)
+        for index in range(1_000)
+    ]
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(
+        [*bulk, *siblings, current],
+        current=current.selector,
+        status="live model list unavailable: provider timeout",
+    )
+
+    class _Host(App[None]):
+        CSS = "ModelPicker { width: 100%; }"
+
+        def compose(self) -> ComposeResult:
+            yield picker
+
+    app = _Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        picker.styles.width = 80
+        await pilot.pause()
+        picker.open("")
+        await pilot.pause()
+        picker._repaint()
+        await pilot.pause()
+        await pilot.pause()
+        first = picker.suggestions()[:3]
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+    assert first[0].selector == current.selector
+    assert all(row.provider == "anthropic" for row in first)
+    assert "live model list unavailable" in painted, painted

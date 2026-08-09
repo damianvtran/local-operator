@@ -979,6 +979,11 @@ class OperatorApp(App[None]):
         if not text:
             return
         if text.startswith("/"):
+            # Echoing a command is the same visible commitment as sending a
+            # prompt: the boot splash must yield before the transcript can own
+            # the screen. Calling slash handlers directly bypasses this path
+            # only in tests and internal control flows.
+            self._set_welcome_visible(False)
             self._append_block(UserBlock(text))  # D15: echo the command
             self._run_slash_command(text)
             return
@@ -1474,6 +1479,16 @@ class OperatorApp(App[None]):
             self._subagent_panel.sync(session)
         if self._todo_panel is not None:
             self._todo_panel.sync(session)
+        # The usage card is an overlay, so a dock-band height change does not
+        # resize it and Textual emits no resize event. Re-measure after the band
+        # has repainted; otherwise a todo/subagent appearing under an open tall
+        # card can lift the input into the card.
+        self.call_after_refresh(self._sync_usage_layout)
+
+    def _sync_usage_layout(self) -> None:
+        panel = self._usage_panel()
+        if panel is not None:
+            panel.sync_layout()
 
     def _open_subagent_trajectory(self, job_id: str) -> None:
         """Open the trajectory modal for one task job.

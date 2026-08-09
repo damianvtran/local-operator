@@ -534,28 +534,36 @@ class SessionPickerScreen(ModalScreen[str | None]):
         width = self._card_width()
         rows = self.visible_rows
 
-        # The header is budgeted against the card the same way the rows are:
-        # the body is ``width: auto``, so anything wider than the card GROWS
-        # it — and shifts it, since it is centred. An unbounded filter echo
-        # moved the list under the eye of the person searching it on every
-        # keystroke, and on a narrow terminal the title alone overflowed.
-        # Least-needed part first: the tally, then the title truncates.
+        # The active filter is the user's only receipt that typing reached this
+        # modal, so narrow terminals shed the tally and then the title before
+        # they shed the query. Truncating the assembled line did the opposite:
+        # at 50 columns it preserved the static title and clipped
+        # ``filter asteroid`` completely.
         title = "Resume a conversation"
         header = Text(no_wrap=True, overflow="ellipsis")
         if self._query:
-            # No ``/`` sigil: in this app a leading slash means a COMMAND, and
-            # the user reached this card by typing ``/resume``, so ``/asteroid``
-            # read as a command named asteroid rather than as a filter.
-            tally = f"  {len(rows)} of {len(self._all)}"
             lead = "  filter "
-            spent = cell_len(title) + cell_len(lead) + cell_len(tally)
-            if spent + 4 > width:  # no room for a filter echo worth reading
-                header.append(truncate_cells(title, width), style=Style(color=fg_colour))
-            else:
+            compact_lead = "filter "
+            tally = f"  {len(rows)} of {len(self._all)}"
+            full_width = cell_len(title) + cell_len(lead) + cell_len(self._query) + cell_len(tally)
+            titled_width = cell_len(title) + cell_len(lead) + cell_len(self._query)
+            if full_width <= width:
                 header.append(title, style=Style(color=fg_colour))
                 header.append(lead, style=faint)
-                header.append(truncate_cells(self._query, width - spent), style=label)
+                header.append(self._query, style=label)
                 header.append(tally, style=dim)
+            elif titled_width <= width:
+                header.append(title, style=Style(color=fg_colour))
+                header.append(lead, style=faint)
+                header.append(self._query, style=label)
+            elif cell_len(compact_lead) < width:
+                header.append(compact_lead, style=faint)
+                header.append(
+                    truncate_cells(self._query, width - cell_len(compact_lead)),
+                    style=label,
+                )
+            else:
+                header.append(truncate_cells(self._query, width), style=label)
         else:
             tally = f"  {len(self._all)} sessions"
             if cell_len(title) + cell_len(tally) > width:

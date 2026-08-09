@@ -453,9 +453,7 @@ class ModelPicker(Static):
         return out
 
     def _chrome_rows(self, width: int) -> list[Text]:
-        rows = self.render_rows(width)
-        footer = self._footer_row(width)
-        return rows if footer is None else [*rows, footer]
+        return [*self.render_rows(width), *self._footer_rows(width)]
 
     def _repaint(self) -> None:
         if not self._open or not self.is_mounted:
@@ -539,36 +537,49 @@ class ModelPicker(Static):
     def _price(self, row: ModelRow) -> str:
         return format_price_pair(row.input_price, row.output_price)
 
-    def _footer_row(self, width: int) -> Text | None:
-        """A count/status line, or None when there is nothing to say.
+    def _footer_rows(self, width: int) -> list[Text]:
+        """Count/status rows with the persistent-default instruction protected.
 
-        This is where the picker admits what it does NOT know. A provider whose
-        live fetch failed is serving a cached or purely static list, and a user
-        hunting for a model released last week needs to be told that rather than
-        concluding the model does not exist.
+        Status is assembled upstream from independent `` · `` segments. The
+        approved default-model instruction is the only one that must survive
+        verbatim at narrow widths, so it gets its own row rather than losing
+        ``default`` behind a longer hidden/login clause.
         """
         total = len(self._matches)
         start, end, _ = self.visible_window()
+        status = [part for part in self._status.split(" · ") if part]
+        persistent = next(
+            (part for part in status if part.startswith("/model default ")),
+            "",
+        )
+        status = [part for part in status if part != persistent]
+
         bits: list[str] = []
         if total == 0:
             bits.append("no matching models" if self._query.strip() else "no models available")
         elif total > end - start:
             bits.append(f"{end - start} of {total}")
-        if self._status:
-            bits.append(self._status)
+        bits.extend(status)
+        if persistent:
+            bits.append(persistent)
         if not bits:
-            return None
+            return []
+
         dim = Style(
             color=theme_mod.semantic_color("dim"),
             bgcolor=theme_mod.semantic_color("surface"),
         )
-        row = Text()
-        row.append(" " * _GUTTER_CELLS, style=dim)
-        row.append(
-            truncate_cells(" · ".join(bits), max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)),
-            style=dim,
-        )
-        return _pad_to(row, width, dim)
+        available = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
+        rows: list[Text] = []
+        ordinary = bits[:-1] if persistent else bits
+        for text in [
+            *([" · ".join(ordinary)] if ordinary else []),
+            *([persistent] if persistent else []),
+        ]:
+            row = Text(" " * _GUTTER_CELLS, style=dim)
+            row.append(truncate_cells(text, available), style=dim)
+            rows.append(_pad_to(row, width, dim))
+        return rows
 
     # -- window -------------------------------------------------------------
     def _row_budget(self) -> int:
@@ -578,7 +589,15 @@ class ModelPicker(Static):
             screen_height = 0
         if screen_height <= 0:
             return MAX_VISIBLE_ROWS
-        return max(1, min(MAX_VISIBLE_ROWS, screen_height // _SCREEN_HEIGHT_FRACTION))
+        # Catalogue status occupies footer chrome. The persistent-default
+        # instruction gets a dedicated second row so wider catalogues cannot
+        # crowd it out non-monotonically.
+        persistent = any(part.startswith("/model default ") for part in self._status.split(" · "))
+        status_rows = 2 if persistent else (1 if self._status else 0)
+        return max(
+            1,
+            min(MAX_VISIBLE_ROWS, screen_height // _SCREEN_HEIGHT_FRACTION) - status_rows,
+        )
 
     def _scroll_to_selection(self) -> None:
         budget = self._row_budget()
@@ -590,6 +609,22 @@ class ModelPicker(Static):
 
     def _refilter(self, *, keep: str | None = None) -> None:
         self._matches = rank_rows(self._rows, self._query)
+        # The unfiltered first frame answers "what am I on?" and keeps that
+        # provider's alternatives beside it. Merely scrolling the highlight to
+        # a current model buried at row 300 showed none of its family.
+        if not self._query.strip() and self._current:
+            current_provider = self._current.partition("/")[0]
+            ranked = {row.selector: index for index, row in enumerate(self._matches)}
+            self._matches.sort(
+                key=lambda row: (
+                    (
+                        0
+                        if row.selector == self._current
+                        else (1 if row.provider == current_provider else 2)
+                    ),
+                    ranked[row.selector],
+                )
+            )
         self._selected = 0
         if keep is not None:
             for index, row in enumerate(self._matches):

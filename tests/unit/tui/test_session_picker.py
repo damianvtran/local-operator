@@ -696,6 +696,29 @@ async def test_typing_a_long_filter_does_not_grow_the_card() -> None:
     assert after == before, (before, after)
 
 
+@pytest.mark.asyncio
+async def test_a_narrow_painted_header_keeps_the_active_filter() -> None:
+    """At 50 columns the old header spent the row on its static title and
+    clipped ``filter asteroid`` — the only receipt that typing reached it."""
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    rows = [_row(f"id{index:04d}", f"asteroid session {index}") for index in range(40)]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(50, 20)) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen(rows, NOW)
+        app.push_screen(screen)
+        await pilot.pause()
+        for char in "asteroid":
+            await pilot.press(char)
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+    assert screen.filter_query == "asteroid"
+    assert "filter asteroid" in painted, painted
+
+
 def test_a_right_click_never_resumes_a_session() -> None:
     """The action behind a click disposes the live session and reboots; a
     context-menu click must not reach it."""

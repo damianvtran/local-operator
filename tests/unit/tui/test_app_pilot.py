@@ -1942,15 +1942,15 @@ async def test_the_model_list_offers_what_the_user_can_actually_run() -> None:
 @pytest.mark.asyncio
 async def test_the_hidden_models_are_counted_with_the_command_that_reveals_them() -> None:
     """Discoverability was the whole argument for the old show-everything list.
-    The count keeps it, at one footer line instead of the visible catalogue."""
+    The footer chrome keeps it without crowding the persistence instruction."""
     ctrl = _AccessController()
     app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
         await pilot.pause()
         picker = await _open_model_picker(app, pilot)
-        footer = picker.render_text(90).plain.split("\n")[-1]
-    assert "1 hidden" in footer, footer
-    assert "/login <provider>" in footer, footer
+        chrome = picker.render_text(90).plain
+    assert "1 hidden" in chrome, chrome
+    assert "/login <provider>" in chrome, chrome
 
 
 @pytest.mark.asyncio
@@ -1963,11 +1963,11 @@ async def test_an_unreadable_credential_store_shows_every_model_not_none() -> No
         await pilot.pause()
         picker = await _open_model_picker(app, pilot)
         offered = {row.selector for row in picker.rows()}
-        footer = picker.render_text(90).plain.split("\n")[-1]
+        chrome = picker.render_text(90).plain
     assert "anthropic/claude-opus-5" in offered, offered
     assert len(offered) == 3, offered
     # …and it says so, rather than quietly presenting a list it could not filter.
-    assert "credential check unavailable" in footer, footer
+    assert "credential check unavailable" in chrome, chrome
 
 
 @pytest.mark.asyncio
@@ -2364,6 +2364,29 @@ async def test_rejected_model_commands_keep_the_boot_composition() -> None:
             assert app.screen.has_class("boot"), command
 
 
+@pytest.mark.asyncio
+async def test_an_entered_rejected_model_command_dismisses_the_boot_splash() -> None:
+    """The real submit path echoes the command into the transcript, so the
+    splash must yield even when the command handler rejects the model."""
+    session = _SwitchableSession()
+    ctrl = _AccessController()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.text = "/model missing-slash"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        welcome_display = app.query_one(WelcomeView).display
+        boot = app.screen.has_class("boot")
+
+    assert "/model missing-slash" in painted, painted
+    assert welcome_display is False
+    assert not boot
+
+
 def test_help_uses_one_column_wider_than_every_command_name() -> None:
     """The two longest aliases used to consume the literal 14-cell column and
     glue directly onto descriptions: `/model, /modelsSwitch model…`."""
@@ -2505,3 +2528,18 @@ async def test_every_model_default_surface_says_it_the_same_way() -> None:
     assert _unwrapped("(this session)") in switch_line, switch_line
     assert _unwrapped("from the next turn") not in _unwrapped(receipt), receipt
     assert _unwrapped("anthropic logged in") in _unwrapped(receipt), receipt
+
+
+@pytest.mark.asyncio
+async def test_model_default_hint_survives_every_supported_narrow_footer() -> None:
+    """More terminal width must never hide words from the approved persistence
+    instruction; the 50-column footer must keep the command whole."""
+    for size in ((50, 20), (60, 22), (80, 24), (100, 30)):
+        ctrl = _AccessController()
+        app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            await _open_model_picker(app, pilot)
+            await pilot.pause()
+            painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert PERSIST_HINT in painted, (size, painted)

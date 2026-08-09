@@ -13,6 +13,7 @@ import re
 from contextlib import asynccontextmanager
 
 import pytest
+from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.containers import Container
 
@@ -681,3 +682,84 @@ async def test_a_scrolled_card_never_covers_the_input_prompt(
 
     assert not panel.region.overlaps(editor.region), (size, panel.region, editor.region)
     assert panel.region.bottom <= editor.region.y
+
+
+@pytest.mark.asyncio
+async def test_narrow_error_and_empty_states_keep_their_retry_and_close_receipts() -> None:
+    """Provider prose is unbounded; at 50x20 it must lose its tail rather than
+    wrap through or clip the footer actions that recover and close the panel."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(50, 20)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_error("provider failed: " + "network timeout " * 20)
+        for _ in range(3):
+            await pilot.pause()
+        error_rows = panel.render_lines_for_test()
+        assert all(cell_len(row) <= panel._content_width() for row in error_rows)
+        assert "r refresh" in error_rows[-1] and "esc close" in error_rows[-1]
+        assert not panel.region.overlaps(app.query_one(Editor).region)
+
+        panel.show_reports([])
+        for _ in range(3):
+            await pilot.pause()
+        empty_rows = panel.render_lines_for_test()
+        assert all(cell_len(row) <= panel._content_width() for row in empty_rows)
+        assert "r refresh" in empty_rows[-1] and "esc close" in empty_rows[-1]
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+    assert "r refresh" in painted and "esc close" in painted, painted
+
+
+@pytest.mark.asyncio
+async def test_compact_usage_keeps_provider_identity_and_operational_actions() -> None:
+    """At End on 50x20, decorative air must yield before the provider heading
+    for the final meters and the refresh/close actions."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(50, 20)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_many_reports())
+        panel.action_scroll_end()
+        for _ in range(3):
+            await pilot.pause()
+        rows = panel.render_lines_for_test()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+    assert any("provider-11" in row for row in rows), rows
+    assert any("5 hour" in row for row in rows), rows
+    assert any("7 day" in row for row in rows), rows
+    assert all(cell_len(row) <= panel._content_width() for row in rows)
+    assert "r refresh" in rows[-1] and "esc close" in rows[-1], rows[-1]
+    assert "provider-11" in painted, painted
+
+
+@pytest.mark.asyncio
+async def test_open_usage_reflows_when_the_bottom_band_grows(monkeypatch) -> None:
+    """A dock mutation does not resize an overlay, so the app must explicitly
+    re-measure an already-open tall card after todos appear."""
+    from local_operator.tui.widgets import todo_panel as todo_panel_module
+
+    todos: list[dict[str, str]] = []
+    monkeypatch.setattr(todo_panel_module, "todo_items", lambda _session_id: list(todos))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_many_reports())
+        for _ in range(4):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        before = panel.region
+        assert not before.overlaps(editor.region)
+
+        todos.extend({"text": f"new live todo {index}", "status": "pending"} for index in range(5))
+        app._refresh_band()
+        for _ in range(6):
+            await pilot.pause()
+        after = panel.region
+        editor_region = editor.region
+
+    assert after.height < before.height, (before, after)
+    assert not after.overlaps(editor_region), (after, editor_region)
+    assert after.bottom <= editor_region.y
