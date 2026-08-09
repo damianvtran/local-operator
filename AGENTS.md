@@ -62,6 +62,7 @@ Every agent asked to "update local-operator" or make a change available through
 change to `main`, run `lop-update`, verify the `.lop-source` marker, then smoke
 test `lop` from outside the repository. Never repoint `lop` at the editable
 `.venv`; doing so couples the stable command back to in-progress work.
+
 ## Visual validation: how to actually look at a UI change
 
 This is a terminal UI. **A passing test is not evidence that a visual change
