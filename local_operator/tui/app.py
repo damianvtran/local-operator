@@ -32,6 +32,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.geometry import Size
 from textual.widgets import Static
 
 from local_operator.logger import current_log_file
@@ -78,8 +79,8 @@ from local_operator.tui.widgets.editor import (
     StopRequested,
 )
 from local_operator.tui.widgets.model_picker import ModelRow
-from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
+from local_operator.tui.widgets.status_line import McpStatus, StatusLine, format_cost
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.toast import Toast, format_mcp_startup
 from local_operator.tui.widgets.todo_panel import TodoPanel
@@ -219,6 +220,12 @@ BOOT_CARD_MIN_INSET = 8
 #: separator comes straight out of the splash, whose degradation ladder pays in
 #: whole sections (the mark, the hints), never in single rows.
 BOOT_COMPOSITION_MIN_SPARE = 2
+
+#: The ``Screen``'s own gutter, both edges together. Every boot measurement is
+#: taken inside it — the card's width and the composition's row budget alike —
+#: because the percentage the sheet resolves and the rows the layout has to
+#: spend are both properties of the CONTENT box, not of the terminal.
+SCREEN_INSET = 2
 
 
 def boot_card_width(box: int) -> int:
@@ -792,30 +799,52 @@ class OperatorApp(App[None]):
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-fit width-sensitive chrome after a terminal resize."""
+        """Re-fit size-sensitive chrome after a terminal resize."""
         if self._status is not None:
             self.call_after_refresh(self._status.refresh)
-        # The EVENT's width, not the app's: during a resize `self.size` is still the
+        # The EVENT's size, not the app's: during a resize `self.size` is still the
         # previous frame's, and one stale cell is enough to put the card threshold on
         # the wrong side of itself — at 85 columns it decided "bar" for a box that was
-        # about to be exactly wide enough for the card.
-        self._sync_boot_layout(width=event.size.width)
+        # about to be exactly wide enough for the card. It is also the last handler
+        # to run BEFORE the screen arranges, which is what lets the composition below
+        # land in the first frame the terminal ever sees.
+        self._sync_boot_layout(size=event.size)
 
-    def _sync_boot_layout(self, *, width: int | None = None) -> None:
+    def on_welcome_view_block_resized(self, message: WelcomeView.BlockResized) -> None:
+        """The splash changed height, so the composition around it has moved.
+
+        The block grows and shrinks after the first frame — the model label lands
+        when the session factory resolves, and a credential warning appears with
+        it. Without this the boot composition would be centred for the block that
+        was measured at startup and left there.
+        """
+        self._sync_boot_layout()
+
+    def _sync_boot_layout(self, *, size: Size | None = None) -> None:
         """Re-measure everything about the boot layout that the sheet cannot.
 
-        Called from ``on_resize`` and from ``_set_welcome_visible``: a resize is not
-        the only way the answers change — the layout itself comes and goes with the
-        splash, and on the first frame no resize event has happened yet. ``width``
-        is the resize event's, when there is one.
+        Called from ``on_resize``, from ``_set_welcome_visible`` and from the splash
+        itself when its block changes height: a resize is not the only way the
+        answers change — the layout comes and goes with the splash, and on the first
+        frame no resize event has happened yet. ``size`` is the resize event's, when
+        there is one.
+
+        Everything below is ARITHMETIC on quantities this method cannot invalidate,
+        and it is applied synchronously. That is the whole fix for TUI boot: the
+        composition used to measure a laid-out frame and re-measure itself one
+        refresh later, but ``call_after_refresh`` resumes before the compositor has
+        re-arranged, so every pass read last frame's splash offset against the
+        padding it had just written and double-counted its own reserve. The lift
+        overshot, undershot, and converged over two dozen PAINTED frames — the
+        splash falling from the top of the screen while the card rose from the
+        bottom until the two met. That is the "logo and screen coming together"
+        effect; it was never an animation anyone declared.
         """
-        self._sync_boot_card(self.size.width if width is None else width)
-        # The card's width is a function of the terminal, so it resolves from the
-        # event itself. The composition is a function of how tall the SPLASH turned
-        # out, which is only knowable from a laid-out frame — and neither caller has
-        # one yet (a mount has not arranged, a resize is arranging). So it measures
-        # one refresh later, and re-measures itself until it stops changing.
-        self.call_after_refresh(self._sync_boot_composition)
+        size = self.size if size is None else size
+        # Card first: the shell's width decides how tall the shell measures, which
+        # is a term in the composition below.
+        self._sync_boot_card(size.width)
+        self._sync_boot_composition(size)
 
     def _sync_boot_card(self, terminal_width: int) -> None:
         """Decide whether this terminal is wide enough for the boot CARD.
@@ -825,13 +854,13 @@ class OperatorApp(App[None]):
         beside it is wide enough to read as a margin. Computing a width in Python
         for want of a media query is the same move ``Toast._refit`` already makes.
         """
-        # The content box, not the terminal: `Screen`'s one-cell inset is outside
-        # the percentage the sheet resolves.
-        box = max(0, terminal_width - 2)
+        # The content box, not the terminal: `Screen`'s inset is outside the
+        # percentage the sheet resolves.
+        box = max(0, terminal_width - SCREEN_INSET)
         card = boot_card_width(box)
         self.screen.set_class(box - card >= BOOT_CARD_MIN_INSET, BOOT_CARD_CLASS)
 
-    def _sync_boot_composition(self) -> None:
+    def _sync_boot_composition(self, size: Size) -> None:
         """Centre the boot composition — splash, separator, card — in the screen.
 
         The splash and the card are ONE block to the eye, and on a tall terminal
@@ -840,19 +869,22 @@ class OperatorApp(App[None]):
         reaches it, and how many rows to reserve below it depends on how tall the
         splash turned out at this width. So the composition's two chrome
         quantities — the ground row above the card and the slack below it — are
-        measured here, the same way ``Toast._refit`` measures a width the sheet
+        resolved here, the same way ``Toast._refit`` resolves a width the sheet
         cannot ask for.
 
         Both are CONDITIONAL, and on the same measurement. Every row this reserves
-        comes out of the splash's budget (WelcomeView.get_content_height), and the
+        comes out of the splash's budget (``WelcomeView.spare_rows``), and the
         splash pays in whole sections — a 28-row terminal that reserved rows to
         centre a block that already fills the region would trade the mark for air.
         So they are only spent out of rows that are empty anyway, which is why a
         96x28 frame is untouched and a 190x48 one is centred.
 
-        The spare count adds back what this method has already spent, which makes
-        it invariant under its own change: re-running converges instead of halving
-        the reserve every pass.
+        NOTHING here is read back off a laid-out frame. Both terms are asked of the
+        widgets as functions of a size — ``get_content_height`` for the dock's
+        children, ``spare_rows`` for the splash — so the answer does not depend on
+        the reserve that is about to be written, and one pass is final. Reading the
+        frame is what made this measurement circular, and a circular measurement
+        applied once per paint is an animation.
         """
         dock = self.query_one("#input-dock", Container)
         welcome = self._welcome
@@ -861,18 +893,46 @@ class OperatorApp(App[None]):
             # Rows left reserved here would be a hole below a populated transcript.
             self._reserve_boot_rows(dock, gap=False, lift=0)
             return
-        region = self.query_one(TranscriptView).content_region
-        # The empty rows ABOVE the block, read off the frame rather than derived:
-        # the region's content is bottom-aligned, so the block's own offset inside
-        # it IS the slack — and unlike `region.height - welcome.height` it does not
-        # count a notice mounted under the splash as spare.
-        spare = welcome.region.y - region.y + dock.styles.padding.bottom
-        if dock.has_class(GAP_CLASS):
-            spare += 1
+        box = Size(max(0, size.width - SCREEN_INSET), max(0, size.height - SCREEN_INSET))
+        transcript = self.query_one(TranscriptView)
+        # Rows the region above the card would have with NO reserve in it, and the
+        # width the splash is drawn at. The transcript's own gutter is part of the
+        # sheet's boot layout (it drops its top row there) and part of neither
+        # widget's content height, so it comes out of the budget here.
+        gutter = transcript.styles.gutter
+        region = max(0, box.height - self._boot_dock_height(dock, box, size) - gutter.height)
+        spare = welcome.spare_rows(region, max(0, box.width - gutter.width))
         if spare < BOOT_COMPOSITION_MIN_SPARE:
             self._reserve_boot_rows(dock, gap=False, lift=0)
             return
+        # One row buys the separator; the rest is split between the ground above
+        # the splash and the ground below the card, the card taking the smaller
+        # half so an odd row lands overhead where the eye does not read it as a
+        # gap under the panel.
         self._reserve_boot_rows(dock, gap=True, lift=(spare - 1) // 2)
+
+    def _boot_dock_height(self, dock: Container, box: Size, viewport: Size) -> int:
+        """Rows the input dock occupies with no composition reserve in it.
+
+        Asked of the dock's CHILDREN rather than read off ``dock.outer_size``,
+        because the dock's own height already contains the lift this measurement
+        exists to compute. The children — the subagent/todo band and the input
+        shell — are content-sized and answer from their own state, so the total is
+        available before the first arrange and cannot move under the reserve.
+        """
+        width = boot_card_width(box.width) if self.screen.has_class(BOOT_CARD_CLASS) else box.width
+        total = 0
+        for child in dock.children:
+            if not child.display:
+                continue
+            gutter, margin = child.styles.gutter, child.styles.margin
+            inner = max(0, width - gutter.width)
+            total += (
+                child.get_content_height(Size(inner, box.height), viewport, inner)
+                + gutter.height
+                + margin.height
+            )
+        return total
 
     def _reserve_boot_rows(self, dock: Container, *, gap: bool, lift: int) -> None:
         """Apply the composition's separator row and its lift, once.
@@ -883,16 +943,16 @@ class OperatorApp(App[None]):
         as a block change. The lift is padding INSIDE the dock — the dock is the
         positioner, so reserving rows in it moves the panel it holds without
         anything else in the layout knowing.
+
+        It does NOT schedule a re-measure. The caller's arithmetic is already the
+        fixed point, and a self-rescheduling measurement is what animated the boot
+        screen; the equality gate is now only here to keep an unchanged sync from
+        dirtying the layout.
         """
         if dock.has_class(GAP_CLASS) == gap and dock.styles.padding.bottom == lift:
             return
         dock.set_class(gap, GAP_CLASS)
         dock.styles.padding = (0, 0, lift, 0)
-        # The measurement above read a laid-out height that this change invalidates,
-        # so it runs again once the new frame exists. The equality gate above is
-        # what ends the chain — the total it measures does not move, so the second
-        # pass agrees with the first.
-        self.call_after_refresh(self._sync_boot_composition)
 
     # -- input --------------------------------------------------------------
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
@@ -1217,9 +1277,18 @@ class OperatorApp(App[None]):
             notice("tool approvals: ask — write and command tools prompt before running")
 
     def _clear_transcript(self) -> None:
-        transcript = self.query_one(TranscriptView)
-        transcript.clear_blocks()  # fires the on_clear hook
-        transcript.append_block(NoticeBlock("transcript cleared — history is untouched", "info"))
+        self.query_one(TranscriptView).clear_blocks()  # fires the on_clear hook
+        # ``ends_empty_state=False``: the receipt reports on the CLEAR, so the
+        # session has not started talking and the splash the clear just restored
+        # must survive it. Going through ``_append_block`` rather than straight to
+        # the transcript is what re-centres the composition around the receipt's
+        # own row — the clear hook above resolved it for a region that did not yet
+        # contain one, and the difference is the splash settling a row after the
+        # frame is up.
+        self._append_block(
+            NoticeBlock("transcript cleared — history is untouched", "info"),
+            ends_empty_state=False,
+        )
 
     def _on_transcript_cleared(self) -> None:
         """TUI-009: /clear and Ctrl+L reset the app's block bookkeeping."""
@@ -1240,9 +1309,9 @@ class OperatorApp(App[None]):
         # since `_set_welcome_visible` drives both from this one condition. One
         # mechanism for both directions rather than a second "should the splash
         # show" rule that could disagree with this one. The "transcript cleared"
-        # notice appended right after this lands UNDER the splash (it goes
-        # through TranscriptView.append_block, not _append_block), which is why
-        # the receipt for the action survives alongside the restored splash.
+        # notice appended right after this lands UNDER the splash (see
+        # ``_clear_transcript``), which is why the receipt for the action
+        # survives alongside the restored splash.
         self._set_welcome_visible(True)
 
     def _set_welcome_visible(self, visible: bool) -> None:
@@ -1255,11 +1324,13 @@ class OperatorApp(App[None]):
         selects between them, so there is no second layout written in Python to
         keep in step with the first.
 
-        The width class and the vertical reserve are re-measured here rather than
+        The width class and the vertical reserve are re-resolved here rather than
         being second conditions: they answer "how wide is this terminal" and "how
         many rows are going spare", which are facts about the frame, not about the
-        session — and they have to be right on the FIRST boot frame, before any
-        resize event has happened.
+        session. On the boot path this call runs at mount, before the terminal's
+        size is known, and resolves nothing; the resize that follows it does the
+        work, and still does it before the first arrange. On ``/clear`` the size
+        is known and this call is the one that re-centres.
         """
         if self._welcome is not None:
             self._welcome.set_visible(visible)
@@ -1449,10 +1520,16 @@ class OperatorApp(App[None]):
         centred prompt at all. The notice is still appended and still scrolls
         back; it simply lands under the splash, exactly as the ``/clear`` receipt
         does.
+
+        A block that lands UNDER the splash takes rows out of the same region the
+        composition is measured against, so the reserve is recomputed here rather
+        than left centred for a region that no longer exists.
         """
         if ends_empty_state:
             self._set_welcome_visible(False)
         self.query_one(TranscriptView).append_block(block)
+        if not ends_empty_state:
+            self._sync_boot_layout()
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:

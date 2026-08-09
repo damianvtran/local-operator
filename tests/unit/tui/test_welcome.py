@@ -29,7 +29,7 @@ from textual.color import Color
 
 from local_operator.harness.types import AgentMessage
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import SLASH_COMMANDS, OperatorApp
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
 from local_operator.tui.widgets.welcome import (
     HINT_KEY_WIDTH_TIGHT,
@@ -39,8 +39,13 @@ from local_operator.tui.widgets.welcome import (
     MARK_PULSE_DEPTH,
     MARK_PULSE_INTERVAL_S,
     MARK_PULSE_PERIOD_S,
+    MARK_PULSE_SWELL_S,
     MARK_WIDTH,
     MODEL_PENDING,
+    TIP_GLYPH,
+    TIP_MIN_WIDTH,
+    TIP_ROTATE_INTERVAL_S,
+    TIPS,
     WORDMARK,
     WORDMARK_SPACED,
     WelcomeInfo,
@@ -76,6 +81,16 @@ def _has_hints(lines: list[str]) -> bool:
     return any("command picker" in row for row in lines) or any(
         row.strip() in {"/", "/help", "ctrl+d"} for row in lines
     )
+
+
+def _has_tip(lines: list[str]) -> bool:
+    """A tip is present when a row opens with the tip glyph.
+
+    Matched on the PREFIX and not on a tip's text, so the same helper answers for
+    a truncated tip as for a whole one. Nothing else on the splash opens with
+    that glyph — the credential warning uses ``!``.
+    """
+    return any(row.lstrip().startswith(f"{TIP_GLYPH} ") for row in lines)
 
 
 def _has_any_status(lines: list[str], info: WelcomeInfo) -> bool:
@@ -189,7 +204,7 @@ def test_hint_descriptions_never_truncate_into_nonsense() -> None:
 
 
 def test_height_tiers_shed_in_cost_to_the_user_order() -> None:
-    """The degradation order, pinned at four heights of the SAME facts.
+    """The degradation order, pinned at six heights of the SAME facts.
 
     The order is by what each step COSTS THE USER, which is deliberately NOT
     plain decoration-before-information:
@@ -197,11 +212,18 @@ def test_height_tiers_shed_in_cost_to_the_user_order() -> None:
     1. a box with room: everything, with the lockup's breathing row;
     2. one row short: the lockup goes FLUSH — one row of air is the cheapest
        thing on the screen;
-    3. tighter: the VERSION row goes. It is the least actionable fact here, and
+    3. tighter: the TIP goes, and the lockup gets its air back. It is the only
+       row here that costs the user nothing permanent — the same tip comes round
+       on the next launch — and it buys two rows, so what is left is EXACTLY the
+       splash as it stood before tips existed, at its own natural height;
+    4. tighter: the air again. The lockup's blank row is still the cheapest
+       concession on the screen, so it is spent twice — once to keep the tip, and
+       again after the tip handed it back;
+    5. tighter: the VERSION row goes. It is the least actionable fact here, and
        spending it to keep the mark is a better trade than losing the product's
        identity on the one screen that exists to show it. At a 28-row terminal
        this single row is exactly the difference;
-    4. tighter still: the mark goes, then the hints last, because the hints are
+    6. tighter still: the mark goes, then the hints last, because the hints are
        a first-time user's way in.
 
     The credential warning survives all of it — see the test below.
@@ -213,8 +235,9 @@ def test_height_tiers_shed_in_cost_to_the_user_order() -> None:
     roomy = _lines(info, ROOMY_W, 99)
     drawn = [i for i, row in enumerate(roomy) if row.strip()]
     full_h = drawn[-1] - drawn[0] + 1
-    # 12 logo (mark 10 + blank + wordmark) + 1 blank + 4 status + 1 blank + 3 hints
-    assert full_h == 21
+    # 12 logo (mark 10 + blank + wordmark) + 1 blank + 4 status + 1 blank
+    # + 3 hints + 1 blank + 1 tip
+    assert full_h == 23
     assert len(roomy) == full_h, "no padding rows: the block is all the builder draws"
 
     # A box of exactly the natural height keeps everything: the budget is what
@@ -223,24 +246,43 @@ def test_height_tiers_shed_in_cost_to_the_user_order() -> None:
     exact = _lines(info, ROOMY_W, full_h)
     assert _has_mark(exact)
     assert _has_hints(exact)
+    assert _has_tip(exact)
     assert f"v{info.version}" in "\n".join(exact)
     assert len(exact) == full_h
 
     # One row short: the lockup goes flush — one row of air is the cheapest thing
-    # on the screen, and every fact survives.
+    # on the screen, and every fact survives, tip included.
     flush = _lines(info, ROOMY_W, full_h - 1)
     assert _has_mark(flush)
     assert _has_hints(flush)
+    assert _has_tip(flush)
     assert f"v{info.version}" in "\n".join(flush)
 
+    # One row tighter: the tip goes — two rows, which buys back the air step 2
+    # spent, so the block is exactly the pre-tip splash and every fact is intact.
+    # Everything below here is therefore measured from THIS height.
+    no_tip_h = full_h - 2
+    no_tip = _lines(info, ROOMY_W, no_tip_h)
+    assert not _has_tip(no_tip)
+    assert _has_mark(no_tip)
+    assert _has_hints(no_tip)
+    assert f"v{info.version}" in "\n".join(no_tip)
+    assert len(no_tip) == no_tip_h, "the pre-tip block fills this budget exactly"
+
+    # One row tighter: the air goes for the second time, and every fact survives.
+    reflushed = _lines(info, ROOMY_W, no_tip_h - 1)
+    assert _has_mark(reflushed)
+    assert _has_hints(reflushed)
+    assert f"v{info.version}" in "\n".join(reflushed)
+
     # One row tighter: the version row is spent to keep the mark.
-    traded = _lines(info, ROOMY_W, full_h - 2)
+    traded = _lines(info, ROOMY_W, no_tip_h - 2)
     assert _has_mark(traded), "the mark is worth more than the version number"
     assert f"v{info.version}" not in "\n".join(traded)
     assert _has_hints(traded)
 
     # One row tighter again: there is nothing cheap left, so the mark goes.
-    mid = _lines(info, ROOMY_W, full_h - 3)
+    mid = _lines(info, ROOMY_W, no_tip_h - 3)
     assert not _has_mark(mid)
     assert _has_hints(mid)
     assert _has_any_status(mid, info)
@@ -292,7 +334,7 @@ def test_empty_box_renders_nothing() -> None:
     assert build_welcome_lines(_info(), 10, 0) == []
 
 
-# --- pure pulse: the mark breathes and nothing else moves ----------------------
+# --- pure glow: the mark strobes and nothing else moves ------------------------
 
 
 def _mark_styles(lines: list[Text]) -> list[Style]:
@@ -326,12 +368,12 @@ def _contrast(a: Color, b: Color) -> float:
     return (high + 0.05) / (low + 0.05)
 
 
-def test_the_pulse_rests_at_the_marks_own_dim() -> None:
+def test_the_glow_rests_at_the_marks_own_dim() -> None:
     """Phase zero is the mark's historical tint, not a sample of the animation.
 
     This is what makes the still frame the OLD frame: with the animation gated
     off the view never overrides the colour at all, and the first tick of a
-    running pulse starts from exactly the same place.
+    running glow starts from exactly the same place.
     """
     assert mark_pulse_phase(0.0) == 0.0
     assert mark_pulse_phase(MARK_PULSE_PERIOD_S) == pytest.approx(0.0, abs=1e-9)
@@ -339,78 +381,97 @@ def test_the_pulse_rests_at_the_marks_own_dim() -> None:
     assert mark_pulse_color(0.0).lower() == dim.lower()
 
 
-def test_the_pulse_swings_both_ways_and_stays_inside_its_ramp_neighbours() -> None:
-    """Up towards ``muted``, down towards ``faint``, a quarter step each way.
+def test_the_glow_only_ever_adds_light_and_spends_most_of_its_cycle_at_rest() -> None:
+    """A strobe, not a breath: never below rest, and mostly not running at all.
 
-    The bound is the point: an excursion that reached either neighbour outright
-    would be the flat ``muted`` mark the lockup rejected, or a mark that fades
-    to ``faint`` and reads as dropping out.
+    Two separate claims, and both are what "subtle" means here. A cycle that
+    dipped towards ``faint`` would read as the logo guttering rather than as
+    light passing over it, and a cycle that was always moving would nag — the
+    eye keeps returning to motion that never finishes.
     """
-    peak = mark_pulse_phase(MARK_PULSE_PERIOD_S / 4)
-    trough = mark_pulse_phase(3 * MARK_PULSE_PERIOD_S / 4)
-    assert peak == pytest.approx(1.0)
-    assert trough == pytest.approx(-1.0)
+    # The swell is a raised cosine: rest at both ends, peak in the middle.
+    assert mark_pulse_phase(MARK_PULSE_SWELL_S / 2) == pytest.approx(1.0)
+    assert mark_pulse_phase(MARK_PULSE_SWELL_S) == pytest.approx(0.0, abs=1e-9)
 
+    # Sampled across a whole cycle at the timer's own cadence: nothing negative,
+    # and the majority of ticks are exactly rest.
+    ticks = [
+        mark_pulse_phase(i * MARK_PULSE_INTERVAL_S)
+        for i in range(int(MARK_PULSE_PERIOD_S / MARK_PULSE_INTERVAL_S))
+    ]
+    assert min(ticks) == 0.0, "the glow went below the mark's resting dim"
+    assert max(ticks) == pytest.approx(1.0)
+    at_rest = sum(1 for level in ticks if level == 0.0)
+    assert at_rest > len(ticks) / 2, "the mark is moving more often than it is still"
+    assert MARK_PULSE_SWELL_S < MARK_PULSE_PERIOD_S / 2
+
+
+def test_the_glow_peaks_inside_one_step_of_the_marks_resting_ramp_value() -> None:
+    """Up towards ``muted`` and never as far as it.
+
+    The bound is the point: an excursion that reached the neighbour outright
+    would be the flat ``muted`` mark the lockup rejected for burying the
+    wordmark it is supposed to sit behind.
+    """
     dim = Color.parse(theme_mod.semantic_color("dim"))
     muted = Color.parse(theme_mod.semantic_color("muted"))
-    faint = Color.parse(theme_mod.semantic_color("faint"))
     assert mark_pulse_color(1.0) == dim.blend(muted, MARK_PULSE_DEPTH).hex
-    assert mark_pulse_color(-1.0) == dim.blend(faint, MARK_PULSE_DEPTH).hex
-    # Brighter at the peak, darker at the trough — a pulse, not a colour cycle.
     assert Color.parse(mark_pulse_color(1.0)).brightness > dim.brightness
-    assert Color.parse(mark_pulse_color(-1.0)).brightness < dim.brightness
+    assert mark_pulse_color(1.0).lower() != muted.hex.lower()
 
-    # Breathing, not flashing — and this is the assertion that says so, because
-    # the two above only restate the constant. The excursion is bounded as a
-    # CONTRAST RATIO between its extremes: the full `dim`->`faint` swing that
-    # was rejected measures 2.30:1 and reads as the logo dropping out, and
-    # reaching both neighbours outright measures 4.37:1. The shipped amplitude
-    # is 1.44:1, and the mark stays legible on the ground at either end.
-    high, low = Color.parse(mark_pulse_color(1.0)), Color.parse(mark_pulse_color(-1.0))
+    # Subtlety as a CONTRAST RATIO, because the assertions above only restate
+    # the constant. Rest sits at 4.55:1 on the ground and the peak at 5.57:1 —
+    # 1.22:1 peak to rest, against 1.90:1 for the full step to `muted`. Anything
+    # past 1.35:1 stops reading as a glow and starts reading as a second theme.
+    peak = Color.parse(mark_pulse_color(1.0))
     ground = Color.parse(theme_mod.semantic_color("bg"))
-    assert _contrast(high, low) < 1.6
-    assert _contrast(low, ground) > 3.0
-    assert high.hex.lower() != muted.hex.lower()
-    assert low.hex.lower() != faint.hex.lower()
+    assert _contrast(peak, dim) < 1.35
+    assert _contrast(peak, ground) > _contrast(dim, ground)
+    assert _contrast(peak, ground) < _contrast(muted, ground)
 
 
-def test_a_pulse_frame_moves_the_marks_style_and_nothing_else() -> None:
-    """Two frames of the breath: identical text, identical row count, and the
+def test_a_glow_frame_moves_the_marks_style_and_nothing_else() -> None:
+    """Two frames of the glow: identical text, identical row count, and the
     ONLY styles that differ are the mark's.
 
-    Geometry is what the boot composition is measured from, so a pulse that
+    Geometry is what the boot composition is measured from, so a glow that
     could change a row count or a pad would move the splash on the card twelve
     times a second. Asserting the text is not enough — a style-only change is
     invisible to a plain-text dump, which is exactly why this compares spans.
     """
     peak = build_welcome_lines(_info(), ROOMY_W, ROOMY_H, mark_color=mark_pulse_color(1.0))
-    trough = build_welcome_lines(_info(), ROOMY_W, ROOMY_H, mark_color=mark_pulse_color(-1.0))
+    mid = build_welcome_lines(_info(), ROOMY_W, ROOMY_H, mark_color=mark_pulse_color(0.5))
     rest = build_welcome_lines(_info(), ROOMY_W, ROOMY_H)
 
-    assert len(peak) == len(trough) == len(rest)
-    assert plain(peak) == plain(trough) == plain(rest)
+    assert len(peak) == len(mid) == len(rest)
+    assert plain(peak) == plain(mid) == plain(rest)
     assert len(_mark_styles(rest)) == len(LOGO_MARK)
 
-    peak_rows, trough_rows = _row_styles(peak), _row_styles(trough)
-    differing = [i for i in range(len(peak)) if peak_rows[i] != trough_rows[i]]
+    peak_rows, mid_rows = _row_styles(peak), _row_styles(mid)
+    differing = [i for i in range(len(peak)) if peak_rows[i] != mid_rows[i]]
     glyph_rows = [i for i, line in enumerate(peak) if any(g in line.plain for g in ("█", "▄", "▀"))]
     # EVERY mark row moves and ONLY the mark rows move: one leaked span would
-    # mean a row of the wordmark or the status stack breathing along with it.
+    # mean a row of the wordmark or the status stack glowing along with it.
     assert differing == glyph_rows == list(range(len(LOGO_MARK)))
-    assert _mark_styles(peak) != _mark_styles(trough)
+    assert _mark_styles(peak) != _mark_styles(mid)
 
 
-def test_the_pulse_cannot_change_the_blocks_height_at_any_size() -> None:
+def test_the_glow_cannot_change_the_blocks_height_at_any_size() -> None:
     """The degradation ladder is blind to the tint.
 
-    Checked across the sizes where the ladder actually fires, because a pulse
+    Checked across the sizes where the ladder actually fires, because a glow
     that shifted a height would do it at the threshold — the one row of budget
-    that decides whether the mark is drawn at all.
+    that decides whether the mark is drawn at all. Every phase the timer can
+    actually produce is sampled, not just the extremes.
     """
+    levels = [
+        mark_pulse_phase(i * MARK_PULSE_INTERVAL_S)
+        for i in range(int(MARK_PULSE_PERIOD_S / MARK_PULSE_INTERVAL_S))
+    ]
     for width in (20, MARK_WIDTH, LOGO_FULL_MIN_WIDTH, ROOMY_W):
         for height in range(1, ROOMY_H + 1):
             rest = build_welcome_lines(_info(), width, height)
-            for phase in (-1.0, -0.5, 0.5, 1.0):
+            for phase in levels:
                 frame = build_welcome_lines(
                     _info(), width, height, mark_color=mark_pulse_color(phase)
                 )
@@ -538,8 +599,8 @@ def _welcome(app: OperatorApp) -> WelcomeView:
 def _frame(app: OperatorApp) -> list[tuple[str, list[tuple[str, str]]]]:
     """The composed frame as (row text, [(segment style, segment text)]).
 
-    Styles and not just text, because the pulse is a STYLE-ONLY change: a dump
-    of ``strip.text`` is byte-identical across every frame of the breath, so a
+    Styles and not just text, because the glow is a STYLE-ONLY change: a dump
+    of ``strip.text`` is byte-identical across every frame of it, so a
     text comparison would pass an animation that had stopped working.
     """
     return [
@@ -696,7 +757,7 @@ async def test_model_label_polls_in_after_boot() -> None:
         assert welcome._timer is None  # retired once the label arrived
 
 
-# --- pulse lifecycle: a timer that only exists while it can be seen ------------
+# --- glow lifecycle: a timer that only exists while it can be seen -------------
 
 
 async def _settled_welcome(pilot: Any) -> WelcomeView:
@@ -704,7 +765,7 @@ async def _settled_welcome(pilot: Any) -> WelcomeView:
 
     The model label lands on the poll timer a fraction of a second into every
     boot and re-centres the whole block, so a frame captured before that is not
-    a still frame and comparing two of them measures the poll, not the pulse.
+    a still frame and comparing two of them measures the poll, not the glow.
     The poll timer retiring IS the settled edge.
     """
     welcome = pilot.app.query_one(WelcomeView)
@@ -722,20 +783,20 @@ def animation_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """Undo the suite-wide shimmer pin for the tests that need real motion.
 
     The autouse fixture sets ``LOCAL_OPERATOR_NO_SHIMMER`` so every other test
-    reads a deterministic still frame; the pulse's own lifecycle can only be
+    reads a deterministic still frame; the glow's own lifecycle can only be
     observed with the gate open.
     """
     monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
 
 
 @pytest.mark.asyncio
-async def test_the_pulse_is_a_no_op_when_animation_is_disabled() -> None:
+async def test_the_glow_is_a_no_op_when_animation_is_disabled() -> None:
     """``LOCAL_OPERATOR_NO_SHIMMER`` (set by this suite's autouse fixture) buys
     a STILL frame, not a slow one: no timer is created, no colour is overridden,
     and the composed frame is byte-identical across a second of wall clock.
 
     Deterministic stills are a hard requirement here — the SVG goldens are
-    captured from exactly this path — so "the pulse is paused" would not be
+    captured from exactly this path — so "the glow is paused" would not be
     good enough. Nothing may be scheduled at all.
     """
     app = _make_app(FakeSession())
@@ -752,9 +813,9 @@ async def test_the_pulse_is_a_no_op_when_animation_is_disabled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_pulse_runs_only_while_the_splash_is_on_screen(animation_on: None) -> None:
-    """Visible: breathing. Hidden by the first transcript block: stopped, and
-    back to rest. Returned by ``/clear``: breathing again, from rest.
+async def test_the_glow_runs_only_while_the_splash_is_on_screen(animation_on: None) -> None:
+    """Visible: glowing. Hidden by the first transcript block: stopped, and
+    back to rest. Returned by ``/clear``: glowing again, from rest.
 
     The stopped timer is checked through the Timer OBJECT rather than through
     the view's attribute: dropping the reference is not stopping it, and a
@@ -800,32 +861,33 @@ async def test_both_timers_stop_when_the_view_is_unmounted(animation_on: None) -
 
 
 @pytest.mark.asyncio
-async def test_a_pulse_frame_repaints_the_mark_and_moves_no_row(animation_on: None) -> None:
-    """The composed frame, not the builder: two phases of the breath restyle the
+async def test_a_glow_frame_repaints_the_mark_and_moves_no_row(animation_on: None) -> None:
+    """The composed frame, not the builder: two phases of the glow restyle the
     mark's rows and leave every row's TEXT and the frame's height untouched.
 
-    Sampled at the two extrema, where the sine is flat, so the assertion does
-    not depend on how long the pilot's pause actually took. A text-only dump
-    cannot see this change at all, which is the trap this test exists to avoid:
-    the comparison is over rendered SEGMENT STYLES.
+    Sampled at the swell's peak and at its rest, both of which are flat, so the
+    assertion does not depend on how long the pilot's pause actually took. A
+    text-only dump cannot see this change at all, which is the trap this test
+    exists to avoid: the comparison is over rendered SEGMENT STYLES.
     """
     app = _make_app(FakeSession())
     async with app.run_test(size=(100, 30)) as pilot:
         welcome = await _settled_welcome(pilot)
 
-        welcome._pulse_origin = time.monotonic() - MARK_PULSE_PERIOD_S / 4
+        welcome._pulse_origin = time.monotonic() - MARK_PULSE_SWELL_S / 2
         welcome._pulse_tick()
         await pilot.pause()
         peak = _frame(app)
 
-        welcome._pulse_origin = time.monotonic() - 3 * MARK_PULSE_PERIOD_S / 4
+        # Deep inside the hold, where the mark is at its resting `dim`.
+        welcome._pulse_origin = time.monotonic() - (MARK_PULSE_PERIOD_S + MARK_PULSE_SWELL_S) / 2
         welcome._pulse_tick()
         await pilot.pause()
-        trough = _frame(app)
+        resting = _frame(app)
 
-        assert len(peak) == len(trough)
-        assert [text for text, _ in peak] == [text for text, _ in trough]
-        differing = [i for i in range(len(peak)) if peak[i][1] != trough[i][1]]
+        assert len(peak) == len(resting)
+        assert [text for text, _ in peak] == [text for text, _ in resting]
+        differing = [i for i in range(len(peak)) if peak[i][1] != resting[i][1]]
         glyphs = [i for i, (text, _) in enumerate(peak) if any(g in text for g in ("█", "▄", "▀"))]
         assert differing == glyphs
         assert len(glyphs) == len(LOGO_MARK), "a mark row went missing between frames"
@@ -843,8 +905,9 @@ async def test_a_tick_never_re_measures_and_skips_the_colours_it_already_drew(
     twitches while the user reads it.
 
     And a tick that resolves to the colour already on screen must do nothing:
-    the ramp quantises to about two dozen hexes across 40 ticks, so repainting
-    the widget to draw identical bytes is the waste this cadence exists to avoid.
+    two thirds of the cycle is held at rest and the swell quantises to ten
+    hexes across twenty ticks, so repainting the widget to draw identical bytes
+    is the waste this cadence exists to avoid.
     """
     app = _make_app(FakeSession())
     async with app.run_test(size=(100, 30)) as pilot:
@@ -859,17 +922,18 @@ async def test_a_tick_never_re_measures_and_skips_the_colours_it_already_drew(
         welcome.refresh = recording_refresh  # type: ignore[method-assign]
 
         # Land on the peak: a colour a long way from rest, so the tick repaints.
-        welcome._pulse_origin = time.monotonic() - MARK_PULSE_PERIOD_S / 4
+        welcome._pulse_origin = time.monotonic() - MARK_PULSE_SWELL_S / 2
         welcome._pulse_tick()
         assert len(calls) == 1, "a moved colour did not repaint"
         assert not any(kwargs.get("layout") for _, kwargs in calls)
 
-        # Immediately again: at 12.5 fps the sine cannot have left the flat top,
-        # so the second tick must cost nothing.
+        # Immediately again: at 12.5 fps the raised cosine cannot have left the
+        # flat top, so the second tick must cost nothing.
         welcome._pulse_tick()
         assert len(calls) == 1, "an unchanged colour still repainted the widget"
-        assert MARK_PULSE_INTERVAL_S <= 0.1, "the pulse is budgeted at 10-15 fps"
-        assert 2.5 <= MARK_PULSE_PERIOD_S <= 4.0, "the breath left its slow band"
+        assert MARK_PULSE_INTERVAL_S <= 0.1, "the glow is budgeted at 10-15 fps"
+        assert 1.0 <= MARK_PULSE_SWELL_S <= 2.0, "the swell left its slow band"
+        assert MARK_PULSE_PERIOD_S >= 3 * MARK_PULSE_SWELL_S / 2, "the mark barely rests"
 
 
 # --- the stylesheet carries no literal hex in the welcome region ---------------
@@ -888,3 +952,261 @@ def test_stylesheet_region_has_no_literal_hex() -> None:
     for value in colors:
         for part in value.split():
             assert part.startswith("$lo-"), f"non-token color in welcome region: {value!r}"
+
+
+# --- the rotating tip ----------------------------------------------------------
+#
+# The load-bearing property is the ROW COUNT. This view is content-sized and the
+# boot layout rests it on the input card, so a tip that could be one row for one
+# entry and two (or none) for the next would shove the whole splash up and down
+# the screen every TIP_ROTATE_INTERVAL_S. Every test here is ultimately about
+# that, from either the pure or the composed side.
+
+
+def _tip_rows(rows: list[str]) -> list[str]:
+    """Every rendered row that opens with the tip glyph — expected to be one."""
+    return [row for row in rows if row.lstrip().startswith(f"{TIP_GLYPH} ")]
+
+
+def _tip_styles(lines: list[Text]) -> list[Style]:
+    """The tip row's spans, glyph first then body."""
+    line = next(line for line in lines if line.plain.lstrip().startswith(f"{TIP_GLYPH} "))
+    return [span.style for span in line.spans if isinstance(span.style, Style)]
+
+
+def test_a_tip_is_drawn_as_the_blocks_last_row() -> None:
+    """One tip, glyph-prefixed, one blank row below the hints it sits under.
+
+    Last on purpose: it is the only row here that teaches something the user did
+    not ask about, so it reads after the facts and after the way in.
+    """
+    lines = _lines(_info(), ROOMY_W, ROOMY_H)
+    rows = _tip_rows(lines)
+    assert len(rows) == 1
+    assert rows[0].strip() == f"{TIP_GLYPH} {TIPS[0]}"
+    # One blank row joins it to the hints, the way every section of this block is
+    # joined — and the hint table's last row is what sits above that blank.
+    assert lines[-1] == rows[0]
+    assert not lines[-2].strip()
+    assert "ctrl+d" in lines[-3]
+
+
+def test_the_tip_is_quieter_than_the_hints_it_sits_under() -> None:
+    """Subordinate is measured as CONTRAST against the ground, not as a token
+    name, so the assertion holds on either theme: the sentence sits below the
+    hints' description ink, and the glyph below the sentence — a bullet the eye
+    can skip over prose it can still read.
+    """
+    ground = Color.parse(theme_mod.semantic_color("bg"))
+    hint_desc = Color.parse(theme_mod.semantic_color("muted"))
+    glyph_style, body_style = _tip_styles(build_welcome_lines(_info(), ROOMY_W, ROOMY_H))
+    assert glyph_style.color is not None and body_style.color is not None
+    glyph = Color.parse(glyph_style.color.get_truecolor().hex)
+    body = Color.parse(body_style.color.get_truecolor().hex)
+    assert _contrast(body, ground) < _contrast(hint_desc, ground)
+    assert _contrast(glyph, ground) < _contrast(body, ground)
+
+
+def test_advancing_the_rotation_changes_the_tip_and_never_the_row_count() -> None:
+    """THE constraint. Every tip, at every size, draws the same number of rows.
+
+    Swept over the whole pool rather than sampled, because the failure this
+    guards against is one long entry among twelve: the block is measured once and
+    then repainted per rotation, so a single tip that needed a second row would
+    make the splash jump every time the ring came round to it.
+    """
+    for width in (TIP_MIN_WIDTH, TIP_MIN_WIDTH + 8, 60, ROOMY_W):
+        for height in range(1, ROOMY_H + 1):
+            base = build_welcome_lines(_info(), width, height)
+            for index in range(1, len(TIPS)):
+                frame = build_welcome_lines(_info(), width, height, tip_index=index)
+                assert len(frame) == len(base), f"{width}x{height} moved on tip {index}"
+
+    # And the text really does turn over where there is room to read it: one row
+    # per tip, a different sentence in each, and the pool walked exactly once.
+    seen: list[str] = []
+    for index in range(len(TIPS)):
+        block = build_welcome_lines(_info(), ROOMY_W, 99, tip_index=index)
+        rows = [line.plain.rstrip() for line in block]
+        tip = _tip_rows(rows)
+        assert len(tip) == 1
+        seen.append(tip[0].strip())
+    assert len(set(seen)) == len(TIPS)
+
+
+def test_the_index_wraps_so_a_caller_can_keep_a_monotonic_counter() -> None:
+    """The view advances an int forever; the pool is what makes it a ring."""
+    base = build_welcome_lines(_info(), ROOMY_W, ROOMY_H)
+    wrapped = build_welcome_lines(_info(), ROOMY_W, ROOMY_H, tip_index=len(TIPS))
+    assert plain(wrapped) == plain(base)
+
+
+def test_a_narrow_terminal_omits_the_tip_rather_than_wrapping_it() -> None:
+    """Below the threshold there is no tip row at all; at it there is exactly
+    one, truncated into the box.
+
+    Omitted on WIDTH and never on the current tip's own length — that is what
+    keeps the row count the same answer for all twelve, which the rotation
+    depends on.
+    """
+    for width in range(1, TIP_MIN_WIDTH):
+        assert not _tip_rows(_lines(_info(), width, 99)), f"a tip survived at {width} cells"
+    for index in range(len(TIPS)):
+        rows = [
+            line.plain.rstrip()
+            for line in build_welcome_lines(_info(), TIP_MIN_WIDTH, 99, tip_index=index)
+        ]
+        tip = _tip_rows(rows)
+        assert len(tip) == 1, f"tip {index} did not fit in one row at the threshold"
+        assert cell_len(tip[0]) <= TIP_MIN_WIDTH
+
+
+def test_every_tip_names_something_this_build_answers() -> None:
+    """A splash advertising a command the app rejects is worse than a blank row,
+    and this is the one screen a first-run user reads word for word — so every
+    leading ``/token`` is checked against the real command table."""
+    known = {command.name for command in SLASH_COMMANDS}
+    known |= {alias for command in SLASH_COMMANDS for alias in command.aliases}
+    for tip in TIPS:
+        for token in re.findall(r"/[a-z]+", tip):
+            assert token[1:] in known, f"{tip!r} names a command that does not exist: {token}"
+
+
+def test_the_pool_stays_a_readable_size_and_fits_a_60_column_terminal() -> None:
+    """Bounds on the three numbers that make this feature pleasant or annoying.
+
+    A pool much past a dozen dilutes the odds of ever meeting the entries that
+    change how the app is used; duplicates waste a slot outright. 60 cells is the
+    narrowest terminal a tip should survive whole in, and the interval has a band
+    of its own (see ``TIP_ROTATE_INTERVAL_S``): under 8 s the row turns over
+    while it is being read, over 15 s a short session only ever sees one.
+    """
+    assert 8 <= len(TIPS) <= 12
+    assert len(set(TIPS)) == len(TIPS)
+    assert max(cell_len(f"{TIP_GLYPH} {tip}") for tip in TIPS) <= 60
+    assert 8.0 <= TIP_ROTATE_INTERVAL_S <= 15.0
+
+
+@pytest.mark.asyncio
+async def test_the_rotation_is_a_no_op_when_animation_is_disabled() -> None:
+    """``LOCAL_OPERATOR_NO_SHIMMER`` (this suite's autouse fixture) holds the row
+    at the FIRST tip with no timer scheduled at all.
+
+    Same gate as the pulse, and for a sharper reason: a row of text on a clock
+    would make every still frame a sample of whichever tip the wall clock
+    happened to be holding, so the SVG goldens could never be regenerated twice.
+    """
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        assert welcome._tip_timer is None
+        assert welcome._tip_index == 0
+
+        before = _frame(app)
+        shown = [row.strip() for row in _tip_rows([text for text, _ in before])]
+        assert shown == [f"{TIP_GLYPH} {TIPS[0]}"]
+        await asyncio.sleep(1.0)
+        await pilot.pause()
+        assert _frame(app) == before
+        assert welcome._tip_timer is None
+        assert welcome._tip_index == 0
+
+
+@pytest.mark.asyncio
+async def test_a_rotation_tick_turns_the_tip_over_and_moves_no_other_row(
+    animation_on: None,
+) -> None:
+    """The composed frame, not the builder: one tick replaces the sentence and
+    leaves the widget's height and every other row of the screen alone.
+
+    Driven by calling the tick rather than by waiting out the interval — twelve
+    seconds of wall clock in a unit test buys nothing the tick does not prove.
+    """
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        assert welcome._tip_timer is not None
+        before = [text for text, _ in _frame(app)]
+        before_tip = _tip_rows(before)
+        assert len(before_tip) == 1
+        height = welcome.size.height
+
+        welcome._tip_tick()
+        await pilot.pause()
+        after = [text for text, _ in _frame(app)]
+        after_tip = _tip_rows(after)
+
+        assert len(after_tip) == 1
+        assert after_tip != before_tip, "the tick did not turn the tip over"
+        assert len(after) == len(before)
+        assert welcome.size.height == height, "the splash was re-measured by a rotation"
+        # Every row that is not the tip is byte-identical, which is the whole
+        # claim: the block did not shift on the card.
+        assert [row for row in before if row not in before_tip] == [
+            row for row in after if row not in after_tip
+        ]
+
+
+@pytest.mark.asyncio
+async def test_the_rotation_walks_the_whole_ring_and_never_repeats_itself(
+    animation_on: None,
+) -> None:
+    """A tip that came up twice running reads as a broken app, and one the ring
+    never reaches might as well not be written — so the walk is checked from
+    wherever the view happened to start, which is not the top of the pool."""
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        seen = [welcome._tip_index]
+        for _ in range(len(TIPS)):
+            welcome._tip_tick()
+            seen.append(welcome._tip_index)
+        assert all(a != b for a, b in zip(seen, seen[1:])), "a tip repeated back to back"
+        assert set(seen) == set(range(len(TIPS))), "the ring cannot reach every tip"
+        assert seen[-1] == seen[0], "a full lap did not come back round"
+
+
+@pytest.mark.asyncio
+async def test_the_rotation_runs_only_while_the_splash_is_on_screen(animation_on: None) -> None:
+    """Visible: rotating. Hidden by the first transcript block: stopped, and back
+    to the first tip. Returned by ``/clear``: a new timer.
+
+    Checked through the Timer OBJECT as well as the attribute, because dropping
+    the reference is not stopping it — an interval whose widget is gone keeps
+    waking the event loop.
+    """
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        running = welcome._tip_timer
+        assert running is not None
+
+        app._append_block(UserBlock("hello"))
+        await pilot.pause()
+        assert welcome.display is False
+        assert welcome._tip_timer is None
+        assert running._task is None, "the timer was dereferenced but never stopped"
+        assert welcome._tip_index == 0, "a hidden splash kept the tip it paused on"
+
+        app.query_one(TranscriptView).clear_blocks()
+        await pilot.pause()
+        assert welcome.display is True
+        assert welcome._tip_timer is not None
+        assert welcome._tip_timer is not running
+
+
+@pytest.mark.asyncio
+async def test_the_tip_timer_stops_when_the_view_is_unmounted(animation_on: None) -> None:
+    """Teardown with the splash still up — every boot that quits without a prompt
+    takes that exit — leaves no rotation running behind a screen that is gone."""
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        rotation = welcome._tip_timer
+        assert rotation is not None
+
+        await welcome.remove()
+        await pilot.pause()
+
+        assert welcome._tip_timer is None
+        assert rotation._task is None

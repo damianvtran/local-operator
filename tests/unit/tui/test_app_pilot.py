@@ -18,8 +18,8 @@ from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.tui.app import BOOT_LAYOUT_CLASS, SLASH_COMMANDS, OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
+from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from local_operator.tui.widgets.welcome import WelcomeView

@@ -34,7 +34,7 @@ def _row(session_id: str, name: str, age_s: float = 60.0) -> SessionRow:
     return SessionRow(id=session_id, mtime=NOW - age_s, name=name)
 
 
-def _write_transcript(root: Path, session_id: str, entries: list[dict]) -> Path:
+def _write_transcript(root: Path, session_id: str, entries: list[dict[str, object]]) -> Path:
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / "transcript.jsonl").open("w", encoding="utf-8") as handle:
@@ -43,7 +43,7 @@ def _write_transcript(root: Path, session_id: str, entries: list[dict]) -> Path:
     return directory
 
 
-def _message(role: str, text: str, **payload) -> dict:
+def _message(role: str, text: str, **payload: object) -> dict[str, object]:
     return {
         "id": "e1",
         "ts": 0,
