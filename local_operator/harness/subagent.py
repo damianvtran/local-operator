@@ -159,7 +159,10 @@ def _make_runner(
             result_text = final["text"]
             await emit(
                 SubagentEndEvent(
-                    job_id=job_id, label=label, status="completed", result_text=result_text
+                    job_id=job_id,
+                    label=label,
+                    status="completed",
+                    result_text=result_text,
                 )
             )
             return result_text
@@ -296,9 +299,9 @@ async def _build_child_session(
     tools = create_tools(tool_context)
 
     def system_blocks_provider() -> list[str]:
-        # Standard block layout (instructions, inventory, env, skills tail)
-        # with an empty skills block: per-launch skill selection is cost the
-        # one-shot child does not need.
+        # Standard block layout with an empty lazy-knowledge tail: rebuilding
+        # semantic indexes per one-shot child would add cost without giving the
+        # parent a new durable capability.
         return build_system_blocks(
             tools, "", _env_details(cwd), datetime.now().strftime("%Y-%m-%d")
         )

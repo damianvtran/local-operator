@@ -52,9 +52,15 @@ class TestPriorityAndDedupe:
     def test_project_wins_over_user_and_imports(self, tmp_path: Path, home: Path) -> None:
         """First source to define a name wins; later sources never override."""
         cwd = tmp_path / "proj"
-        _write(cwd / ".local-operator" / "mcp.json", {"mcpServers": {"srv": _stdio("proj-cmd")}})
+        _write(
+            cwd / ".local-operator" / "mcp.json",
+            {"mcpServers": {"srv": _stdio("proj-cmd")}},
+        )
         _write(cwd / ".mcp.json", {"mcpServers": {"srv": _stdio("dot-cmd")}})
-        _write(home / ".local-operator" / "mcp.json", {"mcpServers": {"srv": _stdio("user-cmd")}})
+        _write(
+            home / ".local-operator" / "mcp.json",
+            {"mcpServers": {"srv": _stdio("user-cmd")}},
+        )
         _write(
             home / ".claude.json",
             {"mcpServers": {"srv": _stdio("claude-cmd"), "claudeonly": _stdio("cc")}},
@@ -68,14 +74,20 @@ class TestPriorityAndDedupe:
     def test_dot_mcp_json_beats_user(self, tmp_path: Path, home: Path) -> None:
         cwd = tmp_path / "proj"
         _write(cwd / ".mcp.json", {"mcpServers": {"srv": _stdio("dot-cmd")}})
-        _write(home / ".local-operator" / "mcp.json", {"mcpServers": {"srv": _stdio("user-cmd")}})
+        _write(
+            home / ".local-operator" / "mcp.json",
+            {"mcpServers": {"srv": _stdio("user-cmd")}},
+        )
 
         configs, _ = load_all_mcp_configs(cwd)
         assert _command(configs, "srv") == "dot-cmd"
 
     def test_user_beats_foreign_imports(self, tmp_path: Path, home: Path) -> None:
         cwd = tmp_path / "proj"
-        _write(home / ".local-operator" / "mcp.json", {"mcpServers": {"srv": _stdio("user-cmd")}})
+        _write(
+            home / ".local-operator" / "mcp.json",
+            {"mcpServers": {"srv": _stdio("user-cmd")}},
+        )
         _write(home / ".cursor" / "mcp.json", {"mcpServers": {"srv": _stdio("cursor-cmd")}})
         _write(
             cwd / ".vscode" / "mcp.json",
@@ -154,7 +166,10 @@ class TestEnableDisable:
             },
         )
         configs, _ = load_all_mcp_configs(cwd)
-        assert set(configs) == {"b", "d"}  # a: disabled wins; c: flag; d: allowlist revives
+        assert set(configs) == {
+            "b",
+            "d",
+        }  # a: disabled wins; c: flag; d: allowlist revives
 
     def test_enabled_false_suppresses_and_keeps_name_owned(
         self, tmp_path: Path, home: Path
@@ -213,7 +228,10 @@ class TestShapesAndImports:
                         "url": "https://example.com/mcp",
                         "headers": {"Authorization": "Bearer x"},
                         "timeout": 5000,
-                        "auth": {"type": "oauth", "token_url": "https://example.com/token"},
+                        "auth": {
+                            "type": "oauth",
+                            "token_url": "https://example.com/token",
+                        },
                         "oauth": {"callback_port": 4000, "callback_path": "/cb"},
                     }
                 }
@@ -274,7 +292,12 @@ class TestCliHelpers:
         cwd.mkdir()
         assert (
             add_server(
-                "srv", command="npx", args=["-y", "pkg"], env={"K": "V"}, scope="project", cwd=cwd
+                "srv",
+                command="npx",
+                args=["-y", "pkg"],
+                env={"K": "V"},
+                scope="project",
+                cwd=cwd,
             )
             == 0
         )
@@ -304,11 +327,26 @@ class TestCliHelpers:
         assert doc["mcpServers"]["remote"]["headers"] == {"a": "b"}
         assert remove_server("remote") == 0
 
+    def test_add_oauth_url_server(self, tmp_path: Path, home: Path) -> None:
+        assert add_server("linear", url="https://mcp.linear.app/mcp", oauth=True) == 0
+        doc = json.loads((home / ".local-operator" / "mcp.json").read_text())
+        assert doc["mcpServers"]["linear"] == {
+            "type": "http",
+            "url": "https://mcp.linear.app/mcp",
+            "auth": {"type": "oauth"},
+        }
+        assert add_server("stdio-oauth", command="npx", oauth=True) == 1
+
     def test_list_effective_servers(self, tmp_path: Path, home: Path) -> None:
         cwd = tmp_path / "proj"
         _write(
             cwd / ".local-operator" / "mcp.json",
-            {"mcpServers": {"a": _stdio("a"), "off": {**_stdio("off"), "enabled": False}}},
+            {
+                "mcpServers": {
+                    "a": _stdio("a"),
+                    "off": {**_stdio("off"), "enabled": False},
+                }
+            },
         )
         listed = list_effective_servers(cwd)
         assert set(listed) == {"a"}
