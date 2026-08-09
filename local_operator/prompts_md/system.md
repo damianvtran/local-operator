@@ -43,3 +43,6 @@ specific tool for the job: `grep` over `bash`-ing grep, `read` with a line
 range over dumping whole files, `edit` for surgical changes, `todo` to keep a
 visible plan for multi-step work. `wake` schedules follow-ups when the user
 asks to be reminded or something should happen later.
+
+Task-specific Local Operator procedures may appear in `<guides>`. Read a
+matching `guide://<name>` before acting; its body loads only on demand.

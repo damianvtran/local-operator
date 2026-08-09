@@ -1,30 +1,14 @@
-"""The ``skill://`` URL protocol — progressive disclosure for skill content.
+"""Progressive-disclosure URL resolution for skills and harness guides.
 
-Contract shared with stream A's ``read`` tool (docs/REWRITE.md §C):
-``resolve_skill_url(url, skills)`` returns ``None`` when ``url`` is not a
-skill URL (so the caller falls through to normal paths), a ``str`` with the
-resolved content, and raises ``ValueError`` for bad skill URLs.
+``skill://`` and ``guide://`` intentionally share one containment-checked
+resolver. Both protocols return a small markdown body only after the model
+chooses to read a semantically surfaced name; reference paths remain lazy.
+Wrappers keep the public ``resolve_skill_url`` contract stable while packaged
+guides use :func:`resolve_resource_url` with their own scheme and error labels.
 
-Resolution ladder:
-
-1. ``skill://<name>`` — exact-name lookup of the skill; miss raises with ALL
-   available names listed. That error message is the model's self-correction
-   path: it reads the list and retries with a real name.
-2. No path → the full ``SKILL.md`` text (frontmatter included; the body is
-   the payload, the frontmatter is cheap context).
-3. With path → joined under ``base_dir`` after rejecting absolute paths and
-   ``..`` segments, then re-checked with ``Path.resolve().is_relative_to`` —
-   the second check is the symlink defense (a link inside the skill dir can
-   point anywhere).
-4. Directory target → a rendered listing (``name/ (dir)`` lines, capped at
-   500 entries) so the model can discover ``references/`` content; file
-   target → text read with ``errors="replace"``, capped at 200KB by
-   bounding the READ itself, never loading the whole file first.
-
-``hide`` skills resolve normally here — hiding only affects prompt listings.
-Dotfiles are unlisted AND unreadable: directory listings skip any name
-starting with ``.``, and a direct read of a dotfile path is rejected with an
-explicit message, so "not listed" never silently means "still reachable".
+Resolution rejects absolute paths, traversal, symlink escapes, and dotfiles.
+Directory listings are deterministic and bounded, while file reads consume at
+most 200 KiB plus one byte so a large file cannot become a large allocation.
 """
 
 from __future__ import annotations
@@ -36,7 +20,7 @@ from urllib.parse import unquote, urlsplit
 from local_operator.skills.discovery import Skill
 
 MAX_READ_BYTES = 200 * 1024
-"""Files larger than this are truncated; skills ship text, not binaries."""
+"""Files larger than this are truncated; resources ship text, not binaries."""
 
 _MAX_LISTING_ENTRIES = 500
 """Directory listings never exceed this many entries (RS-14); the overflow is
@@ -49,8 +33,8 @@ def _read_text_capped(path: Path) -> str:
     """Read a file as UTF-8 (lossy), truncating at MAX_READ_BYTES.
 
     The cap bounds the READ, not just the returned string: we read at most
-    ``MAX_READ_BYTES + 1`` bytes so a multi-GB file inside a skill dir never
-    gets fully loaded into memory before being cut.
+    ``MAX_READ_BYTES + 1`` bytes so a multi-GB resource file is never loaded
+    fully before being cut.
     """
     with path.open("rb") as fh:
         raw = fh.read(MAX_READ_BYTES + 1)
@@ -83,64 +67,72 @@ def _list_directory(directory: Path) -> str:
     return "\n".join(lines) if lines else "(empty directory)"
 
 
-def _resolve_child(skill: Skill, raw_path: str) -> str:
-    """Join ``raw_path`` under the skill's base_dir with containment checks.
-
-    ``raw_path`` comes from ``urlsplit`` and always starts with ``/`` (the
-    separator after the netloc), so that leading slash is the URL separator,
-    not an absolute filesystem path. ``..`` segments are rejected outright,
-    and the resolved target is re-checked against ``base_dir`` — that second
-    check is what catches symlinks pointing out of the skill directory.
-    """
+def _resolve_child(
+    resource: Skill,
+    raw_path: str,
+    *,
+    scheme: str,
+    label: str,
+) -> str:
+    """Join a URL child path under one resource with containment checks."""
     relative = unquote(raw_path.lstrip("/"))
 
     segments = relative.split("/")
     if relative.startswith("/") or any(part == ".." for part in segments):
         raise ValueError(
-            f"Invalid skill path '{raw_path}': absolute paths and '..' segments " "are not allowed"
+            f"Invalid {label} path '{raw_path}': absolute paths and '..' segments "
+            "are not allowed"
         )
     if any(part.startswith(".") and part != "." for part in segments):
-        # "." alone just names the directory itself (the base-dir listing
-        # probe); real dotfiles are unlisted and unreadable by design.
         raise ValueError(
-            f"Invalid skill path '{raw_path}': dotfiles are not listed and " "cannot be read"
+            f"Invalid {label} path '{raw_path}': dotfiles are not listed and cannot be read"
         )
 
-    base = skill.base_dir.resolve()
-    target = (skill.base_dir / relative).resolve()
+    base = resource.base_dir.resolve()
+    target = (resource.base_dir / relative).resolve()
     if not target.is_relative_to(base):
-        raise ValueError(f"Invalid skill path '{raw_path}': escapes the skill directory")
+        raise ValueError(f"Invalid {label} path '{raw_path}': escapes the {label} directory")
     if not target.exists():
-        raise ValueError(f"Skill path not found: skill://{skill.name}/{relative}")
+        raise ValueError(f"{label.title()} path not found: {scheme}://{resource.name}/{relative}")
     if target.is_dir():
         return _list_directory(target)
     return _read_text_capped(target)
 
 
-def resolve_skill_url(url: str, skills: Mapping[str, Skill]) -> str | None:
-    """Resolve a ``skill://`` URL to content, or None for non-skill URLs.
+def resolve_resource_url(
+    url: str,
+    resources: Mapping[str, Skill],
+    *,
+    scheme: str,
+    label: str,
+) -> str | None:
+    """Resolve one internal resource scheme, or return ``None`` for others.
 
-    ``skills`` maps skill name → Skill. Returns None immediately when the URL
-    does not use the ``skill`` scheme so callers can chain resolvers. Raises
-    ``ValueError`` for unknown skill names (listing all available names) and
-    for unsafe paths — both are surfaced to the model as tool errors.
+    Unknown names list only resources in this scheme. That bounded error is the
+    model's self-correction path and never leaks user skills while resolving a
+    packaged guide (or vice versa).
     """
-    if not url.startswith("skill://"):
+    prefix = f"{scheme}://"
+    if not url.startswith(prefix):
         return None
 
     parts = urlsplit(url)
     name = unquote(parts.netloc)
+    title = label.title()
     if not name:
-        raise ValueError("Skill URL missing a name: expected skill://<name>")
+        raise ValueError(f"{title} URL missing a name: expected {scheme}://<name>")
 
-    skill = skills.get(name)
-    if skill is None:
-        available = ", ".join(sorted(skills.keys())) or "(none)"
-        raise ValueError(f"Unknown skill: {name}\nAvailable: {available}")
+    resource = resources.get(name)
+    if resource is None:
+        available = ", ".join(sorted(resources.keys())) or "(none)"
+        raise ValueError(f"Unknown {label}: {name}\nAvailable: {available}")
 
     path = parts.path
-    # No path, a bare "/", or nothing but slashes ("//") → the SKILL.md text.
-    # Routing "//" here keeps _resolve_child's input non-empty (no dead branch).
     if not path or not path.strip("/"):
-        return _read_text_capped(skill.file_path)
-    return _resolve_child(skill, path)
+        return _read_text_capped(resource.file_path)
+    return _resolve_child(resource, path, scheme=scheme, label=label)
+
+
+def resolve_skill_url(url: str, skills: Mapping[str, Skill]) -> str | None:
+    """Resolve a ``skill://`` URL while preserving the public skills API."""
+    return resolve_resource_url(url, skills, scheme="skill", label="skill")

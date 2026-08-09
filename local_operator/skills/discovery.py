@@ -28,19 +28,20 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict
 
 
 class Skill(BaseModel):
-    """A discovered skill — everything the prompt and protocol layers need.
+    """A semantically routable, progressively disclosed knowledge resource.
 
-    ``base_dir`` is the skill directory (``file_path`` minus ``SKILL.md``);
-    ``skill://<name>/<path>`` reads are joined against it with containment
-    validation. ``source`` identifies the root the skill was scanned from,
-    used only for warnings/diagnostics. ``hide`` keeps the skill readable
-    via ``skill://`` while excluding it from prompt listings.
+    User-authored records are ``resource_type="skill"``. Packaged harness
+    guides use ``resource_type="guide"`` so both kinds share one vector index
+    without conflating their prompt tags or URL schemes.
+    ``base_dir`` contains all paths reachable beneath the resource's protocol
+    URL; ``file_path`` is the body returned for a bare URL.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -51,6 +52,7 @@ class Skill(BaseModel):
     base_dir: Path
     source: str
     hide: bool = False
+    resource_type: Literal["skill", "guide", "agent_hint"] = "skill"
 
 
 def parse_frontmatter(text: str) -> dict[str, object]:
