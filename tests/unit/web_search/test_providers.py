@@ -120,6 +120,108 @@ async def test_serpapi_accepts_legacy_serp_api_key_name(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_brave_uses_subscription_token_and_maps_extra_snippets(tmp_path) -> None:
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("BRAVE_API_KEY", "brave-key")
+    seen: httpx.Request | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen
+        seen = request
+        return httpx.Response(
+            200,
+            json={
+                "web": {
+                    "results": [
+                        {
+                            "title": "Brave result",
+                            "url": "https://example.com/brave",
+                            "description": "Primary",
+                            "extra_snippets": ["Extra"],
+                        }
+                    ]
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["brave"].search(
+            client, credentials, WebSearchSettings(), "query", 2
+        )
+
+    assert seen is not None
+    assert seen.headers["X-Subscription-Token"] == "brave-key"
+    assert seen.url.params["count"] == "2"
+    assert response.sources[0].snippet == "Primary\nExtra"
+
+
+@pytest.mark.asyncio
+async def test_exa_requests_query_summary_instead_of_full_page_text(tmp_path) -> None:
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("EXA_API_KEY", "exa-key")
+    seen: httpx.Request | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen
+        seen = request
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Exa result",
+                        "url": "https://example.com/exa",
+                        "summary": "Query-grounded summary",
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["exa"].search(
+            client, credentials, WebSearchSettings(), "semantic query", 4
+        )
+
+    assert seen is not None
+    payload = json.loads(seen.content)
+    assert payload["contents"] == {"summary": {"query": "semantic query"}}
+    assert "text" not in payload["contents"]
+    assert response.sources[0].snippet == "Query-grounded summary"
+
+
+@pytest.mark.asyncio
+async def test_searxng_uses_configured_endpoint_and_json_contract(tmp_path) -> None:
+    seen: httpx.Request | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen
+        seen = request
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Private result",
+                        "url": "https://example.com/private",
+                        "content": "Private snippet",
+                    }
+                ]
+            },
+        )
+
+    settings = WebSearchSettings(searxng_endpoint="https://search.example.com")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["searxng"].search(
+            client, _credentials(tmp_path), settings, "query", 3
+        )
+
+    assert seen is not None
+    assert str(seen.url).startswith("https://search.example.com/search?")
+    assert seen.url.params["format"] == "json"
+    assert response.sources[0].snippet == "Private snippet"
+
+
+@pytest.mark.asyncio
 async def test_perplexity_anonymous_sse_yields_answer_and_sources(tmp_path) -> None:
     source_event = {
         "uuid": "pplx-1",
