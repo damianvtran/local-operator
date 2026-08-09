@@ -1060,10 +1060,12 @@ class ToolCard(TranscriptBlock):
                 ink = signal
             elif stripped[:1].isdigit() and ". " in stripped:
                 ink = fg
-            elif stripped.startswith(("Provider:", "Sources:", "Ask Operator")):
-                ink = muted
-            else:
+            elif stripped.startswith(("Provider:", "Sources:")):
                 ink = dim
+            else:
+                # Snippets and the actionable footer must meet normal-text
+                # contrast; ``dim`` is reserved for structural metadata.
+                ink = muted
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(line, line_width), style=ink)
         hidden = len(self._output) - len(shown)
