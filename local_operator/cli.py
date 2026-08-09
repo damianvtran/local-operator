@@ -1097,15 +1097,17 @@ def _preflight_hosting_model(
     current_agent: Optional[Any],
     args: argparse.Namespace,
 ) -> int | None:
-    """Startup preflight (CL-06): resolve hosting/model and verify the
-    provider's API key resolves BEFORE any turn runs.
+    """Startup preflight (CL-06): resolve hosting/model and verify that a
+    credential source exists BEFORE any turn runs.
 
     Resolution uses the composition root's precedence (agent > flag >
-    config); key resolution walks the AuthStore cascade (runtime override,
-    stored OAuth, stored api_key, env, legacy credentials.env). Providers
-    that need no key (ollama, test, custom) pass through, and anything the
-    provider registry cannot answer passes through too — a preflight must
-    never block a configuration the engine itself would accept.
+    config). Stored credentials satisfy preflight by presence; refreshing an
+    OAuth token belongs to the stream-time failover path, where a transient
+    refresh failure can be reported accurately instead of being misreported
+    here as a missing API key. Providers that need no key (ollama, test,
+    custom) pass through, and anything the provider registry cannot answer
+    passes through too — a preflight must never block a configuration the
+    engine itself would accept.
 
     Returns -1 (already printed) on failure, None to continue. All engine
     imports stay lazy so this never weights down parser-only paths.
@@ -1129,11 +1131,18 @@ def _preflight_hosting_model(
 
 
 def _preflight_api_key(hosting: str, credential_manager: CredentialManager) -> int | None:
-    """Verify the provider's API key resolves via the AuthStore cascade
-    (runtime override, stored OAuth, stored api_key, env, legacy
-    credentials.env). Providers that need no key (ollama, test) and anything
-    the provider registry cannot answer pass through — a preflight must
-    never block a configuration the engine itself would accept.
+    """Verify that the provider has a credential source.
+
+    Stored OAuth and API-key rows satisfy preflight by presence, including a
+    row under temporary stream-time backoff. The stream owns refresh and
+    failover; doing network refresh here can turn a transient OAuth failure
+    into a false "API key is required" startup error that prevents access to
+    the TUI's login command. With no stored row, the AuthStore cascade still
+    checks environment and legacy ``credentials.env`` keys.
+
+    Providers that need no key (ollama, test) and anything the provider
+    registry cannot answer pass through — a preflight must never block a
+    configuration the engine itself would accept.
 
     Returns -1 (already printed) on failure, None to continue.
     """
@@ -1156,6 +1165,9 @@ def _preflight_api_key(hosting: str, credential_manager: CredentialManager) -> i
 
         auth_store = AuthStore(credential_manager=credential_manager)
         try:
+            storage_provider = definition.store_credentials_as or canonical
+            if auth_store.list_credentials(provider=storage_provider):
+                return None
             api_key = asyncio.run(auth_store.get_api_key(canonical))
         finally:
             auth_store.close()

@@ -136,6 +136,19 @@ DEFAULT_CONFIG = Config(
             "hosting": "",
             "model_name": "",
             "auto_save_conversation": False,
+            # One ordered cascade for every text-model call. Entries may be
+            # "provider/model" strings or {provider, model, effort} mappings;
+            # usage-aware switching is opt-in because it spends one lightweight
+            # quota request at user-message boundaries.
+            "retry": {
+                "enabled": True,
+                "maxRetries": 10,
+                "baseDelayMs": 500,
+                "modelFallback": True,
+                "usageAwareFallback": False,
+                "usageReservePercent": 10,
+                "fallbackChains": {},
+            },
             # Search is useful on first run without a credential: DuckDuckGo
             # and Tavily keyless are both bounded fallbacks, so the default
             # rotates between them rather than depending on one free service.

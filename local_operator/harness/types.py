@@ -875,6 +875,9 @@ class ModelSpec(BaseModel):
     temperature: float = 0.2
     top_p: float = 0.9
     reasoning: bool = False
+    # Explicit provider reasoning level. Fallback routes may change providers,
+    # so the effort rides on the resolved spec rather than global session state.
+    reasoning_effort: str | None = None
     # Whether the model accepts ``temperature``/``top_p`` at all. Some families
     # (Anthropic's Claude 5 generation, OpenAI's reasoning models) reject the
     # parameters outright with HTTP 400, so the defaults above are unsendable

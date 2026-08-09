@@ -16,7 +16,9 @@ import pytest
 from local_operator.providers.usage import (
     UsageAmount,
     UsageLimit,
+    UsageReport,
     fetch_usage,
+    usage_health,
     usage_supported,
 )
 
@@ -43,6 +45,69 @@ def _recording_client(payload, status: int = 200) -> tuple[httpx.AsyncClient, li
         return httpx.Response(status, json=payload)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler)), urls
+
+
+def test_usage_health_shared_window_reaches_reserve() -> None:
+    report = UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:7d",
+                label="7 day",
+                amount=UsageAmount(used_fraction=0.95),
+                shared=True,
+                resets_at_ms=20_000,
+            )
+        ],
+    )
+    health = usage_health(report, "claude-opus-5", reserve_percent=10, now_ms=10_000)
+    assert health.state == "reserve"
+    assert health.scope == "account"
+    assert health.remaining_fraction == pytest.approx(0.05)
+    assert health.reset_after_ms == 10_000
+
+
+def test_usage_health_ignores_unrelated_model_tier() -> None:
+    report = UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:sonnet",
+                label="Sonnet",
+                amount=UsageAmount(used_fraction=1.0),
+                tier="sonnet",
+            ),
+            UsageLimit(
+                id="anthropic:shared",
+                label="Shared",
+                amount=UsageAmount(used_fraction=0.2),
+                shared=True,
+            ),
+        ],
+    )
+    assert usage_health(report, "claude-opus-5").state == "healthy"
+
+
+def test_usage_health_enabled_extra_credit_supersedes_included_plan() -> None:
+    report = UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:7d",
+                label="7 day",
+                amount=UsageAmount(used_fraction=1.0),
+                shared=True,
+            ),
+            UsageLimit(
+                id="anthropic:extra",
+                label="Extra usage",
+                amount=UsageAmount(used=25, limit=100),
+            ),
+        ],
+    )
+    health = usage_health(report, "claude-opus-5")
+    assert health.state == "healthy"
+    assert health.remaining_fraction == pytest.approx(0.75)
 
 
 @pytest.mark.asyncio

@@ -261,6 +261,80 @@ class UsageReport:
     identity: str | None = None
 
 
+@dataclass(frozen=True)
+class QuotaHealth:
+    """Whether a provider account can accept another message."""
+
+    state: Literal["healthy", "reserve", "depleted", "unknown"]
+    remaining_fraction: float | None = None
+    reset_after_ms: int | None = None
+    scope: Literal["account", "model", "unknown"] = "unknown"
+
+
+def usage_health(
+    report: UsageReport,
+    model_id: str,
+    *,
+    reserve_percent: float = 10.0,
+    now_ms: float | None = None,
+) -> QuotaHealth:
+    """Reduce a normalized report to the limits that gate ``model_id``.
+
+    Shared windows always apply; tier windows apply only when their tier name
+    appears in the model id. Anthropic's enabled extra-usage meter supersedes
+    the included-plan windows because paid headroom keeps requests runnable
+    after the plan reaches 100%.
+    """
+    lowered_model = model_id.lower()
+    extra = [
+        limit
+        for limit in report.limits
+        if limit.id.endswith(":extra") and limit.amount.fraction() is not None
+    ]
+    if extra:
+        relevant = extra
+    else:
+        relevant = [
+            limit
+            for limit in report.limits
+            if limit.shared
+            or (limit.tier and limit.tier.lower() in lowered_model)
+            or (not limit.shared and not limit.tier)
+        ]
+    measured: list[tuple[UsageLimit, float]] = []
+    for limit in relevant:
+        fraction = limit.amount.fraction()
+        if fraction is not None:
+            measured.append((limit, max(0.0, min(1.0, 1.0 - fraction))))
+    if not measured:
+        return QuotaHealth("unknown")
+
+    remaining = min(value for _limit, value in measured)
+    threshold = min(100.0, max(0.0, float(reserve_percent))) / 100.0
+    state: Literal["healthy", "reserve", "depleted", "unknown"]
+    if remaining <= 0:
+        state = "depleted"
+    elif remaining <= threshold:
+        state = "reserve"
+    else:
+        state = "healthy"
+    binding = [limit for limit, value in measured if value <= threshold]
+    binding_resets = [limit.resets_in_ms(now_ms) for limit in binding]
+    reset_after = max((value for value in binding_resets if value is not None), default=None)
+    if not binding:
+        scope: Literal["account", "model", "unknown"] = "unknown"
+    elif all(limit.tier and not limit.shared for limit in binding):
+        scope = "model"
+    else:
+        scope = "account"
+    return QuotaHealth(
+        state,
+        remaining_fraction=remaining,
+        reset_after_ms=reset_after,
+        scope=scope,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Per-provider fetchers. Each returns a ``UsageReport`` or ``None``.
 # ---------------------------------------------------------------------------
