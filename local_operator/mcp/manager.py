@@ -594,6 +594,33 @@ class McpManager:
     def get_server_config(self, name: str) -> MCPServerConfig | None:
         return self._configs.get(name)
 
+    async def connect_configured_server(
+        self, name: str, *, timeout_ms: float | None = None
+    ) -> ServerConnection:
+        """Connect one configured server without touching unrelated entries.
+
+        Explicit CLI login must wait for one OAuth exchange rather than start
+        every configured server through the session's 250 ms startup gate.
+        ``timeout_ms`` lets that interactive flow outlive the normal 30-second
+        request budget without weakening ordinary session connections.
+        """
+        configs, sources = load_all_mcp_configs(self.cwd)
+        cfg = configs.get(name)
+        if cfg is None:
+            raise McpConnectionError(f"MCP server {name!r} is not configured")
+        errors = validate_server_config(name, cfg)
+        if errors:
+            raise McpConnectionError("; ".join(errors))
+        if timeout_ms is not None:
+            cfg = cfg.model_copy(update={"timeout": timeout_ms})
+
+        self._configs[name] = cfg
+        self._sources[name] = sources[name]
+        self._disposed = False
+        conn = await self._connect_server(name, cfg)
+        self._register_connection(conn)
+        return conn
+
     async def discover_and_connect(self) -> McpLoadResult:
         """Discover configs, race connects against the 250 ms gate.
 
@@ -941,7 +968,9 @@ class McpManager:
             )
         except Exception:
             logger.warning(
-                "OAuth wiring unavailable for %r; connecting unauthenticated", url, exc_info=True
+                "OAuth wiring unavailable for %r; connecting unauthenticated",
+                url,
+                exc_info=True,
             )
             return None
 
@@ -1075,7 +1104,12 @@ class McpManager:
             context: ToolContext,
         ) -> ToolResult:
             return await self._execute_tool_call(
-                server_name, mcp_tool_name, tool_call_id, args, signal, deferred=deferred
+                server_name,
+                mcp_tool_name,
+                tool_call_id,
+                args,
+                signal,
+                deferred=deferred,
             )
 
         agent_tool = build_agent_tool(server_name, tool, _call)
@@ -1127,7 +1161,10 @@ class McpManager:
                 )
             owners[name] = origin
             agent_tool.name = name
-            meta: McpToolMeta = {**self._meta_by_origin.get(origin, {}), "agent_name": name}
+            meta: McpToolMeta = {
+                **self._meta_by_origin.get(origin, {}),
+                "agent_name": name,
+            }
             self._tool_meta[name] = meta
 
     async def _execute_tool_call(

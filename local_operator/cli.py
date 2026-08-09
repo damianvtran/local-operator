@@ -449,6 +449,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default="global",
         help="Config scope to write (default: global ~/.local-operator/mcp.json)",
     )
+    mcp_add_parser.add_argument(
+        "--oauth",
+        action="store_true",
+        help="Enable OAuth for a remote HTTP server",
+    )
     mcp_remove_parser = mcp_subparsers.add_parser(
         "remove",
         help="Remove an MCP server from a config scope",
@@ -462,6 +467,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default="global",
         help="Config scope to remove from (default: global)",
     )
+    mcp_login_parser = mcp_subparsers.add_parser(
+        "login",
+        help="Authenticate one OAuth-enabled MCP server",
+        parents=[parent_parser],
+    )
+    mcp_login_parser.add_argument("name", type=str, help="Server name to authenticate")
 
     # CL-04: ``--yolo`` is accepted on every subcommand too (additive). The
     # root flag keeps its default; subparsers get a SUPPRESS copy so parsing
@@ -875,8 +886,50 @@ def login_status_command() -> int:
         auth_store.close()
 
 
+_MCP_INTERACTIVE_LOGIN_TIMEOUT_MS = 10 * 60_000
+
+
+async def _mcp_login_server(name: str, cwd: Path) -> int:
+    """Run one interactive MCP OAuth exchange and persist its token.
+
+    The SDK's callback handler prints the authorization URL and accepts the
+    final loopback redirect URL on stdin. ``McpTokenStorage`` writes the
+    resulting token and client registration to ``auth.db``; a successful login
+    therefore survives this short-lived manager and future Local Operator
+    sessions reuse it without another browser round-trip.
+    """
+    from local_operator.mcp.config import load_all_mcp_configs
+    from local_operator.mcp.manager import McpManager
+
+    configs, _sources = load_all_mcp_configs(cwd)
+    cfg = configs.get(name)
+    if cfg is None:
+        print(f"error: MCP server {name!r} is not configured", file=sys.stderr)
+        return 1
+    auth = getattr(cfg, "auth", None)
+    if auth is None or auth.type != "oauth":
+        print(
+            f"error: MCP server {name!r} is not OAuth-enabled; " "add a remote server with --oauth",
+            file=sys.stderr,
+        )
+        return 1
+
+    manager = McpManager(cwd)
+    try:
+        conn = await manager.connect_configured_server(
+            name, timeout_ms=_MCP_INTERACTIVE_LOGIN_TIMEOUT_MS
+        )
+        print(f"Authenticated MCP server {name!r}; discovered {len(conn.tools)} tools.")
+        return 0
+    except Exception as exc:  # noqa: BLE001 - CLI turns protocol failures into exit status
+        print(f"error: MCP login failed for {name!r}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        await manager.disconnect_all()
+
+
 def mcp_command(args: argparse.Namespace) -> int:
-    """Dispatch ``mcp list|add|remove`` to the MCP config module (stream E).
+    """Dispatch ``mcp list|add|login|remove`` to MCP configuration and auth.
 
     Lazy import: the MCP package keeps its SDK imports lazy too, and this
     CLI must survive builds where it has not landed yet.
@@ -898,7 +951,7 @@ def mcp_command(args: argparse.Namespace) -> int:
             print(f"\033[1;32m│ {name}: {target}\033[0m")
         print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
         return 0
-    elif args.mcp_command == "add":
+    if args.mcp_command == "add":
         env: dict[str, str] = {}
         for item in getattr(args, "server_env", None) or []:
             if "=" not in item:
@@ -912,13 +965,18 @@ def mcp_command(args: argparse.Namespace) -> int:
             args=getattr(args, "server_args", None),
             env=env or None,
             url=getattr(args, "url", None),
+            oauth=bool(getattr(args, "oauth", False)),
             scope=getattr(args, "scope", "global"),
         )
-    elif args.mcp_command == "remove":
+    if args.mcp_command == "login":
+        import asyncio
+
+        return asyncio.run(_mcp_login_server(args.name, Path.cwd()))
+    if args.mcp_command == "remove":
         return mcp_config.remove_server(args.name, scope=getattr(args, "scope", "global"))
-    else:
-        print(f"\n\033[1;31mError: Invalid mcp command: {args.mcp_command}\033[0m")
-        return -1
+
+    print(f"\n\033[1;31mError: Invalid mcp command: {args.mcp_command}\033[0m")
+    return -1
 
 
 # --- Session factory facade -------------------------------------------------
@@ -1392,6 +1450,17 @@ def main() -> int:
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)
+        elif args.subcommand == "login":
+            return login_command(args)
+        elif args.subcommand == "logout":
+            return logout_command(args)
+        elif args.subcommand in ("login-status", "status"):
+            return login_status_command()
+        elif args.subcommand == "mcp":
+            invalid = _apply_run_in(args.run_in)
+            if invalid is not None:
+                return invalid
+            return mcp_command(args)
         elif args.subcommand == "exec":
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory
