@@ -360,25 +360,57 @@ class SessionPickerScreen(ModalScreen[str | None]):
             self._repaint()
 
     def _index_at(self, event) -> int | None:  # type: ignore[no-untyped-def]
-        """List index under a mouse event, or ``None`` off the rows.
+        """List index under a mouse event, or ``None`` anywhere else.
 
         Measured against the BODY's region rather than the event's own widget:
         the card is one ``Static``, so a click anywhere in it reports a y
         relative to the whole block — header and rule included.
+
+        Three guards, all load-bearing, because this feeds ``on_click`` and a
+        false positive there DISPOSES THE LIVE SESSION and reboots onto another
+        one. The first cut had none of them: a click on the footer resolved to
+        session #12, the blank spacer to #10, and the dimmed backdrop beside
+        the card to row 0.
+
+        - the point must be inside the body's region (the modal's backdrop
+          covers the whole screen and bubbles clicks from well outside the card,
+          including columns to its left where ``y`` alone still looks valid);
+        - the row must be inside the DRAWN page, not merely inside the list —
+          the footer and the spacer sit below the last row and their offsets
+          resolved to real sessions further down the list;
+        - and the resulting index must still be a row that exists.
         """
         body = getattr(self, "_body", None)
         if body is None or not body.is_mounted:
             return None
-        row = event.screen_y - body.region.y - self._header_rows()
-        if row < 0:
+        region = body.region
+        if not region.contains(event.screen_x, event.screen_y):
+            return None
+        row = event.screen_y - region.y - self._header_rows()
+        rows = self.visible_rows
+        drawn = min(self._page_rows(), max(0, len(rows) - self._offset))
+        if not 0 <= row < drawn:
             return None
         index = self._offset + row
-        return index if 0 <= index < len(self.visible_rows) else None
+        return index if 0 <= index < len(rows) else None
 
     # -- geometry ------------------------------------------------------------
     def _screen_size(self) -> tuple[int, int]:
+        """The box the card's ``max-height``/``max-width`` actually resolve in.
+
+        ``self.size`` (this Screen's own CONTENT box), not ``self.app.size``
+        (the terminal). ``Screen { padding: 1 }`` insets the content box by two
+        rows and two cells, so measuring the terminal over-counted the room by
+        exactly that — and since the stylesheet's ``max-height: 80%`` resolves
+        against the content box, the card asked for more rows than the
+        container would draw and Textual clipped the difference SILENTLY, off
+        the bottom, taking the footer with it at every height from 14 to 23.
+        ``UsagePanel`` already measures the screen for the same reason.
+        """
         try:
-            size = self.app.size
+            size = self.size
+            if not size.width or not size.height:  # not laid out yet
+                size = self.app.size
         except Exception:  # pragma: no cover - only before the app has a screen
             return 80, 24
         return max(PICKER_MIN_WIDTH, size.width), max(8, size.height)

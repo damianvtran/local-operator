@@ -582,3 +582,82 @@ def test_a_truncated_first_line_is_not_parsed_as_a_name(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert session_name(directory) == ""
+
+
+# --- painted-frame checks (the real app, so the stylesheet actually applies) --
+#
+# The round-1 D2 test asserted `render_lines_for_test()` — the widget's OWN
+# arithmetic — inside `_PickerHost`, which declares no CSS_PATH. It therefore
+# agreed with the bug: the card computed rows the container then clipped. These
+# mount the real `OperatorApp` and measure what was drawn.
+
+
+async def _real_picker(rows, size):
+    """Push the picker onto the REAL app so `local_operator.tcss` applies."""
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    return app, size
+
+
+@pytest.mark.asyncio
+async def test_the_footer_survives_at_every_height_on_the_real_stylesheet() -> None:
+    """`max-height: 80%` resolves against the screen's CONTENT box, which
+    `Screen { padding: 1 }` insets by two rows. Measuring the terminal instead
+    over-counted the room, so Textual clipped the overflow off the bottom —
+    silently, taking the footer (the only statement of `esc`) with it."""
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    rows = [_row(f"id{index:04d}", f"session {index}") for index in range(40)]
+    for height in (14, 16, 18, 20, 23, 30, 48):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, height)) as pilot:
+            await pilot.pause()
+            screen = SessionPickerScreen(rows, NOW)
+            app.push_screen(screen)
+            await pilot.pause()
+            await pilot.pause()
+            card = screen.query_one(".session-picker")
+            drawn = card.region.height
+            composed = len(screen.render_lines_for_test()) + CARD_PADDING_ROWS
+            assert composed <= drawn, (height, composed, drawn)
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_chrome_or_the_backdrop_resumes_nothing() -> None:
+    """A false positive here disposes the live session and reboots onto another
+    one. The first cut resolved a footer click to session #12, the blank spacer
+    to #10, and the dimmed backdrop beside the card to row 0."""
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    rows = [_row(f"id{index:04d}", f"session {index}") for index in range(40)]
+    chosen: list[str | None] = []
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen(rows, NOW)
+        app.push_screen(screen, chosen.append)
+        await pilot.pause()
+        await pilot.pause()
+        body = screen.query_one("#session-picker-body")
+        region = body.region
+        lines = screen.render_lines_for_test()
+        footer_row = len(lines) - 1
+        spacer_row = next(i for i, line in enumerate(lines) if line == "")
+
+        class _At:
+            def __init__(self, x: int, y: int) -> None:
+                self.screen_x = x
+                self.screen_y = y
+
+        # Header, rule, spacer, counter and footer are all chrome.
+        for row in (0, 1, spacer_row, footer_row):
+            assert screen._index_at(_At(region.x + 4, region.y + row)) is None, row
+        # The backdrop to the left of the card, on a row that IS a list row.
+        assert screen._index_at(_At(max(0, region.x - 12), region.y + 3)) is None
+        # And below the card entirely.
+        assert screen._index_at(_At(region.x + 4, region.y + region.height + 2)) is None
+        assert chosen == []
