@@ -22,10 +22,13 @@ the factory: the factory needs the three legacy managers plus an argparse
 namespace to resolve hosting/model/skills, none of which a child needs — the
 child inherits the parent's model and STREAM FN (the parent's shared httpx
 pool serves any spec, so a ``model_spec`` override works through the same
-pipe), the parent's cwd, and the parent's approval handler. What it does NOT
-inherit: yolo (always False — the child goes through the same approval gate
+pipe), the parent's cwd, the parent's approval handler, and the parent's
+compaction settings (a one-shot child was assumed too short to need them,
+but a real review child ran 48 requests / 1.5M tokens — a delegated task
+must not bypass the operator's compaction cap). What it does NOT inherit:
+yolo (always False — the child goes through the same approval gate
 as the parent, never around it), skills (a per-launch selection pass would
-make spawning expensive and flaky), compaction (children are one-shot), and
+make spawning expensive and flaky), and
 the subagent launcher itself (children are one level deep: a grandchild
 would register on the CHILD's job manager where no panel looks).
 
@@ -314,6 +317,13 @@ async def _build_child_session(
         has_ui=parent_session._has_ui,
         cwd=cwd,
         request_approval=request_approval,
+        # The parent's compaction budget. A one-shot child was assumed to be
+        # too short to need compaction, but a real review child ran 48
+        # requests / 1.5M tokens before its default (600k-cap) threshold
+        # ever fired — the CAP the parent's operator set must bound the child
+        # too, or a delegated task silently bypasses the very knob that keeps
+        # long sessions alive.
+        compaction_settings=parent_session._compaction_settings,
     )
     await child.async_init()
     return child
