@@ -515,16 +515,19 @@ class OperatorApp(App[None]):
             if role == "user":
                 self._append_block(UserBlock(text))
                 appended = True
-            elif role == "assistant" and getattr(message, "tool_calls", None) is None:
+            elif role == "assistant" and not getattr(message, "tool_calls", None):
                 block = AssistantBlock()
                 block.update_text(text)
                 block.finalize_text()
                 self._append_block(block)
                 appended = True
         if appended:
-            # The splash and the centred boot layout were retired by the first
-            # mounted block via _append_block; nothing further is needed here.
-            pass
+            # Replay is mounted as one synchronous batch, before Textual can
+            # remeasure the growing container between blocks. Pin the final
+            # viewport explicitly; otherwise a long resumed conversation can
+            # inherit a stale pre-replay extent and open above its latest turn.
+            transcript = self.query_one(TranscriptView)
+            transcript.call_after_refresh(transcript.scroll_end, animate=False)
 
     def _on_boot_failed(self, error: Exception) -> None:
         """Report a session that never constructed, WITHOUT retiring the splash.
@@ -541,19 +544,29 @@ class OperatorApp(App[None]):
         assert self._status is not None
         self._status.update(model_label="session error", streaming=False)
 
-    async def _reload_session(self) -> None:
-        """Dispose the current session (if any) and re-run boot."""
-        # The same three steps as `on_unmount`, in the same order, for the same
-        # reasons — this path had drifted from it on all three.
-        #
-        # 1. Deny first: `dispose` AWAITS teardown, and a turn parked on an
-        #    unanswered on-screen approval never reaches it. Measured: `/reload`
-        #    with a parked question stalled for the whole 5s dispose budget while
-        #    unmount with the identical turn returned immediately.
-        # 2. Session before controller: disposing the controller first drops the
-        #    dying session's `agent_end`, so the working line kept its spinner
-        #    running and live cards stayed `running` until the next turn.
+    async def _reload_session(self, *, replace_transcript: bool = False) -> None:
+        """Dispose the current session and boot another.
+
+        ``replace_transcript`` is reserved for a session switch. A plain
+        ``/reload`` retries the same conversation and keeps its visible ledger;
+        ``/resume`` changes which conversation the ledger represents and must
+        replace it before replaying the resumed history.
+        """
+        # Deny first: `dispose` AWAITS teardown, and a turn parked on an
+        # unanswered on-screen approval never reaches it. Measured: `/reload`
+        # with a parked question stalled for the whole 5s dispose budget while
+        # unmount with the identical turn returned immediately.
         self._deny_queued_approvals()
+        if replace_transcript and self._controller is not None:
+            # A session switch discards the old ledger, so its controller must
+            # unsubscribe BEFORE session disposal can emit terminal events.
+            # Otherwise those Textual messages are queued while disposal is
+            # awaited, then handled after clear_blocks and contaminate the new
+            # conversation. Plain /reload deliberately keeps the inverse order
+            # below: it preserves the ledger and needs the dying session's
+            # agent_end to settle its live cards.
+            self._controller.dispose()
+            self._controller = None
         if self._session is not None:
             try:
                 await self._session.dispose()
@@ -563,10 +576,17 @@ class OperatorApp(App[None]):
         if self._controller is not None:
             self._controller.dispose()
             self._controller = None
-        # 3. The pending approval belonged to the session that just died. Left
-        #    set, the NEW session's first write/exec approval queued behind a
-        #    question that is no longer on screen and nothing could answer it.
+        # The pending approval belonged to the session that just died. Left
+        # set, the NEW session's first write/exec approval queued behind a
+        # question that is no longer on screen and nothing could answer it.
         self._approval = None
+        if replace_transcript:
+            # Clearing after controller detachment keeps old-session events out
+            # of the replacement conversation. Use the view's public reset so
+            # streaming, tool-card, approval, and welcome-state
+            # bookkeeping are reset by the same hook as /clear, without /clear's
+            # misleading "history is untouched" receipt.
+            self.query_one(TranscriptView).clear_blocks()
         assert self._status is not None
         # A reload is a new conversation: its title and its one naming
         # attempt both reset, or the old name would outlive its session.
@@ -624,7 +644,9 @@ class OperatorApp(App[None]):
         # factory surface through _on_boot_failed exactly as a bad --resume does.
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         notice(f"resuming session {resume_id}…")
-        self.run_worker(self._reload_session(), thread=False, group="session")
+        self.run_worker(
+            self._reload_session(replace_transcript=True), thread=False, group="session"
+        )
 
     # -- MCP status ---------------------------------------------------------
     def _wire_mcp_status(self, session: SessionProtocol) -> None:

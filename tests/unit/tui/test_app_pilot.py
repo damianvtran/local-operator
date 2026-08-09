@@ -8,14 +8,17 @@ paints first, then awaits the session in a worker.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
+from local_operator.harness.types import NoticeEvent
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.tui.app import BOOT_LAYOUT_CLASS, SLASH_COMMANDS, OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice
+from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
@@ -2094,13 +2097,22 @@ async def test_a_failing_turn_shows_the_providers_own_error() -> None:
 # --- /resume ---------------------------------------------------------------
 
 
-def _resume_factory(boots: list[str]):
+def _resume_factory(
+    boots: list[str],
+    history_text: str = "resumed history",
+    assistant_text: str = "resumed answer",
+):
     """A resume factory that records the id it was asked to boot."""
 
     async def resume_factory(resume_id: str):
         boots.append(resume_id)
         session = FakeSession()
-        session._history = ["dummy history entry"]
+        session._history = [
+            SimpleNamespace(role="user", text=history_text, tool_calls=None),
+            # Production Message objects use an empty list, not None, for a
+            # prose-only assistant reply.
+            SimpleNamespace(role="assistant", text=assistant_text, tool_calls=[]),
+        ]
         return session
 
     return resume_factory
@@ -2165,6 +2177,93 @@ async def test_resume_id_rebinds_and_reloads(tmp_path, monkeypatch) -> None:
         await pilot.pause()
         await pilot.pause()
         assert boots == ["cafe01"], boots
+
+
+@pytest.mark.asyncio
+async def test_resume_replaces_the_visible_transcript(tmp_path, monkeypatch) -> None:
+    """Switching sessions must show only the resumed conversation's history."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "cafe01")
+
+    session = FakeSession()
+    session._history = [
+        SimpleNamespace(role="user", text="history from the current session", tool_calls=None)
+    ]
+
+    async def dispose_with_terminal_event() -> None:
+        # A real session emits terminal events while dispose is awaited. The
+        # old controller must already be detached or this notice is queued
+        # behind the transcript replacement and lands in the resumed session.
+        session.emit(NoticeEvent(text="stale event from disposed session", kind="warning"))
+        session.disposed = True
+
+    session.dispose = dispose_with_terminal_event  # type: ignore[method-assign]
+    boots: list[str] = []
+    app = OperatorApp(
+        lambda: _factory(session),
+        resume_factory=_resume_factory(boots, "history from the resumed session"),
+    )
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press(
+            "/", "r", "e", "s", "u", "m", "e", " ", "c", "a", "f", "e", "0", "1", "enter"
+        )
+        await pilot.pause()
+        await pilot.pause()
+
+        text = _transcript_text(app)
+        assert boots == ["cafe01"], boots
+        assert "history from the resumed session" in text, text
+        assistant_texts = [
+            block.text()
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, AssistantBlock)
+        ]
+        assert assistant_texts == ["resumed answer"], assistant_texts
+        assert "history from the current session" not in text, text
+        assert "/resume cafe01" not in text, text
+        assert "resuming session cafe01" not in text, text
+        assert "stale event from disposed session" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_resume_long_history_opens_at_the_latest_turn(tmp_path, monkeypatch) -> None:
+    """A replay batch settles with the resumed conversation's tail in view."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "long01")
+
+    async def resume_factory(_resume_id: str):
+        resumed = FakeSession()
+        resumed._history = [
+            SimpleNamespace(
+                role="user",
+                text=f"resumed history line {index}",
+                tool_calls=None,
+            )
+            for index in range(30)
+        ]
+        return resumed
+
+    app = OperatorApp(
+        lambda: _factory(FakeSession()),
+        resume_factory=resume_factory,
+    )
+    async with app.run_test(size=(60, 12)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for key in "/resume long01":
+            await pilot.press(key if key != " " else "space")
+        await pilot.press("enter")
+        for _ in range(3):
+            await pilot.pause()
+
+        transcript = app.query_one(TranscriptView)
+        assert len(transcript.blocks()) == 30
+        max_scroll_y = max(0, transcript.virtual_size.height - transcript.size.height)
+        assert transcript.scroll_offset.y == max_scroll_y
 
 
 @pytest.mark.asyncio
