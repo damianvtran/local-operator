@@ -819,3 +819,33 @@ def test_a_named_id_survives_a_stat_that_fails(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "is_file", flaky)
     with pytest.raises(resume_mod.ResumeNotFound):
         resume_mod.resume_dir(tmp_path, "sess-abc")
+
+
+@pytest.mark.asyncio
+async def test_mcp_merge_keeps_session_capability_tools(monkeypatch) -> None:
+    """M1 regression: the MCP merge base is the session's LIVE inventory, not
+    the factory's pre-merge list. A session carries capability tools
+    (task/wait/jobs/wake) merged at construction; an MCP merge or refresh
+    that rebuilt from the factory list would drop them."""
+    builtin = MagicMock(name="builtin_tool")
+    capability = MagicMock(name="task_tool")
+    session = FakeSessionShell()
+    session.tools = [builtin, capability]  # the post-construction inventory
+    manager = FakeMcpManager()
+    mcp_tool = MagicMock(name="mcp_tool")
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [mcp_tool], []
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    result = await wire_mcp_into_session(session, [builtin], ".")
+    assert result is manager
+    # Both the capability tool and the MCP tool survive the initial merge.
+    assert set(session.tools) == {builtin, capability, mcp_tool}
+
+    # A live MCP refresh ALSO keeps the capability tool (was dropped before).
+    late = MagicMock(name="late_tool")
+    assert manager.callback is not None
+    manager.callback([late])
+    assert set(session.tools) == {builtin, capability, late}
