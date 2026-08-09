@@ -212,3 +212,48 @@ def test_suffix_tokens_strictly_after():
     assert suffix[2] == 0
     assert suffix[1] == estimate_tokens(c)
     assert suffix[0] == estimate_tokens(b) + estimate_tokens(c)
+
+
+def _ranged_read(path: str, range_spec: str, words: int = 120) -> Message:
+    """A ranged read result (details carry path + range, like the real tool)."""
+    message = Message(role="tool", tool_call_id=f"call-{path}-{range_spec}", tool_name="read")
+    message.content = Message.user(f"content of {path}[{range_spec}] " + "data " * words).content
+    message.provider_payload = {"details": {"path": path, "range": range_spec}}
+    return message
+
+
+def test_nested_range_read_supersedes_the_covered_earlier_range():
+    """A later range that fully covers an earlier range of the same file
+    blanks the earlier result — the model's re-read of a span already served."""
+    covered = _ranged_read("/repo/a.py", "100-500")
+    messages = [covered, _ranged_read("/repo/a.py", "1-800")]
+    out, changed = prune_tool_outputs(messages, NOW, ACTIVE)
+    assert changed is True
+    assert covered.text == SUPERSEDED_NOTICE
+    assert out[1].text.startswith("content of /repo/a.py[1-800]")
+
+
+def test_adjacent_and_partial_overlap_ranges_are_both_kept():
+    """Paging ranges (1-500 then 501-900) and partial overlaps (100-400 then
+    300-700) carry distinct content — neither must be blanked."""
+    a = _ranged_read("/repo/a.py", "1-500")
+    b = _ranged_read("/repo/a.py", "501-900")
+    out, changed = prune_tool_outputs([a, b], NOW, ACTIVE)
+    assert changed is False
+    assert a.text.startswith("content of /repo/a.py[1-500]")
+    assert b.text.startswith("content of /repo/a.py[501-900]")
+
+    c = _ranged_read("/repo/a.py", "100-400")
+    d = _ranged_read("/repo/a.py", "300-700")
+    out2, changed2 = prune_tool_outputs([c, d], NOW, ACTIVE)
+    assert changed2 is False
+    assert c.text.startswith("content of /repo/a.py[100-400]")
+
+
+def test_identical_ranged_read_is_superseded_like_identical_full():
+    """The identical-key supersede still applies to ranged reads."""
+    first = _ranged_read("/repo/a.py", "100-500")
+    messages = [first, _ranged_read("/repo/a.py", "100-500")]
+    out, changed = prune_tool_outputs(messages, NOW, ACTIVE)
+    assert changed is True
+    assert first.text == SUPERSEDED_NOTICE

@@ -169,6 +169,32 @@ def _supersede_path_range(message: Message) -> tuple[str, str | None] | None:
     return None
 
 
+def _span_of(
+    path_range: tuple[str, str | None],
+) -> tuple[str, tuple[int, int]] | None:
+    """``(path, (start, end))`` for a ranged read, or None for full/non-file.
+
+    ``range`` is a 1-based inclusive ``"start-end"`` (or ``"start-"``). A
+    ``None`` or ``"full"`` range is a full read (handled by the full-path
+    supersede, not here). Any unparsable range degrades to None: an
+    unreadable spec must not blank a real read on a guess.
+    """
+    path, spec = path_range
+    if not spec or spec == "full":
+        return None
+    try:
+        start_s, sep, end_s = spec.partition("-")
+        start = int(start_s)
+        if not sep:
+            return None
+        end = int(end_s) if end_s.strip() else None
+    except (TypeError, ValueError):
+        return None
+    if start < 1 or (end is not None and end < start):
+        return None
+    return path, (start, end if end is not None else start)
+
+
 def _blank(message: Message, notice: str) -> None:
     """Replace ``message`` content with ``notice`` and mark it pruned.
 
@@ -213,8 +239,15 @@ def prune_tool_outputs(
     # Pass (a): superseded reads. Walk newest-to-oldest; a seen key marks any
     # earlier result with the same key superseded, and a seen FULL read marks
     # any earlier RANGED read of the same path superseded (never the reverse).
+    # A seen ranged read ALSO supersedes an earlier ranged read of the same
+    # path whose span it fully covers — the model pages through a large file
+    # in overlapping chunks (read 162-500, then 540-900, ...), and without
+    # coverage supersede every chunk stays live, burning the whole file into
+    # context N times. Coverage, not mere adjacency: a later read only blanks
+    # an earlier one it genuinely includes.
     seen_keys: set[str] = set()
     seen_full_paths: set[str] = set()
+    seen_covered_spans: dict[str, list[tuple[int, int]]] = {}
     superseded: list[int] = []
     for i in range(len(messages) - 1, -1, -1):
         message = messages[i]
@@ -228,16 +261,26 @@ def prune_tool_outputs(
         if key is None:
             continue
         path_range = _supersede_path_range(message)
+        span = _span_of(path_range) if path_range is not None else None
         is_superseded = key in seen_keys or (
             path_range is not None
             and path_range[1] is not None
             and path_range[0] in seen_full_paths
         )
+        if not is_superseded and span is not None:
+            path, (start, end) = span
+            for later_start, later_end in seen_covered_spans.get(path, []):
+                if start >= later_start and end <= later_end:
+                    is_superseded = True
+                    break
         if is_superseded:
             superseded.append(i)
         seen_keys.add(key)
         if path_range is not None and path_range[1] is None:
             seen_full_paths.add(path_range[0])
+        elif span is not None:
+            path, (start, end) = span
+            seen_covered_spans.setdefault(path, []).append((start, end))
 
     # Pass (b): useless-flagged results (excluding supersede victims).
     superseded_set = set(superseded)

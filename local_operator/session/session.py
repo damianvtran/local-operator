@@ -351,6 +351,50 @@ class Session:
         # the agent could never close. dispose() closes whatever is still open.
         self._browser = BrowserSurface()
 
+        # Session-capability tools (task/wait/jobs) are createIf-gated on the
+        # ToolContext fields only a SESSION can provide (subagent_launcher,
+        # jobs, wake_scheduler). The factory that built this session constructs
+        # its inventory from a context WITHOUT those fields, so the three
+        # tools silently never advertise — the model cannot delegate even
+        # though the engine fully supports it (reproduced live: 144 requests,
+        # 4M input tokens, zero task calls). Merge them in now that the
+        # session's own context exists.
+        self._merge_capability_tools()
+
+    def _merge_capability_tools(self) -> None:
+        """Add the tools gated on this session's own capabilities.
+
+        ``create_tools`` is createIf-driven: a builder returns ``None`` unless
+        the ToolContext carries what the tool needs. The factory context has
+        no ``subagent_launcher``/``jobs``/``wake_scheduler`` (they are
+        session-owned), so ``task``/``wait``/``jobs`` (and any future
+        session-gated tool) never reached the inventory. Re-running the same
+        builders against ``self._build_tool_context()`` yields exactly those
+        tools; merge them (replacing same-named placeholders) so the model's
+        tool surface reflects what this session can actually do.
+        """
+        try:
+            from local_operator.tools.registry import create_tools
+
+            capability = create_tools(
+                self._build_tool_context(),
+                enabled=("task", "wait", "jobs", "wake"),
+            )
+        except Exception:  # tooling must never break session construction
+            return
+        if not capability:
+            return
+        by_name = {tool.name: tool for tool in capability}
+        merged = list(self._tools)
+        seen = {tool.name for tool in merged}
+        for name, tool in by_name.items():
+            if name in seen:
+                merged = [tool if t.name == name else t for t in merged]
+            else:
+                merged.append(tool)
+        self._tools = merged
+        self._context.tools = merged
+
     async def async_init(self) -> None:
         """Async second half of construction.
 
