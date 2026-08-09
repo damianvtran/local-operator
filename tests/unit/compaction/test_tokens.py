@@ -86,6 +86,19 @@ def test_memoization_hits_cache_and_invalidation_recomputes():
     assert after > before
 
 
+def test_estimate_cache_evicts_least_recent_entry_at_its_hard_bound():
+    """Long-lived servers must retain one turn's working set, not every session."""
+    messages = [
+        Message.user(f"message {index}") for index in range(tokens_mod._ESTIMATE_CACHE_MAX + 1)
+    ]
+    for message in messages:
+        estimate_tokens(message)
+
+    assert len(tokens_mod._ESTIMATE_CACHE) == tokens_mod._ESTIMATE_CACHE_MAX
+    assert messages[0].id not in tokens_mod._ESTIMATE_CACHE
+    assert messages[-1].id in tokens_mod._ESTIMATE_CACHE
+
+
 def test_invalidation_notifies_subscribers_and_unsubscribe():
     """register_invalidator subscribers fire on invalidation; unsubscribe stops them."""
     seen: list[str] = []
