@@ -1,16 +1,23 @@
 from __future__ import annotations
 
-import json
+import asyncio
 
 import pytest
 
-from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
+from local_operator.harness.types import (
+    AbortSignal,
+    AgentTool,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 from local_operator.tools.registry import create_tools
 from local_operator.web_search.models import SearchResponse, SearchSource
 from local_operator.web_search.tool import (
     MODEL_CONTEXT_MAX_CHARS,
     WebSearchParams,
     _render_response,
+    _search_or_abort,
     _tavily_oauth_delegate,
     build_web_search_tool,
 )
@@ -79,17 +86,13 @@ async def test_tavily_oauth_delegate_normalizes_mcp_result() -> None:
             tool_name="mcp__tavily_search",
             content=[
                 TextContent(
-                    text=json.dumps(
-                        {
-                            "answer": "Answer",
-                            "results": [
-                                {
-                                    "title": "Source",
-                                    "url": "https://example.com",
-                                    "content": "Evidence",
-                                }
-                            ],
-                        }
+                    text=(
+                        "Answer: Answer\n\n"
+                        "Detailed Results:\n\n"
+                        "Title: Source\n"
+                        "ID: source-1\n"
+                        "URL: https://example.com\n"
+                        "Content: Evidence"
                     )
                 )
             ],
@@ -111,3 +114,77 @@ async def test_tavily_oauth_delegate_normalizes_mcp_result() -> None:
     assert response.auth_mode == "oauth-mcp"
     assert response.answer == "Answer"
     assert response.sources[0].url == "https://example.com"
+
+
+@pytest.mark.asyncio
+async def test_tavily_oauth_delegate_accepts_structured_mcp_result() -> None:
+    async def execute(tool_call_id, _args, _signal, _on_update, _context):
+        payload = {
+            "answer": "Structured answer",
+            "results": [
+                {
+                    "title": "Structured source",
+                    "url": "https://structured.example.com",
+                    "content": "Structured evidence",
+                }
+            ],
+        }
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="mcp__tavily_search",
+            content=[TextContent(text="Human-readable fallback")],
+            details={"server_result": {"structuredContent": payload}},
+        )
+
+    context = ToolContext(
+        delegated_tools={
+            "mcp__tavily_search": AgentTool(
+                name="mcp__tavily_search",
+                execute=execute,
+            )
+        }
+    )
+    delegate = _tavily_oauth_delegate(context, None, None)
+
+    assert delegate is not None
+    response = await delegate("query", 2)
+
+    assert response.answer == "Structured answer"
+    assert response.sources[0].url == "https://structured.example.com"
+
+
+@pytest.mark.asyncio
+async def test_search_wrapper_reaps_provider_task_when_parent_is_cancelled() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    never = asyncio.Event()
+
+    async def provider_call() -> None:
+        started.set()
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(_search_or_abort(provider_call(), AbortSignal()))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_search_wrapper_closes_call_when_signal_is_already_aborted() -> None:
+    async def provider_call() -> None:
+        await asyncio.sleep(0)
+
+    call = provider_call()
+    signal = AbortSignal()
+    signal.abort("stopped before dispatch")
+
+    with pytest.raises(asyncio.CancelledError):
+        await _search_or_abort(call, signal)
+    assert call.cr_frame is None

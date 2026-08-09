@@ -14,21 +14,26 @@ async def test_search_command_shows_status_and_applies_provider_toggle(
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
 
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         app._run_slash_command("/search")
         await pilot.pause()
         first = _transcript_text(app)
-        assert "web search" in first
-        assert "round_robin" in first
-        assert "duckduckgo" in first and "enabled · ready" in first
-        assert "local-operator search setup <provider>" in first
+        assert "Web search" in first
+        assert "Round Robin" in first
+        assert "DuckDuckGo" in first and "enabled · available" in first
+        assert "/search enable|disable <provider>" in first
+        assert "/search balance round_robin|ordered" in first
+        assert "search setup tavily --oauth|--api-key" in first
+        assert "search setup searxng --endpoint <url>" in first
 
+        app._run_slash_command("/search setup tavily")
         app._run_slash_command("/search disable tavily")
         app._run_slash_command("/search")
         await pilot.pause()
         after = _transcript_text(app)
+        assert "run in a shell: local-operator search setup tavily --oauth" in after
         assert "tavily disabled; applies to the next search" in after
-        assert "tavily" in after and "disabled · ready" in after
+        assert "Tavily" in after and "disabled · available" in after
 
     assert session.prompts == []

@@ -43,6 +43,65 @@ def test_setup_tavily_oauth_writes_http_oauth_server(monkeypatch, tmp_path) -> N
     assert "tavily" in load_search_settings(ConfigManager(config_dir())).providers
 
 
+def test_setup_tavily_oauth_repairs_global_non_oauth_entry(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    mcp_path = tmp_path / ".local-operator" / "mcp.json"
+    mcp_path.parent.mkdir()
+    mcp_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "tavily": {
+                        "type": "http",
+                        "url": "https://mcp.tavily.com/mcp",
+                        "headers": {"X-Test": "not-oauth"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert search_command(_args("setup", "tavily", "--oauth")) == 0
+    assert search_command(_args("setup", "tavily", "--oauth")) == 0
+
+    payload = json.loads(mcp_path.read_text(encoding="utf-8"))
+    assert payload["mcpServers"]["tavily"] == {
+        "type": "http",
+        "url": "https://mcp.tavily.com/mcp/",
+        "auth": {"type": "oauth"},
+    }
+
+
+def test_setup_tavily_oauth_rejects_shadowed_non_oauth_entry(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    project = tmp_path / "project"
+    project_config = project / ".local-operator" / "mcp.json"
+    project_config.parent.mkdir(parents=True)
+    project_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "tavily": {
+                        "type": "http",
+                        "url": "https://mcp.tavily.com/mcp/",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+
+    assert search_command(_args("setup", "tavily", "--oauth")) == 1
+    assert "higher-priority entry" in capsys.readouterr().out
+
+
 def test_setup_searxng_validates_and_stores_endpoint(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
 

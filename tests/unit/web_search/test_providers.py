@@ -18,7 +18,7 @@ def test_duckduckgo_parser_unwraps_links_and_inline_markup() -> None:
     page = (
         '<div class="result results_links">\n'
         '  <h2><a class="result__a" href="//duckduckgo.com/l/?uddg='
-        'https%3A%2F%2Fexample.com%2Fdoc">Example <b>Doc</b></a></h2>\n'
+        'https%3A%2F%2Fexample.com%2Fdocument%252Fversion">Example <b>Doc</b></a></h2>\n'
         '  <a class="result__snippet">Useful &amp; current.</a>\n'
         "</div>\n"
         '<div class="nav-link"></div>'
@@ -28,7 +28,7 @@ def test_duckduckgo_parser_unwraps_links_and_inline_markup() -> None:
 
     assert len(rows) == 1
     assert rows[0].title == "Example Doc"
-    assert rows[0].url == "https://example.com/doc"
+    assert rows[0].url == "https://example.com/document%2Fversion"
     assert rows[0].snippet == "Useful & current."
 
 

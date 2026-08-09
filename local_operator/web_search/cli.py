@@ -108,17 +108,25 @@ def _store_api_key(provider_id: SearchProviderId, credentials: CredentialManager
 def _setup_tavily_oauth() -> int:
     from local_operator.mcp import config as mcp_config
 
-    current = mcp_config.list_effective_servers(Path.cwd())
+    current, sources = mcp_config.load_all_mcp_configs(Path.cwd())
     existing = current.get("tavily")
-    if isinstance(existing, dict) and existing.get("url") == TAVILY_MCP_URL:
-        print("Tavily OAuth MCP is already configured. It will reconnect on the next session.")
-        return 0
-    result = mcp_config.add_server(
-        "tavily",
-        url=TAVILY_MCP_URL,
-        oauth=True,
-        scope="global",
-    )
+    if existing is not None:
+        existing_url = getattr(existing, "url", "").rstrip("/")
+        auth = getattr(existing, "auth", None)
+        if existing_url == TAVILY_MCP_URL.rstrip("/") and getattr(auth, "type", None) == "oauth":
+            print("Tavily OAuth MCP is already configured. It will reconnect on the next session.")
+            return 0
+
+        global_path = mcp_config._scope_path(None, "global")
+        source = Path(sources["tavily"])
+        if source != global_path:
+            print(
+                f"error: Tavily is configured by {source} without the required "
+                "OAuth URL/auth block; update or remove that higher-priority entry"
+            )
+            return 1
+
+    result = mcp_config.set_http_oauth_server("tavily", TAVILY_MCP_URL, scope="global")
     if result == 0:
         print("Tavily OAuth MCP configured. Start or reload a session to sign in.")
     return result
