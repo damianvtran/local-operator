@@ -1225,3 +1225,76 @@ hidden only over the empty placeholder because Textual's caret physically
 inverts the placeholder's first glyph — a documented D-05 design decision).
 Rich-text cursor over the input and pointer-over-rows requires a Textual
 upgrade and is the one deferred surface, recorded rather than hacked.
+
+## The stuck LO-on-LO session: root cause, cap, and recovery (2026-08-09)
+
+A long feature session (id `cb76cb39d6c7`, `openai/gpt-5.4` via the radient
+proxy) ran ~173 tool-use turns / 215 tool messages, stalled, and (at the time) could not be resumed.
+This is the diagnosis, the fix, and the measured recovery — plus the
+token/context-efficiency numbers for the subagent engine that the
+investigation surfaced.
+
+### Root cause: the threshold never fired, so context grew unbounded
+
+The session's transcript (`~/.local-operator/sessions/cb76cb39d6c7/transcript.jsonl`)
+shows **zero compaction events** while context grew monotonically
+3.7k → **249,636 tokens** across 173 assistant calls, ~24.7M total
+cache_read tokens (avg +1,421/call, ~99.0% aggregate cache rate). The provider then
+started returning `stop_reason="aborted"` at ~250k (the first abort came
+mid-batch right after an `edit` tool result; the next turn after an 85s
+stall aborted again).
+
+Why no compaction: the §C default threshold is
+`min(int(window * 0.8), 600_000)`. radient advertises gpt-5.4 at
+**1,050,000** context, so the resolved threshold was **600k** — twice the
+~250k where the provider actually began aborting. `should_compact(249_636,
+1_050_000, default)` returns `False` mechanically. The resume-render bug
+(`--resume` didn't draw the replayed conversation) made the dead session look
+unrecoverable at the time; it's since been fixed.
+
+### Fix: a user-facing threshold cap (PR #115, merged `3ab3075`)
+
+- `values.compaction.max_threshold_tokens` (default **600_000**), applied as
+  an upper bound in `resolve_threshold_tokens` alongside the §C formula. The
+  session's threshold derivation now goes through that one entry point
+  instead of an inline-cloned formula.
+- The user's `config.yml` sets `max_threshold_tokens: 250000` so a long
+  session compacts before the provider's ~250k abort knee. Capped replay of
+  the stuck session would now compact at exactly 250_000 instead of 600k.
+- Regression `test_thresholds.py::test_max_threshold_tokens_caps_the_section_c_default`.
+- Review: round 1 approved with **no blockers**, round 2 APPROVE (MCP-capability
+  wipe bug found and fixed in the same PR — see below).
+
+### Fix: capability tools were invisible to real sessions (PR #115)
+
+A live delegated-review probe showed `task: False wait: False jobs: False` in
+a real session's tool inventory (the factory's ToolContext had no
+`subagent_launcher`/`jobs`), so a review prompt burned **144 requests /
+~4M input tokens with zero `task` calls**. `Session._merge_capability_tools()`
+now re-runs `create_tools` over the session's own context at construction so
+`task`/`wait`/`jobs`/`wake` are advertised. MCP wiring was then fixed to merge
+against the session's *live* inventory (the factory list predates the
+capabilities, so an MCP merge/refresh dropped them).
+
+### Fix: children inherit the operator's compaction budget (PR #115)
+
+A one-shot child was assumed too short to need compaction, but a real review
+child ran 48 requests / 1.5M tokens on the default. `_build_child_session`
+now passes a defensively-copied `compaction_settings` from the parent.
+
+### Subagent task efficiency (live, OpenRouter deepseek-v4-flash)
+
+The multi-round delegated-review test confirms the tokens are spent *passing
+the task*, not re-explaining it, and that a capable cheap model does
+round-trip review work:
+
+| Mechanism | omp-style guarantee | local-operator, verified live |
+|---|---|---|
+| Compaction + snapcompact | fires before the provider's ceiling | now bounded by `max_threshold_tokens`; engages at `min(0.8w, cap)` |
+| Cache-stable system prefix | stable prefix hits provider cache | stable session + tool-merged prefix; ~99.0% aggregate cache rate on the stuck session |
+| Semantic skill freeze | frozen skill text stays cached | one-shot child clones the parent's context; no per-call skill re-derivation |
+| Token-estimate LRU | bounded tool payloads | range-coverage supersede blanks fully-covered read ranges on load (78,272 tokens reclaimed on the stuck session; 1 prune journaled) |
+
+Resume recovery measured live on the real stuck session: reloaded (394
+messages, cap 250k), first turn completed in **5.12s**; supersede pruning
+reclaimed **78,272 tokens** (249,636 → 171,364) on load.
