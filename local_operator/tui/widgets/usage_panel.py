@@ -617,11 +617,13 @@ class UsagePanel(Static):
         if stats:
             row.append(stats, style=dim)
             row.append("   ", style=faint)
-        for index, (key, what) in enumerate(KEY_HINTS):
+        for key, what in KEY_HINTS:
             # Scroll keys are only offered when there is something to scroll: a
             # hint for a key that does nothing teaches the user to distrust the
             # other two. The separator rides the PREVIOUS segment so a skipped
-            # hint never leaves a leading ``·``.
+            # hint never leaves a leading ``·`` — and so a populated row joins
+            # its stats tally to the first hint with the SAME ``·`` glyph the
+            # hint list uses internally (a consistent join, never a leading one).
             if key == "↑↓" and not scrolled:
                 continue
             if row.plain:
