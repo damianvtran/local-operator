@@ -154,6 +154,24 @@ def current_log_file() -> Optional[Path]:
     return _current_log_file
 
 
+def console_is_silenced() -> bool:
+    """True while a :func:`file_logging` block owns the terminal.
+
+    The one honest signal that ANOTHER surface — in practice the Textual TUI —
+    is painting the screen and reading the keyboard. Code that would otherwise
+    ``print`` to stderr or read stdin has to consult this first: a stray write
+    lands inside a frame and stays there until the next full repaint, and a
+    stray ``input()`` competes with Textual's driver for the same file
+    descriptor, so the two readers split the user's keystrokes between them.
+
+    Deliberately phrased about the CONSOLE rather than about the TUI: the
+    contract is "something else owns this terminal", which is exactly what the
+    file-logging window means, and it stays correct if another full-screen
+    front end is added later.
+    """
+    return _file_logging_active
+
+
 def _is_console_handler(handler: logging.Handler) -> bool:
     """True when ``handler`` writes to the terminal the TUI is drawing on.
 
@@ -373,6 +391,7 @@ __all__ = [
     "LOG_TOTAL_MAX_BYTES",
     "configure_cli_logging",
     "configure_console_logging",
+    "console_is_silenced",
     "current_log_file",
     "file_logging",
     "get_logger",

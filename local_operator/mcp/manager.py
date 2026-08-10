@@ -968,13 +968,9 @@ class McpManager:
         if auth is None or auth.type != "oauth":
             return None
         try:
-            from mcp.client.auth import OAuthClientProvider
+            from local_operator.mcp.auth import build_oauth_provider
 
-            from local_operator.mcp.auth import wire_oauth_auth
-
-            return OAuthClientProvider(
-                **wire_oauth_auth(url, cfg, store=self._effective_auth_store())
-            )
+            return build_oauth_provider(url, cfg, store=self._effective_auth_store())
         except Exception:
             logger.warning(
                 "OAuth wiring unavailable for %r; connecting unauthenticated",

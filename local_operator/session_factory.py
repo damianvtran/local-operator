@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import logging
 import os
 import sys
@@ -66,6 +67,59 @@ if TYPE_CHECKING:
     from local_operator.variables import VariableStore
 
 logger = logging.getLogger("local_operator.session_factory")
+
+
+#: Modules whose import dominates :func:`create_session`, measured rather than
+#: guessed: on this machine ``mcp`` costs 443 ms and ``httpx`` 234 ms to import,
+#: and the engine entries below another 195 ms between them. Everything here is
+#: imported lazily by the factory or by something it calls, which is what makes
+#: session construction a ~700 ms burst of import machinery.
+#:
+#: Third-party names sit alongside our own deliberately: the cost is theirs, and
+#: naming only our modules would warm the cheap half of the problem.
+_WARM_IMPORTS: tuple[str, ...] = (
+    "mcp",
+    "httpx",
+    "httpcore",
+    "truststore",
+    "local_operator.compaction.api",
+    "local_operator.mcp.manager",
+    "local_operator.model.configure",
+    "local_operator.model.discovery",
+    "local_operator.providers.auth_store",
+    "local_operator.session.session",
+    "local_operator.skills.discovery",
+)
+
+
+def warm_session_imports() -> None:
+    """Pay :func:`create_session`'s import cost, off whatever loop is running.
+
+    ``create_session`` is a coroutine, but its body is one long SYNCHRONOUS
+    stretch — the awaits are few and none of them yield until the imports are
+    done — so a caller with a live event loop is frozen for the whole of it.
+    Under the TUI that is a ~700 ms window in which no frame is painted and no
+    keypress is handled: the user types the first words of their prompt into a
+    screen that does not move, and the characters all appear at once when it
+    unfreezes.
+
+    Importing is CPU and file I/O, both of which drop the GIL, so running this
+    in a worker thread (``await asyncio.to_thread(warm_session_imports)``)
+    turns that one long stall into interleaved sub-frame ones — measured at
+    16 ms worst case, against 699 ms for the unwarmed factory. The factory
+    itself is unchanged: it still imports what it needs, and finds it cached.
+
+    Never raises. An optional extra that is not installed (``mcp``) or a module
+    that fails to import is the factory's problem to report, in the factory's
+    own words, at the point where it actually needs it.
+    """
+    import importlib
+
+    for name in _WARM_IMPORTS:
+        try:
+            importlib.import_module(name)
+        except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+            logger.debug("prewarm skipped %s", name, exc_info=True)
 
 
 def coerce_compaction_settings(raw: object) -> CompactionSettings | None:
@@ -701,12 +755,24 @@ async def _prepare(
             value = getattr(agent, field_name, None)
             if value is not None:
                 chat_kwargs[field_name] = value
-    model_configuration = configure_model(
-        hosting=hosting,
-        model_name=model_name,
-        credential_manager=credential_manager,
-        env_config=get_env_config(),
-        **chat_kwargs,
+    # OFF THE EVENT LOOP. `configure_model` is synchronous, and for a model the
+    # shipped registry does not fully describe it fetches the provider's live
+    # listing over a BLOCKING httpx client (see
+    # `model.configure._info_from_discovery`). On the TUI's loop that is a
+    # frozen screen and a swallowed keystroke buffer for as long as the
+    # provider takes to answer — up to `discovery.DEFAULT_TIMEOUT_S`, 10 s, on
+    # a bad network. A thread costs nothing here: every caller is already
+    # awaiting this line, and the work is a network wait plus a memoised
+    # lookup.
+    model_configuration = await asyncio.to_thread(
+        functools.partial(
+            configure_model,
+            hosting=hosting,
+            model_name=model_name,
+            credential_manager=credential_manager,
+            env_config=get_env_config(),
+            **chat_kwargs,
+        )
     )
     spec = model_configuration.spec
 

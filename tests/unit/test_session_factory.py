@@ -994,3 +994,39 @@ async def test_lazy_mcp_refresh_keeps_session_capability_tools(monkeypatch) -> N
     assert manager.callback is not None
     manager.callback([late])
     assert set(session.tools) == {builtin, capability}
+
+
+class TestWarmSessionImports:
+    """The prewarm exists so the TUI's boot does not freeze the keyboard.
+
+    ``create_session``'s body is one synchronous stretch of imports, so a
+    caller with a live event loop paints nothing and services no key event for
+    its duration. The warm-up moves that cost to a thread; these tests defend
+    the two properties that make it worth having.
+    """
+
+    def test_it_imports_the_factorys_heavy_dependencies(self) -> None:
+        """Every warmed name is in ``sys.modules`` afterwards.
+
+        A name that silently fails to import warms nothing, and the stall it
+        was supposed to remove comes back on the event loop instead.
+        """
+        import sys
+
+        from local_operator.session_factory import _WARM_IMPORTS, warm_session_imports
+
+        warm_session_imports()
+        assert [name for name in _WARM_IMPORTS if name not in sys.modules] == []
+
+    def test_a_broken_entry_does_not_raise(self, monkeypatch) -> None:
+        """A warm-up is never worth a failed startup.
+
+        ``mcp`` is an optional extra, so an entry that cannot import is a real
+        deployment rather than a hypothetical.
+        """
+        import local_operator.session_factory as factory
+
+        monkeypatch.setattr(
+            factory, "_WARM_IMPORTS", ("local_operator.no_such_module_at_all", "json")
+        )
+        factory.warm_session_imports()  # must not raise

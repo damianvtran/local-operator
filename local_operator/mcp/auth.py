@@ -1,13 +1,18 @@
 """MCP OAuth support on the official SDK's ``OAuthClientProvider``.
 
-Headless-capable flow (official SDK PKCE + RFC 7591 DCR under the hood):
+Flow (official SDK PKCE + RFC 7591 DCR under the hood):
 
-- ``wire_oauth_auth(server_url, cfg)`` returns ``OAuthClientProvider`` kwargs:
-  client metadata with a loopback redirect URI, a token storage bound to the
-  shared credential store, and redirect/callback handlers that print the
-  authorization URL and accept a pasted redirect URL on stdin.
+- ``build_oauth_provider(server_url, cfg)`` is the entry point: it wires the
+  provider AND primes it with the stored token's expiry, which is what makes a
+  restart spend the refresh token instead of re-running a browser grant.
+- ``wire_oauth_auth(server_url, cfg)`` returns the ``OAuthClientProvider``
+  kwargs: client metadata with a loopback redirect URI, a token storage bound
+  to the shared credential store, and a :class:`LoopbackAuthFlow` that
+  actually LISTENS on that redirect URI (with a pasted-URL race for browsers
+  that cannot reach this machine).
 - ``McpTokenStorage`` is the SDK ``TokenStorage``: one row per server URL in
-  the real ``providers.auth_store.AuthStore``, keyed ``mcp_oauth:<url>``.
+  the real ``providers.auth_store.AuthStore``, keyed ``mcp_oauth:<url>``, with
+  the token's issue time recorded so its lifetime survives the process.
 
 Credential mapping onto the REAL AuthStore API (MCP-03): the store is keyed
 by integer row id + ``provider`` column + ``identity_key``, so the logical
@@ -21,9 +26,11 @@ field, which the store's dedupe logic picks up). Reads filter
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import html
 import logging
 import sys
-from collections.abc import Awaitable, Callable
+import time
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlparse
 
@@ -51,6 +58,11 @@ MCP_OAUTH_PROVIDER = "mcp-oauth"
 
 DEFAULT_CALLBACK_PORT = 3000
 DEFAULT_CALLBACK_PATH = "/callback"
+
+#: Payload key holding the wall-clock time (epoch seconds) the stored access
+#: token was issued. Not part of the SDK's ``OAuthToken`` — see
+#: :meth:`McpTokenStorage.stored_token_expiry` for why we have to record it.
+TOKENS_OBTAINED_AT_KEY = "tokens_obtained_at"
 
 
 def mcp_oauth_credential_id(server_url: str) -> str:
@@ -128,8 +140,8 @@ class McpTokenStorage:
         self.credential_id = mcp_oauth_credential_id(server_url)
         self._store = _resolve_store(store)
 
-    def _read(self) -> dict[str, Any] | None:
-        """Row payload for this server URL, or ``None`` (no store/no row)."""
+    def _read_row(self) -> StoredCredential | None:
+        """The credential row for this server URL, or ``None`` (no store/no row)."""
         store = self._store
         if store is None:
             return None
@@ -140,9 +152,16 @@ class McpTokenStorage:
             return None
         for row in rows:
             if row.identity_key == self.server_url:
-                data = row.data
-                return dict(data) if isinstance(data, dict) else None
+                return row
         return None
+
+    def _read(self) -> dict[str, Any] | None:
+        """Row payload for this server URL, or ``None`` (no store/no row)."""
+        row = self._read_row()
+        if row is None:
+            return None
+        data = row.data
+        return dict(data) if isinstance(data, dict) else None
 
     def _write(self, creds: dict[str, Any]) -> None:
         store = self._store
@@ -181,10 +200,52 @@ class McpTokenStorage:
             return None
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
-        """Persist fresh/refreshed tokens (access + refresh together)."""
+        """Persist fresh/refreshed tokens (access + refresh together).
+
+        The issuing WALL-CLOCK time is written alongside them. ``OAuthToken``
+        carries only the relative ``expires_in`` the server quoted, which is
+        meaningless once the process that received it has exited — and the SDK
+        reloads tokens without reloading any notion of when they die (see
+        :func:`stored_token_expiry`). Recording the moment of issue is what
+        turns that relative number back into an absolute deadline on the next
+        launch.
+        """
         creds = self._read() or {}
         creds["tokens"] = tokens.model_dump(mode="json")
+        creds[TOKENS_OBTAINED_AT_KEY] = time.time()
         self._write(creds)
+
+    def stored_token_expiry(self) -> float | None:
+        """Epoch seconds at which the stored access token expires, if knowable.
+
+        ``None`` means "no opinion" — no row, no token, or a token the server
+        quoted no lifetime for — and callers must then leave the SDK's own
+        default (treat as valid) alone: a provider that issues non-expiring
+        tokens and no refresh token would otherwise be forced through a full
+        re-authorization on every launch.
+
+        Legacy rows written before :meth:`set_tokens` recorded the issue time
+        fall back to the row's ``updated_at`` (milliseconds). That column is
+        touched by exactly the writes this class makes, so for a token row it
+        IS the issue time, and using it means the fix applies to grants that
+        already exist rather than only to the next re-authorization.
+        """
+        row = self._read_row()
+        if row is None:
+            return None
+        data = row.data if isinstance(row.data, dict) else {}
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            return None
+        expires_in = tokens.get("expires_in")
+        if not isinstance(expires_in, (int, float)) or expires_in <= 0:
+            return None
+        obtained_at = data.get(TOKENS_OBTAINED_AT_KEY)
+        if not isinstance(obtained_at, (int, float)) or obtained_at <= 0:
+            if row.updated_at <= 0:
+                return None
+            obtained_at = row.updated_at / 1000.0
+        return float(obtained_at) + float(expires_in)
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         """Stored client registration (DCR result or pinned config), or ``None``."""
@@ -226,27 +287,6 @@ class McpTokenStorage:
         self._write(creds)
 
 
-def _default_redirect_handler() -> Callable[[str], Awaitable[None]]:
-    """Build the redirect handler: print the URL, open a browser when possible.
-
-    The URL is hard-wrapped in brackets so trailing OAuth params can never be
-    silently lost on copy (a real production paste bug).
-    """
-
-    async def redirect_handler(authorization_url: str) -> None:
-        print("\nMCP OAuth authorization required. Open this URL in a browser:", file=sys.stderr)
-        print(f"  <{authorization_url}>", file=sys.stderr)
-        try:
-            import webbrowser
-
-            if webbrowser.open(authorization_url):
-                print("(opened in your default browser)", file=sys.stderr)
-        except Exception:
-            pass  # headless: the paste fallback below carries the flow
-
-    return redirect_handler
-
-
 def parse_oauth_callback_input(raw: str) -> tuple[str, str | None, str | None]:
     """Parse the pasted callback input into ``(code, state, iss)`` (MCP-02).
 
@@ -275,52 +315,276 @@ def parse_oauth_callback_input(raw: str) -> tuple[str, str | None, str | None]:
     return code, state, iss
 
 
-#: The paste read is bounded: a connect that reaches the paste path on a
-#: non-interactive host must fail fast, not park the connect task forever.
+#: How long the whole grant may sit waiting for the human: the browser round
+#: trip and, where it is offered, the paste. A connect that reaches this path
+#: on an unattended host must fail eventually, not park the connect task
+#: forever.
 PASTE_INPUT_TIMEOUT_S = 300.0
 
+#: Hosts a redirect URI can name that THIS process is able to answer.
+#:
+#: A redirect URI may legitimately point anywhere; only a loopback address is
+#: something we can bind. Anything else — a hosted callback, a tunnel — has to
+#: fall through to the paste path, because listening would not intercept it.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
-def _default_callback_handler() -> Callable[[], Awaitable[AuthorizationCodeResult]]:
-    """Build the callback handler: accept the pasted FULL redirect URL.
+#: Bound on the request head we will read from the browser before giving up.
+#: A callback is a GET with a short query string; anything larger is not the
+#: browser we asked for, and an unbounded read on a public-ish port is a
+#: memory-exhaustion invitation.
+_MAX_REQUEST_HEAD_BYTES = 16 * 1024
+_MAX_REQUEST_HEADERS = 64
 
-    The SDK hands us control between redirect and token exchange; we read the
-    input from stdin in a worker thread (never blocks the event loop). The
-    user pastes the complete redirect URL (or a ``code state`` pair); state
-    and iss are parsed out and returned so the SDK can complete its state
-    validation (MCP-02).
 
-    Gated on a real terminal: under the TUI (raw mode), the server (stdin
-    DEVNULL) and ``exec --background`` a bare ``input()`` scribbles over the
-    screen, raises EOFError, or parks forever — so without an interactive
-    stdin the handler fails fast with an actionable error, and the read is
-    bounded by :data:`PASTE_INPUT_TIMEOUT_S`.
+def _callback_page(title: str, detail: str) -> bytes:
+    """A complete, self-closing HTTP response for the browser tab."""
+    body = (
+        "<!doctype html><meta charset='utf-8'>"
+        "<title>local-operator</title>"
+        '<body style="font:14px -apple-system,system-ui,sans-serif;'
+        'margin:15vh auto;max-width:32rem;text-align:center;color:#222">'
+        f"<h2 style='font-weight:600'>{html.escape(title)}</h2>"
+        f"<p style='color:#666'>{html.escape(detail)}</p></body>"
+    ).encode()
+    head = (
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode()
+    return head + body
+
+
+class LoopbackAuthFlow:
+    """The redirect/callback pair for one authorization, over a real listener.
+
+    The SDK drives an authorization in two steps: it hands us the URL to open
+    (:meth:`redirect_handler`), then blocks on us to produce the code the
+    provider redirected back with (:meth:`callback_handler`). We advertise
+    ``http://127.0.0.1:<port>/callback`` as the redirect URI, so the ONLY way
+    that promise is kept is by listening on it — without a listener the user
+    signs in, the provider redirects, and the browser lands on
+    ``ERR_CONNECTION_REFUSED`` with the code stranded in the address bar.
+
+    The listener is opened in :meth:`redirect_handler`, BEFORE the browser is
+    launched, because the provider can redirect the instant the user's session
+    is already authorized — binding afterwards is a race the fast path loses.
+
+    Paste stays as a fallback, but only where reading stdin is actually safe:
+    under the TUI the terminal belongs to Textual's input driver, and a second
+    reader on the same file descriptor does not queue behind it — the two
+    split the user's keystrokes between them, which reads as an app randomly
+    ignoring what is typed. :func:`~local_operator.logger.console_is_silenced`
+    is the signal for that, and it also decides whether our progress notices
+    go to stderr or to the log file.
     """
 
-    async def callback_handler() -> AuthorizationCodeResult:
+    def __init__(self, redirect_uri: str) -> None:
+        parsed = urlparse(redirect_uri)
+        self.redirect_uri = redirect_uri
+        self._host = parsed.hostname or ""
+        self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        self._path = parsed.path or "/"
+        self._servable = parsed.scheme == "http" and self._host in LOOPBACK_HOSTS
+        self._server: asyncio.AbstractServer | None = None
+        self._result: asyncio.Future[tuple[str, str | None, str | None]] | None = None
+
+    # --- notices ---------------------------------------------------------
+
+    def _notify(self, *lines: str) -> None:
+        """Tell the user what is happening, without painting over a frame."""
+        from local_operator.logger import console_is_silenced
+
+        if console_is_silenced():
+            for line in lines:
+                logger.info("%s", line.strip())
+            return
+        for line in lines:
+            print(line, file=sys.stderr)
+
+    def _paste_allowed(self) -> bool:
+        """Whether stdin is ours to read (see the class docstring)."""
+        from local_operator.logger import console_is_silenced
+
+        return sys.stdin.isatty() and not console_is_silenced()
+
+    # --- SDK handlers ----------------------------------------------------
+
+    async def redirect_handler(self, authorization_url: str) -> None:
+        """Start listening, then send the user to the authorization URL.
+
+        The URL is hard-wrapped in brackets so trailing OAuth params can never
+        be silently lost on copy (a real production paste bug).
+        """
+        await self._start_server()
+        lines = [
+            "\nMCP OAuth authorization required. Open this URL in a browser:",
+            f"  <{authorization_url}>",
+        ]
+        try:
+            import webbrowser
+
+            if webbrowser.open(authorization_url):
+                lines.append("(opened in your default browser)")
+        except Exception:
+            pass  # headless: the listener or the paste fallback carries it
+        if self._server is not None:
+            lines.append(f"Waiting for the redirect to {self.redirect_uri} …")
+        self._notify(*lines)
+
+    async def callback_handler(self) -> AuthorizationCodeResult:
+        """Wait for the provider's redirect (or a pasted URL) and return the code."""
         from mcp.shared.auth import AuthorizationCodeResult
 
-        if not sys.stdin.isatty():
-            raise RuntimeError(
-                "MCP OAuth requires an interactive terminal to paste the "
-                "redirect URL; run the login from a TTY (local-operator mcp "
-                "login <server>) or configure the server with a token."
-            )
-
-        def _read_input() -> str:
-            return input(
-                "Paste the full redirect URL (or 'code state' separated by a space): "
-            ).strip()
-
         try:
-            raw = await asyncio.wait_for(
-                asyncio.to_thread(_read_input), timeout=PASTE_INPUT_TIMEOUT_S
-            )
-        except asyncio.TimeoutError as exc:
-            raise RuntimeError("Timed out waiting for the pasted redirect URL") from exc
-        code, state, iss = parse_oauth_callback_input(raw)
+            code, state, iss = await self._await_authorization()
+        finally:
+            await self._stop_server()
         return AuthorizationCodeResult(code=code, state=state, iss=iss)
 
-    return callback_handler
+    async def _await_authorization(self) -> tuple[str, str | None, str | None]:
+        waiters: list[asyncio.Future[Any] | asyncio.Task[Any]] = []
+        if self._result is not None:
+            waiters.append(self._result)
+        paste_task: asyncio.Task[tuple[str, str | None, str | None]] | None = None
+        if self._paste_allowed():
+            # Raced against the listener rather than used only as a fallback:
+            # a browser on another machine (an SSH session) reaches the login
+            # page but cannot reach our port, and without the race that user
+            # waits out the timeout with the code sitting in front of them.
+            paste_task = asyncio.get_running_loop().create_task(self._read_pasted())
+            waiters.append(paste_task)
+        if not waiters:
+            raise RuntimeError(
+                "MCP OAuth cannot complete here: the redirect URI "
+                f"{self.redirect_uri} is not a loopback address this process "
+                "can serve, and stdin is not available for a paste. Run "
+                "`local-operator mcp login <server>` from a terminal, or "
+                "configure the server with a token."
+            )
+        try:
+            done, pending = await asyncio.wait(
+                waiters, timeout=PASTE_INPUT_TIMEOUT_S, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            if paste_task is not None and not paste_task.done():
+                paste_task.cancel()
+        if not done:
+            raise RuntimeError(
+                f"Timed out after {PASTE_INPUT_TIMEOUT_S:.0f}s waiting for the " "OAuth redirect"
+            )
+        for task in pending:
+            task.cancel()
+        # `done` holds at most the listener and the paste; either is a complete
+        # answer, so the first one that finished wins and its exception (a
+        # provider `error=` redirect, an unparseable paste) is the flow's.
+        return next(iter(done)).result()
+
+    async def _read_pasted(self) -> tuple[str, str | None, str | None]:
+        prompt = (
+            "…or paste the full redirect URL here if your browser cannot reach " "this machine: "
+        )
+        raw = await asyncio.to_thread(lambda: input(prompt).strip())
+        return parse_oauth_callback_input(raw)
+
+    # --- the listener ----------------------------------------------------
+
+    async def _start_server(self) -> None:
+        """Bind the redirect URI, or leave ``_server`` None and say why."""
+        if self._server is not None or not self._servable:
+            return
+        loop = asyncio.get_running_loop()
+        self._result = loop.create_future()
+        try:
+            self._server = await asyncio.start_server(self._serve, self._host, self._port)
+        except OSError as exc:
+            # Almost always "address already in use": another local-operator, or
+            # a dev server squatting :3000. Not fatal — the paste path still
+            # completes the grant — but the user has to be told, because from
+            # the browser's side this looks like the login simply not working.
+            self._result = None
+            self._notify(
+                f"Could not listen on {self.redirect_uri} ({exc}); "
+                "the browser redirect will not be captured automatically."
+            )
+
+    async def _stop_server(self) -> None:
+        server, self._server = self._server, None
+        self._result = None
+        if server is None:
+            return
+        server.close()
+        with contextlib.suppress(Exception):
+            await server.wait_closed()
+
+    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Answer one browser request; resolve the flow when it is the callback."""
+        try:
+            target = await self._read_request_target(reader)
+            if target is None:
+                writer.write(_callback_page("Bad request", "Malformed HTTP request."))
+                return
+            parsed = urlparse(target)
+            if parsed.path != self._path:
+                # Browsers ask for /favicon.ico off their own bat; answering
+                # 200-with-a-page rather than resolving the flow keeps those
+                # from being mistaken for the redirect.
+                writer.write(_callback_page("Not found", "Nothing is served here."))
+                return
+            query = parse_qs(parsed.query)
+            error = (query.get("error") or [""])[0]
+            if error:
+                detail = (query.get("error_description") or [""])[0] or error
+                writer.write(_callback_page("Authorization failed", detail))
+                self._settle_error(RuntimeError(f"OAuth authorization failed: {detail}"))
+                return
+            code = (query.get("code") or [""])[0]
+            if not code:
+                writer.write(_callback_page("Missing code", "The redirect carried no code."))
+                return
+            writer.write(
+                _callback_page(
+                    "Authorized",
+                    "local-operator has the authorization code. You can close this tab.",
+                )
+            )
+            self._settle(
+                code,
+                (query.get("state") or [None])[0],
+                (query.get("iss") or [None])[0],
+            )
+        except Exception:  # noqa: BLE001 — one bad request must not kill the flow
+            logger.debug("MCP OAuth callback request failed", exc_info=True)
+        finally:
+            with contextlib.suppress(Exception):
+                await writer.drain()
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    async def _read_request_target(self, reader: asyncio.StreamReader) -> str | None:
+        """The request target of a GET, with the head read and discarded."""
+        line = await reader.readline()
+        if not line or len(line) > _MAX_REQUEST_HEAD_BYTES:
+            return None
+        parts = line.decode("latin-1").split()
+        if len(parts) < 2 or parts[0].upper() != "GET":
+            return None
+        # Drain the headers so the browser sees a well-formed exchange rather
+        # than a reset mid-request (which some render as a failed navigation).
+        for _ in range(_MAX_REQUEST_HEADERS):
+            header = await reader.readline()
+            if header in (b"\r\n", b"\n", b""):
+                break
+        return parts[1]
+
+    def _settle(self, code: str, state: str | None, iss: str | None) -> None:
+        if self._result is not None and not self._result.done():
+            self._result.set_result((code, state, iss))
+
+    def _settle_error(self, exc: Exception) -> None:
+        if self._result is not None and not self._result.done():
+            self._result.set_exception(exc)
 
 
 def wire_oauth_auth(
@@ -339,8 +603,9 @@ def wire_oauth_auth(
     - ``storage``: a :class:`McpTokenStorage` bound to ``store``; a config
       ``client_id`` pre-seeds the client registration so DCR is skipped
       (MCP-11);
-    - ``redirect_handler`` / ``callback_handler``: headless-capable defaults
-      (print URL + paste the full redirect URL; see module docstring).
+    - ``redirect_handler`` / ``callback_handler``: the two halves of one
+      :class:`LoopbackAuthFlow`, which listens on that redirect URI for the
+      duration of the grant (see the module docstring).
 
     The returned dict is constructed eagerly but imports ``mcp`` lazily inside
     so config-only code paths never touch the SDK.
@@ -388,10 +653,44 @@ def wire_oauth_auth(
     if client_id:
         storage.seed_client_info(client_id, client_secret)
 
+    flow = LoopbackAuthFlow(redirect_uri)
     return {
         "server_url": server_url,
         "client_metadata": client_metadata,
         "storage": storage,
-        "redirect_handler": _default_redirect_handler(),
-        "callback_handler": _default_callback_handler(),
+        "redirect_handler": flow.redirect_handler,
+        "callback_handler": flow.callback_handler,
     }
+
+
+def build_oauth_provider(
+    server_url: str, cfg: MCPServerConfig, store: StructuralAuthStore | None = None
+) -> Any:
+    """An ``OAuthClientProvider`` that knows when its stored token expires.
+
+    The SDK reloads tokens on first use but NOT their deadline
+    (``OAuthClientProvider._initialize`` sets ``current_tokens`` and leaves
+    ``token_expiry_time`` at ``None``), and ``OAuthContext.is_token_valid``
+    reads a missing deadline as "still good". So every fresh process presented
+    a day-old access token, got a 401, and ran the FULL browser authorization
+    — the refresh token sitting in the same row was never spent, because the
+    refresh branch is only reached when the token is known to be expired.
+
+    Priming the deadline from what we persisted is the whole fix: an expired
+    token now takes the refresh grant, silently, with no browser. It is set
+    after construction rather than passed in because the SDK offers no
+    constructor argument for it, and ``_initialize`` does not clear it.
+    """
+    from mcp.client.auth import OAuthClientProvider
+
+    kwargs = wire_oauth_auth(server_url, cfg, store=store)
+    provider = OAuthClientProvider(**kwargs)
+    storage = kwargs["storage"]
+    try:
+        expiry = storage.stored_token_expiry()
+    except Exception:  # noqa: BLE001 — a metadata read must not block a connect
+        logger.debug("MCP token expiry unreadable for %s", server_url, exc_info=True)
+        return provider
+    if expiry is not None:
+        provider.context.token_expiry_time = expiry
+    return provider

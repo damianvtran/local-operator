@@ -2741,3 +2741,46 @@ async def test_model_default_hint_survives_every_supported_narrow_footer() -> No
             await pilot.pause()
             painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
         assert PERSIST_HINT in painted, (size, painted)
+
+
+@pytest.mark.asyncio
+async def test_boot_warms_session_imports_before_awaiting_the_factory() -> None:
+    """The import cost must be paid in a thread, ahead of the factory await.
+
+    ``create_session`` does not yield until it has imported the engine, the
+    provider stack and the MCP SDK — measured at ~700 ms — so awaiting it
+    directly from the boot worker freezes the compositor and the key handler
+    for that whole window: the user's first keystrokes land in a dead screen
+    and appear in a burst afterwards. Ordering is the contract (warm, THEN
+    build) and the thread hop is what makes the warm-up non-blocking, so both
+    are asserted here.
+    """
+    import threading
+
+    calls: list[str] = []
+    warm_thread: list[int] = []
+
+    def fake_warm() -> None:
+        warm_thread.append(threading.get_ident())
+        calls.append("warm")
+
+    async def factory() -> FakeSession:
+        calls.append("factory")
+        return FakeSession()
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("local_operator.session_factory.warm_session_imports", fake_warm)
+    try:
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(50):
+                if calls.count("factory"):
+                    break
+                await pilot.pause()
+            loop_thread = threading.get_ident()
+    finally:
+        monkeypatch.undo()
+
+    assert calls[:2] == ["warm", "factory"], calls
+    assert warm_thread and warm_thread[0] != loop_thread
