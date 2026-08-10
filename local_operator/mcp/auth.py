@@ -33,9 +33,9 @@ import time
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlparse
 
-from local_operator.mcp.callback_page import callback_response
-
 from pydantic import AnyUrl
+
+from local_operator.mcp.callback_page import callback_response
 
 if TYPE_CHECKING:
     # The SDK is an optional extra: these names are needed for annotations
