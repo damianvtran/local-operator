@@ -496,35 +496,51 @@ class LoopbackAuthFlow:
         if not self._paste_allowed():
             raise RuntimeError(f"MCP OAuth cannot complete here: {self._no_route_reason()}")
         prompt = "Paste the full redirect URL (or 'code state' separated by a space): "
-        raw = await asyncio.wait_for(
-            asyncio.to_thread(lambda: input(prompt).strip()), timeout=PASTE_INPUT_TIMEOUT_S
-        )
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(lambda: input(prompt).strip()), timeout=PASTE_INPUT_TIMEOUT_S
+            )
+        except asyncio.TimeoutError as exc:
+            # TRANSLATE IT. Since 3.11 `asyncio.TimeoutError` IS `TimeoutError`
+            # and `str(TimeoutError())` is the empty string, so letting it
+            # propagate makes the CLI print "MCP login failed for 'x': " with no
+            # reason at all — on exactly the paths (unservable redirect URI, a
+            # bind lost to a squatter) that `_no_route_reason` exists to explain.
+            raise RuntimeError(
+                f"Timed out after {PASTE_INPUT_TIMEOUT_S:.0f}s waiting for the pasted "
+                f"redirect URL. Reading from stdin because {self._no_listener_reason()}."
+            ) from exc
         return parse_oauth_callback_input(raw)
 
-    def _no_route_reason(self) -> str:
-        """Why neither route is available, in the user's terms.
+    def _no_listener_reason(self) -> str:
+        """Why the browser redirect is not being captured, in the user's terms.
 
         A bind failure and an unservable redirect URI are different problems
         with different fixes, and conflating them sends someone to audit their
         OAuth configuration when the real answer is that a dev server is
-        squatting the port.
+        squatting the port. Phrased as a clause so both callers — "no route at
+        all" and "falling back to a paste" — can finish the sentence their own
+        way.
         """
         if self._bind_error is not None:
             return (
                 f"nothing could listen on {self.redirect_uri} ({self._bind_error}) "
                 "— free that port, or set a different `oauth.callback_port` for "
-                "this server — and stdin is not available for a paste."
+                "this server"
             )
         if not self._servable:
             return (
                 f"the redirect URI {self.redirect_uri} is not a loopback address "
-                "this process can serve, and stdin is not available for a paste. "
-                "Run `local-operator mcp login <server>` from a terminal, or "
-                "configure the server with a token."
+                "this process can serve"
             )
+        return "the callback listener is not running"
+
+    def _no_route_reason(self) -> str:
+        """Why NEITHER route is available: no listener, and no stdin either."""
         return (
-            "the callback listener is not running and stdin is not available "
-            "for a paste. Run `local-operator mcp login <server>` from a terminal."
+            f"{self._no_listener_reason()}, and stdin is not available for a "
+            "paste. Run `local-operator mcp login <server>` from a terminal, or "
+            "configure the server with a token."
         )
 
     # --- the listener ----------------------------------------------------
@@ -650,11 +666,18 @@ class LoopbackAuthFlow:
         except Exception:  # noqa: BLE001 — one bad request must not kill the flow
             logger.debug("MCP OAuth callback request failed", exc_info=True)
         finally:
+            # The last unbounded awaits in a handler whose every other wait is
+            # explicit. A peer that sends a valid GET and then stops reading
+            # blocks `drain()` for as long as it likes, holding a task and an fd
+            # for the life of the PROCESS — which under the TUI is the whole
+            # session, not the flow. Today the page fits in a default send
+            # buffer on macOS, but that is an accident of one platform's
+            # defaults and a page size capped three functions away.
             with contextlib.suppress(Exception):
-                await writer.drain()
+                await asyncio.wait_for(writer.drain(), timeout=_SERVER_CLOSE_TIMEOUT_S)
             writer.close()
             with contextlib.suppress(Exception):
-                await writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), timeout=_SERVER_CLOSE_TIMEOUT_S)
 
     async def _read_request_target(self, reader: asyncio.StreamReader) -> str | None:
         """The request target of a GET, with the head read and discarded.

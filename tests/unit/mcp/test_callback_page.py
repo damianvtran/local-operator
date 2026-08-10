@@ -36,9 +36,18 @@ class TestZeroNetwork:
     )
     def test_no_external_reference_of_any_kind(self, kwargs) -> None:
         page = render_callback_page("Title", "Detail.", **kwargs)
-        assert "http://" not in page.replace("http://www.w3.org", "")
-        assert "https://" not in page.replace("https://srv.example/mcp", "")
-        for forbidden in ("<link", "<script", "<img", "@import", "url("):
+        # The load-bearing assertion, because it is an INVARIANT rather than a
+        # blocklist: this document has no URL-bearing attribute at all. A token
+        # list alone lets protocol-relative references through — `<use
+        # href="//cdn/s.svg#m">` inside the inline mark, for one — and every
+        # such reference has to spell `src=` or `href=` to fetch anything.
+        assert re.search(r"(?:src|href)\s*=", page) is None
+        assert "//" not in page.replace(str(kwargs.get("server") or "\0"), "")
+        # The token list stays as a second net over CSS, which fetches without
+        # attributes. `url(` covers `url()` (CSS forbids whitespace between the
+        # ident and the paren, so `url (…)` does not fetch); `image-set(` is the
+        # other function that takes a bare URL string.
+        for forbidden in ("<link", "<script", "<img", "@import", "url(", "image-set("):
             assert forbidden not in page, forbidden
 
 
@@ -73,6 +82,32 @@ class TestVoiceBoundary:
         )
         assert "<img" not in page
         assert "&lt;img" in page
+
+    def test_a_huge_provider_message_is_truncated_visibly(self) -> None:
+        """The voice boundary needs an extent boundary too.
+
+        The listener's 16 KiB head budget is otherwise the only bound, and a
+        description that spends it renders a card thousands of pixels tall —
+        pushing OUR sentence, the one that says what to do next, far below the
+        fold on a page with no navigation. Truncation is visible rather than
+        clipped in CSS so the page never hides text without saying so.
+        """
+        from local_operator.mcp.callback_page import _MAX_PROVIDER_MESSAGE
+
+        page = render_callback_page(
+            "Authorization failed", "Detail.", tone="danger", provider_message="x" * 16_000
+        )
+        rendered = re.search(r'class="trough">(x+…?)<', page)
+        assert rendered is not None
+        assert len(rendered.group(1)) == _MAX_PROVIDER_MESSAGE
+        assert rendered.group(1).endswith("…")
+
+    def test_a_short_provider_message_is_untouched(self) -> None:
+        page = render_callback_page(
+            "Authorization failed", "Detail.", tone="danger", provider_message="access_denied"
+        )
+        assert 'class="trough">access_denied<' in page
+        assert "…" not in page
 
     def test_absent_provider_message_renders_no_empty_trough(self) -> None:
         page = render_callback_page("Authorized", "Detail.", tone="success")

@@ -198,7 +198,7 @@ h1 {
   display: inline-block; margin: 8px 0 0;
   padding: 4px 8px;
   border: 1px solid var(--hairline-strong);
-  border-radius: 2px;
+  border-radius: 2px;                        /* --radius-xs */
   background: var(--sunken);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.875rem; line-height: 1.5;
@@ -214,6 +214,19 @@ h1 {
   font-size: 0.875rem; line-height: 1.6;
   color: var(--ink-dim);
 }
+/* The system's narrow-viewport steps: a 20px page gutter below `sm`, and 20px
+   card padding below `md`. LAST in the sheet on purpose — these override
+   `body`, `.head` and `.body` at equal specificity, so source order is the
+   whole mechanism, and putting them beside the rules they modify silently
+   loses. (It did: the first attempt sat above `.body` and measured as a no-op.)
+   Not cosmetic at 320px — the 16px they give back is the difference between
+   the server URL fitting on one line and breaking two characters from its
+   end, which splits the one string the trough exists to let you read. */
+@media (max-width: 639.98px) { body { padding: 20px; } }
+@media (max-width: 767.98px) {
+  .head { padding: 16px 20px; }
+  .body { padding: 32px 20px 20px; }
+}
 """
 
 #: Per-tone status rules. ``success`` takes the SEMANTIC token rather than the
@@ -227,6 +240,22 @@ _TONE_VARS: dict[Tone, str] = {
     "danger": "--tone: var(--danger);",
     "neutral": "--tone: var(--hairline-strong);",
 }
+
+#: How much of a provider's ``error_description`` this page will render.
+#:
+#: The voice boundary gave the string its own trough; this gives it an extent.
+#: The listener's 16 KiB request-head budget is the only other bound on it, and
+#: a description that spends it renders a 7,461px card at 1417x1022 — pushing
+#: OUR sentence, the one that says what to do next, some 7,000px below the fold
+#: on a page with no navigation. 500 characters is roughly five lines in the
+#: trough and keeps the whole card inside a desktop viewport with no scroll at
+#: all; anything a provider needs to say beyond that belongs in their own UI.
+#:
+#: Truncated at the render boundary with a visible ellipsis rather than clipped
+#: in CSS: `max-height` + `overflow` makes a nested scroll container that then
+#: needs a `tabindex` to be keyboard-reachable, and `-webkit-line-clamp` hides
+#: text with no sign that it did.
+_MAX_PROVIDER_MESSAGE = 500
 
 
 def _trough(label: str, value: str) -> str:
@@ -263,7 +292,10 @@ def render_callback_page(
     if server:
         blocks += _trough("MCP server", server)
     if provider_message:
-        blocks += _trough("Provider response", provider_message)
+        text = provider_message.strip()
+        if len(text) > _MAX_PROVIDER_MESSAGE:
+            text = text[: _MAX_PROVIDER_MESSAGE - 1].rstrip() + "…"
+        blocks += _trough("Provider response", text)
     close = (
         '<p class="close">You can close this tab and return to Local Operator.</p>'
         if closable

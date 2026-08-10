@@ -449,8 +449,10 @@ class TestLoopbackCallbackServer:
         import asyncio
         import socket
         import sys
+        import time
         import urllib.request
 
+        from local_operator.mcp import auth as auth_mod
         from local_operator.mcp.auth import LoopbackAuthFlow
 
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
@@ -466,12 +468,24 @@ class TestLoopbackCallbackServer:
                 url = f"http://127.0.0.1:{port}/callback?code=c&state=s"
                 await asyncio.to_thread(lambda: urllib.request.urlopen(url, timeout=5).read())
 
+            # Bounded BELOW the head-read deadline on purpose. R1 asked for two
+            # bounds — the read deadline and the teardown timeout — and either
+            # one alone is enough to finish this scenario eventually, so a
+            # generous outer timeout would keep passing after one of them was
+            # deleted. Waiting less than `_REQUEST_READ_TIMEOUT_S` means only
+            # the teardown bound can satisfy it.
+            started = time.monotonic()
             _, result = await asyncio.wait_for(
-                asyncio.gather(visit(), flow.callback_handler()), timeout=15
+                asyncio.gather(visit(), flow.callback_handler()), timeout=5
             )
+            elapsed = time.monotonic() - started
         finally:
             idle.close()
         assert result.code == "c"
+        assert elapsed < auth_mod._REQUEST_READ_TIMEOUT_S, (
+            f"took {elapsed:.1f}s — the idle handler's own read deadline carried "
+            "this, not the teardown bound"
+        )
 
     @pytest.mark.asyncio
     async def test_the_listener_path_never_reads_stdin(self, monkeypatch) -> None:
