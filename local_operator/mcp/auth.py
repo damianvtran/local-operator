@@ -536,11 +536,17 @@ class LoopbackAuthFlow:
         return "the callback listener is not running"
 
     def _no_route_reason(self) -> str:
-        """Why NEITHER route is available: no listener, and no stdin either."""
+        """Why NEITHER route is available: no listener, and no stdin either.
+
+        The listener clause is ended with a full stop rather than spliced in on
+        a comma: the bind branch carries an em-dash aside, and coordinating
+        "and stdin is not available" onto it reads as a third item in that
+        clause's remedy list rather than as a second problem.
+        """
         return (
-            f"{self._no_listener_reason()}, and stdin is not available for a "
-            "paste. Run `local-operator mcp login <server>` from a terminal, or "
-            "configure the server with a token."
+            f"{self._no_listener_reason()}. Stdin is not available for a paste "
+            "either. Run `local-operator mcp login <server>` from a terminal, "
+            "or configure the server with a token."
         )
 
     # --- the listener ----------------------------------------------------

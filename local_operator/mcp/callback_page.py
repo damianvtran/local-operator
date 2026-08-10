@@ -291,11 +291,15 @@ def render_callback_page(
     blocks = ""
     if server:
         blocks += _trough("MCP server", server)
-    if provider_message:
-        text = provider_message.strip()
-        if len(text) > _MAX_PROVIDER_MESSAGE:
-            text = text[: _MAX_PROVIDER_MESSAGE - 1].rstrip() + "…"
-        blocks += _trough("Provider response", text)
+    # Strip BEFORE the gate. `error_description=%20%20%20` is truthy and
+    # reaches here from the wire, and gating on the raw argument then rendering
+    # the stripped text produces a labelled empty box — the exact thing the
+    # absent-message case exists to avoid.
+    trimmed = (provider_message or "").strip()
+    if trimmed:
+        if len(trimmed) > _MAX_PROVIDER_MESSAGE:
+            trimmed = trimmed[: _MAX_PROVIDER_MESSAGE - 1].rstrip() + "…"
+        blocks += _trough("Provider response", trimmed)
     close = (
         '<p class="close">You can close this tab and return to Local Operator.</p>'
         if closable

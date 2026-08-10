@@ -10,6 +10,7 @@ by looking at rendered frames, not by a test.
 
 from __future__ import annotations
 
+import html
 import re
 
 import pytest
@@ -32,23 +33,39 @@ class TestZeroNetwork:
             {"tone": "success", "server": "https://srv.example/mcp"},
             {"tone": "danger", "server": "https://srv.example/mcp", "provider_message": "denied"},
             {"tone": "neutral", "closable": False},
+            # A caller string that CONTAINS the tokens the assertions look for.
+            # It is escaped into a text node and cannot fetch, so the invariant
+            # is about the document we author, not about what a provider says
+            # inside it — and the assertions have to subtract it or they fail on
+            # the very payload the escaping test proves is a real input.
+            {
+                "tone": "danger",
+                "server": "https://srv.example/mcp",
+                "provider_message": '<img src=x onerror="alert(1)"> see //cdn.example/x',
+            },
         ],
     )
     def test_no_external_reference_of_any_kind(self, kwargs) -> None:
         page = render_callback_page("Title", "Detail.", **kwargs)
+        # Everything a caller handed us, escaped exactly as the page escapes it,
+        # removed before the document is examined.
+        authored = page
+        for supplied in (kwargs.get("server"), kwargs.get("provider_message")):
+            if supplied:
+                authored = authored.replace(html.escape(str(supplied)), "")
         # The load-bearing assertion, because it is an INVARIANT rather than a
-        # blocklist: this document has no URL-bearing attribute at all. A token
-        # list alone lets protocol-relative references through — `<use
+        # blocklist: the document we author has no URL-bearing attribute at all.
+        # A token list alone lets protocol-relative references through — `<use
         # href="//cdn/s.svg#m">` inside the inline mark, for one — and every
         # such reference has to spell `src=` or `href=` to fetch anything.
-        assert re.search(r"(?:src|href)\s*=", page) is None
-        assert "//" not in page.replace(str(kwargs.get("server") or "\0"), "")
+        assert re.search(r"(?:src|href)\s*=", authored) is None
+        assert "//" not in authored
         # The token list stays as a second net over CSS, which fetches without
         # attributes. `url(` covers `url()` (CSS forbids whitespace between the
         # ident and the paren, so `url (…)` does not fetch); `image-set(` is the
         # other function that takes a bare URL string.
         for forbidden in ("<link", "<script", "<img", "@import", "url(", "image-set("):
-            assert forbidden not in page, forbidden
+            assert forbidden not in authored, forbidden
 
 
 class TestVoiceBoundary:
@@ -112,6 +129,20 @@ class TestVoiceBoundary:
     def test_absent_provider_message_renders_no_empty_trough(self) -> None:
         page = render_callback_page("Authorized", "Detail.", tone="success")
         assert "Provider response" not in page
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t\n "])
+    def test_a_whitespace_only_provider_message_renders_no_trough(self, blank) -> None:
+        """`error_description=%20%20%20` is truthy and arrives from the wire.
+
+        Gating on the raw argument and rendering the stripped text produces a
+        labelled empty box, which is the same defect as an empty trough with a
+        different cause.
+        """
+        page = render_callback_page(
+            "Authorization failed", "Detail.", tone="danger", provider_message=blank
+        )
+        assert "Provider response" not in page
+        assert 'class="trough"></p>' not in page
 
 
 class TestIdentityIsNotConditional:
