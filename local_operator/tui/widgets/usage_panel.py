@@ -809,8 +809,18 @@ class UsagePanel(Static):
             )
 
         # Drop the least important receipts until the canonical, fully-labelled
-        # row fits. Stats go only after scrolling; close is never dropped.
-        for disposable in ("↑↓", "stats"):
+        # row fits. Close is never dropped.
+        #
+        # Stats go BEFORE the scroll hint, which only matters when the row is
+        # actually scrolled — otherwise `↑↓` was never appended. In that state
+        # the two say different kinds of thing: the tally summarises what is on
+        # screen, while `↑↓ scroll` is the only affordance telling the reader
+        # the rest is reachable at all. Shedding the affordance and keeping the
+        # summary leaves a footer reporting a total the user cannot get to.
+        # Multi-account reports made this bite: the body grew from 16 rows to
+        # 23, so what is hidden at 120x30 is now two whole providers rather
+        # than a short tail.
+        for disposable in ("stats", "↑↓"):
             if painted_width(segments) <= width:
                 break
             segments = [segment for segment in segments if segment[0] != disposable]

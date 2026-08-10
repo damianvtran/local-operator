@@ -5,7 +5,9 @@ import pytest
 from local_operator.compaction import tokens as tokens_mod
 from local_operator.compaction.tokens import (
     IMAGE_TOKEN_ESTIMATE,
+    approx_text_tokens,
     clear_estimate_cache,
+    count_text_tokens,
     estimate_messages_tokens,
     estimate_tokens,
     invalidate_message_cache,
@@ -257,3 +259,35 @@ def test_upper_bound_does_not_load_tiktoken(monkeypatch):
     monkeypatch.setattr(tokens_mod, "_get_encoding", _boom)
     messages = [Message.user("hello " * 500), Message.assistant("world " * 500)]
     assert messages_tokens_upper_bound(messages) > 0
+
+
+class TestApproxTextTokens:
+    """The estimate for callers who cannot afford the exact ruler."""
+
+    def test_it_never_reaches_the_encoding(self, monkeypatch) -> None:
+        """The whole point. Loading cl100k_base costs ~43.6 MB RSS and, on a
+        cold cache, a network fetch — so a status readout that wanted a number
+        immediately was buying the most expensive object in the process."""
+
+        def _boom():
+            raise AssertionError("the approximation must not touch tiktoken")
+
+        monkeypatch.setattr(tokens_mod, "_get_encoding", _boom)
+        monkeypatch.setattr(tokens_mod, "_get_model_encoding", lambda _m: _boom())
+        assert approx_text_tokens("hello world " * 200) > 0
+
+    def test_empty_text_is_zero(self) -> None:
+        assert approx_text_tokens("") == 0
+
+    def test_it_tracks_the_exact_count_closely_enough_for_a_percentage(self) -> None:
+        """A reading rendered to one decimal of a context window tolerates a few
+        percent; it does not tolerate being absent. Measured at +7.0% against
+        cl100k_base on a real system prompt plus tool inventory."""
+        text = (
+            "You are a careful assistant. Read the repository before editing. "
+            '{"type":"object","properties":{"path":{"type":"string"}}}'
+        ) * 40
+        exact = count_text_tokens(text)
+        approx = approx_text_tokens(text)
+        assert exact > 0
+        assert abs(approx - exact) / exact < 0.25

@@ -341,12 +341,6 @@ class OperatorApp(App[None]):
         self._usage_focus_restore: Any | None = None
         self._working_block: WorkingBlock | None = None
         self._total_cost: float = 0.0
-        # True while the context reading is a LOCAL estimate of what is already
-        # loaded (system prompt + tool schemas) rather than a provider's exact
-        # ``prompt_tokens``. Two things need the distinction: a re-measure after
-        # MCP tools land may overwrite an estimate but never an exact count, and
-        # the first real turn clears it for good.
-        self._context_is_estimate: bool = False
         # Auto-naming fires ONCE per session. Latched here rather than on the
         # session holder because the app is what schedules the call, and a
         # second submit arriving while the first title is still in flight
@@ -587,7 +581,7 @@ class OperatorApp(App[None]):
         if (
             self._status is not None
             and self._status.context_tokens
-            and not self._context_is_estimate
+            and not self._status.context_is_estimate
         ):
             # A turn already reported the provider's exact count. Nothing local
             # improves on that, so do not even spend the measurement.
@@ -601,13 +595,25 @@ class OperatorApp(App[None]):
                 return
             if not tokens or self._status is None:
                 return
-            if self._status.context_tokens and not self._context_is_estimate:
+            if self._status.context_tokens and not self._status.context_is_estimate:
                 # A turn finished while this was in flight; the exact count wins.
                 return
-            self._context_is_estimate = True
-            self._status.update(context_tokens=tokens, context_window=_context_window(session))
+            self._status.update(
+                context_tokens=tokens,
+                context_is_estimate=True,
+                context_window=_context_window(session),
+            )
 
-        self.run_worker(run(), name="context-preload", group="status", exclusive=False)
+        # EXCLUSIVE on its own group. `on_tools_changed` fires per server
+        # connect, reconnect and list-changed, so several of these can be in
+        # flight, and each re-resolves the system blocks — so they finish out of
+        # order. Neither guard above can break the tie: both only ask whether
+        # the reading is exact, which is false for every one of them, so the
+        # LAST to land wins rather than the newest, leaving the band reporting a
+        # smaller inventory than the session now has. The same hazard is already
+        # guarded this way for the usage panel. A superseded measurement has
+        # nothing worth finishing, so cancelling it costs nothing.
+        self.run_worker(run(), name="context-preload", group="context-preload", exclusive=True)
 
     def _render_resumed_history(self, session: Any) -> None:
         """Replay a resumed session's prior messages onto the transcript.
@@ -717,12 +723,22 @@ class OperatorApp(App[None]):
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. _boot_session repaints it from the new session's manager.
+        #
+        # The context reading goes with them, and for a sharper reason than
+        # tidiness: an exact ``prompt_tokens`` left standing is what the
+        # measurement guard reads to decide the band already knows better than
+        # any estimate. It belonged to the conversation that just died, so the
+        # replacement session would be denied its own measurement and the band
+        # would report a number for history no longer on screen — until the new
+        # session's first turn happened to end.
         self._status.update(
             model_label=MODEL_PENDING,
             streaming=False,
             effort="",
             conversation_name="",
             mcp=McpStatus(),
+            context_tokens=0,
+            context_is_estimate=False,
         )
         await self._boot_session()
 
@@ -2849,10 +2865,6 @@ class OperatorApp(App[None]):
         # so a wrong-typed segment would only surface as a render glitch.
         # `None` means "leave this segment alone" in update()'s contract.
         context_tokens: int | None = message.context_tokens or None
-        if context_tokens is not None:
-            # The provider's own prompt_tokens: exact, and it supersedes the
-            # boot estimate permanently.
-            self._context_is_estimate = False
         cost_text: str | None = None
         cost = self._cost_for(message.usage)
         if cost is not None:
@@ -2866,6 +2878,10 @@ class OperatorApp(App[None]):
         self._status.update(
             streaming=False,
             context_tokens=context_tokens,
+            # The provider's own prompt_tokens: exact, and it supersedes the
+            # boot estimate permanently. `None` leaves the flag alone, so a turn
+            # that reported no usage does not demote a standing estimate.
+            context_is_estimate=None if context_tokens is None else False,
             context_window=_context_window(self._session),
             cost=cost_text,
         )

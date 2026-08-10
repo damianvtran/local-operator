@@ -168,6 +168,32 @@ def count_text_tokens(text: str, model: str | None = None) -> int:
     return len(text) // _CHARS_PER_TOKEN_FALLBACK
 
 
+def approx_text_tokens(text: str) -> int:
+    """Token count for ``text`` that NEVER loads the tokenizer.
+
+    :func:`count_text_tokens` is exact when the ``tokenizer`` extra is present,
+    and reaching for that exactness has a price paid once per process: loading
+    cl100k_base costs ~84 ms and ~43.6 MB RSS (``scripts/bench_base_overhead``),
+    and on a cold cache tiktoken fetches the ranks over the NETWORK — which
+    offline is a connection timeout rather than a slow answer. Both
+    :func:`local_operator.compaction.pruning.prune_transcript` and the session's
+    compaction gate go out of their way to defer that load, precisely so a short
+    run does not buy a 43.6 MB table to be told there is nothing to do.
+
+    This is for callers who want a number NOW and would rather be a few percent
+    out than spend that: a status readout, a progress hint, a size warning. On a
+    real system prompt plus a real tool inventory the ratio lands +7.0% against
+    cl100k_base (11,612 chars: 2891 estimated vs 2702 exact), which is well
+    inside what a percentage rendered to one decimal can carry.
+
+    Deliberately NOT "use the encoder when it is already resident". That would
+    make the same session report different numbers depending on whether
+    compaction happened to have run, and an estimate that moves for reasons the
+    user cannot see is worse than one that is consistently approximate.
+    """
+    return len(text) // _CHARS_PER_TOKEN_FALLBACK if text else 0
+
+
 def truncate_to_tokens(text: str, max_tokens: int) -> str:
     """Prefix of ``text`` that fits within ``max_tokens`` tokens.
 

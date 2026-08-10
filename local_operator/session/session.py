@@ -38,7 +38,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from typing import TYPE_CHECKING, Any
 
-from local_operator.compaction.tokens import count_text_tokens
+from local_operator.compaction.tokens import approx_text_tokens
 from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.subagent import run_subagent
@@ -618,29 +618,40 @@ class Session:
 
         What is counted is exactly what :class:`~local_operator.harness.loop`
         puts in a ``ChatRequest`` with an empty transcript: the system blocks
-        and the serialized tool schemas. It is a local tiktoken ESTIMATE, not
-        the provider's number; the first real response overwrites it with the
-        authoritative count. Being approximately right an hour before the exact
-        answer arrives beats rendering a confident zero.
+        and the serialized tool schemas.
 
-        Resolving the blocks is real work (the skills index, the environment
-        probe), which is why this is a coroutine the host runs off its boot
-        path rather than something computed in the constructor.
+        Two costs are deliberately refused, because a status readout must not
+        be the most expensive thing a session does before the user speaks:
+
+        - **The tokenizer.** :func:`approx_text_tokens` never loads
+          cl100k_base. The exact ruler costs ~43.6 MB RSS and, on a cold cache,
+          a NETWORK fetch of the ranks — a cost ``prune_transcript`` and the
+          compaction gate both restructure themselves to defer. Paying it in
+          every session so the band can read 0.3% would undo that. The ratio
+          runs +7.0% on a real prompt-plus-inventory payload, and the first
+          turn replaces the whole figure with the provider's exact count.
+        - **The event loop.** ``json.dumps`` over an unbounded tool inventory
+          is a synchronous burn with no await in it, and this runs on the boot
+          path a sibling commit cleared of exactly that. The counting is
+          handed to a thread; only resolving the blocks stays here, because
+          that is genuinely async work.
         """
         blocks = self._system_blocks_provider()
         if inspect.isawaitable(blocks):
             blocks = await blocks
-        total = sum(count_text_tokens(block) for block in blocks)
+        # Snapshot before the hop: the inventory can be swapped by an MCP
+        # refresh while the thread runs, and iterating it there would race.
+        texts = list(blocks)
         for tool in self._tools:
             # Name/description/schema is what a provider serializes per tool.
             # The JSON separators do not match any one vendor's wire format
             # exactly, and no estimate could: this is the same order of
             # magnitude, which is what a percentage needs.
-            total += count_text_tokens(tool.name)
-            total += count_text_tokens(tool.description)
+            texts.append(tool.name)
+            texts.append(tool.description)
             if tool.parameters:
-                total += count_text_tokens(json.dumps(tool.parameters, separators=(",", ":")))
-        return total
+                texts.append(json.dumps(tool.parameters, separators=(",", ":")))
+        return await asyncio.to_thread(lambda: sum(approx_text_tokens(t) for t in texts))
 
     # -- events ---------------------------------------------------------------
 

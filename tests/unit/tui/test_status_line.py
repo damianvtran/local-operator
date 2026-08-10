@@ -719,3 +719,61 @@ def test_the_quiet_ladder_moves_mcp_without_promoting_the_widest_alarm() -> None
     assert _DROP_LADDER_QUIET.index("approvals") < _DROP_LADDER_QUIET.index("context")
     # Same rungs in both ladders: the reorder moves things, it never drops one.
     assert sorted(_DROP_LADDER) == sorted(_DROP_LADDER_QUIET)
+
+
+def test_an_estimated_context_sheds_before_the_working_directory() -> None:
+    """The ladder ranks by what a segment is worth NOW, not by its slot.
+
+    ``cwd`` sits ahead of ``context`` because the context number "predicts the
+    operator's next action". That is true of a number the model reported and
+    false of the boot estimate: before any turn nothing has been spent and
+    nothing is near compaction, while "where am I" is if anything MORE useful
+    in a session that has just opened.
+    """
+    for ladder in (
+        drop_ladder(McpStatus(configured=2, connected=1, failed=True), context_estimated=True),
+        drop_ladder(McpStatus(), context_estimated=True),
+    ):
+        assert ladder.index("context") < ladder.index("cwd")
+    # Exact readings keep the documented order.
+    for ladder in (
+        drop_ladder(McpStatus(configured=2, connected=1, failed=True)),
+        drop_ladder(McpStatus()),
+    ):
+        assert ladder.index("cwd") < ladder.index("context")
+    # A reorder moves rungs; it never adds or drops one.
+    assert sorted(drop_ladder(McpStatus(), context_estimated=True)) == sorted(_DROP_LADDER_QUIET)
+    assert sorted(
+        drop_ladder(McpStatus(configured=1, failed=True), context_estimated=True)
+    ) == sorted(_DROP_LADDER)
+
+
+def test_a_narrow_band_keeps_the_cwd_over_a_pre_turn_estimate(monkeypatch) -> None:
+    """The rendered consequence, not just the rung order.
+
+    Measured before the fix: between 40 and 48 cells an estimated reading
+    evicted the working directory entirely, so a session that had just opened
+    in the wrong directory rendered `◆ kimi-k2-thinking     ▦ 49.6%/1M` and
+    never said where it was — trading the fact a user checks at boot for a
+    number that cannot yet mean anything.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    status, _clock = _full_band()
+
+    def narrowest_showing_cwd() -> int:
+        widths = [w for w in range(30, 70) if ICON_CWD in status.render_text(w).plain]
+        assert widths, "the cwd must survive somewhere in this range"
+        return min(widths)
+
+    status.update(context_is_estimate=False)
+    exact_floor = narrowest_showing_cwd()
+    status.update(context_is_estimate=True)
+    estimate_floor = narrowest_showing_cwd()
+
+    # The path survives materially narrower once the reading is only a guess:
+    # 37 vs 51 cells as measured, i.e. the whole 40-48 band the review flagged.
+    assert estimate_floor < exact_floor
+    for width in range(estimate_floor, exact_floor):
+        rendered = status.render_text(width).plain
+        assert ICON_CWD in rendered, f"width {width} lost the cwd"
+        assert "49.6%" not in rendered, f"width {width} kept the estimate over the cwd"

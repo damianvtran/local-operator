@@ -194,18 +194,48 @@ def _mcp_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
 _DROP_LADDER_QUIET: tuple[str, ...] = _mcp_before_cwd(_DROP_LADDER)
 
 
-def drop_ladder(status: McpStatus) -> tuple[str, ...]:
+def _context_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
+    """``ladder`` with the context rung moved to just ahead of ``cwd``.
+
+    The full order puts cwd first because the context number "predicts the
+    operator's next action". That is true of a number the model reported, and
+    false of the boot ESTIMATE: before a single turn, nothing has been spent,
+    nothing is approaching compaction, and the figure is a static property of a
+    session that has not done anything yet. Meanwhile "where am I" is exactly
+    as load-bearing as it always was — more so, since a fresh session is when a
+    user is most likely to be checking they opened the right directory.
+
+    Shedding the estimate first is therefore the same trade ``_mcp_before_cwd``
+    exists to make: rank by what the segment is worth RIGHT NOW, not by what
+    its slot is usually worth.
+    """
+    rungs = [step for step in ladder if step != "context"]
+    rungs.insert(rungs.index("cwd"), "context")
+    return tuple(rungs)
+
+
+#: Estimate variants of both ladders, precomputed for the same reason.
+_DROP_LADDER_ESTIMATE: tuple[str, ...] = _context_before_cwd(_DROP_LADDER)
+_DROP_LADDER_QUIET_ESTIMATE: tuple[str, ...] = _context_before_cwd(_DROP_LADDER_QUIET)
+
+
+def drop_ladder(status: McpStatus, *, context_estimated: bool = False) -> tuple[str, ...]:
     """Which reduction order this band uses, given its MCP state.
 
     The mcp rung's place is earned by the ALARM, not by the segment. Unconditional
     last place meant a healthy `⊙ 2 MCP` outranked both the working directory and
     the full model label: at 40 cells the band read `◆ model › ⊙ 2 MCP` where the
     same terminal with no MCP configured showed `◆ test/model › ⌂ local-operator`.
-    A count nobody has to act on was costing the user "where am I" AND "which
-    provider". So a neutral count sheds early, just ahead of the working
-    directory, and a danger one still outlives everything.
+    A healthy count is a nicety and a failed one is the only warning the band
+    carries, so the rung moves rather than the segment being special-cased at the
+    render site.
+
+    ``context_estimated`` demotes the context rung for the same kind of reason —
+    see :func:`_context_before_cwd`.
     """
-    return _DROP_LADDER if mcp_semantic(status) == "danger" else _DROP_LADDER_QUIET
+    if mcp_semantic(status) == "danger":
+        return _DROP_LADDER_ESTIMATE if context_estimated else _DROP_LADDER
+    return _DROP_LADDER_QUIET_ESTIMATE if context_estimated else _DROP_LADDER_QUIET
 
 
 def format_context_tokens(tokens: int) -> str:
@@ -438,6 +468,12 @@ class StatusLine:
         self._effort: str = ""
         self._cwd: str = ""
         self._context_tokens: int = 0
+        # Provenance of the reading above: True while it is the host's LOCAL
+        # estimate of what is already loaded, False once a provider's exact
+        # prompt_tokens has replaced it. Lives here rather than on the app
+        # because both readers need it — the app for precedence, the band for
+        # how hard to fight to keep the segment on screen.
+        self._context_is_estimate: bool = False
         self._context_window: int = 0
         self._subagents: int = 0
         self._jobs: int = 0
@@ -467,6 +503,11 @@ class StatusLine:
         """
         return self._context_tokens
 
+    @property
+    def context_is_estimate(self) -> bool:
+        """Whether :attr:`context_tokens` is a local estimate, not the wire."""
+        return self._context_is_estimate
+
     # -- segment setters ----------------------------------------------------
     def update(
         self,
@@ -475,6 +516,7 @@ class StatusLine:
         effort: str | None = None,
         cwd: str | None = None,
         context_tokens: int | None = None,
+        context_is_estimate: bool | None = None,
         context_window: int | None = None,
         subagents: int | None = None,
         jobs: int | None = None,
@@ -493,6 +535,8 @@ class StatusLine:
             self._cwd = cwd
         if context_tokens is not None:
             self._context_tokens = context_tokens
+        if context_is_estimate is not None:
+            self._context_is_estimate = context_is_estimate
         if context_window is not None:
             self._context_window = context_window
         if subagents is not None:
@@ -559,7 +603,10 @@ class StatusLine:
         # string joins and the ladder is nine steps, so the worst case is ten
         # cheap rebuilds on a resize — far cheaper than measuring segments
         # independently and getting the separator arithmetic subtly wrong.
-        for step in (None, *drop_ladder(self._mcp)):
+        for step in (
+            None,
+            *drop_ladder(self._mcp, context_estimated=self._context_is_estimate),
+        ):
             if step is not None:
                 target = step.partition("shorten-")[2]
                 (short if target else dropped).add(target or step)

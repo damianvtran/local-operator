@@ -853,3 +853,88 @@ class TestMeasurePreloadedContext:
             assert await session.measure_preloaded_context() == 0
         finally:
             await session.dispose()
+
+
+class TestMeasurementCosts:
+    """The two costs a pre-turn status readout must not incur.
+
+    Both were live defects: the measurement loaded tiktoken (~43.6 MB RSS, and
+    a NETWORK fetch of the BPE ranks on a cold cache) and ran its counting on
+    the caller's event loop — on the very boot path a sibling change cleared of
+    a 700 ms freeze.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_never_loads_the_tokenizer(self, tmp_path, monkeypatch) -> None:
+        from local_operator.compaction import tokens as tokens_mod
+
+        def _boom(*_args, **_kwargs):
+            raise AssertionError("the boot measurement must not load tiktoken")
+
+        monkeypatch.setattr(tokens_mod, "_get_encoding", _boom)
+        monkeypatch.setattr(tokens_mod, "_get_model_encoding", _boom)
+
+        executed: list[str] = []
+        session = make_session(
+            tmp_path,
+            ScriptedStream([]),
+            tools=[echo_tool(executed)],
+            system_blocks_provider=lambda: ["a system prompt " * 200],
+        )
+        try:
+            assert await session.measure_preloaded_context() > 0
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_the_counting_runs_off_the_event_loop(self, tmp_path, monkeypatch) -> None:
+        """Not "it is fast enough": the inventory is unbounded, so the work has
+        to leave the loop rather than merely be small today."""
+        import threading
+
+        from local_operator.compaction import tokens as tokens_mod
+        from local_operator.session import session as session_mod
+
+        loop_thread = threading.get_ident()
+        seen: list[int] = []
+        real = tokens_mod.approx_text_tokens
+
+        def spy(text: str) -> int:
+            seen.append(threading.get_ident())
+            return real(text)
+
+        monkeypatch.setattr(session_mod, "approx_text_tokens", spy)
+
+        executed: list[str] = []
+        session = make_session(
+            tmp_path,
+            ScriptedStream([]),
+            tools=[echo_tool(executed)],
+            system_blocks_provider=lambda: ["sys"],
+        )
+        try:
+            await session.measure_preloaded_context()
+        finally:
+            await session.dispose()
+
+        assert seen, "nothing was counted"
+        assert loop_thread not in seen, "counting ran on the caller's loop"
+
+    @pytest.mark.asyncio
+    async def test_a_tool_swap_mid_measurement_cannot_race(self, tmp_path) -> None:
+        """The inventory is snapshotted before the thread hop, so an MCP
+        refresh landing mid-measurement cannot mutate the list being walked."""
+        executed: list[str] = []
+        session = make_session(
+            tmp_path,
+            ScriptedStream([]),
+            tools=[echo_tool(executed, name=f"t{i}") for i in range(8)],
+            system_blocks_provider=lambda: ["sys"],
+        )
+        try:
+            task = asyncio.create_task(session.measure_preloaded_context())
+            await asyncio.sleep(0)
+            session.refresh_tools([])
+            assert await task > 0
+        finally:
+            await session.dispose()

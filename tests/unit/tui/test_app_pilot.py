@@ -2804,6 +2804,13 @@ class _MeasuredSession(FakeSession):
         return self.tokens
 
 
+def _ctx_estimate(app: OperatorApp) -> bool:
+    """Whether the band's reading is a local estimate rather than the wire."""
+    status = app._status
+    assert status is not None
+    return status.context_is_estimate
+
+
 def _ctx_tokens(app: OperatorApp) -> int:
     """The band's context reading, with the ``_status is None`` case ruled out.
 
@@ -2836,7 +2843,7 @@ async def test_context_reads_before_the_first_message() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
-        assert app._context_is_estimate is True
+        assert _ctx_estimate(app) is True
         assert session.prompts == [], "measuring must not send anything"
 
 
@@ -2850,7 +2857,7 @@ async def test_a_real_turn_supersedes_the_estimate() -> None:
 
         app.post_message(TurnEnded(aborted=False, error=None, context_tokens=51_007))
         assert await _settle(pilot, lambda: _ctx_tokens(app) == 51_007)
-        assert app._context_is_estimate is False
+        assert _ctx_estimate(app) is False
 
         # And a later re-measure (an MCP server connecting) must not walk it back.
         session.tokens = 9_999
@@ -2895,7 +2902,7 @@ async def test_a_turn_landing_mid_measurement_still_wins() -> None:
         for _ in range(15):
             await pilot.pause()
         assert _ctx_tokens(app) == 51_007
-        assert app._context_is_estimate is False
+        assert _ctx_estimate(app) is False
 
 
 @pytest.mark.asyncio
@@ -2909,7 +2916,7 @@ async def test_a_growing_tool_inventory_re_measures() -> None:
         session.tokens = 88_000
         app._measure_preloaded_context(session)
         assert await _settle(pilot, lambda: _ctx_tokens(app) == 88_000)
-        assert app._context_is_estimate is True
+        assert _ctx_estimate(app) is True
 
 
 @pytest.mark.asyncio
@@ -2921,4 +2928,67 @@ async def test_a_session_without_the_capability_is_not_a_crash() -> None:
         for _ in range(10):
             await pilot.pause()
         assert _ctx_tokens(app) == 0
-        assert app._context_is_estimate is False
+        assert _ctx_estimate(app) is False
+
+
+@pytest.mark.asyncio
+async def test_reload_drops_the_dead_sessions_context() -> None:
+    """An exact count belongs to one conversation, and dies with it.
+
+    The dispatch guard reads "a non-zero reading that is not an estimate" as
+    "the band already knows better than you". Left standing across a reload
+    that is a lie about a session that no longer exists, and it also suppresses
+    the replacement session's own measurement.
+    """
+    first = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=51_007))
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 51_007)
+
+        second = _MeasuredSession(tokens=20_000)
+        app._session_factory = lambda: _factory(second)  # type: ignore[assignment]
+        await app._reload_session()
+
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 20_000)
+        assert second.measure_calls >= 1, "the new session must be measured"
+
+
+@pytest.mark.asyncio
+async def test_the_newest_measurement_wins_not_the_slowest() -> None:
+    """Several measurements can be in flight; they finish out of order.
+
+    Neither precedence guard can break that tie — both only ask whether the
+    reading is exact, which is false for every estimate — so without
+    cancellation the LAST to land wins rather than the newest, and the band
+    settles on a smaller inventory than the session actually has.
+    """
+    session = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        slow_release = asyncio.Event()
+
+        async def slow() -> int:
+            await slow_release.wait()
+            return 30_000
+
+        async def fast() -> int:
+            return 90_000
+
+        session.measure_preloaded_context = slow  # type: ignore[method-assign]
+        app._measure_preloaded_context(session)
+        await pilot.pause()
+
+        session.measure_preloaded_context = fast  # type: ignore[method-assign]
+        app._measure_preloaded_context(session)
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 90_000)
+
+        # Releasing the superseded measurement must not walk the band back.
+        slow_release.set()
+        for _ in range(15):
+            await pilot.pause()
+        assert _ctx_tokens(app) == 90_000
