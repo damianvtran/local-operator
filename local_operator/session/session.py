@@ -32,11 +32,13 @@ import asyncio
 import base64
 import contextlib
 import inspect
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from typing import TYPE_CHECKING, Any
 
+from local_operator.compaction.tokens import count_text_tokens
 from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.subagent import run_subagent
@@ -599,6 +601,46 @@ class Session:
         loop can dispatch calls to tools not yet materialized. ``None`` clears
         it."""
         self._fallback_tool_resolver = resolver
+
+    # -- context accounting ---------------------------------------------------
+
+    async def measure_preloaded_context(self) -> int:
+        """Tokens the NEXT request carries before the user has typed anything.
+
+        The status line's context reading used to come from one place only:
+        ``prompt_tokens`` on a provider's usage response. That is exact, and it
+        is unavailable at the one moment a reader most wants it — a session
+        opens claiming an empty context when the system prompt, the environment
+        block, the skills index and every tool schema are already loaded and
+        already spent. On a large tool inventory that is tens of thousands of
+        tokens rendered as nothing at all, so the first turn appears to jump
+        from 0% to 15% because of a short question.
+
+        What is counted is exactly what :class:`~local_operator.harness.loop`
+        puts in a ``ChatRequest`` with an empty transcript: the system blocks
+        and the serialized tool schemas. It is a local tiktoken ESTIMATE, not
+        the provider's number; the first real response overwrites it with the
+        authoritative count. Being approximately right an hour before the exact
+        answer arrives beats rendering a confident zero.
+
+        Resolving the blocks is real work (the skills index, the environment
+        probe), which is why this is a coroutine the host runs off its boot
+        path rather than something computed in the constructor.
+        """
+        blocks = self._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        total = sum(count_text_tokens(block) for block in blocks)
+        for tool in self._tools:
+            # Name/description/schema is what a provider serializes per tool.
+            # The JSON separators do not match any one vendor's wire format
+            # exactly, and no estimate could: this is the same order of
+            # magnitude, which is what a percentage needs.
+            total += count_text_tokens(tool.name)
+            total += count_text_tokens(tool.description)
+            if tool.parameters:
+                total += count_text_tokens(json.dumps(tool.parameters, separators=(",", ":")))
+        return total
 
     # -- events ---------------------------------------------------------------
 

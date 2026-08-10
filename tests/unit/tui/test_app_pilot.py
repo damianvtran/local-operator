@@ -25,6 +25,7 @@ from local_operator.tui.app import (
     OperatorApp,
 )
 from local_operator.tui.autocomplete import ArgumentChoice
+from local_operator.tui.events import TurnEnded
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
@@ -2784,3 +2785,140 @@ async def test_boot_warms_session_imports_before_awaiting_the_factory() -> None:
 
     assert calls[:2] == ["warm", "factory"], calls
     assert warm_thread and warm_thread[0] != loop_thread
+
+
+class _MeasuredSession(FakeSession):
+    """A session that can report what it is already carrying."""
+
+    def __init__(self, tokens: int = 42_318) -> None:
+        super().__init__()
+        self.tokens = tokens
+        self.measure_calls = 0
+
+    @property
+    def model(self) -> Any:
+        return SimpleNamespace(context_window=1_000_000, reasoning_effort="", reasoning=False)
+
+    async def measure_preloaded_context(self) -> int:
+        self.measure_calls += 1
+        return self.tokens
+
+
+def _ctx_tokens(app: OperatorApp) -> int:
+    """The band's context reading, with the ``_status is None`` case ruled out.
+
+    The attribute is Optional until compose runs; every caller here is inside
+    ``run_test``, where it never is.
+    """
+    status = app._status
+    assert status is not None
+    return status.context_tokens
+
+
+async def _settle(pilot, predicate, tries: int = 60) -> bool:
+    for _ in range(tries):
+        if predicate():
+            return True
+        await pilot.pause()
+    return predicate()
+
+
+@pytest.mark.asyncio
+async def test_context_reads_before_the_first_message() -> None:
+    """The band must not claim an empty context while the prompt is loaded.
+
+    The provider's exact ``prompt_tokens`` only exists after a turn, so without
+    a boot measurement the one number a user checks before deciding what to ask
+    is blank precisely when the system prompt, skills index and every tool
+    schema are already spent.
+    """
+    session = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+        assert app._context_is_estimate is True
+        assert session.prompts == [], "measuring must not send anything"
+
+
+@pytest.mark.asyncio
+async def test_a_real_turn_supersedes_the_estimate() -> None:
+    """An estimate is a stand-in, not a competitor: the wire number wins."""
+    session = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=51_007))
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 51_007)
+        assert app._context_is_estimate is False
+
+        # And a later re-measure (an MCP server connecting) must not walk it back.
+        session.tokens = 9_999
+        app._measure_preloaded_context(session)
+        for _ in range(10):
+            await pilot.pause()
+        assert _ctx_tokens(app) == 51_007
+
+
+@pytest.mark.asyncio
+async def test_a_turn_landing_mid_measurement_still_wins() -> None:
+    """The race the cheap outer check cannot cover.
+
+    A measurement that started while the context was unknown can finish AFTER
+    a turn has reported the provider's exact count. Deciding only at dispatch
+    would let the stale estimate overwrite the better number, so the result is
+    re-checked against the state at the moment it lands.
+    """
+    session = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        # Park a second measurement mid-flight, with the reading still an
+        # estimate so the dispatch-time check lets it through.
+        release = asyncio.Event()
+
+        async def slow_measure() -> int:
+            await release.wait()
+            return 9_999
+
+        session.measure_preloaded_context = slow_measure  # type: ignore[method-assign]
+        app._measure_preloaded_context(session)
+        await pilot.pause()
+
+        # The turn lands while that is parked...
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=51_007))
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 51_007)
+
+        # ...and the late estimate must not undo it.
+        release.set()
+        for _ in range(15):
+            await pilot.pause()
+        assert _ctx_tokens(app) == 51_007
+        assert app._context_is_estimate is False
+
+
+@pytest.mark.asyncio
+async def test_a_growing_tool_inventory_re_measures() -> None:
+    """MCP schemas are the biggest term, and they land after boot."""
+    session = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        session.tokens = 88_000
+        app._measure_preloaded_context(session)
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 88_000)
+        assert app._context_is_estimate is True
+
+
+@pytest.mark.asyncio
+async def test_a_session_without_the_capability_is_not_a_crash() -> None:
+    """Reduced hosts (embedders, these fakes) have no measurement to offer."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(10):
+            await pilot.pause()
+        assert _ctx_tokens(app) == 0
+        assert app._context_is_estimate is False

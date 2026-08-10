@@ -458,6 +458,15 @@ class StatusLine:
         self._spinner_index: int = 0
         self._spinner_timer = None
 
+    @property
+    def context_tokens(self) -> int:
+        """Tokens currently attributed to the context segment.
+
+        Read by the boot-time estimator, which must not overwrite a provider's
+        exact ``prompt_tokens`` if a turn beat it to the finish.
+        """
+        return self._context_tokens
+
     # -- segment setters ----------------------------------------------------
     def update(
         self,

@@ -570,6 +570,78 @@ class AuthStore:
             access_token=key, credential_id=row.id if row is not None else 0, kind="api_key"
         )
 
+    async def list_oauth_accesses(self, provider: str) -> list[OAuthAccess]:
+        """EVERY logged-in OAuth account for ``provider``, each one refreshed.
+
+        :meth:`get_oauth_access` answers "which account will the next request
+        run as", and that is the right question for the wire. It is the wrong
+        question for a usage report: quota is per account, so a user with two
+        accounts on one provider has two answers and the cascade can only ever
+        return one of them. Worse, with no ``session_id`` the cascade's
+        selection order ROUND-ROBINS, so the single account that got reported
+        was not even stable between refreshes.
+
+        Four differences from the cascade, all deliberate, and all the same
+        principle: routing decisions must not become reporting decisions.
+
+        - **Blocked credentials are INCLUDED.** ``_usable_key_rows`` drops rows
+          under a backoff, which is right for "where do I send this request"
+          and exactly wrong here — the commonest reason a credential is blocked
+          is that it ran out of quota, so the account a user most needs to see
+          on a usage screen was the one guaranteed to be missing from it. Its
+          exhausted window IS the explanation for the block.
+        - **Stable order, by row id.** Enumeration must not depend on which
+          request happened last, or a list of accounts reshuffles itself while
+          the user is reading it.
+        - **No stickiness.** ``_set_sticky`` pins which credential a SESSION
+          transacts on. Reading a quota must not repoint the session's account
+          as a side effect.
+        - **No blocking on refresh failure.** The cascade blocks a row that
+          fails to refresh so it can rotate to a sibling for the request in
+          hand. Here the row is simply omitted: taking a credential out of
+          service is a routing decision, and a read is not entitled to make it.
+
+        Logged-out rows are still excluded — ``list_credentials`` filters on
+        ``disabled_cause``, and an account the user signed out of is genuinely
+        not theirs to report on.
+
+        Overrides short-circuit for the same reason they do in
+        :meth:`get_oauth_access` — they aim at a gateway, where stored identity
+        does not apply.
+        """
+        if self._runtime_overrides.get(provider) or self._config_overrides.get(provider):
+            return []
+        definition: ProviderDefinition | None = get_provider_definition(provider)
+        key_fn = definition.get_api_key if definition else None
+        rows = [r for r in self.list_credentials(provider) if r.credential_type == "oauth"]
+        accesses: list[OAuthAccess] = []
+        for row in sorted(rows, key=lambda r: r.id):
+            try:
+                creds = await self._ensure_oauth_fresh(row)
+            except AuthStoreError:
+                logger.debug(
+                    "usage: credential %s for %s failed to refresh; omitting",
+                    row.id,
+                    provider,
+                    exc_info=True,
+                )
+                continue
+            key = key_fn(creds) if key_fn else creds.get("access")
+            if not key:
+                continue
+            accesses.append(
+                OAuthAccess(
+                    access_token=key,
+                    credential_id=row.id,
+                    account_id=creds.get("account_id"),
+                    email=creds.get("email"),
+                    org_id=creds.get("org_id"),
+                    api_endpoint=creds.get("api_endpoint"),
+                    kind="oauth",
+                )
+            )
+        return accesses
+
     async def _resolve(
         self, provider: str, session_id: str | None, *, force_refresh: bool = False
     ) -> tuple[str | None, StoredCredential | None]:

@@ -100,6 +100,10 @@ class ControllerAuthStore(Protocol):
 
     async def get_oauth_access(self, provider: str) -> "OAuthAccess | None": ...  # pragma: no cover
 
+    async def list_oauth_accesses(
+        self, provider: str
+    ) -> list["OAuthAccess"]: ...  # pragma: no cover
+
     async def get_api_key(self, provider: str) -> str | None: ...  # pragma: no cover
 
 
@@ -313,12 +317,42 @@ class ProviderController:
         async with httpx.AsyncClient() as client:
             for provider in targets:
                 try:
-                    report = await self._fetch_one(client, provider)
+                    reports.extend(await self._fetch_provider(client, provider))
                 except Exception:  # noqa: BLE001 — isolate one broken provider
-                    report = None
-                if report is not None:
-                    reports.append(report)
+                    continue
         return reports
+
+    async def _fetch_provider(self, client: httpx.AsyncClient, provider: str) -> list[UsageReport]:
+        """Every account's usage for one provider — not just the cascade's pick.
+
+        Quota is per ACCOUNT, so a provider with two logins has two answers.
+        Asking :meth:`AuthStore.get_oauth_access` produced one of them, chosen
+        by a round-robin that also moved between refreshes: a user with two
+        Anthropic accounts saw a single block and could not tell which login it
+        described, or that a second one was missing entirely.
+
+        The API-key route stays a single report, and is only reached when no
+        OAuth credential produced one. An API key is not an identity — the
+        cascade's env/config tiers resolve one secret per provider — so fanning
+        out there would report the same numbers twice.
+        """
+        if not usage_supported(provider):
+            return []
+        reports: list[UsageReport] = []
+        for access in await self.auth_store.list_oauth_accesses(provider):
+            try:
+                report = await self._fetch_one(client, provider, access=access)
+            except Exception:  # noqa: BLE001 — one bad account, not the provider
+                continue
+            if report is not None:
+                reports.append(report)
+        if reports:
+            return reports
+        try:
+            report = await self._fetch_one(client, provider, access=None)
+        except Exception:  # noqa: BLE001
+            return []
+        return [report] if report is not None else []
 
     def _dedupe_targets(self, targets: list[str]) -> list[str]:
         """Keep one id per storage row so alias providers don't double-fetch."""
@@ -442,10 +476,22 @@ class ProviderController:
         # session is ACTUALLY RUNNING ON is the one whose catalogue stays empty.
         return stored or resolve_env_key(provider), False
 
-    async def _fetch_one(self, client: httpx.AsyncClient, provider: str) -> UsageReport | None:
+    async def _fetch_one(
+        self,
+        client: httpx.AsyncClient,
+        provider: str,
+        *,
+        access: OAuthAccess | None,
+    ) -> UsageReport | None:
+        """One report for one account.
+
+        ``access`` is supplied by the caller rather than resolved here: which
+        account this report is FOR is the caller's decision now that there can
+        be several (see :meth:`_fetch_provider`). ``None`` means "no OAuth
+        account" and selects the API-key route.
+        """
         if not usage_supported(provider):
             return None
-        access = await self.auth_store.get_oauth_access(provider)
         access_token: str | None = None
         api_key: str | None = None
         account_id: str | None = None
@@ -454,7 +500,10 @@ class ProviderController:
             account_id = access.account_id
         elif access is not None and access.access_token:
             api_key = access.access_token
-        if api_key is None:
+        if access_token is None and api_key is None:
+            # Only when no OAuth account was handed in: with one, falling back
+            # to the cascade's key would silently report a DIFFERENT account's
+            # numbers under this account's identity.
             try:
                 api_key = await self.auth_store.get_api_key(provider)
             except Exception:  # noqa: BLE001 — a refresh failure is not fatal here

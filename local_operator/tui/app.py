@@ -22,6 +22,7 @@ error`` status and can be retried with ``/reload`` (TUI-012).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol
@@ -183,6 +184,10 @@ LOOP_PROMPT = (
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
 
+#: TUI diagnostics go to the log FILE, never the terminal — stderr belongs to
+#: the rendered app (see ``local_operator.logger.file_logging``).
+logger = logging.getLogger("local_operator.tui.app")
+
 #: How long the second Ctrl+C counts as a DOUBLE press. Short on purpose: this
 #: is a deliberate double-tap, not a mode. Long enough and a user interrupting
 #: two turns in a row would quit the app by accident, which is the one outcome a
@@ -336,6 +341,12 @@ class OperatorApp(App[None]):
         self._usage_focus_restore: Any | None = None
         self._working_block: WorkingBlock | None = None
         self._total_cost: float = 0.0
+        # True while the context reading is a LOCAL estimate of what is already
+        # loaded (system prompt + tool schemas) rather than a provider's exact
+        # ``prompt_tokens``. Two things need the distinction: a re-measure after
+        # MCP tools land may overwrite an estimate but never an exact count, and
+        # the first real turn clears it for good.
+        self._context_is_estimate: bool = False
         # Auto-naming fires ONCE per session. Latched here rather than on the
         # session holder because the app is what schedules the call, and a
         # second submit arriving while the first title is still in flight
@@ -550,6 +561,53 @@ class OperatorApp(App[None]):
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
         self._render_resumed_history(session)
+        self._measure_preloaded_context(session)
+
+    def _measure_preloaded_context(self, session: Any) -> None:
+        """Fill the context segment before the first turn, off the boot path.
+
+        Without this the reading stays blank until a provider's first usage
+        response arrives, which tells the user their context is empty at the
+        exact moment it is most loaded: system prompt, environment block,
+        skills index and every tool schema are already spent. See
+        ``Session.measure_preloaded_context`` for what is counted.
+
+        Called again whenever the tool inventory moves, because MCP servers
+        connect AFTER boot and their schemas are the largest single term in
+        that sum — a figure measured before they land understates the context
+        by more than it reports.
+
+        Run as a worker rather than awaited, for the same reason the rest of
+        boot is: resolving system blocks touches the skills index, and the app
+        must paint before that finishes.
+        """
+        measure = getattr(session, "measure_preloaded_context", None)
+        if measure is None:  # reduced hosts (embedders, pilot fakes)
+            return
+        if (
+            self._status is not None
+            and self._status.context_tokens
+            and not self._context_is_estimate
+        ):
+            # A turn already reported the provider's exact count. Nothing local
+            # improves on that, so do not even spend the measurement.
+            return
+
+        async def run() -> None:
+            try:
+                tokens = await measure()
+            except Exception:  # a status estimate must never take the app down
+                logger.debug("preloaded context measurement failed", exc_info=True)
+                return
+            if not tokens or self._status is None:
+                return
+            if self._status.context_tokens and not self._context_is_estimate:
+                # A turn finished while this was in flight; the exact count wins.
+                return
+            self._context_is_estimate = True
+            self._status.update(context_tokens=tokens, context_window=_context_window(session))
+
+        self.run_worker(run(), name="context-preload", group="status", exclusive=False)
 
     def _render_resumed_history(self, session: Any) -> None:
         """Replay a resumed session's prior messages onto the transcript.
@@ -774,6 +832,10 @@ class OperatorApp(App[None]):
                 # manager's task: this module's whole arrangement is that widget
                 # mutation happens on the Textual thread.
                 self.call_later(self._refresh_mcp_status)
+                # The incumbent above merged the new tools into the session, so
+                # the context estimate this repaints is now measurably wrong —
+                # MCP schemas are the biggest term in it.
+                self.call_later(self._measure_preloaded_context, session)
 
         manager.set_on_tools_changed(on_tools_changed)
         self._refresh_mcp_status()
@@ -2787,6 +2849,10 @@ class OperatorApp(App[None]):
         # so a wrong-typed segment would only surface as a render glitch.
         # `None` means "leave this segment alone" in update()'s contract.
         context_tokens: int | None = message.context_tokens or None
+        if context_tokens is not None:
+            # The provider's own prompt_tokens: exact, and it supersedes the
+            # boot estimate permanently.
+            self._context_is_estimate = False
         cost_text: str | None = None
         cost = self._cost_for(message.usage)
         if cost is not None:

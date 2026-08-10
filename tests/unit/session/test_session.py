@@ -765,3 +765,91 @@ async def test_session_merges_capability_tools_into_inventory(tmp_path):
     assert task_tool is not None
     assert task_tool.name == "task"
     await session.dispose()
+
+
+class TestMeasurePreloadedContext:
+    """What a session is already carrying before the user has typed.
+
+    The status line's only source used to be a provider's ``prompt_tokens``,
+    which does not exist until a turn completes — so a session opened with a
+    large tool inventory read as empty at the exact moment it was most loaded.
+    """
+
+    @pytest.mark.asyncio
+    async def test_counts_system_blocks_and_tool_schemas(self, tmp_path) -> None:
+        executed: list[str] = []
+        session = make_session(
+            tmp_path,
+            ScriptedStream([]),
+            tools=[echo_tool(executed)],
+            system_blocks_provider=lambda: ["a system prompt", "an environment block"],
+        )
+        try:
+            total = await session.measure_preloaded_context()
+
+            blocks_only = make_session(
+                tmp_path / "b",
+                ScriptedStream([]),
+                tools=[],
+                system_blocks_provider=lambda: ["a system prompt", "an environment block"],
+            )
+            try:
+                without_tools = await blocks_only.measure_preloaded_context()
+            finally:
+                await blocks_only.dispose()
+
+            assert without_tools > 0, "system blocks alone must count for something"
+            assert total > without_tools, "the tool schema is context too"
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_an_async_blocks_provider_is_awaited(self, tmp_path) -> None:
+        """The real provider is a coroutine (it builds the skills index)."""
+
+        async def blocks() -> list[str]:
+            return ["resolved asynchronously"]
+
+        session = make_session(tmp_path, ScriptedStream([]), system_blocks_provider=blocks)
+        try:
+            assert await session.measure_preloaded_context() > 0
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_it_tracks_a_tool_inventory_that_grows(self, tmp_path) -> None:
+        """MCP servers connect AFTER boot, and their schemas are the big term.
+
+        A measurement taken once at boot would understate the context for the
+        rest of the session, so the figure must follow ``refresh_tools``. The
+        new set is the incumbent PLUS the arrivals, which is what the manager
+        hands over — ``refresh_tools`` replaces rather than appends.
+        """
+        executed: list[str] = []
+        session = make_session(tmp_path, ScriptedStream([]), system_blocks_provider=lambda: ["sys"])
+        try:
+            before = await session.measure_preloaded_context()
+            arrivals = [echo_tool(executed, name=f"mcp_{i}") for i in range(12)]
+            session.refresh_tools([*session._tools, *arrivals])
+            after = await session.measure_preloaded_context()
+            assert after > before
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_an_empty_context_reports_zero(self, tmp_path) -> None:
+        """Zero must stay reachable: the segment renders nothing for it, and a
+        host with no system prompt and no tools genuinely has nothing loaded.
+
+        The inventory is emptied through ``refresh_tools`` because construction
+        merges this session's own capability tools in regardless of what the
+        caller passed.
+        """
+        session = make_session(
+            tmp_path, ScriptedStream([]), tools=[], system_blocks_provider=lambda: []
+        )
+        try:
+            session.refresh_tools([])
+            assert await session.measure_preloaded_context() == 0
+        finally:
+            await session.dispose()
