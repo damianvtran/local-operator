@@ -532,6 +532,39 @@ class TestLoopbackCallbackServer:
         finally:
             squatter.close()
 
+    @pytest.mark.asyncio
+    async def test_a_redirect_without_a_code_fails_the_flow(self, monkeypatch) -> None:
+        """A codeless redirect must end the grant, not leave it waiting.
+
+        The page tells the user they can close the tab. If the flow does not
+        settle, that sentence points at a terminal still parked on a redirect
+        that can never carry a code — a five-minute silent wait after the user
+        has been told it is over.
+        """
+        import asyncio
+        import sys
+        import urllib.request
+
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        await self._listening(flow)
+
+        async def visit() -> str:
+            url = f"http://127.0.0.1:{port}/callback?state=s"  # no code
+            return await asyncio.to_thread(
+                lambda: urllib.request.urlopen(url, timeout=5).read().decode()
+            )
+
+        page_task = asyncio.ensure_future(visit())
+        with pytest.raises(RuntimeError, match="carried no authorization code"):
+            await asyncio.wait_for(flow.callback_handler(), timeout=10)
+        page = await page_task
+        assert "No authorization code" in page
+
 
 class TestWireOauthAuth:
     def _cfg(self, **oauth_overrides: Any) -> MCPHttpServerConfig:

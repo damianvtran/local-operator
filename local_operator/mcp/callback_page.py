@@ -6,9 +6,9 @@ their behalf and is looking for confirmation that the thing they authorized
 actually received it. A bare ``<h2>`` on a white page reads like a server
 error even when it says "Authorized", so this page is drawn in the product's
 own design language — the Local Operator marketing site's system
-(``local-operator-site/docs/design-language.md``): warm paper, one green,
-hairlines instead of shadows, Fraunces-style serif display over a humanist
-sans, and a dark ramp for a user whose OS is dark.
+(``local-operator-site/docs/design-language.md``): warm paper, one accent,
+hairlines instead of shadows, an old-style serif display over a humanist sans,
+and a dark ramp for a user whose OS is dark.
 
 Three constraints shape the implementation:
 
@@ -16,22 +16,29 @@ Three constraints shape the implementation:
   render identically on a laptop that is offline or behind a proxy that has not
   been authorized yet, and a page that phones out at the end of an OAuth flow
   is the wrong thing to hand someone thinking about permissions. So: one
-  document, inline ``<style>``, inline SVG, and the design system's own
-  declared fallback stacks (``ui-serif, Georgia`` / ``ui-sans-serif, system-ui``
-  / ``ui-monospace``) instead of the three webfonts the site self-hosts.
+  document, inline ``<style>``, inline SVG, and a system-font stack in place of
+  the three webfonts the site self-hosts. The serif stack is chosen so the
+  first hit on every platform is an OLD-STYLE face in Fraunces' family of
+  shapes (New York on macOS, Georgia on Windows, Palladio on Linux); Times is
+  deliberately not in it, because Times is the one common serif that reads as
+  *browser default* — the register this page exists to avoid.
 - **One file, no build step.** The site is React + Tailwind v4; none of that can
   run here. The tokens below are copied from that system's ``@theme`` block
   with their names kept, so a change there is greppable here.
 - **Both ramps, always.** ``prefers-color-scheme`` swaps the ramp via CSS
   variables exactly as the site's ``.dark`` block does. Every pair below is
   from the system's contrast tables: body ink is AAA on its ground in both
-  ramps, and the dimmest text used (``ink-dim``) is 5.43:1 light, 5.11:1 dark.
+  ramps, and the dimmest text used (``ink-dim`` on ``surface``) is 5.43:1
+  light, 5.11:1 dark.
 
 The tone argument is not decoration. Success and failure of an authorization
 are the one thing this page exists to distinguish, and the system's rule is
-that semantic colour is only ever spent on real semantics — so ``success``
-lights the mark and the rule in the brand green, ``danger`` in the danger red,
-and ``neutral`` (the 404 a browser's speculative fetch earns) spends nothing.
+that colour is only ever spent on real semantics — so the 2px rule along the
+card's top edge is the page's ONE spend, ``--success`` when a code arrived,
+``--danger`` when the provider refused, and a plain hairline for the 404 a
+browser's speculative fetch earns. The identity mark is never tinted: it is
+``--ink`` in every state, as ``logo-mark.tsx`` has it, because the one thing
+that must not look conditional on this page is the software's own identity.
 """
 
 from __future__ import annotations
@@ -43,7 +50,7 @@ Tone = Literal["success", "danger", "neutral"]
 
 #: The Local Operator mark, traced in `local-operator-site`'s `logo-mark.tsx`.
 #: Inlined rather than fetched (see the module docstring) and stroked in
-#: ``currentColor`` so the tone class alone colours it.
+#: ``currentColor``, which ``.mark`` pins to ``--ink`` in all three states.
 _LOGO_MARK = (
     '<svg class="mark" viewBox="285 253 520 520" fill="none" stroke="currentColor" '
     'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">'
@@ -65,29 +72,35 @@ _LOGO_MARK = (
 #: a single centred card from reading as an empty page.
 _STYLE = """
 :root {
+  color-scheme: light;
   --paper: #f7f4ee; --surface: #fcfbf7; --sunken: #efece3;
   --ink: #211e18; --ink-muted: #565147; --ink-dim: #6c675c;
   --hairline: #e5e0d5; --hairline-strong: #d5cfc2;
-  --accent: #177b45; --accent-wash: #e7f1e8; --accent-border: #47795b;
-  --danger: #b23a31; --danger-wash: #f7e7e4; --danger-border: #96544c;
-  --shadow-frame: 0 1px 2px rgb(20 17 12 / 0.06), 0 24px 48px -24px rgb(20 17 12 / 0.28);
+  --success: #1e7b4e; --danger: #b23a31;
 }
 @media (prefers-color-scheme: dark) {
   :root {
+    color-scheme: dark;
     --paper: #16130e; --surface: #1e1a14; --sunken: #0f0c08;
     --ink: #f1eee6; --ink-muted: #b5afa2; --ink-dim: #918b7d;
     --hairline: #2b2619; --hairline-strong: #3b3527;
-    --accent: #38c96a; --accent-wash: #16281d; --accent-border: #4a8160;
-    --danger: #ef8078; --danger-wash: #2e1b18; --danger-border: #9e5a51;
-    --shadow-frame: 0 1px 2px rgb(0 0 0 / 0.4), 0 24px 48px -24px rgb(0 0 0 / 0.6);
+    --success: #57c785; --danger: #ef8078;
   }
 }
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html { height: 100%; }
+/* SAFE centring. `place-items: center` on a full-height grid overflows a
+   too-tall card equally in both directions, and the half above the top cannot
+   be scrolled to: measured card.top = -36px at 844x390 with a realistic
+   provider error, losing the status rule and the brand header — the two
+   elements that say what happened and who is saying it. `align-content` gives
+   away free space only when there is some, so overflow can only ever go
+   downward, where the scrollbar reaches. */
 body {
   margin: 0;
+  min-height: 100%;
   display: grid;
-  place-items: center;
+  align-content: center;
   padding: 24px;
   background: var(--paper);
   color: var(--ink);
@@ -113,13 +126,18 @@ body {
   mask-composite: intersect;
 }
 @media (max-width: 520px) { .field { display: none; } }
+/* A card, by the system's Card/panel reading: `--radius-md`, and NO shadow.
+   Elevation here is the `--surface`-on-`--paper` step plus one hairline, and
+   the dot field stopping dead at the card's edge separates it further. The
+   heaviest shadow the system owns has no business on the page whose own
+   comment says nothing floats. */
 .card {
   position: relative; z-index: 1;
   width: 100%; max-width: 30rem;
+  margin-inline: auto;
   background: var(--surface);
   border: 1px solid var(--hairline-strong);
-  border-radius: 16px;
-  box-shadow: var(--shadow-frame);
+  border-radius: 10px;
   overflow: hidden;
   /* No entrance animation, and that is a decision rather than an omission.
      A fade-in was tried and removed: an offscreen or throttled renderer never
@@ -128,73 +146,91 @@ body {
      green, nothing on screen. Dropping the fill mode does not fix it, because
      a started-but-never-advanced animation still wins over the base style.
      The general rule this leaves behind: the one page whose entire job is to
-     be read must not depend on motion to become legible. It also happens to be
-     what the design language asks for — nothing on this page floats. */
+     be read must not depend on motion to become legible. */
 }
-/* The header rule is the only place the tone is spent as a fill: a hairline
-   the width of the card, tinted, reading as a status light along the top edge
-   rather than as a banner. */
+/* The page's single spend of colour: a 2px rule along the top edge, reading as
+   a status light rather than a banner. 2px because the system has 1px borders
+   and exactly one 2px exception; 3px is a weight it does not own. */
 .card::before {
-  content: ""; display: block; height: 3px;
+  content: ""; display: block; height: 2px;
   background: var(--tone, var(--hairline-strong));
 }
 .head {
-  display: flex; align-items: center; gap: 10px;
-  padding: 18px 28px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 16px 24px;
   border-bottom: 1px solid var(--hairline);
   background: var(--sunken);
 }
-.mark { width: 22px; height: 22px; color: var(--tone, var(--ink)); flex: none; }
+.mark { width: 24px; height: 24px; color: var(--ink); flex: none; }
 .wordmark {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px; line-height: 1.25; font-weight: 500; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--ink-dim);
+  text-transform: uppercase; color: var(--ink-muted);
 }
-.body { padding: 32px 28px 28px; }
+.body { padding: 32px 24px 24px; }
 h1 {
   margin: 0;
-  font-family: ui-serif, Georgia, "Times New Roman", serif;
+  font-family: ui-serif, "Iowan Old Style", Georgia, "Palatino Linotype",
+    "URW Palladio L", serif;
   font-size: 2.5rem; line-height: 1.08; font-weight: 400; letter-spacing: -0.024em;
   color: var(--ink);
   text-wrap: balance;
 }
 .detail {
-  margin: 14px 0 0;
+  margin: 12px 0 0;
   font-size: 1.0625rem; line-height: 1.65;
   color: var(--ink-muted);
-  max-width: 42ch;
   text-wrap: pretty;
 }
-/* The server the grant was for. A user with several MCP servers configured
-   has no other way to tell which tab belongs to which authorization. */
-.server {
-  display: inline-block; margin: 20px 0 0;
-  padding: 6px 10px;
-  border: 1px solid var(--accent-border);
-  border-radius: 6px;
-  background: var(--accent-wash);
+/* Labelled troughs. Untinted on purpose: an accent pill with a button's radius
+   reads as something to click, spends the accent the status rule needs, and
+   leaks M2's chip grammar out of the band that owns it. `--sunken`'s
+   documented role is "inset wells, code-adjacent troughs", which is what these
+   are — and the label is what stops a screen reader announcing a bare URL with
+   no idea what it is. */
+.label {
+  margin: 20px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.25; font-weight: 500; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--ink-dim);
+}
+.trough {
+  display: inline-block; margin: 8px 0 0;
+  padding: 4px 8px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 2px;
+  background: var(--sunken);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.875rem; line-height: 1.5;
   color: var(--ink);
-  word-break: break-all;
+  /* `anywhere`, not `break-all`: break-all splits at the first opportunity that
+     fits even when a better one is two characters later, which cuts a hostname
+     mid-label on the one element whose job is to be read as a hostname. */
+  overflow-wrap: anywhere;
 }
-.server.danger { border-color: var(--danger-border); background: var(--danger-wash); }
 .close {
-  margin: 24px 0 0; padding-top: 18px;
+  margin: 24px 0 0; padding-top: 16px;
   border-top: 1px solid var(--hairline);
   font-size: 0.875rem; line-height: 1.6;
   color: var(--ink-dim);
 }
 """
 
-#: Per-tone accents. ``neutral`` deliberately maps to a hairline: a speculative
-#: browser fetch for ``/favicon.ico`` is not an event, and giving it a coloured
-#: rule would teach the colour to mean nothing.
+#: Per-tone status rules. ``success`` takes the SEMANTIC token rather than the
+#: brand accent — the failure half already uses ``--danger``, and "confirmed" is
+#: what ``--color-success`` is for — which also leaves the brand accent unspent
+#: on a page that has one message. ``neutral`` deliberately maps to a hairline:
+#: a speculative browser fetch for ``/favicon.ico`` is not an event, and giving
+#: it a coloured rule would teach the colour to mean nothing.
 _TONE_VARS: dict[Tone, str] = {
-    "success": "--tone: var(--accent);",
+    "success": "--tone: var(--success);",
     "danger": "--tone: var(--danger);",
     "neutral": "--tone: var(--hairline-strong);",
 }
+
+
+def _trough(label: str, value: str) -> str:
+    return f'<p class="label">{html.escape(label)}</p><p class="trough">{html.escape(value)}</p>'
 
 
 def render_callback_page(
@@ -203,21 +239,33 @@ def render_callback_page(
     *,
     tone: Tone = "neutral",
     server: str | None = None,
+    provider_message: str | None = None,
     closable: bool = True,
 ) -> str:
     """The full HTML document for one callback outcome.
 
-    ``server`` is the MCP server the grant was for, shown as a mono chip —
-    omitted rather than faked when the caller does not know it. ``closable``
-    adds the "you can close this tab" line, which is true of a finished grant
-    and a lie on a page the flow is still waiting past.
+    ``server`` is the MCP server the grant was for, shown in a labelled trough —
+    omitted rather than faked when the caller does not know it.
+
+    ``provider_message`` is the third party's own ``error_description``, and it
+    gets its own labelled trough rather than being spliced into ``detail``.
+    That is a voice boundary, not decoration: the string is arbitrary text from
+    a query parameter, rendered inside a card carrying our mark, and a sentence
+    that begins in our voice and continues in theirs with no seam hands a
+    hostile provider a paragraph of Local Operator-branded instruction. The
+    trough says "this text is data, not us" — and it is also where a bare
+    ``access_denied`` reads correctly, instead of appearing as English prose.
+
+    ``closable`` adds the "you can close this tab" line, which is true of a
+    finished grant and a lie on a page the flow is still waiting past.
     """
-    chip = ""
+    blocks = ""
     if server:
-        chip_class = "server danger" if tone == "danger" else "server"
-        chip = f'<p class="{chip_class}">{html.escape(server)}</p>'
+        blocks += _trough("MCP server", server)
+    if provider_message:
+        blocks += _trough("Provider response", provider_message)
     close = (
-        '<p class="close">You can close this tab and return to your terminal.</p>'
+        '<p class="close">You can close this tab and return to Local Operator.</p>'
         if closable
         else ""
     )
@@ -232,7 +280,7 @@ def render_callback_page(
         "<main class='card'>"
         f"<header class='head'>{_LOGO_MARK}<span class='wordmark'>Local Operator</span></header>"
         f"<div class='body'><h1>{html.escape(title)}</h1>"
-        f"<p class='detail'>{html.escape(detail)}</p>{chip}{close}</div>"
+        f"<p class='detail'>{html.escape(detail)}</p>{blocks}{close}</div>"
         "</main></body></html>"
     )
 
@@ -243,6 +291,7 @@ def callback_response(
     *,
     tone: Tone = "neutral",
     server: str | None = None,
+    provider_message: str | None = None,
     closable: bool = True,
     status: str = "200 OK",
 ) -> bytes:
@@ -253,7 +302,14 @@ def callback_response(
     without both, a keep-alive browser holds the socket open and the flow's
     teardown has one more thing to wait for.
     """
-    body = render_callback_page(title, detail, tone=tone, server=server, closable=closable).encode()
+    body = render_callback_page(
+        title,
+        detail,
+        tone=tone,
+        server=server,
+        provider_message=provider_message,
+        closable=closable,
+    ).encode()
     head = (
         f"HTTP/1.1 {status}\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"

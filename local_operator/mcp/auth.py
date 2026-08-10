@@ -595,13 +595,23 @@ class LoopbackAuthFlow:
             query = parse_qs(parsed.query)
             error = (query.get("error") or [""])[0]
             if error:
+                # The provider's own words go in their own labelled trough, not
+                # spliced into a sentence spoken in our voice. `error_description`
+                # is arbitrary text from a query string rendered inside a card
+                # carrying our mark; escaping stops it being an injection, but
+                # only a visible seam stops a hostile provider borrowing our
+                # voice. It is also where a bare `access_denied` reads correctly
+                # rather than being presented as English.
                 detail = (query.get("error_description") or [""])[0] or error
                 writer.write(
                     callback_response(
                         "Authorization failed",
-                        f"The provider declined the request: {detail}",
+                        "The provider did not grant this authorization, so nothing "
+                        "was connected. You can start the connection again from "
+                        "Local Operator.",
                         tone="danger",
                         server=self.server_url,
+                        provider_message=detail,
                     )
                 )
                 self._settle_error(RuntimeError(f"OAuth authorization failed: {detail}"))
@@ -610,18 +620,24 @@ class LoopbackAuthFlow:
             if not code:
                 writer.write(
                     callback_response(
-                        "Missing code",
+                        "No authorization code",
                         "The redirect arrived without an authorization code, so "
-                        "there is nothing to hand back. Try signing in again.",
+                        "there is nothing to hand back. You can start the "
+                        "connection again from Local Operator.",
                         tone="danger",
                         server=self.server_url,
                     )
                 )
+                # SETTLE, do not just report. Without this the page says the tab
+                # can be closed while the flow sits waiting out its full timeout
+                # on a redirect that can never carry a code — the one call site
+                # that made `closable` a lie.
+                self._settle_error(RuntimeError("OAuth redirect carried no authorization code"))
                 return
             writer.write(
                 callback_response(
                     "Authorized",
-                    "Local Operator has the authorization code and is finishing " "the connection.",
+                    "Local Operator has the authorization code and is finishing the connection.",
                     tone="success",
                     server=self.server_url,
                 )
