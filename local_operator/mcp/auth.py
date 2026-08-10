@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import html
 import logging
 import sys
 import time
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlparse
+
+from local_operator.mcp.callback_page import callback_response
 
 from pydantic import AnyUrl
 
@@ -139,6 +140,13 @@ class McpTokenStorage:
         self.server_url = server_url
         self.credential_id = mcp_oauth_credential_id(server_url)
         self._store = _resolve_store(store)
+        # Snapshot ``updated_at`` NOW, before anything this process does can
+        # move it. The store stamps that column on every write, including the
+        # client-info writes that ``wire_oauth_auth`` makes moments after
+        # constructing us — so reading it later would report this process's own
+        # seed as the token's issue time. See :meth:`stored_token_expiry`.
+        row = self._read_row()
+        self._row_updated_at_at_open: int = row.updated_at if row is not None else 0
 
     def _read_row(self) -> StoredCredential | None:
         """The credential row for this server URL, or ``None`` (no store/no row)."""
@@ -225,10 +233,19 @@ class McpTokenStorage:
         re-authorization on every launch.
 
         Legacy rows written before :meth:`set_tokens` recorded the issue time
-        fall back to the row's ``updated_at`` (milliseconds). That column is
-        touched by exactly the writes this class makes, so for a token row it
-        IS the issue time, and using it means the fix applies to grants that
-        already exist rather than only to the next re-authorization.
+        fall back to the ``updated_at`` this instance snapshotted when it opened
+        (milliseconds). That is an UPPER BOUND on the issue time, not the issue
+        time: the store stamps the column on every write to the row, and
+        client-info writes touch the same row without touching the tokens. So
+        the fallback can read a genuinely expired token as live — never the
+        reverse — and the cost of being wrong is the one browser grant that used
+        to happen every launch. It is self-healing: that grant writes
+        ``tokens_obtained_at``, and the row never takes the fallback again.
+
+        Using the snapshot rather than a fresh read is what keeps THIS process's
+        own ``seed_client_info`` from resetting the bound to "now" before we can
+        read it, which would make the migration a guaranteed no-op for exactly
+        the pinned-client servers that seed exists to serve.
         """
         row = self._read_row()
         if row is None:
@@ -242,9 +259,9 @@ class McpTokenStorage:
             return None
         obtained_at = data.get(TOKENS_OBTAINED_AT_KEY)
         if not isinstance(obtained_at, (int, float)) or obtained_at <= 0:
-            if row.updated_at <= 0:
+            if self._row_updated_at_at_open <= 0:
                 return None
-            obtained_at = row.updated_at / 1000.0
+            obtained_at = self._row_updated_at_at_open / 1000.0
         return float(obtained_at) + float(expires_in)
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
@@ -335,24 +352,15 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _MAX_REQUEST_HEAD_BYTES = 16 * 1024
 _MAX_REQUEST_HEADERS = 64
 
+#: How long one connection may take to send its request head.
+#: A browser sends it in one packet; anything slower is a probe holding a
+#: handler open, and a held handler is what makes ``wait_closed()`` hang.
+_REQUEST_READ_TIMEOUT_S = 10.0
 
-def _callback_page(title: str, detail: str) -> bytes:
-    """A complete, self-closing HTTP response for the browser tab."""
-    body = (
-        "<!doctype html><meta charset='utf-8'>"
-        "<title>local-operator</title>"
-        '<body style="font:14px -apple-system,system-ui,sans-serif;'
-        'margin:15vh auto;max-width:32rem;text-align:center;color:#222">'
-        f"<h2 style='font-weight:600'>{html.escape(title)}</h2>"
-        f"<p style='color:#666'>{html.escape(detail)}</p></body>"
-    ).encode()
-    head = (
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html; charset=utf-8\r\n"
-        f"Content-Length: {len(body)}\r\n"
-        "Connection: close\r\n\r\n"
-    ).encode()
-    return head + body
+#: How long teardown may wait for in-flight handlers before abandoning them.
+#: The authorization code is already in hand at that point; a lingering socket
+#: is not worth stalling the connect for.
+_SERVER_CLOSE_TIMEOUT_S = 1.0
 
 
 class LoopbackAuthFlow:
@@ -370,24 +378,36 @@ class LoopbackAuthFlow:
     launched, because the provider can redirect the instant the user's session
     is already authorized — binding afterwards is a race the fast path loses.
 
-    Paste stays as a fallback, but only where reading stdin is actually safe:
-    under the TUI the terminal belongs to Textual's input driver, and a second
-    reader on the same file descriptor does not queue behind it — the two
-    split the user's keystrokes between them, which reads as an app randomly
-    ignoring what is typed. :func:`~local_operator.logger.console_is_silenced`
-    is the signal for that, and it also decides whether our progress notices
-    go to stderr or to the log file.
+    Paste is a strict FALLBACK, never a race: it is offered only when there is
+    no listener to wait on. A thread parked in ``input()`` cannot be cancelled,
+    so racing it would leave a reader on the tty and a thread that
+    ``asyncio.run`` joins at shutdown — the browser path would succeed and the
+    process would hang anyway. Paste is additionally gated on the terminal
+    being ours: under the TUI it belongs to Textual's input driver, and a
+    second reader on the same file descriptor does not queue behind it — the
+    two split the user's keystrokes, which reads as an app randomly ignoring
+    what is typed. :func:`~local_operator.logger.console_is_silenced` is the
+    signal for that, and it also decides whether our progress notices go to
+    stderr or to the log file.
     """
 
-    def __init__(self, redirect_uri: str) -> None:
+    def __init__(self, redirect_uri: str, server_url: str | None = None) -> None:
         parsed = urlparse(redirect_uri)
         self.redirect_uri = redirect_uri
+        #: Named on the callback page. Someone with several MCP servers
+        #: configured has no other way to tell which tab belongs to which
+        #: authorization, and "Authorized" without a subject is a page that
+        #: could be about anything.
+        self.server_url = server_url
         self._host = parsed.hostname or ""
         self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self._path = parsed.path or "/"
         self._servable = parsed.scheme == "http" and self._host in LOOPBACK_HOSTS
         self._server: asyncio.AbstractServer | None = None
         self._result: asyncio.Future[tuple[str, str | None, str | None]] | None = None
+        #: Why the bind failed, when it did. "Could not listen" and "could not
+        #: have listened" need different advice, so the two are kept apart.
+        self._bind_error: str | None = None
 
     # --- notices ---------------------------------------------------------
 
@@ -443,54 +463,74 @@ class LoopbackAuthFlow:
         return AuthorizationCodeResult(code=code, state=state, iss=iss)
 
     async def _await_authorization(self) -> tuple[str, str | None, str | None]:
-        waiters: list[asyncio.Future[Any] | asyncio.Task[Any]] = []
-        if self._result is not None:
-            waiters.append(self._result)
-        paste_task: asyncio.Task[tuple[str, str | None, str | None]] | None = None
-        if self._paste_allowed():
-            # Raced against the listener rather than used only as a fallback:
-            # a browser on another machine (an SSH session) reaches the login
-            # page but cannot reach our port, and without the race that user
-            # waits out the timeout with the code sitting in front of them.
-            paste_task = asyncio.get_running_loop().create_task(self._read_pasted())
-            waiters.append(paste_task)
-        if not waiters:
+        if self._result is None:
+            # No listener: paste is the only route left, and reading stdin is
+            # safe precisely because nothing else is going to.
+            return await self._await_pasted()
+        try:
+            return await asyncio.wait_for(self._result, timeout=PASTE_INPUT_TIMEOUT_S)
+        except asyncio.TimeoutError as exc:
             raise RuntimeError(
-                "MCP OAuth cannot complete here: the redirect URI "
-                f"{self.redirect_uri} is not a loopback address this process "
-                "can serve, and stdin is not available for a paste. Run "
-                "`local-operator mcp login <server>` from a terminal, or "
+                f"Timed out after {PASTE_INPUT_TIMEOUT_S:.0f}s waiting for the OAuth "
+                f"redirect to {self.redirect_uri}. If you authorized in a browser on "
+                "another machine it cannot reach this port — forward it "
+                f"(ssh -L {self._port}:127.0.0.1:{self._port} …) and try again."
+            ) from exc
+
+    async def _await_pasted(self) -> tuple[str, str | None, str | None]:
+        """Read the redirect URL from stdin. NEVER raced against the listener.
+
+        A thread parked in ``input()`` cannot be cancelled: ``asyncio.to_thread``
+        hands the call to the default executor, whose future refuses
+        cancellation once running, and the thread then sits on stdin until a
+        newline that — on the happy path, where the browser finished the grant —
+        never comes. Two things break as a result: ``asyncio.run`` never returns
+        (``Runner.close`` joins the default executor), so ``local-operator mcp
+        login`` hangs AFTER succeeding; and the parked reader is a second
+        consumer on the tty, which is the same keystroke-splitting bug this
+        class exists to avoid, moved outside the TUI.
+
+        So paste is a genuine FALLBACK, reached only when there is no listener
+        to wait on, and the thread it starts is one the flow is committed to.
+        """
+        if not self._paste_allowed():
+            raise RuntimeError(f"MCP OAuth cannot complete here: {self._no_route_reason()}")
+        prompt = "Paste the full redirect URL (or 'code state' separated by a space): "
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(lambda: input(prompt).strip()), timeout=PASTE_INPUT_TIMEOUT_S
+        )
+        return parse_oauth_callback_input(raw)
+
+    def _no_route_reason(self) -> str:
+        """Why neither route is available, in the user's terms.
+
+        A bind failure and an unservable redirect URI are different problems
+        with different fixes, and conflating them sends someone to audit their
+        OAuth configuration when the real answer is that a dev server is
+        squatting the port.
+        """
+        if self._bind_error is not None:
+            return (
+                f"nothing could listen on {self.redirect_uri} ({self._bind_error}) "
+                "— free that port, or set a different `oauth.callback_port` for "
+                "this server — and stdin is not available for a paste."
+            )
+        if not self._servable:
+            return (
+                f"the redirect URI {self.redirect_uri} is not a loopback address "
+                "this process can serve, and stdin is not available for a paste. "
+                "Run `local-operator mcp login <server>` from a terminal, or "
                 "configure the server with a token."
             )
-        try:
-            done, pending = await asyncio.wait(
-                waiters, timeout=PASTE_INPUT_TIMEOUT_S, return_when=asyncio.FIRST_COMPLETED
-            )
-        finally:
-            if paste_task is not None and not paste_task.done():
-                paste_task.cancel()
-        if not done:
-            raise RuntimeError(
-                f"Timed out after {PASTE_INPUT_TIMEOUT_S:.0f}s waiting for the " "OAuth redirect"
-            )
-        for task in pending:
-            task.cancel()
-        # `done` holds at most the listener and the paste; either is a complete
-        # answer, so the first one that finished wins and its exception (a
-        # provider `error=` redirect, an unparseable paste) is the flow's.
-        return next(iter(done)).result()
-
-    async def _read_pasted(self) -> tuple[str, str | None, str | None]:
-        prompt = (
-            "…or paste the full redirect URL here if your browser cannot reach " "this machine: "
+        return (
+            "the callback listener is not running and stdin is not available "
+            "for a paste. Run `local-operator mcp login <server>` from a terminal."
         )
-        raw = await asyncio.to_thread(lambda: input(prompt).strip())
-        return parse_oauth_callback_input(raw)
 
     # --- the listener ----------------------------------------------------
 
     async def _start_server(self) -> None:
-        """Bind the redirect URI, or leave ``_server`` None and say why."""
+        """Bind the redirect URI, or leave ``_server`` None and record why."""
         if self._server is not None or not self._servable:
             return
         loop = asyncio.get_running_loop()
@@ -503,6 +543,7 @@ class LoopbackAuthFlow:
             # completes the grant — but the user has to be told, because from
             # the browser's side this looks like the login simply not working.
             self._result = None
+            self._bind_error = str(exc)
             self._notify(
                 f"Could not listen on {self.redirect_uri} ({exc}); "
                 "the browser redirect will not be captured automatically."
@@ -514,38 +555,75 @@ class LoopbackAuthFlow:
         if server is None:
             return
         server.close()
+        # BOUNDED. Since 3.12.1 ``wait_closed()`` also waits for every accepted
+        # connection's handler to finish, so one peer that opened a socket and
+        # sent nothing — a browser preconnect, a security scanner — would park
+        # this forever. It runs in ``callback_handler``'s ``finally``, so an
+        # unbounded wait here would swallow the authorization we already have
+        # and turn every timeout into a hang.
         with contextlib.suppress(Exception):
-            await server.wait_closed()
+            await asyncio.wait_for(server.wait_closed(), timeout=_SERVER_CLOSE_TIMEOUT_S)
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Answer one browser request; resolve the flow when it is the callback."""
         try:
             target = await self._read_request_target(reader)
             if target is None:
-                writer.write(_callback_page("Bad request", "Malformed HTTP request."))
+                writer.write(
+                    callback_response(
+                        "Bad request",
+                        "That was not a request this page knows how to answer.",
+                        closable=False,
+                        status="400 Bad Request",
+                    )
+                )
                 return
             parsed = urlparse(target)
             if parsed.path != self._path:
-                # Browsers ask for /favicon.ico off their own bat; answering
-                # 200-with-a-page rather than resolving the flow keeps those
-                # from being mistaken for the redirect.
-                writer.write(_callback_page("Not found", "Nothing is served here."))
+                # Browsers ask for /favicon.ico off their own bat; answering a
+                # real 404 rather than resolving the flow keeps those from
+                # being mistaken for the redirect.
+                writer.write(
+                    callback_response(
+                        "Nothing here",
+                        "This address only answers the authorization redirect.",
+                        closable=False,
+                        status="404 Not Found",
+                    )
+                )
                 return
             query = parse_qs(parsed.query)
             error = (query.get("error") or [""])[0]
             if error:
                 detail = (query.get("error_description") or [""])[0] or error
-                writer.write(_callback_page("Authorization failed", detail))
+                writer.write(
+                    callback_response(
+                        "Authorization failed",
+                        f"The provider declined the request: {detail}",
+                        tone="danger",
+                        server=self.server_url,
+                    )
+                )
                 self._settle_error(RuntimeError(f"OAuth authorization failed: {detail}"))
                 return
             code = (query.get("code") or [""])[0]
             if not code:
-                writer.write(_callback_page("Missing code", "The redirect carried no code."))
+                writer.write(
+                    callback_response(
+                        "Missing code",
+                        "The redirect arrived without an authorization code, so "
+                        "there is nothing to hand back. Try signing in again.",
+                        tone="danger",
+                        server=self.server_url,
+                    )
+                )
                 return
             writer.write(
-                _callback_page(
+                callback_response(
                     "Authorized",
-                    "local-operator has the authorization code. You can close this tab.",
+                    "Local Operator has the authorization code and is finishing " "the connection.",
+                    tone="success",
+                    server=self.server_url,
                 )
             )
             self._settle(
@@ -563,19 +641,37 @@ class LoopbackAuthFlow:
                 await writer.wait_closed()
 
     async def _read_request_target(self, reader: asyncio.StreamReader) -> str | None:
-        """The request target of a GET, with the head read and discarded."""
+        """The request target of a GET, with the head read and discarded.
+
+        Bounded in BOTH directions — bytes and time. A peer that connects and
+        says nothing must not hold a handler open (see :meth:`_stop_server`),
+        and a peer that talks forever must not be allowed to.
+        """
+        try:
+            return await asyncio.wait_for(self._read_head(reader), timeout=_REQUEST_READ_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return None
+
+    @staticmethod
+    async def _read_head(reader: asyncio.StreamReader) -> str | None:
         line = await reader.readline()
-        if not line or len(line) > _MAX_REQUEST_HEAD_BYTES:
+        budget = _MAX_REQUEST_HEAD_BYTES - len(line)
+        if not line or budget < 0:
             return None
         parts = line.decode("latin-1").split()
         if len(parts) < 2 or parts[0].upper() != "GET":
             return None
         # Drain the headers so the browser sees a well-formed exchange rather
         # than a reset mid-request (which some render as a failed navigation).
+        # The byte budget spans the WHOLE head: bounding each `readline` alone
+        # leaves 64 headers x StreamReader's own 64 KiB limit, which is 4 MB.
         for _ in range(_MAX_REQUEST_HEADERS):
             header = await reader.readline()
             if header in (b"\r\n", b"\n", b""):
                 break
+            budget -= len(header)
+            if budget < 0:
+                return None
         return parts[1]
 
     def _settle(self, code: str, state: str | None, iss: str | None) -> None:
@@ -653,7 +749,7 @@ def wire_oauth_auth(
     if client_id:
         storage.seed_client_info(client_id, client_secret)
 
-    flow = LoopbackAuthFlow(redirect_uri)
+    flow = LoopbackAuthFlow(redirect_uri, server_url=server_url)
     return {
         "server_url": server_url,
         "client_metadata": client_metadata,

@@ -523,8 +523,12 @@ class OperatorApp(App[None]):
 
     async def _boot_session(self) -> None:
         """Await the session factory; on failure surface + offer /reload."""
-        await self._warm_session_imports()
         try:
+            # Inside the guard, not ahead of it. `warm_session_imports` itself
+            # never raises, but the import that reaches it and the thread hop
+            # around it can, and anything that escapes this worker leaves the
+            # user with a splash and no explanation.
+            await self._warm_session_imports()
             session = await self._session_factory()
         except Exception as error:  # TUI-012: construction error path
             self._on_boot_failed(error)

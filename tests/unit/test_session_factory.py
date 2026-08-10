@@ -1005,18 +1005,24 @@ class TestWarmSessionImports:
     the two properties that make it worth having.
     """
 
-    def test_it_imports_the_factorys_heavy_dependencies(self) -> None:
-        """Every warmed name is in ``sys.modules`` afterwards.
+    def test_it_imports_the_first_party_dependencies(self) -> None:
+        """Every warmed ``local_operator.*`` name is in ``sys.modules`` afterwards.
 
-        A name that silently fails to import warms nothing, and the stall it
-        was supposed to remove comes back on the event loop instead.
+        A name that silently fails to import warms nothing, and the stall it was
+        supposed to remove comes back on the event loop instead. Scoped to our
+        own modules because that is where the drift risk lives — a renamed or
+        moved module leaves a dead string behind with no other symptom. The
+        third-party entries are deliberately best-effort: ``mcp`` is an optional
+        extra, and asserting its presence would fail the install that omits it.
         """
         import sys
 
         from local_operator.session_factory import _WARM_IMPORTS, warm_session_imports
 
         warm_session_imports()
-        assert [name for name in _WARM_IMPORTS if name not in sys.modules] == []
+        ours = [name for name in _WARM_IMPORTS if name.startswith("local_operator.")]
+        assert ours, "the warm list has lost every first-party entry"
+        assert [name for name in ours if name not in sys.modules] == []
 
     def test_a_broken_entry_does_not_raise(self, monkeypatch) -> None:
         """A warm-up is never worth a failed startup.
