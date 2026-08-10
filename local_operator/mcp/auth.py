@@ -624,7 +624,12 @@ class LoopbackAuthFlow:
                 # only a visible seam stops a hostile provider borrowing our
                 # voice. It is also where a bare `access_denied` reads correctly
                 # rather than being presented as English.
-                detail = (query.get("error_description") or [""])[0] or error
+                # Stripped BEFORE the `or`, so a whitespace-only description
+                # falls back to the code instead of satisfying the truthiness
+                # test and blanking it. `?error=access_denied&error_description=
+                # %20%20%20` otherwise raises "OAuth authorization failed:    ",
+                # dropping the one word that says what went wrong.
+                detail = (query.get("error_description") or [""])[0].strip() or error
                 writer.write(
                     callback_response(
                         "Authorization failed",

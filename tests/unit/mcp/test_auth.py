@@ -547,6 +547,44 @@ class TestLoopbackCallbackServer:
             squatter.close()
 
     @pytest.mark.asyncio
+    async def test_a_blank_error_description_still_names_the_error(self, monkeypatch) -> None:
+        """A whitespace-only description must not blank the error code.
+
+        `?error=access_denied&error_description=%20%20%20` is reachable from the
+        wire, and testing the raw value for truthiness satisfies it — so the
+        `or error` fallback never fires and the CLI-facing exception loses the
+        one word that says what went wrong.
+        """
+        import asyncio
+        import sys
+        import urllib.parse
+        import urllib.request
+
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        await self._listening(flow)
+
+        query = urllib.parse.urlencode({"error": "access_denied", "error_description": "   "})
+
+        async def visit() -> str:
+            url = f"http://127.0.0.1:{port}/callback?{query}"
+            return await asyncio.to_thread(
+                lambda: urllib.request.urlopen(url, timeout=5).read().decode()
+            )
+
+        page_task = asyncio.ensure_future(visit())
+        with pytest.raises(RuntimeError, match="access_denied"):
+            await asyncio.wait_for(flow.callback_handler(), timeout=10)
+        page = await page_task
+        # And the page shows the code rather than a labelled empty box.
+        assert "Provider response" in page
+        assert "access_denied" in page
+
+    @pytest.mark.asyncio
     async def test_a_redirect_without_a_code_fails_the_flow(self, monkeypatch) -> None:
         """A codeless redirect must end the grant, not leave it waiting.
 
