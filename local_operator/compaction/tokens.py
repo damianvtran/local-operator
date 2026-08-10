@@ -180,11 +180,29 @@ def approx_text_tokens(text: str) -> int:
     compaction gate go out of their way to defer that load, precisely so a short
     run does not buy a 43.6 MB table to be told there is nothing to do.
 
-    This is for callers who want a number NOW and would rather be a few percent
-    out than spend that: a status readout, a progress hint, a size warning. On a
-    real system prompt plus a real tool inventory the ratio lands +7.0% against
-    cl100k_base (11,612 chars: 2891 estimated vs 2702 exact), which is well
-    inside what a percentage rendered to one decimal can carry.
+    This is for callers who want a number NOW and would rather be somewhat out
+    than spend that: a status readout, a progress hint, a size warning.
+
+    **The error is a property of the content, not a bound.** ``chars // 4`` is
+    exactly right only where the text averages four characters per token, and
+    real text does not. Measured against cl100k_base:
+
+    ==========================  ============  ========
+    payload                     chars/token   error
+    ==========================  ============  ========
+    English prose                      5.59    +39.8%
+    Python source                      3.61     -9.8%
+    system prompt + tool JSON          4.30     +7.0%
+    minified JSON                      1.82    -54.4%
+    CJK                                1.36    -65.9%
+    ==========================  ============  ========
+
+    So the honest claim is narrow: on the mix this exists to measure — a Latin
+    system prompt plus JSON tool schemas — it runs roughly +7% to +17% high,
+    which a percentage rendered to one decimal can carry. It is NOT a
+    general-purpose estimator, and a caller measuring CJK or minified payloads
+    would be told they had spent a third of what they actually had. Anything
+    load-bearing wants :func:`count_text_tokens` and should pay for it.
 
     Deliberately NOT "use the encoder when it is already resident". That would
     make the same session report different numbers depending on whether

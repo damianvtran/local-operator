@@ -628,30 +628,40 @@ class Session:
           a NETWORK fetch of the ranks — a cost ``prune_transcript`` and the
           compaction gate both restructure themselves to defer. Paying it in
           every session so the band can read 0.3% would undo that. The ratio
-          runs +7.0% on a real prompt-plus-inventory payload, and the first
-          turn replaces the whole figure with the provider's exact count.
-        - **The event loop.** ``json.dumps`` over an unbounded tool inventory
-          is a synchronous burn with no await in it, and this runs on the boot
-          path a sibling commit cleared of exactly that. The counting is
-          handed to a thread; only resolving the blocks stays here, because
-          that is genuinely async work.
+          runs +7% to +17% high depending on how much of the payload is JSON
+          punctuation, and the first turn replaces the whole figure with the
+          provider's exact count anyway.
+        - **The event loop.** Everything that scales with the inventory —
+          ``json.dumps`` of each schema as much as the arithmetic over the
+          result — happens in the thread. Serializing on the loop and crossing
+          only to add up ``len(text) // 4`` was measurably backwards: at 500
+          tools the on-loop half cost 3.9 ms against 0.09 ms carried, less than
+          the ~0.15 ms the hop itself takes. This runs on the boot path a
+          sibling commit cleared of exactly this kind of stall.
         """
         blocks = self._system_blocks_provider()
         if inspect.isawaitable(blocks):
             blocks = await blocks
-        # Snapshot before the hop: the inventory can be swapped by an MCP
-        # refresh while the thread runs, and iterating it there would race.
-        texts = list(blocks)
-        for tool in self._tools:
-            # Name/description/schema is what a provider serializes per tool.
-            # The JSON separators do not match any one vendor's wire format
-            # exactly, and no estimate could: this is the same order of
-            # magnitude, which is what a percentage needs.
-            texts.append(tool.name)
-            texts.append(tool.description)
-            if tool.parameters:
-                texts.append(json.dumps(tool.parameters, separators=(",", ":")))
-        return await asyncio.to_thread(lambda: sum(approx_text_tokens(t) for t in texts))
+        resolved = list(blocks)
+        # Bind the inventory here, not in the thread. ``refresh_tools`` REBINDS
+        # ``self._tools`` rather than mutating it, so this reference stays a
+        # coherent snapshot even if an MCP refresh swaps the list mid-count.
+        tools = self._tools
+
+        def count() -> int:
+            total = sum(approx_text_tokens(text) for text in resolved)
+            for tool in tools:
+                # Name/description/schema is what a provider serializes per
+                # tool. The JSON separators do not match any one vendor's wire
+                # format exactly, and no estimate could: this is the same order
+                # of magnitude, which is what a percentage needs.
+                total += approx_text_tokens(tool.name)
+                total += approx_text_tokens(tool.description)
+                if tool.parameters:
+                    total += approx_text_tokens(json.dumps(tool.parameters, separators=(",", ":")))
+            return total
+
+        return await asyncio.to_thread(count)
 
     # -- events ---------------------------------------------------------------
 

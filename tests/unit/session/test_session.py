@@ -887,29 +887,47 @@ class TestMeasurementCosts:
             await session.dispose()
 
     @pytest.mark.asyncio
-    async def test_the_counting_runs_off_the_event_loop(self, tmp_path, monkeypatch) -> None:
+    async def test_everything_that_scales_leaves_the_event_loop(
+        self, tmp_path, monkeypatch
+    ) -> None:
         """Not "it is fast enough": the inventory is unbounded, so the work has
-        to leave the loop rather than merely be small today."""
+        to leave the loop rather than merely be small today.
+
+        Both halves are checked, because an earlier version passed a
+        counting-only version of this test while leaving ~97% of the CPU work
+        on the pump: it serialized every tool schema with ``json.dumps`` to
+        BUILD the list, then crossed to the thread only to add up
+        ``len(text) // 4``. The term that grows with the inventory was the one
+        that stayed, and the hop cost more than it carried.
+        """
+        import json as json_mod
         import threading
 
         from local_operator.compaction import tokens as tokens_mod
         from local_operator.session import session as session_mod
 
         loop_thread = threading.get_ident()
-        seen: list[int] = []
-        real = tokens_mod.approx_text_tokens
+        counted: list[int] = []
+        dumped: list[int] = []
+        real_count = tokens_mod.approx_text_tokens
+        real_dumps = json_mod.dumps
 
-        def spy(text: str) -> int:
-            seen.append(threading.get_ident())
-            return real(text)
+        def count_spy(text: str) -> int:
+            counted.append(threading.get_ident())
+            return real_count(text)
 
-        monkeypatch.setattr(session_mod, "approx_text_tokens", spy)
+        def dumps_spy(*args, **kwargs):
+            dumped.append(threading.get_ident())
+            return real_dumps(*args, **kwargs)
+
+        monkeypatch.setattr(session_mod, "approx_text_tokens", count_spy)
+        monkeypatch.setattr(session_mod.json, "dumps", dumps_spy)
 
         executed: list[str] = []
         session = make_session(
             tmp_path,
             ScriptedStream([]),
-            tools=[echo_tool(executed)],
+            tools=[echo_tool(executed, name=f"t{i}") for i in range(6)],
             system_blocks_provider=lambda: ["sys"],
         )
         try:
@@ -917,8 +935,10 @@ class TestMeasurementCosts:
         finally:
             await session.dispose()
 
-        assert seen, "nothing was counted"
-        assert loop_thread not in seen, "counting ran on the caller's loop"
+        assert counted, "nothing was counted"
+        assert dumped, "no schema was serialized — the test tools lost their parameters"
+        assert loop_thread not in counted, "counting ran on the caller's loop"
+        assert loop_thread not in dumped, "schema serialization ran on the caller's loop"
 
     @pytest.mark.asyncio
     async def test_a_tool_swap_mid_measurement_cannot_race(self, tmp_path) -> None:

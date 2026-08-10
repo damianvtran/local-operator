@@ -280,9 +280,19 @@ class TestApproxTextTokens:
         assert approx_text_tokens("") == 0
 
     def test_it_tracks_the_exact_count_closely_enough_for_a_percentage(self) -> None:
-        """A reading rendered to one decimal of a context window tolerates a few
-        percent; it does not tolerate being absent. Measured at +7.0% against
-        cl100k_base on a real system prompt plus tool inventory."""
+        """The claim is narrow on purpose: this payload, this direction.
+
+        The bound is 20% because the payload below measures +17.3% — not
+        because 20% is a general property of ``chars // 4``. On other content
+        the same function is off by -66% (CJK) to +40% (English prose), which
+        is why the docstring tabulates rather than advertises a single figure,
+        and why this test names the payload it is calibrated against.
+
+        The direction matters as much as the size. Over-counting is the safe
+        error for a context readout: it reports less headroom than there really
+        is, so the failure mode is compacting slightly early rather than
+        promising room that does not exist.
+        """
         text = (
             "You are a careful assistant. Read the repository before editing. "
             '{"type":"object","properties":{"path":{"type":"string"}}}'
@@ -290,4 +300,5 @@ class TestApproxTextTokens:
         exact = count_text_tokens(text)
         approx = approx_text_tokens(text)
         assert exact > 0
-        assert abs(approx - exact) / exact < 0.25
+        assert approx >= exact, "a context readout must not under-report a Latin+JSON payload"
+        assert (approx - exact) / exact < 0.20

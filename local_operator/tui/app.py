@@ -2864,7 +2864,20 @@ class OperatorApp(App[None]):
         # dict[str, object] splatted into update() erases every parameter type,
         # so a wrong-typed segment would only surface as a render glitch.
         # `None` means "leave this segment alone" in update()'s contract.
-        context_tokens: int | None = message.context_tokens or None
+        #
+        # Gated on the session still being here. A plain `/reload` deliberately
+        # keeps the controller SUBSCRIBED across `dispose()` so the dying
+        # session's `agent_end` can settle its live tool cards — and that same
+        # event carries a `context_tokens` for the conversation being thrown
+        # away. `_post` queues it, so whether it arrives before or after the
+        # reload's reset is a scheduling race; arriving after, it reinstates an
+        # exact reading for a dead session AND the exact-count guard then
+        # suppresses the replacement session's own measurement, which is
+        # precisely the staleness the reset exists to prevent. The cards still
+        # settle either way; only the number is refused.
+        context_tokens: int | None = None
+        if self._session is not None:
+            context_tokens = message.context_tokens or None
         cost_text: str | None = None
         cost = self._cost_for(message.usage)
         if cost is not None:

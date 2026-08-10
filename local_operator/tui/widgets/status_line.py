@@ -170,22 +170,38 @@ _DROP_LADDER: tuple[str, ...] = (
 )
 
 
+def _narrowest_survivor_last(rungs: list[str]) -> list[str]:
+    """Re-seat ``approvals`` so it is never the last rung standing.
+
+    Every ``_x_before_cwd`` helper below promotes one rung, and promoting a rung
+    leaves whatever FOLLOWED it at the end of the ladder. In this ladder that is
+    reliably ``approvals`` — the 14-cell segment the authored order sheds FIRST,
+    precisely because dropping it buys the most width. Left last it outlives the
+    narrow segments it was supposed to make room for, inverting the ladder's
+    whole argument.
+
+    Factored out rather than repeated: it was written inline for the mcp move,
+    and the next promotion (context) silently did not re-apply it and shipped
+    a ladder ending ``… → cwd → approvals``. One rule, applied by construction,
+    is what stops the third promotion doing it again.
+    """
+    if rungs[-1] != "approvals":
+        return rungs
+    rungs = [step for step in rungs if step != "approvals"]
+    rungs.insert(len(rungs) - 1, "approvals")
+    return rungs
+
+
 def _mcp_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
     """``ladder`` with the mcp rung moved to just ahead of ``cwd``.
 
-    Moving mcp forward leaves whatever followed it at the END of the ladder, and
-    in the full order that is ``approvals`` — the 14-cell segment this ladder
-    documents as the FIRST alarm to shed because dropping it buys the most width.
-    Left last it became the thing that outlived the context number in the quiet
-    band, which inverts the whole argument. So the tail is re-ordered too: the
-    narrowest survivor goes last.
+    A healthy `⊙ 2 MCP` is a nicety, and last place had it outranking both the
+    working directory and the full model label. The rung moves rather than the
+    render site special-casing the segment.
     """
     rungs = [step for step in ladder if step != "mcp"]
     rungs.insert(rungs.index("cwd"), "mcp")
-    if rungs[-1] == "approvals":
-        rungs.remove("approvals")
-        rungs.insert(rungs.index("context"), "approvals")
-    return tuple(rungs)
+    return tuple(_narrowest_survivor_last(rungs))
 
 
 #: The ladder for a band whose MCP segment is NOT an alarm. Precomputed rather
@@ -207,11 +223,13 @@ def _context_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
 
     Shedding the estimate first is therefore the same trade ``_mcp_before_cwd``
     exists to make: rank by what the segment is worth RIGHT NOW, not by what
-    its slot is usually worth.
+    its slot is usually worth. It inherits the same tail rule for the same
+    reason — promoting context out of last place in the quiet ladder is exactly
+    what left ``approvals`` stranded there.
     """
     rungs = [step for step in ladder if step != "context"]
     rungs.insert(rungs.index("cwd"), "context")
-    return tuple(rungs)
+    return tuple(_narrowest_survivor_last(rungs))
 
 
 #: Estimate variants of both ladders, precomputed for the same reason.

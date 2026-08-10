@@ -2992,3 +2992,35 @@ async def test_the_newest_measurement_wins_not_the_slowest() -> None:
         for _ in range(15):
             await pilot.pause()
         assert _ctx_tokens(app) == 90_000
+
+
+@pytest.mark.asyncio
+async def test_a_dead_sessions_turn_cannot_restore_its_context() -> None:
+    """The race the reload reset alone does not close.
+
+    A plain ``/reload`` deliberately keeps the controller SUBSCRIBED across
+    ``dispose()`` so the dying session's ``agent_end`` can settle its live tool
+    cards. That same event carries a ``context_tokens``, and it is posted to
+    the message pump — so whether it arrives before or after the reload's reset
+    is scheduling. Arriving after, it reinstates an exact reading for a
+    conversation that no longer exists, and the exact-count guard then
+    suppresses the replacement session's own measurement: the reset undone.
+    """
+    first = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        second = _MeasuredSession(tokens=20_000)
+        app._session_factory = lambda: _factory(second)  # type: ignore[assignment]
+        await app._reload_session()
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 20_000)
+
+        # The dying session's turn lands late, carrying its own exact count.
+        app._session = None
+        app.post_message(TurnEnded(aborted=True, error=None, context_tokens=51_007))
+        for _ in range(15):
+            await pilot.pause()
+
+        assert _ctx_tokens(app) == 20_000, "a dead session's count was adopted"
+        assert _ctx_estimate(app) is True

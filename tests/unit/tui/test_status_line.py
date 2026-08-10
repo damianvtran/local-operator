@@ -23,7 +23,9 @@ from textual.widgets import Static
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import (
     _DROP_LADDER,
+    _DROP_LADDER_ESTIMATE,
     _DROP_LADDER_QUIET,
+    _DROP_LADDER_QUIET_ESTIMATE,
     _MIN_GROUP_GAP,
     _SPINNER_FRAMES,
     ICON_CWD,
@@ -777,3 +779,39 @@ def test_a_narrow_band_keeps_the_cwd_over_a_pre_turn_estimate(monkeypatch) -> No
         rendered = status.render_text(width).plain
         assert ICON_CWD in rendered, f"width {width} lost the cwd"
         assert "49.6%" not in rendered, f"width {width} kept the estimate over the cwd"
+
+
+def test_no_ladder_variant_strands_the_widest_alarm_last() -> None:
+    """The invariant every rung promotion has to preserve, checked on all four.
+
+    ``approvals`` is the widest segment in the band (14 cells against the
+    context number's ~9 and a basename's ~7), which is exactly why the authored
+    order sheds it FIRST. Promoting any rung out of last place leaves whatever
+    followed it at the end, and in this ladder that is reliably ``approvals`` —
+    stranded there it outlives the narrow segments the promotion was meant to
+    protect, inverting the ladder's whole argument.
+
+    It was written inline for the mcp promotion and then silently not
+    re-applied when the context promotion was added, which shipped a quiet
+    estimate ladder ending ``… -> cwd -> approvals``. Asserted across every
+    variant so the next promotion cannot reintroduce it either.
+    """
+    variants = {
+        "full": _DROP_LADDER,
+        "quiet": _DROP_LADDER_QUIET,
+        "full+estimate": _DROP_LADDER_ESTIMATE,
+        "quiet+estimate": _DROP_LADDER_QUIET_ESTIMATE,
+    }
+    for name, ladder in variants.items():
+        assert ladder[-1] != "approvals", f"{name} strands the widest alarm last"
+        # A promotion reorders; it never adds or loses a rung.
+        assert sorted(ladder) == sorted(_DROP_LADDER), f"{name} changed the rung set"
+
+    # And the specific tails, so a reorder that happens to dodge the assertion
+    # above still has to be argued for.
+    assert _DROP_LADDER[-1] == "mcp"
+    assert _DROP_LADDER_QUIET[-1] == "context"
+    assert _DROP_LADDER_ESTIMATE[-1] == "mcp"
+    # The quiet band with a pre-turn estimate: the working directory is the last
+    # thing standing, which is D21's argument carried to its conclusion.
+    assert _DROP_LADDER_QUIET_ESTIMATE[-1] == "cwd"
