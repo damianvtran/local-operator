@@ -126,7 +126,12 @@ class _CompactionPlan:
     compaction_api: Any
     settings: Any
     strategy: str
-    llm_history: list[AgentMessage]
+    #: The CONVERTED, wire-legal history (``_convert_to_llm`` output), not the
+    #: transcript vocabulary: the commit slices it into ``to_summarize`` for
+    #: ``_produce_summary`` and re-seats ``kept`` behind a fresh
+    #: ``CustomMessage`` marker, so ``CustomMessage`` entries are already gone
+    #: by the time a plan exists.
+    llm_history: list[Message]
     cut: int
     #: Context size for the transcript entry: ``max(provider-reported, local)``.
     context_tokens: int

@@ -22,7 +22,7 @@ from local_operator.harness.types import CompactionEndEvent, CompactionStartEven
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui.app import OperatorApp, compaction_receipt
 from local_operator.tui.events import CompactionEnded
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_slash_echo import _boot, _submit
@@ -134,7 +134,7 @@ async def test_a_prompt_typed_during_a_pass_is_held_and_then_sent() -> None:
         rows = [
             block.text()
             for block in app.query_one(TranscriptView).blocks()
-            if type(block).__name__ == "UserBlock"
+            if isinstance(block, UserBlock)
         ]
 
     assert held == "and now analyse the parser"

@@ -129,7 +129,7 @@ async def _fill(pilot: Any, app: OperatorApp, turns: int) -> None:
     await _settle(pilot)
 
 
-def _app(session: Any | None = None) -> tuple[OperatorApp, Any]:
+def _app(session: FakeSession | None = None) -> tuple[OperatorApp, FakeSession]:
     session = session if session is not None else FakeSession()
     return OperatorApp(lambda: _factory(session)), session
 

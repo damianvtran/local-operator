@@ -1154,7 +1154,14 @@ class TestTransientFailuresAreRetriedOnEveryCallPath:
         assert excinfo.value.kind == "auth"
         # Each key tried once. Five same-key retries would have been five
         # guaranteed 401s before the sibling that might have worked.
-        assert sorted(set(used)) == used == ["k1", "k2"]
+        #
+        # ``api_key`` is optional on the wire (an OAuth provider sends none), so
+        # the real keys are separated out first: a ``None`` reaching the client
+        # under a keyed provider would be its own bug, and it would otherwise
+        # crash ``sorted`` here instead of naming itself.
+        keys = [key for key in used if key is not None]
+        assert keys == used, "every rotation must carry a real credential"
+        assert sorted(set(keys)) == keys == ["k1", "k2"]
 
     async def test_a_long_quota_reset_surfaces_instead_of_sleeping_through_it(self) -> None:
         """A quota exhaustion with a long reset is not transient. The user gets

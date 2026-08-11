@@ -423,7 +423,7 @@ class InstructionBlock(UserBlock):
 
     can_focus = True
     BINDINGS = [
-        Binding("enter", "toggle", "Expand instruction", show=False),
+        Binding("enter", "toggle_brief", "Expand instruction", show=False),
     ]
 
     def __init__(self, text: str) -> None:
@@ -451,8 +451,14 @@ class InstructionBlock(UserBlock):
         more = f"{EXPAND_HINT} {self._hidden_rows} more line"
         return [*rows[:INSTRUCTION_ROWS], f"{more}{'' if self._hidden_rows == 1 else 's'}"]
 
-    def action_toggle(self) -> None:
-        """Show the whole brief, or fold it back to its summary."""
+    def action_toggle_brief(self) -> None:
+        """Show the whole brief, or fold it back to its summary.
+
+        NOT ``action_toggle``: ``DOMNode.action_toggle(attribute_name)`` is a
+        framework action that flips a named bool on the node, and shadowing it
+        with a no-arg method means a ``toggle('...')`` action string aimed at
+        this widget raises instead of doing what Textual documents.
+        """
         if self._expanded or self._hidden_rows:
             self._expanded = not self._expanded
             self._rebuild()
@@ -461,7 +467,7 @@ class InstructionBlock(UserBlock):
         # Stopped so one gesture does not also move the transcript behind it,
         # the discipline every mouse handler in this app follows.
         event.stop()
-        self.action_toggle()
+        self.action_toggle_brief()
 
     def _rebuild(self) -> None:
         """Repaint at the current width and re-ask the spacing question.

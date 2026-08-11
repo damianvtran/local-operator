@@ -1513,6 +1513,10 @@ def test_a_running_rows_duration_advances_and_holds_the_settled_column() -> None
     card = ToolCard("t", "bash", {"command": "sleep 30"})
     assert card._build_row(80).plain.rstrip().endswith("0s")
 
+    # A card built here started its own clock; ``_started`` is only ``None`` for
+    # a card adopted through ``restore()``, which refuses to time a row it did
+    # not watch run. Winding the clock back is only meaningful for the former.
+    assert card._started is not None, "a card that begins running times itself"
     card._started -= 34.0
     assert card._build_row(80).plain.rstrip().endswith("34s")
 

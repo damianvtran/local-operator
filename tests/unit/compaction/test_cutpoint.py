@@ -96,8 +96,12 @@ def test_no_cut_when_only_a_previous_summary_and_one_message_precede_it():
     not worth the pass.
     """
     marker = CustomMessage(custom_type="compaction_summary", details={"summary": "s" * 400})
-    messages = [marker, _big_user(), Message.user("tail")]
-    keep = estimate_tokens(messages[2]) + 10
+    # Held by name, not read back out of the mixed list: the keep budget is a
+    # fact about THIS message, and indexing the list hands back the
+    # ``Message | CustomMessage`` union that ``estimate_tokens`` cannot take.
+    tail = Message.user("tail")
+    messages = [marker, _big_user(), tail]
+    keep = estimate_tokens(tail) + 10
     assert find_cut_point(messages, keep) is None
 
     # Two real messages before the cut and the pass IS worth running — the rule
