@@ -96,6 +96,22 @@ class TurnEnded(Message):
         self.usage = usage
 
 
+class ContextUsageReported(Message):
+    """One model call reported how large the context was when it ran.
+
+    Separate from :class:`TurnEnded` because it fires per CALL, not per turn.
+    An agentic turn is many calls over many minutes, and the context reading
+    used to move only when the whole turn settled — so during exactly the
+    stretch a user is watching it grow, the band reported the size the context
+    had before the turn began. On a long tool-using turn that is a number tens
+    of thousands of tokens stale, and it looks live.
+    """
+
+    def __init__(self, context_tokens: int) -> None:
+        super().__init__()
+        self.context_tokens = context_tokens
+
+
 class TurnBoundaryStart(Message):
     """A ``turn_start`` engine event: one model call is beginning."""
 
@@ -414,6 +430,19 @@ class EventController:
         self._flush_assistant()
         self._stop_flush_timer()
         self._post(AssistantMessageEnd(text))
+        # Keep the context reading live THROUGH the turn, not just after it.
+        # One agentic turn is many model calls; each reports the context size
+        # it ran against, and that is the only signal the band can move on
+        # while the agent is still working.
+        message_usage = getattr(event.message, "usage", None)
+        if message_usage is not None:
+            size = (
+                getattr(message_usage, "context_tokens", None)
+                or getattr(message_usage, "input_tokens", 0)
+                or 0
+            )
+            if size:
+                self._post(ContextUsageReported(int(size)))
 
     def _handle_tool_compose(self, event: ToolCallComposeEvent) -> None:
         self._post(ToolComposing(event))

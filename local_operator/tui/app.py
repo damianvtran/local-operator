@@ -48,6 +48,7 @@ from local_operator.tui.events import (
     AssistantMessageStart,
     CompactionEnded,
     CompactionStarted,
+    ContextUsageReported,
     EventController,
     NoticePosted,
     RetryEnded,
@@ -134,6 +135,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("help", "List all commands"),
     SlashCommand("exit", "Quit the app", aliases=("quit",)),
     SlashCommand("clear", "Clear the transcript (history is untouched)"),
+    SlashCommand("new", "Start a new conversation"),
     SlashCommand("reload", "Retry starting the session"),
     SlashCommand(
         "resume",
@@ -310,7 +312,7 @@ class OperatorApp(App[None]):
         session_factory: Callable[[], Awaitable[SessionProtocol]],
         theme_name: str = "dark",
         provider_controller: Any | None = None,
-        resume_factory: Callable[[str], Awaitable[SessionProtocol]] | None = None,
+        resume_factory: Callable[[str | None], Awaitable[SessionProtocol]] | None = None,
     ) -> None:
         super().__init__()
         theme_mod.set_theme(theme_name)  # dark is the product's island night
@@ -319,6 +321,11 @@ class OperatorApp(App[None]):
         # (the CLI wires it to ``create_session`` with ``args.resume`` mutated)
         # and reloads — the "proper /resume command" the app is asked for. A
         # bare ``/resume`` lists recent sessions instead.
+        #
+        # ``None`` is a first-class argument, not a missing one: ``create_session``
+        # branches on ``args.resume is not None``, so handing it None asks for a
+        # BRAND NEW conversation through the identical path. That is what backs
+        # ``/new``, and it is why this is one factory rather than two.
         self._resume_factory = resume_factory
         # Full provider/model/credential/usage facade behind the slash
         # commands; ``None`` degrades /provider /usage /model-switch to
@@ -621,10 +628,24 @@ class OperatorApp(App[None]):
         ``--resume`` restores the conversation into LLM context but the TUI
         transcript is a separate surface, so without this the app opens on a
         blank screen that reads as a failed resume even though the model sees
-        everything. This mounts the prior user prompts and assistant replies as
-        blocks, so the resumed session looks resumed. Tool results and the
-        compaction summary are deliberately skipped (too noisy to replay as
-        blocks; the conversation reads cleanest as prompts + replies).
+        everything.
+
+        This replays what the conversation WAS: prompts, assistant prose, and
+        every tool call with the result it got. The previous version rendered
+        prompts plus assistant messages that carried no tool calls, on the
+        theory that tool rows were too noisy to replay — which sounded
+        reasonable and was measurably wrong. An agent turn is
+        ``text + tool_calls`` in ONE message, so ``not tool_calls`` excluded the
+        prose too: on a real 396-message conversation the old rule mounted
+        **6 blocks** — 5 prompts and 1 reply — dropping 74 assistant messages
+        that had text, all 215 tool calls and all 215 results. What resumed on
+        screen was a list of questions with no answers, which reads as a
+        session that never ran rather than one being continued.
+
+        Tool rows are replayed settled, never running, and with no duration:
+        see :meth:`ToolCard.restore`. A call whose result is missing from the
+        transcript is shown ``interrupted`` rather than complete — that is what
+        a session killed mid-turn actually left behind.
 
         Guarded: a fresh session has an empty history, and a /clear already
         retired the splash — this must not fight either.
@@ -633,23 +654,51 @@ class OperatorApp(App[None]):
             history = list(session.history())
         except Exception:
             return  # defensive: reduced hosts may lack the accessor
+
+        # Results are keyed by the call they answer, and a tool message can sit
+        # several messages after its call (one assistant turn issues a batch).
+        # Indexing first is what lets each call render WITH its outcome instead
+        # of as a second, orphaned row.
+        results: dict[str, Any] = {}
+        for message in history:
+            if getattr(message, "role", None) == "tool":
+                call_id = getattr(message, "tool_call_id", None)
+                if call_id:
+                    results[call_id] = message
+
         appended = False
         for message in history:
             role = getattr(message, "role", None)
-            text = getattr(message, "text", None) if hasattr(message, "text") else None
-            if isinstance(text, str):
-                text = text.strip()
-            if not text:
-                continue  # tool-use or empty assistant message — no prose
+            if role == "tool":
+                continue  # already rendered beside the call that asked for it
+            text = getattr(message, "text", "") or ""
+            text = text.strip() if isinstance(text, str) else ""
             if role == "user":
-                self._append_block(UserBlock(text))
-                appended = True
-            elif role == "assistant" and not getattr(message, "tool_calls", None):
+                if text:
+                    self._append_block(UserBlock(text))
+                    appended = True
+                continue
+            if role != "assistant":
+                continue
+            if text:
                 block = AssistantBlock()
                 block.update_text(text)
                 block.finalize_text()
                 self._append_block(block)
                 appended = True
+            tool_calls = getattr(message, "tool_calls", None) or []
+            for call in tool_calls:
+                self._replay_tool_call(call, results)
+                appended = True
+            if not text and not tool_calls:
+                # An assistant message with neither prose nor a call is a turn
+                # that FAILED. Skipping it is what left a resumed session
+                # showing a prompt and nothing after it, with no hint that the
+                # answer had errored rather than never been asked for.
+                if getattr(message, "stop_reason", None) in ("error", "aborted"):
+                    reason = "turn failed" if message.stop_reason == "error" else "interrupted"
+                    self._append_block(NoticeBlock(reason, "error"))
+                    appended = True
         if appended:
             # Replay is mounted as one synchronous batch, before Textual can
             # remeasure the growing container between blocks. Pin the final
@@ -657,6 +706,39 @@ class OperatorApp(App[None]):
             # inherit a stale pre-replay extent and open above its latest turn.
             transcript = self.query_one(TranscriptView)
             transcript.call_after_refresh(transcript.scroll_end, animate=False)
+
+    def _replay_tool_call(self, call: Any, results: dict[str, Any]) -> None:
+        """Mount one settled tool row for a call from a previous session.
+
+        The card is built exactly as a live one is — same constructor, same
+        summary derivation from the arguments — so a resumed row is
+        indistinguishable from the row the user watched run, apart from the
+        duration the transcript never recorded.
+        """
+        card = ToolCard(
+            getattr(call, "id", "") or "",
+            getattr(call, "name", "") or "",
+            getattr(call, "arguments", None) or {},
+        )
+        self._append_block(card)
+        result = results.get(getattr(call, "id", "") or "")
+        if result is None:
+            # No result recorded: the session ended between the call and its
+            # answer. Showing it as complete would invent an outcome.
+            card.restore(state="interrupted")
+            return
+        result_text = getattr(result, "text", "") or ""
+        payload = getattr(result, "provider_payload", None) or {}
+        details = payload.get("details") if isinstance(payload, dict) else None
+        if getattr(result, "is_error", False):
+            card.restore(
+                state="error",
+                result_text=result_text,
+                details=details,
+                error=_first_line(result_text),
+            )
+        else:
+            card.restore(state="success", result_text=result_text, details=details)
 
     def _on_boot_failed(self, error: Exception) -> None:
         """Report a session that never constructed, WITHOUT retiring the splash.
@@ -801,6 +883,31 @@ class OperatorApp(App[None]):
             return
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         notice(f"resuming session {resume_id}…")
+        self.run_worker(
+            self._reload_session(replace_transcript=True), thread=False, group="session"
+        )
+
+    def _cmd_new(self, notice: NoticeFn) -> None:
+        """``/new`` — start a fresh conversation without leaving the app.
+
+        There was no way to do this: ``/clear`` wipes the SCREEN and keeps the
+        conversation the model sees, ``/reload`` reboots the SAME conversation,
+        and ``/resume`` moves to a different existing one. Starting genuinely
+        fresh meant quitting and relaunching, which also throws away the
+        terminal state, the MCP connections and the warm imports.
+
+        Implemented through the resume factory with ``None`` rather than a
+        second factory: ``create_session`` already branches on
+        ``args.resume is not None``, so this is the same code path a cold
+        launch takes, which is exactly what "new session" should mean. The
+        transcript is replaced for the same reason ``/resume`` replaces it —
+        the visible ledger must not outlive the conversation it describes.
+        """
+        if self._resume_factory is None:
+            notice("new session unavailable: no session-capable launcher", "warning")
+            return
+        self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
+        notice("starting a new session…")
         self.run_worker(
             self._reload_session(replace_transcript=True), thread=False, group="session"
         )
@@ -1736,6 +1843,8 @@ class OperatorApp(App[None]):
         elif command == "/reload":
             notice("reloading session…")
             self.run_worker(self._reload_session(), thread=False, group="session")
+        elif command == "/new":
+            self._cmd_new(notice)
         elif command == "/resume":
             self._cmd_resume(arg, notice)
         elif command == "/model":
@@ -3013,6 +3122,22 @@ class OperatorApp(App[None]):
         block.update_text(message.text)
         block.finalize_text()
         self._streaming_block = None
+
+    def on_context_usage_reported(self, message: ContextUsageReported) -> None:
+        """Move the context reading DURING a turn, not only when it ends.
+
+        An agentic turn is many model calls over many minutes, and each one
+        reports the context it ran against. Waiting for ``agent_end`` meant the
+        band showed the pre-turn size for the whole time the agent was working
+        — the exact stretch a user watches it for. Reported as exact, because
+        it is the provider's own number.
+        """
+        assert self._status is not None
+        self._status.update(
+            context_tokens=message.context_tokens,
+            context_is_estimate=False,
+            context_window=_context_window(self._session),
+        )
 
     def on_tool_composing(self, message: ToolComposing) -> None:
         """Show the call the model is still dictating (TUI-026).

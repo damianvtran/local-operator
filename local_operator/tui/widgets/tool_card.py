@@ -553,6 +553,43 @@ class ToolCard(TranscriptBlock):
         self._refresh_row()
         self.finalize()
 
+    def restore(
+        self,
+        *,
+        state: str,
+        result_text: str = "",
+        details: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> None:
+        """Settle a card for a call that ran in a PREVIOUS session.
+
+        Separate from :meth:`mark_done` / :meth:`mark_failed` for one reason:
+        those three all compute ``_duration`` from ``self._started``, which for
+        a row mounted during replay is the moment the row was mounted. That is
+        not how long the tool took, it is how long ago the app painted the row,
+        and it renders as ``0.0s`` on every card in a resumed conversation.
+        The transcript does not record durations, so replay leaves
+        ``_duration`` at ``None`` and the column paints blank.
+
+        ``state`` is ``"success"``, ``"error"`` or ``"interrupted"`` — the last
+        for a call whose result is not in the transcript, which is what a
+        session killed mid-turn leaves behind.
+        """
+        self._stop_composing()
+        self._state = state
+        self.remove_class("tool-running")
+        if state == "error":
+            self._error = _strip_control_sequences(" ".join(error.split())) or "error"
+            self._absorb_result(result_text or error, details)
+            self.add_class("tool-error")
+        elif state == "interrupted":
+            self.add_class("tool-interrupted")
+        else:
+            self._absorb_result(result_text, details)
+            self.add_class("tool-success")
+        self._refresh_row()
+        self.finalize()
+
     def set_composing(self, argument_bytes: int, tool_name: str = "") -> None:
         """Show that the model is still WRITING this call's arguments.
 
@@ -1302,18 +1339,27 @@ class ToolCard(TranscriptBlock):
         has stopped being a ledger entry.
         """
         dim = Style(color=theme_mod.semantic_color("dim"))
-        elapsed = self._duration or 0.0
-        # Sub-second precision where it distinguishes tools, and the SAME
-        # grammar as everything else past a minute: the composing row above this
-        # one says `1m57s`, and `117s` two seconds later on the same row is the
-        # app disagreeing with itself about how it writes a duration.
-        if elapsed < 10:
-            duration = f"{elapsed:.1f}s"
-        elif elapsed < 60:
-            duration = f"{elapsed:.0f}s"
+        if self._duration is None:
+            # A REPLAYED row: the transcript records what a tool did, never how
+            # long it took. `self._duration or 0.0` rendered that as `0.0s`,
+            # which is not a missing number, it is a wrong one — it says every
+            # tool in a resumed conversation returned instantly. Blank keeps
+            # the column aligned and says nothing, which is the truth.
+            duration = " " * DURATION_COL
         else:
-            duration = format_duration(elapsed)
-        duration = duration.rjust(DURATION_COL)
+            elapsed = self._duration
+            # Sub-second precision where it distinguishes tools, and the SAME
+            # grammar as everything else past a minute: the composing row above
+            # this one says `1m57s`, and `117s` two seconds later on the same
+            # row is the app disagreeing with itself about how it writes a
+            # duration.
+            if elapsed < 10:
+                duration = f"{elapsed:.1f}s"
+            elif elapsed < 60:
+                duration = f"{elapsed:.0f}s"
+            else:
+                duration = format_duration(elapsed)
+            duration = duration.rjust(DURATION_COL)
         if self._state == "success":
             # D12: success is quiet — check + duration both dim, no reason.
             return [(f"{ICON_SUCCESS} ", dim), (duration, dim)]

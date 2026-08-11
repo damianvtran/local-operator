@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.harness.types import NoticeEvent
+from local_operator.harness.types import NoticeEvent, TextContent
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.tui.app import (
     BOOT_LAYOUT_CLASS,
@@ -2205,13 +2205,17 @@ async def test_a_failing_turn_shows_the_providers_own_error() -> None:
 
 
 def _resume_factory(
-    boots: list[str],
+    boots: list[str | None],
     history_text: str = "resumed history",
     assistant_text: str = "resumed answer",
 ):
-    """A resume factory that records the id it was asked to boot."""
+    """A resume factory that records the id it was asked to boot.
 
-    async def resume_factory(resume_id: str):
+    ``None`` is a real value here, not a missing one: it is what ``/new`` asks
+    for, and ``create_session`` reads it as "start a fresh conversation".
+    """
+
+    async def resume_factory(resume_id: str | None):
         boots.append(resume_id)
         session = FakeSession()
         session._history = [
@@ -2270,7 +2274,7 @@ async def test_a_bare_resume_opens_the_picker_naming_each_session(tmp_path, monk
     _seed_session(tmp_path, "aabbcc", prompt="Make an asteroids game")
 
     session = FakeSession()
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
@@ -2298,7 +2302,7 @@ async def test_choosing_in_the_picker_resumes_that_session(tmp_path, monkeypatch
     _seed_session(tmp_path, "aabbcc", prompt="the only session")
 
     session = FakeSession()
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
@@ -2321,7 +2325,7 @@ async def test_escaping_the_picker_resumes_nothing(tmp_path, monkeypatch) -> Non
     _seed_session(tmp_path, "aabbcc", prompt="the only session")
 
     session = FakeSession()
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
@@ -2344,7 +2348,7 @@ async def test_resume_id_rebinds_and_reloads(tmp_path, monkeypatch) -> None:
     _seed_session(tmp_path, "cafe01")
 
     session = FakeSession()
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
@@ -2380,7 +2384,7 @@ async def test_resume_replaces_the_visible_transcript(tmp_path, monkeypatch) -> 
         session.disposed = True
 
     session.dispose = dispose_with_terminal_event  # type: ignore[method-assign]
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots, "history from the resumed session"),
@@ -2416,7 +2420,7 @@ async def test_resume_long_history_opens_at_the_latest_turn(tmp_path, monkeypatc
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     _seed_session(tmp_path, "long01")
 
-    async def resume_factory(_resume_id: str):
+    async def resume_factory(_resume_id: str | None):
         resumed = FakeSession()
         resumed._history = [
             SimpleNamespace(
@@ -2458,7 +2462,7 @@ async def test_resume_at_latest_passes_the_sentinel_verbatim(tmp_path, monkeypat
     _seed_session(tmp_path, "aabbcc")
 
     session = FakeSession()
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
@@ -3024,3 +3028,228 @@ async def test_a_dead_sessions_turn_cannot_restore_its_context() -> None:
 
         assert _ctx_tokens(app) == 20_000, "a dead session's count was adopted"
         assert _ctx_estimate(app) is True
+
+
+def _resumed(*messages: Any) -> Any:
+    """A session whose ``history()`` is the given messages."""
+
+    class _Resumed(FakeSession):
+        def history(self) -> list[Any]:
+            return list(messages)
+
+    return _Resumed()
+
+
+def _blocks_by_type(app: OperatorApp) -> dict[str, int]:
+    from local_operator.tui.widgets.assistant import AssistantBlock as _AB
+    from local_operator.tui.widgets.tool_card import ToolCard as _TC
+    from local_operator.tui.widgets.transcript import NoticeBlock as _NB
+    from local_operator.tui.widgets.transcript import UserBlock as _UB
+
+    counts = {"user": 0, "assistant": 0, "tool": 0, "notice": 0}
+    for block in app.query_one(TranscriptView).blocks():
+        if isinstance(block, _UB):
+            counts["user"] += 1
+        elif isinstance(block, _AB):
+            counts["assistant"] += 1
+        elif isinstance(block, _TC):
+            counts["tool"] += 1
+        elif isinstance(block, _NB):
+            counts["notice"] += 1
+    return counts
+
+
+class TestResumeReplaysTheWholeConversation:
+    """What ``--resume`` puts back on screen.
+
+    The old rule was "prompts, plus assistant messages carrying no tool calls".
+    An agent turn is text AND tool_calls in ONE message, so that excluded the
+    prose too: on a real 396-message session it mounted 6 blocks and dropped 74
+    assistant messages, 215 calls and 215 results. The screen read as a list of
+    questions nobody had answered.
+    """
+
+    @pytest.mark.asyncio
+    async def test_prose_that_accompanies_a_tool_call_is_kept(self) -> None:
+        from local_operator.harness.types import Message, ToolCall
+
+        session = _resumed(
+            Message.user("find the bug"),
+            Message(
+                role="assistant",
+                content=[TextContent(text="Reading the file first.")],
+                tool_calls=[ToolCall(id="c1", name="read", arguments={"path": "a.py"})],
+            ),
+            Message(
+                role="tool",
+                content=[TextContent(text="file contents")],
+                tool_call_id="c1",
+                tool_name="read",
+            ),
+            Message.assistant("Found it."),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["tool"] == 1)
+            counts = _blocks_by_type(app)
+        # The old rule scored assistant=1 here; the turn's own sentence was lost.
+        assert counts == {"user": 1, "assistant": 2, "tool": 1, "notice": 0}
+
+    @pytest.mark.asyncio
+    async def test_a_tool_call_is_paired_with_its_result(self) -> None:
+        """Results can arrive several messages after the call that asked for
+        them, so they are indexed rather than matched positionally."""
+        from local_operator.harness.types import Message, ToolCall
+        from local_operator.tui.widgets.tool_card import ToolCard
+
+        session = _resumed(
+            Message(
+                role="assistant",
+                tool_calls=[
+                    ToolCall(id="a", name="read", arguments={"path": "x"}),
+                    ToolCall(id="b", name="bash", arguments={"command": "ls"}),
+                ],
+            ),
+            Message(
+                role="tool",
+                content=[TextContent(text="boom")],
+                tool_call_id="b",
+                tool_name="bash",
+                is_error=True,
+            ),
+            Message(
+                role="tool", content=[TextContent(text="ok")], tool_call_id="a", tool_name="read"
+            ),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["tool"] == 2)
+            cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert [c.tool_name for c in cards] == ["read", "bash"], "call order, not result order"
+        assert [c._state for c in cards] == ["success", "error"]
+
+    @pytest.mark.asyncio
+    async def test_a_call_with_no_result_is_interrupted_not_complete(self) -> None:
+        """A session killed mid-turn leaves a call with no answer. Rendering it
+        as done would invent an outcome that never happened."""
+        from local_operator.harness.types import Message, ToolCall
+        from local_operator.tui.widgets.tool_card import ToolCard
+
+        session = _resumed(
+            Message(
+                role="assistant",
+                tool_calls=[ToolCall(id="orphan", name="bash", arguments={"command": "sleep 99"})],
+            ),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["tool"] == 1)
+            card = next(
+                b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)
+            )
+        assert card._state == "interrupted"
+
+    @pytest.mark.asyncio
+    async def test_a_replayed_card_reports_no_duration(self) -> None:
+        """The transcript records what a tool did, never how long it took.
+        ``0.0s`` on every row is a wrong number, not a missing one."""
+        from local_operator.harness.types import Message, ToolCall
+        from local_operator.tui.widgets.tool_card import ToolCard
+
+        session = _resumed(
+            Message(role="assistant", tool_calls=[ToolCall(id="c", name="read", arguments={})]),
+            Message(role="tool", content=[TextContent(text="ok")], tool_call_id="c"),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["tool"] == 1)
+            card = next(
+                b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)
+            )
+            rendered = card._build_row(100).plain
+        assert card._duration is None
+        assert "0.0s" not in rendered, rendered
+
+    @pytest.mark.asyncio
+    async def test_a_failed_turn_says_so_instead_of_vanishing(self) -> None:
+        """The reported symptom: two identical prompts and nothing between them.
+
+        The turn had errored, and an assistant message with neither prose nor a
+        call was skipped — so the screen implied the second prompt was a
+        duplicate rather than a retry.
+        """
+        from local_operator.harness.types import Message
+
+        session = _resumed(
+            Message.user("do the thing"),
+            Message(role="assistant", stop_reason="error"),
+            Message.user("do the thing"),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["notice"] == 1)
+            counts = _blocks_by_type(app)
+        assert counts["user"] == 2 and counts["notice"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_session_still_replays_nothing(self) -> None:
+        """The splash must not be retired by an empty history."""
+        app = OperatorApp(lambda: _factory(_resumed()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(10):
+                await pilot.pause()
+            assert _blocks_by_type(app) == {"user": 0, "assistant": 0, "tool": 0, "notice": 0}
+
+
+@pytest.mark.asyncio
+async def test_new_starts_a_fresh_conversation() -> None:
+    """``/new`` had no equivalent: ``/clear`` keeps the conversation the model
+    sees, ``/reload`` reboots the same one, ``/resume`` moves to another
+    existing one. Starting fresh meant quitting the app."""
+    boots: list[str | None] = []
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_resume_factory(boots))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/new")
+        assert await _settle(pilot, lambda: boots == [None])
+    # None, not "" and not a sentinel id: create_session branches on
+    # `resume is not None`, so this is the cold-launch path.
+    assert boots == [None]
+
+
+@pytest.mark.asyncio
+async def test_new_replaces_the_visible_ledger() -> None:
+    """The transcript must not outlive the conversation it describes."""
+    boots: list[str | None] = []
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_resume_factory(boots))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._append_block(NoticeBlock("from the old conversation", "info"))
+        assert any(
+            "old conversation" in _renderable_plain(getattr(b, "renderable", ""))
+            for b in app.query_one(TranscriptView).blocks()
+        )
+        app._run_slash_command("/new")
+        assert await _settle(pilot, lambda: boots == [None])
+        for _ in range(10):
+            await pilot.pause()
+        assert not any(
+            "old conversation" in _renderable_plain(getattr(b, "renderable", ""))
+            for b in app.query_one(TranscriptView).blocks()
+        )
+
+
+@pytest.mark.asyncio
+async def test_new_without_a_capable_launcher_says_so() -> None:
+    """Embedders may supply no session factory beyond the first."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/new")
+        for _ in range(6):
+            await pilot.pause()
+        text = "\n".join(
+            _renderable_plain(getattr(b, "renderable", ""))
+            for b in app.query_one(TranscriptView).blocks()
+        )
+    assert "unavailable" in text

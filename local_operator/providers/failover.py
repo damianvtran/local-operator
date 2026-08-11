@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import logging
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -247,6 +248,10 @@ async def resolve_next_key(
 # Tier 2 — model fallback chains
 # ---------------------------------------------------------------------------
 
+#: Config problems are reported to the LOG, never the terminal: this module runs
+#: under a full-screen TUI that owns stderr.
+logger = logging.getLogger("local_operator.providers.failover")
+
 DEFAULT_CHAIN_KEY = "default"
 
 
@@ -337,6 +342,90 @@ def _same_credential_retry_allowed(
     return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_USAGE_RETRIES)
 
 
+def _normalize_chain_entry(entry: Any, chain_key: str) -> str | None:
+    """One fallback-chain entry as a ``provider/model`` selector, or ``None``.
+
+    The declared shape is a list of selector STRINGS, and until this existed
+    that shape was assumed rather than checked: ``from_settings`` validated
+    that ``fallbackChains`` was a mapping and then trusted everything inside
+    it. A config written with structured entries —
+
+    .. code-block:: yaml
+
+        fallbackChains:
+          anthropic/claude-opus-5:
+            - provider: anthropic
+              model: claude-opus-5
+            - provider: openai
+              model: gpt-5.4
+
+    — parsed cleanly, resolved cleanly, and then died in
+    :func:`expand_fallback_candidates` with ``'dict' object has no attribute
+    'endswith'``. Not at startup, where a config error belongs: on EVERY turn,
+    because that is the first moment a fallback chain is walked. The user sees
+    one red line naming a string method and no way to connect it to a YAML
+    block they wrote weeks ago.
+
+    So the mapping form is accepted and normalized rather than rejected. It
+    carries exactly the information the selector does, the intent is
+    unambiguous, and refusing it would turn a crash into silence — the same
+    config, still not doing what it says, just quietly.
+
+    ``None`` means "not something this can turn into a selector"; the caller
+    warns and drops that entry rather than letting it reach the wire.
+    """
+    if isinstance(entry, str):
+        return entry.strip() or None
+    if isinstance(entry, Mapping):
+        provider = str(entry.get("provider", "") or "").strip()
+        model = str(entry.get("model", entry.get("model_id", "")) or "").strip()
+        if provider and model:
+            extra = sorted(set(entry) - {"provider", "model", "model_id"})
+            if extra:
+                # Named rather than swallowed. A chain entry that silently
+                # drops half of what the user wrote is the next bug report:
+                # `effort` in particular reads like it should re-tier the
+                # fallback, and ``ModelSpec`` has nowhere to put it today.
+                logger.warning(
+                    "retry.fallbackChains[%s]: ignoring unsupported key(s) %s on entry %s/%s"
+                    " — only provider/model are honoured",
+                    chain_key,
+                    ", ".join(extra),
+                    provider,
+                    model,
+                )
+            return f"{provider}/{model}"
+    return None
+
+
+def _normalize_chains(chains: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Coerce the configured chains to ``{selector: [selector, ...]}``.
+
+    Follows the convention the session factory uses for its compaction block:
+    a malformed value degrades with a warning and never blocks. A bad chain is
+    a preference about what to do when a model fails — losing it must not be
+    more disruptive than the failure it was written to handle.
+    """
+    normalized: dict[str, list[str]] = {}
+    for key, raw in chains.items():
+        if not isinstance(key, str):
+            logger.warning("retry.fallbackChains: ignoring non-string key %r", key)
+            continue
+        if isinstance(raw, str) or not isinstance(raw, Sequence):
+            logger.warning("retry.fallbackChains[%s]: expected a list, got %s", key, type(raw))
+            continue
+        entries = []
+        for entry in raw:
+            selector = _normalize_chain_entry(entry, key)
+            if selector is None:
+                logger.warning("retry.fallbackChains[%s]: ignoring unreadable entry %r", key, entry)
+                continue
+            entries.append(selector)
+        if entries:
+            normalized[key] = entries
+    return normalized
+
+
 @dataclasses.dataclass(frozen=True)
 class RetrySettings:
     """The ``values.retry.*`` config surface (defaults from the established harness)."""
@@ -360,7 +449,9 @@ class RetrySettings:
             max_retries=int(retry.get("maxRetries", retry.get("max_retries", 10))),
             base_delay_ms=int(retry.get("baseDelayMs", retry.get("base_delay_ms", 500))),
             model_fallback=bool(retry.get("modelFallback", retry.get("model_fallback", True))),
-            fallback_chains=chains,
+            # Normalized HERE, at the one place config crosses into the module,
+            # so every consumer downstream can rely on the declared type.
+            fallback_chains=_normalize_chains(chains),
         )
 
 

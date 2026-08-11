@@ -17,7 +17,7 @@ async def run_tui(
     session_factory: Callable[[], Awaitable[SessionProtocol]],
     theme_name: str = "dark",
     provider_controller: Any | None = None,
-    resume_factory: Callable[[str], Awaitable[SessionProtocol]] | None = None,
+    resume_factory: Callable[[str | None], Awaitable[SessionProtocol]] | None = None,
 ) -> int:
     """Run the full-screen TUI to completion; return a process exit code.
 

@@ -549,3 +549,86 @@ async def test_abort_interrupts_backoff_sleep() -> None:
         ):
             pass
     await task
+
+
+class TestChainsAreNormalizedAtTheBoundary:
+    """A config that is wrong in a way YAML cannot catch must not kill turns.
+
+    ``fallbackChains`` declares ``Sequence[str]``, and the parser used to check
+    only that the outer value was a mapping. A config written with structured
+    entries therefore parsed, resolved, and died in
+    ``expand_fallback_candidates`` with ``'dict' object has no attribute
+    'endswith'`` — on EVERY turn, because the selector list is built eagerly at
+    the top of ``stream_with_failover`` before any provider is called.
+    """
+
+    def test_the_mapping_form_is_accepted_not_merely_survived(self) -> None:
+        """The exact config that reproduced the crash, from a real machine."""
+        settings = RetrySettings.from_settings(
+            {
+                "retry": {
+                    "fallbackChains": {
+                        "anthropic/claude-opus-5": [
+                            {"effort": "low", "model": "claude-opus-5", "provider": "anthropic"},
+                            {"effort": "high", "model": "gpt-5.4", "provider": "openai"},
+                        ]
+                    }
+                }
+            }
+        )
+        assert settings.fallback_chains == {
+            "anthropic/claude-opus-5": ["anthropic/claude-opus-5", "openai/gpt-5.4"]
+        }
+        # And it reaches the wire as the user plainly intended.
+        chain = resolve_chain("anthropic/claude-opus-5", settings.fallback_chains)
+        assert chain is not None
+        assert expand_fallback_candidates("anthropic/claude-opus-5", chain) == ["openai/gpt-5.4"]
+
+    def test_an_unsupported_key_is_reported_rather_than_swallowed(self, caplog) -> None:
+        """``effort`` has nowhere to go — ``ModelSpec`` has no such field. A
+        chain that quietly drops half of what the user wrote is the next bug
+        report, so it is named in the log."""
+        with caplog.at_level("WARNING"):
+            RetrySettings.from_settings(
+                {
+                    "retry": {
+                        "fallbackChains": {"a/b": [{"provider": "x", "model": "y", "effort": 1}]}
+                    }
+                }
+            )
+        assert any("effort" in record.getMessage() for record in caplog.records)
+
+    def test_a_string_chain_is_untouched(self) -> None:
+        """The declared form keeps working, byte for byte."""
+        settings = RetrySettings.from_settings(
+            {"retry": {"fallbackChains": {"default": ["a/b", "c/*"]}}}
+        )
+        assert settings.fallback_chains == {"default": ["a/b", "c/*"]}
+
+    def test_junk_degrades_instead_of_raising(self) -> None:
+        """A preference about what to do when a model fails must not be more
+        disruptive than the failure it was written to handle."""
+        settings = RetrySettings.from_settings(
+            {
+                "retry": {
+                    "fallbackChains": {
+                        "a/b": [None, 42, {"provider": "x"}, {"model": "y"}, "", "  "],
+                        "c/d": "not-a-list",
+                        "e/f": ["ok/one"],
+                    }
+                }
+            }
+        )
+        # Every unreadable entry dropped, the readable chain kept, nothing raised.
+        assert settings.fallback_chains == {"e/f": ["ok/one"]}
+
+    def test_a_wholly_bad_chain_cannot_reach_the_wire(self) -> None:
+        """The regression that mattered: whatever the config says, the selectors
+        handed to ``expand_fallback_candidates`` are strings."""
+        settings = RetrySettings.from_settings(
+            {"retry": {"fallbackChains": {"a/b": [{"nonsense": True}]}}}
+        )
+        chain = resolve_chain("a/b", settings.fallback_chains)
+        assert chain is None  # dropped entirely rather than half-formed
+        for entries in settings.fallback_chains.values():
+            assert all(isinstance(entry, str) for entry in entries)
