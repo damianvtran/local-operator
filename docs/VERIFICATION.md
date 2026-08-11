@@ -1367,9 +1367,35 @@ Two real `claude-opus-5` turns, same 7k-token prompt, same app:
 Both are correct for their case, and neither was distinguishable before: the old
 arithmetic priced input and output only. Anthropic reports `input_tokens`
 EXCLUDING its cache buckets while OpenAI and Gemini report a total prompt count
-with the cached part as a subset, so `cost_for_usage` keys on the wire format
-and adds or subtracts accordingly — pricing them side by side would double-charge
-an OpenAI cached prefix at 11x its real rate.
+with the cached part as a subset, so the three buckets are made disjoint before
+they are priced — Anthropic's are already disjoint and are billed alongside the
+input count, OpenAI's cached part is subtracted out of it. Pricing them side by
+side without that division would double-charge an OpenAI cached prefix at 11x its
+real rate.
+
+### Making cache prices billable exposed 19 rows of bad cache data
+
+Found in review, and caused by this change rather than merely revealed by it: at
+`32d36ed` `calculate_cost` read only `input_price` and `output_price`, so a
+nonsense `cache_reads_price` was inert data. Pricing the cache buckets made 19
+rows chargeable that had never been charged, all of them in the expensive
+direction — a cache HIT costing at least as much as reading the token fresh,
+which is the inverse of what caching is for.
+
+| Rows | Was | Cause | Now |
+|---|---|---|---|
+| 5 Claude (3.7 Sonnet ×2, 3.5 Sonnet, 3.5 Haiku, 3 Haiku) | `cache_reads_price == input_price` | the "no separate rate known" placeholder | Anthropic's published rate: 0.1x base, or the per-model figure where the page gives one (3.5 Haiku $0.08) |
+| 14 Qwen | `cache_writes_price == input_price`, `cache_reads_price == output_price` | the four price fields filled in the order (input, output, input, output) | `None` — Alibaba publishes no cache rate and all 14 are `supports_prompt_cache=False` |
+
+`qwen-max` was the worst: $9.60/MTok to re-read a token it charges $2.40 to read
+the first time. Corroborated where a second source exists —
+`anthropic/claude-3-haiku` in the OpenRouter catalogue quotes `cr=0.03` against
+the 0.1x rule's 0.025, and `cw=0.3` matching the row exactly.
+
+`test_no_cache_read_costs_as_much_as_a_fresh_input_token` now fails the build and
+names any row that reintroduces it, in the same shape as the zero-price guard.
+The lesson generalises: making a dormant field load-bearing is a data audit, not
+just a code change.
 
 ### The aggregate, live
 

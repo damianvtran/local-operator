@@ -83,6 +83,40 @@ def test_no_unexplained_placeholder_prices() -> None:
     )
 
 
+def test_no_cache_read_costs_as_much_as_a_fresh_input_token() -> None:
+    """A cache hit must be cheaper than reading the token for the first time.
+
+    Otherwise caching is a cost, which is backwards on its face — Anthropic's own
+    published multiplier is 0.1x base input, and no provider has ever charged a
+    premium for a hit.
+
+    This class of bad data used to be INERT: `calculate_cost` took input and output
+    only, so a nonsense `cache_reads_price` sat in the registry unread. Pricing the
+    cache buckets made it billable, and it would have over-billed exactly the
+    warm-cache turns this agent runs all day. Nineteen rows were wrong when the
+    guard was written: five Claude rows using `cache_reads_price = input_price` as
+    a "no separate rate known" placeholder, and fourteen Qwen rows that had the
+    four price fields filled in the order (input, output, input, output), making a
+    cached read cost up to 4x a fresh one.
+
+    ``None`` is the right value when a provider publishes no cache rate;
+    `calculate_cost` falls back to the input price for it, which is wrong by the
+    unknown discount rather than wrong in the expensive direction.
+    """
+    offenders = [
+        f"{label} (input {info.input_price}, cache read {info.cache_reads_price})"
+        for label, info in _static_rows()
+        if info.cache_reads_price is not None
+        and info.input_price
+        and info.cache_reads_price >= info.input_price
+    ]
+    assert not offenders, (
+        "these rows charge as much or more to read a CACHED token as a fresh one, "
+        f"which now bills real money: {offenders}. Use the provider's published "
+        "cache rate, or None if it publishes none \u2014 never the input or output price."
+    )
+
+
 def test_unpriced_exemptions_have_not_rotted() -> None:
     """An exemption for a row that no longer exists, or is now priced, is stale."""
     by_label = {label: info for label, info in _static_rows()}
@@ -404,10 +438,12 @@ def test_calculate_cost_keeps_its_legacy_two_count_contract() -> None:
     assert calculate_cost(_priced(), 1_000_000, 1_000_000) == pytest.approx(110.0)
 
 
-def test_anthropic_usage_adds_cache_tokens_to_input() -> None:
+def test_anthropic_cache_tokens_are_billed_alongside_input_not_within_it() -> None:
     """Anthropic reports ``input_tokens`` EXCLUDING its cache buckets.
 
-    Dropping them undercounts a warm agent turn by most of its input: prompt
+    So the three buckets are disjoint and each is priced at its own rate, with
+    nothing added to or subtracted from the input count. Dropping the cache
+    buckets would undercount a warm agent turn by most of its input: prompt
     caching is on and the cached prefix is the bulk of the prompt.
     """
     usage = Usage(

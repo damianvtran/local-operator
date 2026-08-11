@@ -575,7 +575,7 @@ anthropic_models: Dict[str, ModelInfo] = {
         input_price=3.0,
         output_price=15.0,
         cache_writes_price=3.75,
-        cache_reads_price=3.0,
+        cache_reads_price=0.30,  # $0.30 / MTok (0.1x base)
         description=(
             "Anthropic's latest and most powerful model for coding and agentic "
             "tasks.  Latest version."
@@ -592,7 +592,7 @@ anthropic_models: Dict[str, ModelInfo] = {
         input_price=3.0,
         output_price=15.0,
         cache_writes_price=3.75,
-        cache_reads_price=3.0,
+        cache_reads_price=0.30,  # $0.30 / MTok (0.1x base)
         description=(
             "Anthropic's latest and most powerful model for coding and agentic "
             "tasks.  Snapshot from February 2025."
@@ -609,7 +609,7 @@ anthropic_models: Dict[str, ModelInfo] = {
         input_price=3.0,
         output_price=15.0,
         cache_writes_price=3.75,
-        cache_reads_price=3.0,
+        cache_reads_price=0.30,  # $0.30 / MTok (0.1x base)
         description="Anthropic's latest balanced model with excellent performance",
         recommended=True,
     ),
@@ -623,7 +623,7 @@ anthropic_models: Dict[str, ModelInfo] = {
         input_price=0.8,
         output_price=4.0,
         cache_writes_price=1.0,
-        cache_reads_price=0.8,
+        cache_reads_price=0.08,  # $0.08 / MTok, published per-model
         description="Fast and efficient model for simpler tasks",
         recommended=False,
     ),
@@ -651,7 +651,7 @@ anthropic_models: Dict[str, ModelInfo] = {
         input_price=0.25,
         output_price=1.25,
         cache_writes_price=0.3,
-        cache_reads_price=0.3,
+        cache_reads_price=0.025,  # $0.025 / MTok (0.1x base)
         description="Fast and efficient model for simpler tasks",
         recommended=False,
     ),
@@ -1232,6 +1232,20 @@ deepseek_models: Dict[str, ModelInfo] = {
 }
 
 qwen_models: Dict[str, ModelInfo] = {
+    # No row here carries a cache price, and their absence is a correction rather
+    # than an omission. All 14 priced rows used to set
+    # `cache_writes_price = input_price` and `cache_reads_price = output_price` —
+    # the four price fields filled in the order (input, output, input, output),
+    # which is a transcription slip, not a rate. It made a cached read cost 2-4x a
+    # fresh input token, the exact inverse of what caching is; `qwen-max` billed
+    # $9.60/MTok to re-read a token it charges $2.40 to read the first time.
+    #
+    # It was inert until `cost_for_usage` began pricing cache buckets, so nothing
+    # had ever charged it. `None` is this registry's "unknown", which is the honest
+    # value: Alibaba publishes no cache rate for these, and every row here is
+    # `supports_prompt_cache=False`, so no cache token should ever reach the
+    # arithmetic in the first place. If one does, `calculate_cost` falls back to
+    # the input rate — wrong by the unknown discount rather than by 4x the wrong way.
     "qwen2.5-coder-32b-instruct": ModelInfo(
         id="qwen2.5-coder-32b-instruct",
         name="Qwen 2.5 Coder 32B Instruct",
@@ -1241,8 +1255,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=2.0,
         output_price=6.0,
-        cache_writes_price=2.0,
-        cache_reads_price=6.0,
         description="Specialized for code generation and understanding",
         recommended=False,
     ),
@@ -1255,8 +1267,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=2.0,
         output_price=6.0,
-        cache_writes_price=2.0,
-        cache_reads_price=6.0,
         description="Medium-sized code-specialized model",
         recommended=False,
     ),
@@ -1269,8 +1279,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.5,
         output_price=1.0,
-        cache_writes_price=0.5,
-        cache_reads_price=1.0,
         description="Efficient code-specialized model",
         recommended=False,
     ),
@@ -1283,8 +1291,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.5,
         output_price=1.0,
-        cache_writes_price=0.5,
-        cache_reads_price=1.0,
         description="Compact code-specialized model",
         recommended=False,
     ),
@@ -1297,8 +1303,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.0,
         output_price=0.0,
-        cache_writes_price=0.0,
-        cache_reads_price=0.0,
         description="Very compact code-specialized model",
         recommended=False,
     ),
@@ -1311,8 +1315,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.0,
         output_price=0.0,
-        cache_writes_price=0.0,
-        cache_reads_price=0.0,
         description="Smallest code-specialized model",
         recommended=False,
     ),
@@ -1325,8 +1327,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=3.5,
         output_price=7,
-        cache_writes_price=3.5,
-        cache_reads_price=7,
         description="Advanced code generation model",
         recommended=False,
     ),
@@ -1339,8 +1339,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.8,
         output_price=2,
-        cache_writes_price=0.8,
-        cache_reads_price=0.2,
         description="Balanced performance Qwen model",
         recommended=True,
     ),
@@ -1353,8 +1351,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.8,
         output_price=2,
-        cache_writes_price=0.8,
-        cache_reads_price=2,
         description="Fast and efficient Qwen model",
         recommended=False,
     ),
@@ -1367,8 +1363,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=2.4,
         output_price=9.6,
-        cache_writes_price=2.4,
-        cache_reads_price=9.6,
         description="Alibaba's most powerful Qwen model",
         recommended=False,
     ),
@@ -1381,8 +1375,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=3.5,
         output_price=7,
-        cache_writes_price=3.5,
-        cache_reads_price=7,
         description="Advanced code generation model",
         recommended=False,
     ),
@@ -1395,8 +1387,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.8,
         output_price=2,
-        cache_writes_price=0.8,
-        cache_reads_price=0.2,
         description="Balanced performance Qwen model",
         recommended=True,
     ),
@@ -1409,8 +1399,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=0.3,
         output_price=0.6,
-        cache_writes_price=0.3,
-        cache_reads_price=0.6,
         description="Fast and efficient Qwen model",
         recommended=False,
     ),
@@ -1423,8 +1411,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=2.4,
         output_price=9.6,
-        cache_writes_price=2.4,
-        cache_reads_price=9.6,
         description="Alibaba's most powerful Qwen model",
         recommended=True,
     ),
@@ -1437,8 +1423,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=3,
         output_price=9,
-        cache_writes_price=3,
-        cache_reads_price=9,
         description="Multimodal Qwen model with vision capabilities",
         recommended=False,
     ),
@@ -1451,8 +1435,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=3,
         output_price=9,
-        cache_writes_price=3,
-        cache_reads_price=9,
         description="Multimodal Qwen model with vision capabilities",
         recommended=False,
     ),
@@ -1465,8 +1447,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=1.5,
         output_price=4.5,
-        cache_writes_price=1.5,
-        cache_reads_price=4.5,
         description="Balanced multimodal Qwen model",
         recommended=False,
     ),
@@ -1479,8 +1459,6 @@ qwen_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=1.5,
         output_price=4.5,
-        cache_writes_price=1.5,
-        cache_reads_price=4.5,
         description="Balanced multimodal Qwen model",
         recommended=False,
     ),

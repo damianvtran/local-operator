@@ -78,6 +78,15 @@ def job_cost(job: Any, *, default_model_label: str | None = None) -> float | Non
     ``model_spec`` override, and a child that WAS overridden records its own
     label — so the two together price a mixed-model fan-out correctly.
 
+    MUST NOT BLOCK, and today does not: every path it takes is a memo hit or
+    pure arithmetic. It is called from the Textual event loop (`app.py`'s
+    `_harvest_subagent_costs`, on the 1 Hz poll), so anything added here that
+    can wait on I/O freezes the keyboard. The one hazard is indirect and
+    already bounded: `resolve_model_info` will consult a listing for a model id
+    it has not seen this TTL bucket, which is why callers that can be on a
+    hot paint path resolve off-thread instead (`subagent_panel.job_stats`).
+    A new caller on the event loop should assume the memo is cold.
+
     Duck-typed means the two field reads are guarded, not just the pricing. The
     TUI runs against embedder hosts and replayed ledgers whose job objects are
     not ``AsyncJob`` at all, so ``job.usage`` can be a property with real work
