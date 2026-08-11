@@ -12,7 +12,12 @@ from typing import Any
 import httpx
 import pytest
 
-from local_operator.harness.types import ChatRequest, ModelSpec, StreamEndEvent, StreamTextDelta
+from local_operator.harness.types import (
+    ChatRequest,
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+)
 from local_operator.model.configure import build_model_spec
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,

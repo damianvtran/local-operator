@@ -15,8 +15,8 @@ from typing import Any
 
 import pytest
 
-from local_operator.tui.app import OperatorApp
 from local_operator.session.protocol import CompactionOutcome
+from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.todo_panel import TodoPanel
 

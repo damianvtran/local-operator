@@ -1478,7 +1478,7 @@ def test_a_short_identity_summary_was_never_broken_and_must_stay_that_way() -> N
 
 
 def test_the_command_is_abbreviated_to_the_row_by_one_rule_in_every_state() -> None:
-    """"Abbreviated within the available horizontal line space" — and the SAME
+    """ "Abbreviated within the available horizontal line space" — and the SAME
     abbreviation running as settled, so a call cannot read as one thing while
     it works and another once it is done. A row that composed first must be
     indistinguishable from one that did not.
@@ -1577,7 +1577,7 @@ def test_the_in_progress_header_is_the_accent_the_running_icon_spends() -> None:
     assert _triplet(lit.color) == _triplet(Style(color=theme_mod.semantic_color("accent")).color)
 
 
-def test_an_expanded_running_card_can_still_be_closed_once_it_settles_empty()  -> None:
+def test_an_expanded_running_card_can_still_be_closed_once_it_settles_empty() -> None:
     """`can_expand` goes false under an OPEN card when a running call finishes
     having printed nothing — reachable only now that running cards open. A card
     stuck open is the same trap as one that will not open."""

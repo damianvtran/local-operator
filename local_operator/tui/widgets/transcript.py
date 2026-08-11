@@ -29,14 +29,18 @@ reads from the SHAPE of each mark, a spanning bar against a single glyph.
 from __future__ import annotations
 
 import time
-from typing import Callable, ClassVar, Literal
+from contextlib import contextmanager
+from typing import Callable, ClassVar, Iterator, Literal
 
 from rich.cells import cell_len
 from rich.console import Console, RenderableType
 from rich.style import Style
 from rich.text import Text
+from textual import events
 from textual.containers import ScrollableContainer
 from textual.content import Content
+from textual.geometry import Size
+from textual.scrollbar import ScrollDown, ScrollTo, ScrollUp
 from textual.selection import Selection
 from textual.widgets import Static
 
@@ -46,6 +50,87 @@ from local_operator.tui import theme as theme_mod
 #: The turn spine (D20): user prompts sit at the gutter; everything else
 #: indents two cells so the gutter column reads at a glance.
 SPINE_INDENT = 2
+
+#: Rows of slack that still count as "at the bottom". A last line half off the
+#: viewport is the bottom to a human, and the offsets involved are FLOATS — a
+#: fractional resting position (wheel deceleration, a scrollbar drag) makes
+#: `offset == max_scroll_y` false at a place the reader cannot tell apart from
+#: the end. Two rows is the smallest tolerance that survives both.
+TAIL_TOLERANCE_ROWS = 2
+
+
+class TailAnchor:
+    """The three-state sticky-bottom rule, shared by every streaming surface.
+
+    * **Following** — the viewport is at the end, and every growth keeps it
+      there.
+    * **Released** — the reader scrolled up; nothing may move the viewport,
+      however fast the deltas arrive.
+    * **Re-acquired** — the reader came back to the end; following resumes.
+
+    The transition INTO released is the whole difficulty, and it is why this is
+    a state machine rather than a predicate. Following itself moves the scroll
+    offset, so "the offset changed since last frame" cannot mean "the user
+    scrolled" — that test releases the anchor the instant it engages. The
+    machine is therefore driven by INTENT: :meth:`note_user_scroll` is called
+    from input handlers and from nowhere else, and the offset is consulted only
+    afterwards, to decide where the reader came to rest.
+
+    Kept as its own object rather than as three attributes on ``TranscriptView``
+    because the rule is not the transcript's: the nested transcript inside the
+    subagent page streams a child's output under the same requirement, and the
+    aside card scrolls its own exchange in units of turns rather than rows.
+    Three hand-rolled copies of a sticky-bottom rule would diverge on the first
+    bug fixed in one of them.
+    """
+
+    def __init__(self) -> None:
+        self._following = True
+        #: Depth, not a bool: a follow-scroll can settle a layout that scrolls
+        #: again, and the inner exit must not re-arm the outer guard.
+        self._depth = 0
+
+    @property
+    def following(self) -> bool:
+        """Whether growth should currently carry the viewport with it."""
+        return self._following
+
+    @property
+    def programmatic(self) -> bool:
+        """Whether a scroll happening right now is this widget's own."""
+        return self._depth > 0
+
+    def note_user_scroll(self) -> None:
+        """A human moved the viewport. Release NOW, ask where they landed later.
+
+        Releasing immediately rather than waiting for the resync is what makes
+        the release survive a burst: between the wheel event and the frame that
+        settles it, a delta can arrive, and a still-armed anchor would scroll
+        the reader back to the end before anyone measured where they went.
+
+        Ignored while a programmatic scroll is in flight — that is this widget
+        moving itself, not a person moving it.
+        """
+        if self._depth:
+            return
+        self._following = False
+
+    def resync(self, *, at_end: bool) -> None:
+        """Settle the state from where the viewport actually came to rest."""
+        self._following = at_end
+
+    def acquire(self) -> None:
+        """Re-acquire deliberately: the caller is asking to sit at the end."""
+        self._following = True
+
+    @contextmanager
+    def programmatic_scroll(self) -> Iterator[None]:
+        """Mark the scroll performed inside as this widget's own, not a user's."""
+        self._depth += 1
+        try:
+            yield
+        finally:
+            self._depth -= 1
 
 
 def wrap_cells(text: str, width: int) -> list[str]:
@@ -922,8 +1007,15 @@ class TranscriptView(ScrollableContainer):
     changes height after the fact). Tool rows each take a blank row; a run of
     one-line notices stays flush. Nothing else pads: the base block selectors
     in the tcss declare no margin at all, so the gap can only ever come from
-    the deliberate class. Appends scroll to the bottom unless the user has
-    scrolled up to read.
+    the deliberate class.
+
+    The viewport STICKS TO THE BOTTOM while the reader is at the bottom — see
+    :class:`TailAnchor` for the three states and :meth:`_size_updated` for
+    where growth is noticed. Anchoring lives here, on the container, rather
+    than at the append sites: a streaming message appends ONCE and then grows
+    in place, so an append-time pin follows nothing (see the commit that added
+    this — the offset stayed at 0 while the message ran 58 rows past the
+    bottom of an 80x24 screen).
 
     The container also owns KEYBOARD movement between focusable blocks
     (:meth:`focus_neighbour`): only it knows the append order, and a card
@@ -957,6 +1049,10 @@ class TranscriptView(ScrollableContainer):
         #: line). Pinned rather than re-appended so it is never unmounted and
         #: remounted mid-turn, which would restart its timer and its clock.
         self._tail: TranscriptBlock | None = None
+        #: The sticky-bottom state. A fresh transcript is at its own end.
+        #: Named for the TAIL to keep it clear of ``_anchor_before``, which is
+        #: about spacing neighbours and has nothing to do with scrolling.
+        self._tail_anchor = TailAnchor()
 
     def set_on_clear(self, hook: Callable[[], None] | None) -> None:
         """Install the hook fired after every :meth:`clear_blocks`."""
@@ -981,15 +1077,15 @@ class TranscriptView(ScrollableContainer):
         self._tail = block
 
     def append_block(self, block: TranscriptBlock) -> None:
-        """Mount ``block`` at the bottom and keep the tail in view.
+        """Mount ``block`` at the bottom.
 
         "The bottom" means above the PINNED tail when there is one — the
         transcript grows underneath the working line, not past it.
 
-        Scrolling is deferred through ``call_after_refresh`` so the freshly
-        mounted block's layout settles BEFORE ``scroll_end`` measures the
-        virtual size (TUI-022) — an immediate scroll would target the stale
-        pre-mount extent and land short.
+        Nothing here scrolls. Mounting a block grows the container's virtual
+        size, and :meth:`_size_updated` is where that is noticed — for THIS
+        mount and equally for a block that grows in place afterwards, which an
+        append-time pin could never see.
         """
         tail = self._tail if self._tail is not block else None
         index = self._blocks.index(tail) if tail in self._blocks else len(self._blocks)
@@ -997,7 +1093,6 @@ class TranscriptView(ScrollableContainer):
         self._blocks.insert(index, block)
         if hasattr(block, "tool_name"):
             self._invalidate_name_col()
-        stick_to_bottom = self.is_near_bottom()
         # `before=None` is Textual's own "append" — one mount call either way.
         self.mount(block, before=tail if tail in self._blocks else None)
         # The gap above was decided while the block was still UNMOUNTED, where
@@ -1008,8 +1103,6 @@ class TranscriptView(ScrollableContainer):
         # class and nothing repaints.
         self.call_after_refresh(self._settle_gap, block)
         self._remeasure_empty_state()
-        if stick_to_bottom:
-            self.call_after_refresh(self.scroll_end, animate=False)
 
     def _remeasure_empty_state(self) -> None:
         """Re-measure the empty state after the block count in this region changed.
@@ -1225,24 +1318,179 @@ class TranscriptView(ScrollableContainer):
         # working line is mounted again.
         self._name_col_cache = None
         self._tail = None
+        # A cleared transcript IS at its own end, so the anchor re-arms: the
+        # next turn streams into a reader who is, by construction, at the
+        # bottom of an empty column.
+        self._tail_anchor.acquire()
         self.scroll_home(animate=False)
         if self._on_clear is not None:
             self._on_clear()
 
     def is_near_bottom(self) -> bool:
-        """True when the viewport sits at (or within 2 rows of) the bottom.
+        """True when the viewport sits within :data:`TAIL_TOLERANCE_ROWS` of the end.
 
-        Public because a block can now GROW in place — a live tool card
-        streaming output — and growth has the same "follow the tail, but only
-        if the reader was already at the tail" question that mounting does.
-        A reader who has scrolled up to read something is reading it, and
-        yanking them back to the bottom because a card elsewhere gained a row
-        is the reflow bug this branch has already fixed twice.
+        Measured against ``max_scroll_y``, which is Textual's own answer for
+        "the furthest this can scroll" and already nets off the horizontal
+        scrollbar and the container's padding. Deriving it here from
+        ``virtual_size - size`` instead — which is what this did — ignored both,
+        and the transcript now carries a bottom padding row, so a
+        locally-computed extent reads as one row short of an end the reader is
+        sitting exactly on.
         """
-        max_offset = self.virtual_size.height - self.size.height
-        if max_offset <= 0:
+        cap = self.max_scroll_y
+        if cap <= 0:
             return True
-        return self.scroll_offset.y >= max_offset - 2
+        return self.scroll_offset.y >= cap - TAIL_TOLERANCE_ROWS
+
+    @property
+    def is_following_tail(self) -> bool:
+        """Whether growth currently carries the viewport with it."""
+        return self._tail_anchor.following
+
+    def follow_tail(self) -> None:
+        """Go to the end and stay there — the caller is asking for the tail.
+
+        The deliberate re-acquire, for the places that mean "land the reader on
+        the newest thing": a replayed session opening on its latest turn, the
+        aside closing and handing the conversation back. They used to post a
+        one-shot ``call_after_refresh(scroll_end)``, which pinned the frame it
+        ran in and then drifted off the end of everything that arrived after.
+        """
+        self._tail_anchor.acquire()
+        self.call_after_refresh(self._scroll_to_tail)
+
+    def note_user_scroll(self) -> None:
+        """A person moved the viewport: release, then re-decide where they land.
+
+        Public because a scroll gesture does not always arrive as an event on
+        this widget — the subagent page's ↑↓ hint buttons page the body from
+        outside it, and a click on an affordance is as much a user scroll as
+        the wheel is.
+        """
+        self._tail_anchor.note_user_scroll()
+        # After the refresh, not now: the scroll this call is reporting has not
+        # been applied yet, so "where did they land" has no answer until the
+        # frame settles. This pass exists for the gesture that moves NOTHING —
+        # a wheel notch DOWN while already at the tail, which must hand the
+        # anchor straight back rather than leaving it released forever.
+        self.call_after_refresh(self._resync_tail_anchor)
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        """Re-decide following from every offset the viewport actually rests at.
+
+        The companion to :meth:`note_user_scroll`, and the half that copes with
+        MOTION: key scrolling animates, so the frame after the keypress still
+        shows the reader at the bottom and a single deferred check re-acquires
+        an anchor they had just released. Watching the offset settles that —
+        every intermediate frame is asked the same question, so the answer is
+        the one from where they stopped.
+
+        Reading the offset here is not "inferring the user scrolled from the
+        offset changing", which is the trap this design avoids: a follow-scroll
+        runs inside the programmatic guard and is skipped outright.
+        """
+        super().watch_scroll_y(old_value, new_value)
+        if not self._tail_anchor.programmatic:
+            self._tail_anchor.resync(at_end=self.is_near_bottom())
+
+    def _resync_tail_anchor(self) -> None:
+        # Not while the viewport is still travelling: an animated page-up is
+        # measured mid-flight, still within the tolerance of the bottom it just
+        # left. `watch_scroll_y` is watching that journey and will answer from
+        # where it ends.
+        if self.app.animator.is_being_animated(self, "scroll_y"):
+            return
+        self._tail_anchor.resync(at_end=self.is_near_bottom())
+
+    def _scroll_to_tail(self) -> None:
+        """Put the viewport on the end of the CONTENT, as measured right now.
+
+        ``immediate=True`` because every caller has already waited for the
+        extent to be recomputed; ``scroll_end``'s own deferral would re-measure
+        a frame later and, under a burst of deltas, land permanently one flush
+        short of the tail.
+        """
+        with self._tail_anchor.programmatic_scroll():
+            self.scroll_to(y=self.max_scroll_y, animate=False, immediate=True)
+
+    def _size_updated(
+        self, size: Size, virtual_size: Size, container_size: Size, layout: bool = True
+    ) -> bool:
+        """Follow the tail whenever the scrollable extent moves under us.
+
+        THE anchor point, and the reason there is only one. Textual calls this
+        after it has recomputed the container's virtual size, so ``max_scroll_y``
+        is fresh here and nowhere earlier — a scroll issued from the delta
+        handler targets the previous frame's extent and lands short (measured:
+        eight rows short, every burst, forever).
+
+        Being keyed on the EXTENT rather than on any particular event is also
+        what makes the rule hold for growth nobody thought to instrument: a
+        streaming message re-rendering in place, a tool card unfolding its
+        output, the aside reserving rows at the bottom, the composer taking a
+        line as the user types, the terminal being resized.
+        """
+        changed = super()._size_updated(size, virtual_size, container_size, layout)
+        if changed and self._tail_anchor.following:
+            self._scroll_to_tail()
+        return changed
+
+    # -- user scroll gestures ------------------------------------------------
+    # Enumerated rather than funnelled through `scroll_to`, because the funnel
+    # cannot tell the two apart: follow-scrolling goes through it too. These are
+    # the widget's INPUT surfaces — wheel, key bindings, and the scrollbar's own
+    # messages — and a scroll arriving through one of them came from a person.
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self.note_user_scroll()
+        super()._on_mouse_scroll_down(event)
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self.note_user_scroll()
+        super()._on_mouse_scroll_up(event)
+
+    def _on_scroll_to(self, message: ScrollTo) -> None:
+        self.note_user_scroll()
+        super()._on_scroll_to(message)
+
+    def _on_scroll_up(self, event: ScrollUp) -> None:
+        self.note_user_scroll()
+        super()._on_scroll_up(event)
+
+    def _on_scroll_down(self, event: ScrollDown) -> None:
+        self.note_user_scroll()
+        super()._on_scroll_down(event)
+
+    def action_scroll_up(self) -> None:
+        self.note_user_scroll()
+        super().action_scroll_up()
+
+    def action_scroll_down(self) -> None:
+        self.note_user_scroll()
+        super().action_scroll_down()
+
+    def action_page_up(self) -> None:
+        self.note_user_scroll()
+        super().action_page_up()
+
+    def action_page_down(self) -> None:
+        self.note_user_scroll()
+        super().action_page_down()
+
+    def action_scroll_home(self) -> None:
+        self.note_user_scroll()
+        super().action_scroll_home()
+
+    def action_scroll_end(self) -> None:
+        """``end`` is a request for the TAIL, not for a particular row.
+
+        So it goes through the anchor rather than through Textual's animated
+        ``scroll_end``. That animation targets the extent measured when the key
+        was pressed, and a stream that grows during the glide lands the reader
+        short of the new end — where ``watch_scroll_y`` correctly concludes they
+        are not at the bottom and releases the anchor they had just asked for.
+        """
+        self.follow_tail()
 
 
 def _count_rows(renderable: RenderableType | None, width: int = 80) -> int:

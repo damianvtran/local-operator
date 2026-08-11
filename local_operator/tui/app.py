@@ -4,7 +4,7 @@ Layout (top→bottom): the scrolling transcript, the input panel on the
 ``surface`` elevation step with the ``❯`` chevron, and the full-width status
 BAND on the ``sunken`` ground. No bordered boxes anywhere; the app draws two
 lines, both ``$lo-dim`` and neither an edge of anything — the input's thin top
-rule (with the focus accent moving to the chevron, D23/D24) and the user
+rule (with focus brightening the chevron, D23/D24) and the user
 prompt's gutter bar in the transcript. Structure comes from symbols, tint, and
 spacing; the one space of edge padding sits left/right/bottom, never along
 the top while scrolling.
@@ -119,7 +119,6 @@ from local_operator.tui.widgets.subagent_panel import (
     JobStats,
     SubagentPanel,
     job_elapsed,
-    job_seconds,
 )
 from local_operator.tui.widgets.subagent_view import SubagentView, SubagentViewDismissed
 from local_operator.tui.widgets.toast import Toast, format_mcp_startup
@@ -191,8 +190,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("clear", "Clear the transcript (history is untouched)"),
     # Replaces the transcript; a row describing the old one would not survive.
     SlashCommand("new", "Start a new conversation"),
-    # "reloading session…" then the rebooted session is the receipt.
-    SlashCommand("reload", "Retry starting the session"),
+    # "reloading session…" while it runs; `_reconcile_reload` posts the receipt
+    # that survives the ledger being rebuilt, and it names what came back.
+    SlashCommand("reload", "Reboot the session, keeping this conversation"),
     # The picker (or "resuming session <id>…") is the receipt, and a resume
     # replaces the transcript anyway.
     SlashCommand(
@@ -252,7 +252,6 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # away. The card is the receipt; `^f` inside it is how an exchange gets a
     # row, as a real turn rather than an echo.
     SlashCommand("btw", "Ask a side question off the record (esc closes it)"),
-    # Prints an explanation and changes nothing.
     # NOT an echo, and the receipt is the reason. The pass narrates itself
     # through the same `compacting context…` / `context compacted · 128.4k →
     # 21.9k tokens` notices the automatic one emits, and a refusal says why it
@@ -281,9 +280,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # submitting a no-op over the list it just drew.
     SlashCommand("login", "Authenticate a provider", arguments=ArgumentMode.REQUIRED),
     # The worker reports the removal, naming the provider.
-    SlashCommand(
-        "logout", "Remove stored provider credentials", arguments=ArgumentMode.REQUIRED
-    ),
+    SlashCommand("logout", "Remove stored provider credentials", arguments=ArgumentMode.REQUIRED),
 ]
 
 
@@ -367,11 +364,16 @@ SUBAGENT_LAYOUT_CLASS = "subagent"
 ASIDE_LAYOUT_CLASS = "aside"
 
 #: Class the input dock carries while the COMPOSER holds focus, which is what
-#: turns the chevron accent on (D23). A class rather than the `:focus-within`
-#: pseudo-class the sheet used to ask for: Textual only re-applies focus styles
-#: on nodes reachable by walking UP from the widget that gained or lost focus,
-#: and the rule's subject is the chevron — the editor's sibling — so the accent
-#: went on at boot and never went off again. Flipped in exactly one place, see
+#: brightens the chevron from `dim` to `fg` (D23). NOT the accent: that means
+#: "a turn is live", and a composer is focused in nearly every frame, so an
+#: accent chevron sat permanently two rows above the band's streaming spinner
+#: meaning something else (D5, round 11).
+#:
+#: A class rather than the `:focus-within` pseudo-class the sheet used to ask
+#: for: Textual only re-applies focus styles on nodes reachable by walking UP
+#: from the widget that gained or lost focus, and the rule's subject is the
+#: chevron — the editor's sibling — so the treatment went on at boot and never
+#: went off again. Flipped in exactly one place, see
 #: ``OperatorApp._sync_composer_focus``.
 COMPOSER_FOCUSED_CLASS = "-composer-focused"
 
@@ -995,11 +997,11 @@ class OperatorApp(App[None]):
                     appended = True
         if appended:
             # Replay is mounted as one synchronous batch, before Textual can
-            # remeasure the growing container between blocks. Pin the final
-            # viewport explicitly; otherwise a long resumed conversation can
-            # inherit a stale pre-replay extent and open above its latest turn.
-            transcript = self._transcript_view()
-            transcript.call_after_refresh(transcript.scroll_end, animate=False)
+            # remeasure the growing container between blocks. Land the reader on
+            # the latest turn and ARM the anchor there, so the first thing the
+            # resumed session streams carries them with it rather than growing
+            # off the bottom of a viewport pinned to the replay's last frame.
+            self._transcript_view().follow_tail()
 
     def _replay_tool_call(self, call: Any, results: dict[str, Any]) -> None:
         """Mount one settled tool row for a call from a previous session.
@@ -1054,14 +1056,28 @@ class OperatorApp(App[None]):
         # accepted and painted where the app meant to say "session error".
         self._status.update(model_label="session error", model_name="", streaming=False)
 
-    async def _reload_session(self, *, replace_transcript: bool = False) -> None:
-        """Dispose the current session and boot another.
+    async def _reload_session(self, *, keep_context: bool = False) -> None:
+        """Dispose the current session, boot its replacement, and rebuild the
+        ledger from what that replacement ACTUALLY holds.
 
-        ``replace_transcript`` is reserved for a session switch. A plain
-        ``/reload`` retries the same conversation and keeps its visible ledger;
-        ``/resume`` changes which conversation the ledger represents and must
-        replace it before replaying the resumed history.
+        The transcript is always cleared and always replayed from the new
+        session's own ``history()`` (see :meth:`_render_resumed_history`), so
+        the screen is a PROJECTION of the model's context rather than a second
+        record of it maintained beside it. The bug that forced that rule: a
+        plain ``/reload`` kept the visible ledger while booting a session whose
+        history was empty, so the user read a whole conversation off the screen
+        while the agent answered "I have no prior turn in this session". The
+        missing history was the smaller half of it — nothing detected or
+        reported the divergence, because nothing compared the two surfaces.
+
+        ``keep_context`` states the CALLER'S INTENT — ``/reload`` continues this
+        conversation, ``/new`` and ``/resume`` deliberately do not — and it is
+        verified rather than trusted: a reload that meant to keep the
+        conversation and came back with less of it says so, instead of leaving
+        the user to discover it from an answer that has forgotten everything.
         """
+        previous_id = self._conversation_id()
+        previous_len = self._history_length()
         # A subagent page is a window onto THIS session's job ledger. The
         # session is about to be disposed and the ledger with it, so the page
         # would go on standing over a conversation it no longer describes
@@ -1082,27 +1098,28 @@ class OperatorApp(App[None]):
         # unmount with the identical turn returned immediately.
         self._deny_queued_approvals()
         # The working line belongs to the turn being thrown away. Left standing
-        # it does two kinds of damage: on a plain `/reload` the widget keeps
-        # animating a turn that no longer exists, and on ANY of these paths the
-        # stale `_working_block` reference makes `_start_working_block` return
-        # early — so the replacement session's turns get no working line at all,
-        # for the rest of the app's life. `clear_blocks` unmounts the widget on
-        # the /resume and /new paths but cannot clear a reference it does not
-        # own, which is exactly why this is here and not there.
+        # it does two kinds of damage: the widget goes on animating a turn that
+        # no longer exists, and the stale `_working_block` reference makes
+        # `_start_working_block` return early — so the replacement session's
+        # turns get no working line at all, for the rest of the app's life.
+        # `clear_blocks` unmounts the widget below but cannot clear a reference
+        # it does not own, which is exactly why this is here and not there.
         self._dismiss_working_block()
         # And settle the cards that turn was running. A session torn down
         # mid-turn never delivers the `turn_end` that normally reconciles them,
-        # so on a plain `/reload` — which preserves the ledger — the dead turn's
-        # rows kept spinning for the rest of the app's life.
+        # and `_current_activity` derives the working line's label from these
+        # two dictionaries — so without this the NEXT session's first turn
+        # opened by announcing `running bash` for a bash call that died with
+        # the previous session.
         self._retire_live_tool_cards()
-        if replace_transcript and self._controller is not None:
-            # A session switch discards the old ledger, so its controller must
-            # unsubscribe BEFORE session disposal can emit terminal events.
-            # Otherwise those Textual messages are queued while disposal is
-            # awaited, then handled after clear_blocks and contaminate the new
-            # conversation. Plain /reload deliberately keeps the inverse order
-            # below: it preserves the ledger and needs the dying session's
-            # agent_end to settle its live cards.
+        if self._controller is not None:
+            # BEFORE disposal, always: the ledger is being rebuilt from the
+            # replacement session, so the dying session's terminal events have
+            # nothing left to land on. They are Textual messages, queued while
+            # disposal is awaited and handled after `clear_blocks`, so leaving
+            # the controller subscribed contaminates the new conversation with
+            # the old one's `agent_end` — including the `context_tokens` and
+            # `cost` it carries.
             self._controller.dispose()
             self._controller = None
         if self._session is not None:
@@ -1111,30 +1128,32 @@ class OperatorApp(App[None]):
             except Exception:
                 pass
             self._session = None
-        if self._controller is not None:
-            self._controller.dispose()
-            self._controller = None
         # The pending approval belonged to the session that just died. Left
         # set, the NEW session's first write/exec approval queued behind a
         # question that is no longer on screen and nothing could answer it.
         self._approval = None
-        if replace_transcript:
-            # Clearing after controller detachment keeps old-session events out
-            # of the replacement conversation. Use the view's public reset so
-            # streaming, tool-card, approval, and welcome-state
-            # bookkeeping are reset by the same hook as /clear, without /clear's
-            # misleading "history is untouched" receipt.
-            self._transcript_view().clear_blocks()
+        # Unconditional, and this is the whole discipline: the ledger is only
+        # ever as old as the session on screen. Clearing after controller
+        # detachment keeps old-session events out of the replacement
+        # conversation. The view's public reset is used so streaming,
+        # tool-card, approval and welcome-state bookkeeping are reset by the
+        # same hook as `/clear`, without `/clear`'s "history is untouched"
+        # receipt — which would be a lie on every path through here.
+        self._transcript_view().clear_blocks()
         assert self._status is not None
-        # A reload is a new conversation: its title and its one naming
-        # attempt both reset, or the old name would outlive its session.
+        # A reload may land on a different conversation, so its title and its
+        # one naming attempt both reset, or the old name would outlive its
+        # session. A `/reload` that continues this conversation re-derives the
+        # name from the session it boots, exactly as a `--resume` launch does.
         self._name_requested = False
-        # The spend ledger goes with it, both halves. `_total_cost` and every
-        # child's entry in `_subagent_costs` were charged to the conversation that
-        # just died, and after `/new` or `/resume` the band would report them as
-        # the new one's — the same staleness the context reading is refused for
-        # below, and money is the segment where a user is least able to tell a
-        # carried-over number from a real one.
+        # The spend ledger is the dead conversation's — unless the reload lands
+        # back on the SAME conversation, which `/reload` now does. Reset it here
+        # so `/new` and `/resume` cannot inherit a figure they did not spend,
+        # and hand the totals to `_reconcile_reload`, which puts them back when
+        # the conversation turns out to be the one that was already open.
+        # Money is the segment where a user is least able to tell a
+        # carried-over number from a real one, in EITHER direction.
+        carried_spend = (self._total_cost, dict(self._subagent_costs))
         self._total_cost = 0.0
         self._subagent_costs.clear()
         # The MCP segment is cleared too: the old session's manager is gone, so
@@ -1165,6 +1184,105 @@ class OperatorApp(App[None]):
             cost="",
         )
         await self._boot_session()
+        self._reconcile_reload(previous_id, previous_len, carried_spend, keep_context=keep_context)
+
+    def _conversation_id(self) -> str:
+        """Which conversation is open, or "" when none is."""
+        session = self._session
+        return getattr(session, "session_id", "") if session is not None else ""
+
+    def _history_length(self) -> int:
+        """How many messages the model currently has, as the session reports it."""
+        session = self._session
+        if session is None:
+            return 0
+        try:
+            return len(session.history())
+        except Exception:  # reduced hosts (embedders, pilot fakes) may lack it
+            return 0
+
+    def _reconcile_reload(
+        self,
+        previous_id: str,
+        previous_len: int,
+        carried_spend: tuple[float, dict[str, float]],
+        *,
+        keep_context: bool,
+    ) -> None:
+        """Check the rebooted session against the one it replaced, and SAY so.
+
+        The ledger has already been rebuilt from the new session's own history,
+        so the screen cannot disagree with the model by the time this runs. What
+        it can be is emptier than the user asked for, and that is what this
+        catches: ``/reload`` is a promise to continue this conversation, and
+        when the replacement comes back with less of it — no resume-capable
+        launcher, a transcript that never reached disk, a boot that failed
+        outright — the promise was not kept. Reporting it is the difference
+        between a user who knows to re-establish context and the one who found
+        out from an answer that had forgotten the question.
+
+        Spend travels the other way. It was charged to a conversation that is
+        still open, so without this the band walks its own total back to zero
+        every time a reload refreshes the MCP servers.
+        """
+        if previous_id and self._conversation_id() == previous_id:
+            total, children = carried_spend
+            self._total_cost = total
+            self._subagent_costs.update(children)
+            if self._status is not None:
+                spend = self._spend_total()
+                self._status.update(cost=format_cost(spend) if spend else "")
+        if not keep_context:
+            return
+        remaining = self._history_length()
+        if previous_len and remaining < previous_len:
+            # `_on_boot_failed` has already said WHY when the boot is what
+            # failed; this says what it cost, which is the part the user is
+            # about to act on.
+            self._system_notice(
+                f"reload could not restore this conversation — "
+                f"{_messages(previous_len)} are no longer in the model's context",
+                "warning",
+            )
+            return
+        if self._session is None:
+            return  # nothing was there to lose, and the error notice stands
+        self._system_notice(
+            f"session reloaded — {_messages(remaining)} still in context"
+            if remaining
+            else "session reloaded"
+        )
+
+    def _cmd_reload(self, notice: NoticeFn) -> None:
+        """``/reload`` — re-run boot against the SAME conversation.
+
+        What a reload is FOR is the boot: MCP servers reconnected, credentials
+        re-read, the model re-resolved. The conversation is not what went
+        wrong, and with ``/new`` standing as the explicit fresh start there is
+        no reason for this to discard it. It discarded it anyway: the launch
+        factory is ``create_session`` bound to the args the app started with,
+        which name no session to resume, so every ``/reload`` minted a NEW
+        transcript directory. The model lost the conversation while the screen
+        went on showing it.
+
+        So rebind to this conversation's id first, exactly as
+        :meth:`_resume_session` does — a reload IS a resume of the session
+        already open, and ``Session`` seeds its context from the transcript it
+        is pointed at. Gated on that transcript being on disk, because
+        ``resume_dir`` refuses an id it cannot find: a reload before the first
+        turn persisted would otherwise fail to boot at all. The same gate keeps
+        the command's original purpose intact — a session that never
+        constructed has no id to rebind to, so it retries the launch factory
+        exactly as it always did.
+        """
+        resume_id = self._resumable_session_id()
+        if resume_id and self._resume_factory is not None:
+            self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
+        # Transient by design: the reload rebuilds the ledger from the session
+        # it boots, so this line is the acknowledgement WHILE that happens and
+        # `_reconcile_reload`'s receipt is what the user is left holding.
+        notice("reloading session…")
+        self.run_worker(self._reload_session(keep_context=True), thread=False, group="session")
 
     def _cmd_resume(self, arg: str, notice: NoticeFn) -> None:
         """``/resume`` — pick a conversation; ``/resume <id>`` — resume one.
@@ -1227,9 +1345,7 @@ class OperatorApp(App[None]):
             return
         self._session_factory = lambda: self._resume_factory(resume_id)  # type: ignore[misc]
         notice(f"resuming session {resume_id}…")
-        self.run_worker(
-            self._reload_session(replace_transcript=True), thread=False, group="session"
-        )
+        self.run_worker(self._reload_session(), thread=False, group="session")
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
@@ -1244,17 +1360,15 @@ class OperatorApp(App[None]):
         second factory: ``create_session`` already branches on
         ``args.resume is not None``, so this is the same code path a cold
         launch takes, which is exactly what "new session" should mean. The
-        transcript is replaced for the same reason ``/resume`` replaces it —
-        the visible ledger must not outlive the conversation it describes.
+        ledger is rebuilt from the session that boots, as it is on every
+        reload, which for a conversation with no history is an empty screen.
         """
         if self._resume_factory is None:
             self._system_notice("new session unavailable: no session-capable launcher", "warning")
             return
         self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
         notice("starting a new session…")
-        self.run_worker(
-            self._reload_session(replace_transcript=True), thread=False, group="session"
-        )
+        self.run_worker(self._reload_session(), thread=False, group="session")
 
     # -- MCP status ---------------------------------------------------------
     def _wire_mcp_status(self, session: SessionProtocol) -> None:
@@ -1619,7 +1733,7 @@ class OperatorApp(App[None]):
         ancestor whose rules mention `focus-within`, and it records that flag on
         the node the rule SELECTS — the chevron, a SIBLING of the editor and so
         never on that walk. Measured on the shipped build, blurring the composer
-        left the chevron painting `$lo-accent` on every later frame while
+        left the chevron painting its focused ink on every later frame while
         `:focus-within` itself correctly reported False.
 
         Both events, because a focus change is two facts: something took focus
@@ -1728,18 +1842,18 @@ class OperatorApp(App[None]):
         self._exit_hint = NoticeBlock(text, "note")
         self._append_block(self._exit_hint)
 
-    def resume_hint(self) -> str:
-        """``local-operator --resume <id>`` for this session, or "" when there is none.
-
-        Read by :func:`run_tui` after the app has released the terminal, so the
-        command lands in the user's scrollback where they can copy it, rather
-        than in a frame that is about to be torn down.
+    def _resumable_session_id(self) -> str:
+        """This conversation's id IF ``--resume`` could reopen it, else "".
 
         Gated on the transcript EXISTING, not merely on having a session id:
-        ``--resume`` refuses an id whose transcript is not on disk (a typo must
-        fail rather than open an empty session that looks resumed), so quitting
-        before the first turn persisted would otherwise advertise a command that
-        is guaranteed to be rejected.
+        ``resume_dir`` refuses an id whose transcript is not on disk (a typo
+        must fail rather than open an empty session that looks resumed), so an
+        id offered before the first turn persisted is one every resume path is
+        guaranteed to reject.
+
+        Read by :meth:`resume_hint`, which must not advertise a command that
+        cannot work, and by :meth:`_cmd_reload`, which must not rebind the
+        session factory to an id that would fail to boot.
         """
         session = self._session
         if session is None:
@@ -1751,9 +1865,17 @@ class OperatorApp(App[None]):
         from local_operator.resume import TRANSCRIPT_NAME
 
         transcript = config_dir() / "sessions" / session_id / TRANSCRIPT_NAME
-        if not transcript.is_file():
-            return ""
-        return f"local-operator --resume {session_id}"
+        return session_id if transcript.is_file() else ""
+
+    def resume_hint(self) -> str:
+        """``local-operator --resume <id>`` for this session, or "" when there is none.
+
+        Read by :func:`run_tui` after the app has released the terminal, so the
+        command lands in the user's scrollback where they can copy it, rather
+        than in a frame that is about to be torn down.
+        """
+        session_id = self._resumable_session_id()
+        return f"local-operator --resume {session_id}" if session_id else ""
 
     def _interrupt(self) -> None:
         """Abort the running turn AND stop any ``/loop`` in flight.
@@ -2111,8 +2233,7 @@ class OperatorApp(App[None]):
             )
         else:
             notice(
-                "tool approvals: ask — write and command tools will prompt again "
-                "(this session)"
+                "tool approvals: ask — write and command tools will prompt again " "(this session)"
             )
 
     def _report_approvals(self, notice: NoticeFn) -> None:
@@ -2672,7 +2793,7 @@ class OperatorApp(App[None]):
         if read_only and editor.has_focus:
             # Dropping `can_focus` does not move focus that is already there,
             # and a still-focused composer keeps BOTH affordances lit — the
-            # caret and, through `_sync_composer_focus`, the chevron accent —
+            # caret and, through `_sync_composer_focus`, the bright chevron —
             # on a surface whose entire argument is that the dock is not where
             # you are. The blur is what turns them off; the stylesheet's
             # `Screen.subagent` chevron rule then states the same thing a
@@ -2844,8 +2965,7 @@ class OperatorApp(App[None]):
         elif command == "/clear":
             self._clear_transcript()
         elif command == "/reload":
-            notice("reloading session…")
-            self.run_worker(self._reload_session(), thread=False, group="session")
+            self._cmd_reload(notice)
         elif command == "/new":
             self._cmd_new(notice)
         elif command == "/resume":
@@ -4055,9 +4175,11 @@ class OperatorApp(App[None]):
         aside to ask about. Padding the transcript by the card's height pushes
         the conversation up so the card rests on the END of it.
 
-        The scroll only follows when the reader was already at the end. Yanking
-        someone who had scrolled back to re-read something is the cost of doing
-        this unconditionally, and re-reading is a thing people do WHILE asking
+        The reserved rows change what "the end" means in pixels, so the anchor
+        is consulted rather than the raw offset: it already knows whether the
+        reader is following, and it re-measures the extent AFTER the padding
+        lands. Yanking someone who had scrolled back to re-read something is
+        what this must not do, and re-reading is a thing people do WHILE asking
         an aside about it.
         """
         transcript = self._transcript_view()
@@ -4066,10 +4188,10 @@ class OperatorApp(App[None]):
         padding = transcript.styles.padding
         if padding.bottom == height:
             return
-        at_end = transcript.scroll_offset.y >= transcript.max_scroll_y
+        at_end = transcript.is_near_bottom()
         transcript.styles.padding = (padding.top, padding.right, height, padding.left)
         if at_end:
-            transcript.call_after_refresh(transcript.scroll_end, animate=False)
+            transcript.follow_tail()
 
     def _close_aside(self) -> bool:
         """Dismiss the aside and give the main chat back. True if it was open.
@@ -4103,7 +4225,7 @@ class OperatorApp(App[None]):
         transcript = self._transcript_view()
         if transcript is not None:
             transcript.styles.clear_rule("padding")
-            transcript.call_after_refresh(transcript.scroll_end, animate=False)
+            transcript.follow_tail()
         draft = self._aside_draft
         self._aside_draft = None
         editor = self._editor()
@@ -5472,6 +5594,11 @@ def _effort_label(session) -> str:
     if getattr(spec, "reasoning_efforts", ()):
         return "auto"
     return "reasoning" if getattr(spec, "reasoning", False) else ""
+
+
+def _messages(count: int) -> str:
+    """``1 message`` / ``12 messages`` — the reload receipts count out loud."""
+    return f"{count} message" if count == 1 else f"{count} messages"
 
 
 def _first_line(text: str) -> str:

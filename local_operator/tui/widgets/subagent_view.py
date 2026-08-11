@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
 from rich.cells import cell_len
+from rich.console import RenderableType
 from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding
@@ -61,13 +62,13 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets import tool_card
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.subagent_panel import (
     SPINNER_FRAMES,
     SPINNER_INTERVAL_S,
     status_glyph,
 )
-from local_operator.tui.widgets import tool_card
 from local_operator.tui.widgets.tool_card import ToolCard, truncate_cells
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -450,6 +451,41 @@ class InstructionBlock(UserBlock):
             return rows
         more = f"{EXPAND_HINT} {self._hidden_rows} more line"
         return [*rows[:INSTRUCTION_ROWS], f"{more}{'' if self._hidden_rows == 1 else 's'}"]
+
+    def _build(self) -> RenderableType:
+        """The brief behind its gutter, with the affordance row as CHROME.
+
+        The base class paints every row in one ink (``TEXT_TOKEN``), which is
+        right for a prompt where every row is the author's words. Here the last
+        row is the app talking - it is an offer, not part of the brief - and at
+        ``fg`` it read as the brief's closing line, which is worse than omitting
+        it: a reader takes ``⟨expand⟩ 7 more lines`` for something the parent
+        wrote. The loop is restated rather than hooked because the base class
+        resolves its token once per build, and a per-row hook there is not mine
+        to add for one caller.
+
+        The height pin is kept for the reason its own docstring gives: a block
+        that authors its own rows KNOWS its height, and letting the layout
+        engine measure this one is what left a hole mid-transcript.
+        """
+        rule_style = Style(color=theme_mod.semantic_color(self.RULE_TOKEN))
+        text_style = Style(color=theme_mod.semantic_color(self.TEXT_TOKEN))
+        chrome_style = Style(color=theme_mod.semantic_color("dim"))
+        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
+        gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
+        rows = self._rows(body)
+        self.styles.height = len(rows)
+        # `_rows` appends the affordance LAST and only when there is one to
+        # offer, so its index is derivable rather than tracked - one fact.
+        offer = len(rows) - 1 if self._expanded or self._hidden_rows else -1
+        line = Text(no_wrap=True, overflow="ellipsis")
+        for index, row in enumerate(rows):
+            if index:
+                line.append("\n")
+            line.append(gutter, style=rule_style)
+            if row:
+                line.append(row, style=chrome_style if index == offer else text_style)
+        return line
 
     def action_toggle_brief(self) -> None:
         """Show the whole brief, or fold it back to its summary.

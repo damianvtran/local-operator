@@ -40,8 +40,8 @@ from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from local_operator.tui.widgets.welcome import WelcomeView
-from tests.unit.tui.test_aside import AsideSession
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.test_aside import AsideSession
 
 #: The two frames the seam was measured in: the everyday wide terminal and the
 #: narrow one where the conversation reaches the dock soonest.
@@ -251,7 +251,6 @@ async def test_the_aside_card_still_rests_flush_on_the_composer(size: tuple[int,
 
         panel = app.query_one(AsidePanel)
         assert panel.is_open
-        transcript = app.query_one(TranscriptView)
         shell = app.query_one("#input-shell")
         # Flush, on the regions: no transcript ground survives between them, so
         # the single blank row below is interior to the card.
@@ -365,13 +364,9 @@ async def test_the_subagent_page_ends_in_ground_too(size: tuple[int, int]) -> No
     page container's, which is the same "one owner per join" rule the dock
     column follows.
     """
-    from tests.unit.tui.test_subagent_view import (
-        TRAJECTORY,
-        FakeSession as PageSession,
-        _async_factory,
-        _job_with,
-        _open,
-    )
+    from tests.unit.tui.test_subagent_view import TRAJECTORY
+    from tests.unit.tui.test_subagent_view import FakeSession as PageSession
+    from tests.unit.tui.test_subagent_view import _async_factory, _job_with, _open
 
     app = OperatorApp(_async_factory(PageSession()))
     async with app.run_test(size=size) as pilot:

@@ -213,10 +213,12 @@ class AsidePanel(Static):
         #: aside promises not to leave, and while the card is up the row would
         #: be drawn behind it, so the user finds it only after dismissing.
         self._notice = ""
-        #: How many rows back from the tail the reader has scrolled. The wheel
-        #: moves it; asking or streaming snaps it back to 0, because a card
-        #: that stayed parked in history while a new answer arrived would hide
-        #: the thing the user just asked for.
+        #: How many turns back from the tail the reader has walked. The wheel
+        #: moves it; ASKING snaps it back to 0, because the user's own new
+        #: question is a re-acquire. Streaming does NOT: the same three-state
+        #: rule the transcript follows (:class:`TailAnchor`), in this card's
+        #: units — a reader who walked back mid-answer is reading, and the
+        #: deltas must not drag them forward.
         self._scroll_back = 0
         #: Screen size plus the live dock ceiling at the last paint. The dock
         #: grows as the composer wraps without resizing this card, so Textual
@@ -283,10 +285,11 @@ class AsidePanel(Static):
         if not self.accepts(generation) or not delta:
             return
         self._turns[-1].answer += delta
-        # Streaming snaps the view back to the tail: a reader parked in the
-        # history while a new answer arrived would watch the card refuse to
-        # show them the thing they just asked for.
-        self._scroll_back = 0
+        # NOT reset here. `ask` already put the reader on the new question, so
+        # the only way `_scroll_back` is non-zero mid-answer is that they
+        # wheeled back on purpose — and snapping them forward on every delta is
+        # the same bug the transcript had, in this card's units. They re-acquire
+        # by wheeling back down to the tail.
         self._repaint()
 
     def settle_answer(self, generation: int, answer: str) -> None:
@@ -493,7 +496,7 @@ class AsidePanel(Static):
     ) -> list[Text]:
         """The question on the transcript's spine: dim mark, ``fg`` prose.
 
-        NOT the accent. The stylesheet enumerates the five sites the one green
+        NOT the accent. The stylesheet enumerates the four sites the one green
         is spent on and ends "Before adding a sixth, take one away" — and this
         would be by far the largest of them, three wrapped questions being some
         hundreds of cells. The accent also MEANS "a turn is live", which a

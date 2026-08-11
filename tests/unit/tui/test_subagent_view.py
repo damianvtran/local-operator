@@ -431,8 +431,14 @@ async def test_a_long_transcript_scrolls_instead_of_stopping() -> None:
         assert body.scroll_offset.y >= body.virtual_size.height - body.size.height - 2
 
 
+#: Both halves of the reload switch: `/new` drops the context, `/resume` keeps
+#: it. The page's answer must not depend on which - it is a window onto a job
+#: ledger that BOTH dispose, so a page left standing would report `gone` for
+#: every job in it. Parametrized rather than asserted once, because the two
+#: paths diverge inside `_reload_session` and only one of them was covered.
+@pytest.mark.parametrize("keep_context", [False, True])
 @pytest.mark.asyncio
-async def test_replacing_the_session_leaves_the_page_first() -> None:
+async def test_replacing_the_session_leaves_the_page_first(keep_context: bool) -> None:
     """`/new` and `/resume` dispose the session, and the job ledger with it.
     A page left standing would report `gone` for a child it had been reading a
     moment earlier, over a conversation it no longer describes — with the
@@ -444,9 +450,11 @@ async def test_replacing_the_session_leaves_the_page_first() -> None:
         view = await _open(pilot, app, _job_with(TRAJECTORY))
         assert view.is_mounted
 
-        # The seam `/new` and `/resume` both reach; the commands themselves
-        # need a resume factory this fake host does not have.
-        app.run_worker(app._reload_session(replace_transcript=True), thread=False)
+        # The seam `/new` and `/resume` both reach; the commands themselves need
+        # a resume factory this fake host does not have, so the switch is driven
+        # directly - the page's behaviour is what is under test, not the command
+        # plumbing that reaches it.
+        app.run_worker(app._reload_session(keep_context=keep_context), thread=False)
         for _ in range(80):
             await pilot.pause()
             if not app.query(SubagentView):

@@ -900,10 +900,12 @@ async def test_the_boot_composer_draws_its_caret_beside_the_placeholder() -> Non
         assert placeholder, f"the placeholder is broken into pieces: {cells}"
         assert placeholder[0][1] == theme_mod.semantic_color("dim").lower()
 
-        # ...and the second affordance is on too (D23: focus moves the accent
-        # onto the chevron only).
+        # ...and the second affordance is on too: focus BRIGHTENS the chevron
+        # (D23), in the neutral ramp rather than the accent — green is reserved
+        # for "a turn is live" and this splash has no turn running (D5).
         chevron = [fg for text, fg, _ in cells if "❯" in text]
-        assert chevron == [theme_mod.semantic_color("accent").lower()]
+        assert chevron == [theme_mod.semantic_color("fg").lower()]
+        assert chevron != [theme_mod.semantic_color("accent").lower()]
 
 
 @pytest.mark.asyncio

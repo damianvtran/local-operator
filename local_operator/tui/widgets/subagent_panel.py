@@ -10,7 +10,7 @@ child session's retained events as a transcript.
 Rows are live by construction: the app repaints the panel on every Subagent*
 event AND on the 1 Hz job poll, and the panel advances its own spinner while
 anything is running — motion, not colour, says "alive": the accent green is
-spent at exactly five sites (see the tcss preamble) and a sixth spinner is
+spent at exactly four sites (see the tcss preamble) and a fifth spinner is
 not one of them. Settled rows follow the tool ledger's ink law: ✓ dim,
 ✗ danger, nothing else.
 """
@@ -32,10 +32,7 @@ from textual.widgets import Static
 from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.costs import job_cost
-from local_operator.tui.widgets.status_line import (
-    context_spelling,
-    format_cost,
-)
+from local_operator.tui.widgets.status_line import context_spelling, format_cost
 from local_operator.tui.widgets.tool_card import (
     clean_intent,
     format_duration,

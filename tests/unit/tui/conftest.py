@@ -67,7 +67,7 @@ def composer_cells(app: App[None]) -> list[tuple[str, str | None, str | None]]:
     """(text, fg hex, bg hex) for every segment of the composer's row.
 
     Shared because the composer's focus state is not a widget attribute: a
-    caret is a cell whose colours have been swapped, and the accent chevron is
+    caret is a cell whose colours have been swapped, and the chevron's ink is
     a colour the stylesheet resolved. Both are only answerable from what the
     terminal was SENT, which is what ``render_strips`` returns.
 
@@ -107,5 +107,11 @@ def caret_cells(cells: list[tuple[str, str | None, str | None]]) -> list[str]:
 
 
 def chevron_colour(cells: list[tuple[str, str | None, str | None]]) -> str | None:
-    """The prompt marker's ink — accent while the composer has focus (D23)."""
+    """The prompt marker's ink — `fg` while the composer has focus, else `dim`.
+
+    NOT the accent (D5): green means a turn is live, and a marker that is lit
+    in nearly every frame cannot also mean that. Focus is a brightness step in
+    the same neutral ramp, which is a 3.86x luminance move against `dim` where
+    the accent was 2.15x.
+    """
     return next(fg for text, fg, _ in cells if PROMPT_CHEVRON in text)

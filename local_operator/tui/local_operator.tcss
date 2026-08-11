@@ -6,12 +6,17 @@
  *
  * Minimalism contract (density is the brand):
  *   - NO bordered boxes anywhere. Structure comes from symbols, tint, and
- *     spacing. The app draws exactly TWO rules, both structural $lo-dim and
- *     neither of them an edge of anything: the input panel's thin top line
- *     (the focus accent moves to the chevron, never the rule — D23/D24) and
- *     the user prompt's gutter bar, which runs down the left of every row of
- *     a message so a multi-paragraph prompt reads as ONE block. A rule that
- *     closes a shape is a box; a rule that marks a margin is a gutter.
+ *     spacing. The app draws exactly ONE persistent structural rule, and it is
+ *     not an edge of anything: the user prompt's $lo-dim gutter bar, which
+ *     runs down the left of every row of a message so a multi-paragraph prompt
+ *     reads as ONE block. (This used to say TWO and name "the input panel's
+ *     thin top line" as the other. That rule does not exist — it was removed
+ *     deliberately, see the `#input-shell` comment; there is no `border-top`,
+ *     no `Rule(` and no `─` in any input widget. Focus still brightens the
+ *     chevron and never a rule, D23/D24.) Overlay cards may draw ONE $lo-faint
+ *     horizontal directly under their own title and nowhere else, which is
+ *     what every `─` in the app is. A rule that closes a shape is a box; a
+ *     rule that marks a margin is a gutter; a rule under a title is a caption.
  *   - NO uniform filler rows. Blocks own no outer margin; separation is
  *     ADAPTIVE and rides one opt-in class (.gap-above) that the transcript
  *     container applies only where the rhythm needs it — a run of one-line
@@ -21,14 +26,16 @@
  *     background-filled card (elevation = a background step, never a border
  *     or shadow) whose FILL carries the outcome
  *   - the accent green means ONE thing: a turn is live. It is spent on exactly
- *     five sites, and the list is exhaustive — `grep -rn 'semantic_color("accent")'
+ *     four sites, and the list is exhaustive — `grep -rn 'semantic_color("accent")'
  *     local_operator/tui` plus `$lo-accent` in this file should find no others:
  *       1. the working line's shimmer crest      (shimmer.py)
  *       2. a running tool's glyph                (widgets/tool_card.py)
  *       3. the status band's streaming spinner   (widgets/status_line.py)
- *       4. the focused input chevron             (this file,
- *                                                 #input-dock.-composer-focused)
- *       5. the picker's highlighted command NAME (widgets/command_picker.py)
+ *       4. the picker's highlighted command NAME (widgets/command_picker.py)
+ *     It was FIVE until the focused input chevron gave its site back. Focus is
+ *     not liveness, and painting both green put a green chevron two rows above
+ *     the band's green spinner meaning something else (D5, round 11). Focus is
+ *     a brightness step in the neutral ramp now — see `#prompt-chevron`.
  *     Everything else is warm neutrals. Links and file paths are the `signal`
  *     blue and deliberately NOT green; `/usage` provider headings are `label`;
  *     the brand glyph in the band is `muted`, because a mark that is always on
@@ -324,7 +331,22 @@ ToolCard:focus {
     color: $lo-dim;
 }
 
-/* Focus moves the accent onto the chevron only — the rule stays dim (D23).
+/* Focus BRIGHTENS the chevron — the rule stays dim (D23), and so does the hue.
+ *
+ * `fg`, not `$lo-accent`. The accent means "a turn is live" and nothing else,
+ * and the composer is focused in essentially every frame a user looks at, so
+ * an accent chevron was a permanent green two rows above the band's streaming
+ * spinner — three accent sites on one frame carrying two different meanings,
+ * and the always-on one the loudest (D5, round 11).
+ *
+ * Brightness says it better anyway, measured against this panel's `surface`:
+ * `fg` 13.76:1 over `dim` 4.18:1 is a 3.86x luminance step and 3.29:1 BETWEEN
+ * the two states, clear of the 3:1 non-text floor. Accent over dim was 2.15x
+ * and 1.92:1 — accent and `muted` are within 1.3% of each other in luminance
+ * (0.4365 vs 0.4309), so the old focus signal was carried almost entirely by
+ * HUE and all but vanished for a red-green deficient reader. It also lands on
+ * exactly the ink the caret is drawn in, so a focused composer states itself
+ * once, in one colour, at both ends of its own row.
  *
  * Driven by a CLASS the app toggles (see `OperatorApp._sync_composer_focus`),
  * NOT by `#input-dock:focus-within`, which silently never turned back off.
@@ -334,13 +356,11 @@ ToolCard:focus {
  * the node the rule SELECTS — here the chevron, which is the editor's SIBLING
  * and so is never on that walk. Measured on the shipped build: after the boot
  * `editor.focus()`, blurring the composer left `:focus-within` reporting False
- * while the chevron still painted the accent green on every later frame.
- * A permanently green chevron is not just a missed affordance, it spends the
- * one accent on a composer that is not focused. Class changes go through
- * `App.update_styles`, which re-applies the node AND its descendants, so the
- * chevron follows the class in both directions. */
+ * while the chevron still painted on every later frame. Class changes go
+ * through `App.update_styles`, which re-applies the node AND its descendants,
+ * so the chevron follows the class in both directions. */
 #input-dock.-composer-focused #prompt-chevron {
-    color: $lo-accent;
+    color: $lo-fg;
 }
 
 Editor {
@@ -1014,14 +1034,14 @@ Screen.subagent #todo-panel {
  * chevron carries the greying instead: a dead spine marker over a live one is
  * the whole signal, at no cost to legibility. */
 
-/* The chevron's focus accent is OFF in this mode, stated rather than inferred
- * from where focus happens to be. The accent means "a turn is live" (rule 4 of
- * the five sites in the preamble) and must never sit on a field that refuses
- * input — that is a property of the MODE, not of the focus chain, so the mode
- * says it. Higher specificity by one TYPE than the focus rule above, so it
- * wins outright whatever the dock's class says. (It also used to be the only
- * thing holding: the focus accent was driven by `#input-dock:focus-within`,
- * which never turned back off — see that rule for the mechanism.) */
+/* The chevron stays DIM in this mode, stated rather than inferred from where
+ * focus happens to be. A composer that refuses every key is not one you are
+ * typing into, whatever the focus chain says — that is a property of the MODE,
+ * so the mode says it. Higher specificity by one TYPE than the focus rule
+ * above, so it wins outright whatever the dock's class says. (It also used to
+ * be the only thing holding: the focus treatment was driven by
+ * `#input-dock:focus-within`, which never turned back off — see that rule for
+ * the mechanism.) */
 Screen.subagent #input-dock #prompt-chevron {
     color: $lo-dim;
 }

@@ -49,8 +49,8 @@ from local_operator.harness.types import (  # noqa: E402
     TurnStartEvent,
     Usage,
 )
+from local_operator.session.protocol import CompactionOutcome  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
-from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
 from local_operator.tui.widgets.welcome import WelcomeView  # noqa: E402
 

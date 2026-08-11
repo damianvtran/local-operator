@@ -3341,8 +3341,8 @@ async def test_new_without_a_capable_launcher_says_so() -> None:
 # --- "am I focused?", both sides of it ----------------------------------------
 #
 # The composer answered neither side. It drew no caret at all while the buffer
-# was empty, so clicking into it changed nothing on the frame; and its chevron
-# accent — the affordance meant to carry focus (D23) — was driven by
+# was empty, so clicking into it changed nothing on the frame; and its bright
+# chevron — the affordance meant to carry focus (D23) — was driven by
 # `#input-dock:focus-within`, which Textual never re-applied on blur, so once
 # lit it stayed lit for the life of the process. Both directions are pinned
 # here, off a real composed frame rather than off widget state: what the user
@@ -3410,14 +3410,23 @@ async def test_the_caret_holds_still_across_consecutive_frames() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_chevron_accent_turns_off_when_focus_leaves() -> None:
+async def test_the_chevron_brightens_on_focus_and_never_spends_the_accent() -> None:
     """The second affordance, in both directions — it used to only go on.
 
+    And it used to go on GREEN. The accent means "a turn is live" and the
+    composer is focused in nearly every frame, so the chevron sat permanently
+    accent two rows above the band's streaming spinner, which is accent for a
+    different reason (D5). Focus is a brightness step in the same neutral ramp
+    now: `fg` focused, `dim` blurred, a 3.86x luminance move where the accent
+    was 2.15x. The accent assertion is the load-bearing one — a future pass
+    reaching for green here reintroduces the collision, and the two-meanings
+    bug is invisible in any frame where no turn is running.
+
     The class is asserted alongside the painted colour because the class is the
-    mechanism the stylesheet reads: a green chevron with the class off would be
-    a stale frame, and the class on with a neutral chevron would be a broken
-    rule. The blur is a tool card taking focus — a real product surface, the
-    one a user reaches by clicking or tabbing to a tool row, and it leaves the
+    mechanism the stylesheet reads: a bright chevron with the class off would be
+    a stale frame, and the class on with a dim chevron would be a broken rule.
+    The blur is a tool card taking focus — a real product surface, the one a
+    user reaches by clicking or tabbing to a tool row, and it leaves the
     composer on screen, which is exactly when "are my keys still going to the
     composer?" is a live question.
     """
@@ -3425,13 +3434,15 @@ async def test_the_chevron_accent_turns_off_when_focus_leaves() -> None:
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         dock = app.query_one("#input-dock")
+        focused_ink = theme_mod.semantic_color("fg").lower()
         accent = theme_mod.semantic_color("accent").lower()
         dim = theme_mod.semantic_color("dim").lower()
 
         app.query_one(Editor).focus()
         await pilot.pause()
         assert dock.has_class(COMPOSER_FOCUSED_CLASS)
-        assert chevron_colour(composer_cells(app)) == accent
+        assert chevron_colour(composer_cells(app)) == focused_ink
+        assert chevron_colour(composer_cells(app)) != accent, "focus spent the accent"
 
         card = ToolCard("t1", "bash", {"command": "ls"})
         app._append_block(card)
@@ -3439,16 +3450,16 @@ async def test_the_chevron_accent_turns_off_when_focus_leaves() -> None:
         card.focus()
         await pilot.pause()
         assert not dock.has_class(COMPOSER_FOCUSED_CLASS)
-        assert chevron_colour(composer_cells(app)) == dim, "the chevron stayed green"
+        assert chevron_colour(composer_cells(app)) == dim, "the chevron stayed lit"
 
         app.query_one(Editor).focus()
         await pilot.pause()
         assert dock.has_class(COMPOSER_FOCUSED_CLASS)
-        assert chevron_colour(composer_cells(app)) == accent
+        assert chevron_colour(composer_cells(app)) == focused_ink
 
 
 @pytest.mark.asyncio
-async def test_the_read_only_composer_shows_neither_caret_nor_accent() -> None:
+async def test_the_read_only_composer_shows_neither_caret_nor_bright_chevron() -> None:
     """The subagent page's composer refuses every key, and looks it.
 
     Today this holds because `_set_composer_read_only` drops `can_focus` and
@@ -3501,7 +3512,7 @@ async def test_the_aside_keeps_the_caret_because_it_keeps_the_composer() -> None
         assert app.query_one(Editor).placeholder == ASIDE_PLACEHOLDER
         cells = composer_cells(app)
         assert caret_cells(cells) == [" "], "the aside took the caret with it"
-        assert chevron_colour(cells) == theme_mod.semantic_color("accent").lower()
+        assert chevron_colour(cells) == theme_mod.semantic_color("fg").lower()
         # The CONSTANT, not a copy literal: the claim is that the caret takes
         # its cell from the field rather than out of the placeholder, which is
         # true whatever the placeholder says. Spelling the sentence out here

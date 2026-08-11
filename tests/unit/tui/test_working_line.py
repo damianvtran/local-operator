@@ -520,7 +520,10 @@ async def test_a_session_switch_mid_turn_lifts_the_line_too() -> None:
         assert _working(app) is not None
 
         app._session_factory = lambda: _factory(FakeSession())  # type: ignore[assignment]
-        await app._reload_session(replace_transcript=True)
+        # A session SWITCH. `replace_transcript=True` was this call's old
+        # spelling; the ledger is now always rebuilt from the new session's
+        # own history, so the plain call is the switch.
+        await app._reload_session()
         await pilot.pause(0.1)
 
         assert _working(app) is None, "a line was mounted into the new transcript"

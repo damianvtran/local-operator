@@ -896,29 +896,26 @@ class ToolCard(TranscriptBlock):
         # …but only a tick that took new output can have changed the card's
         # HEIGHT, and only a height change concerns the container. Collapsed,
         # the card is one row and cannot reflow anything at all; expanded with
-        # nothing new, the gap and scroll work below would run once a second
-        # per open card — a linear `_blocks.index` scan and a deferred
-        # `scroll_end` — to re-settle a layout that did not move.
+        # nothing new, the gap work below would run once a second per open card
+        # — a linear `_blocks.index` scan — to re-settle a layout that did not
+        # move.
         if not self._expanded or not grew:
             self._refresh_row()
             return
         parent = self.parent if isinstance(self.parent, TranscriptView) else None
-        # Sampled BEFORE the repaint, because the repaint is what moves the
-        # extent this is measured against. Afterwards the answer is always
-        # "no", and a reader who was following the tail would be left behind by
-        # the very card they were watching.
-        pinned = parent.is_near_bottom() if parent is not None else False
         self._refresh_row()
         if parent is None:
             return
         # A card that changed height changes the gap its neighbours need, above
         # as well as below (see `refresh_gap_around`).
+        #
+        # It does NOT scroll. Keeping the tail in view as a live card grew was
+        # sampled and re-pinned here, which made this a third private copy of
+        # the sticky-bottom rule. `TranscriptView` now follows its own extent
+        # (`_size_updated`), so a growing card is anchored by the same state
+        # machine as a streaming message — and, unlike the copy, honours the
+        # release when the reader has scrolled up to read.
         parent.refresh_gap_around(self)
-        if pinned:
-            # Deferred for the reason `append_block` defers its own: `scroll_end`
-            # measures the virtual size, and the rows this repaint added are not
-            # in it until the layout has settled.
-            parent.call_after_refresh(parent.scroll_end, animate=False)
 
     def on_mount(self) -> None:
         """Start the clock for a card that was mounted already RUNNING.
