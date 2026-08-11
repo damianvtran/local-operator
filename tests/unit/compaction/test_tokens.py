@@ -282,11 +282,17 @@ class TestApproxTextTokens:
     def test_it_tracks_the_exact_count_closely_enough_for_a_percentage(self) -> None:
         """The claim is narrow on purpose: this payload, this direction.
 
-        Skipped without the ``tokenizer`` extra, which is NOT paranoia: with
-        tiktoken absent, ``count_text_tokens`` degrades to the identical
-        ``len(text) // 4`` expression, so both assertions below would hold by
-        identity and this test would measure nothing at all while looking
-        green. CI installs the extra, so the calibration is real there.
+        Skipped without a working ENCODING, which is NOT paranoia: whenever
+        ``_get_encoding()`` returns None, ``count_text_tokens`` degrades to the
+        identical ``len(text) // 4`` expression, so both assertions below hold
+        by identity and this test measures nothing while looking green.
+
+        Guarding the import alone was not enough. ``_get_encoding`` also
+        swallows a failure from ``tiktoken.get_encoding("cl100k_base")``, which
+        on a cold cache is a network fetch and offline is a connection timeout
+        — tiktoken imports fine, ``importorskip`` does not fire, and the
+        comparison is an identity again. The same offline-cold-cache case the
+        estimator's own docstring calls out.
 
         The bound is 20% because the payload below measures +17.3% — not
         because 20% is a general property of ``chars // 4``. On other content
@@ -300,6 +306,8 @@ class TestApproxTextTokens:
         promising room that does not exist.
         """
         pytest.importorskip("tiktoken")
+        if tokens_mod._get_encoding() is None:
+            pytest.skip("cl100k_base unavailable — the comparison would be an identity")
         text = (
             "You are a careful assistant. Read the repository before editing. "
             '{"type":"object","properties":{"path":{"type":"string"}}}'

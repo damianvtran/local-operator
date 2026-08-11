@@ -193,12 +193,22 @@ def _narrowest_survivor_last(rungs: list[str]) -> list[str]:
     it sheds down the ladder until the row fits and can never add a segment
     back. Ending on ``cwd`` therefore means the band sheds the armed
     ``! auto-approve`` alarm to make room for a path that then does not fit
-    either, and paints neither. Measured on the quiet estimate ladder with a
-    24-character basename, at 34-46 cells: ``◆ kimi-k2-thinking`` and up to 29
-    blank cells, where keeping the alarm last paints
-    ``◆ kimi-k2-thinking      ! auto-approve``. A 14-cell alarm that always
-    fits beats an unbounded path that may not, and the alarm is the only place
-    the band admits the approval gate is disarmed.
+    either, and paints neither.
+
+    The decisive argument is PARITY WITH MAIN, not blank cells. Main's boot band
+    carries no estimate, so it uses the quiet ladder and keeps the alarm; a band
+    that ends on ``cwd`` disagrees with main about which of {path, alarm}
+    survives at 172 of the widths swept (20-95 cells x 7 basenames), and this
+    rule brings that to zero. Blank cells are the symptom and they do not argue
+    it cleanly either way — from 47 cells up the swap trades an ink-heavy path
+    for a shorter alarm, which the blank-cell count scores as worse and main
+    scores as correct.
+
+    Concretely, with a 24-character basename and the gate disarmed: the alarm
+    first fits at 36 cells, and from 36 to 46 the previous ordering painted
+    ``◆ kimi-k2-thinking`` alone. A 14-cell alarm that always fits beats an
+    unbounded path that may not, and the alarm is the only place the band admits
+    the approval gate is disarmed.
 
     So the rule is really "the last survivor must be BOUNDED, and should be the
     narrowest such rung". Those agree everywhere except the quiet estimate
