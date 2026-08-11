@@ -36,6 +36,8 @@ from rich.console import Console, RenderableType
 from rich.style import Style
 from rich.text import Text
 from textual.containers import ScrollableContainer
+from textual.content import Content
+from textual.selection import Selection
 from textual.widgets import Static
 
 from local_operator.harness.intent import ACTIVITY_THINKING
@@ -167,12 +169,37 @@ class TranscriptBlock(Static):
     _multirow_cache: bool | None = None
 
     def set_content(self, renderable: RenderableType) -> None:
-        """Apply ``renderable`` as the block content (no-op once finalized)."""
+        """Apply ``renderable`` as the block content (no-op once finalized).
+
+        A ``Text`` is promoted to a ``Content`` HERE rather than left to
+        Textual, and that is not a micro-optimisation. ``visualize``
+        (``textual/visual.py``) promotes one by calling
+        ``Content.from_rich_text(obj, console=widget.app.console)``, and
+        ``Widget.app`` RAISES for a widget that is neither mounted nor inside a
+        running app. The product takes exactly that path — ``app.py`` builds a
+        block, gives it its text, and appends it afterwards (session replay and
+        the direct-answer path) — so every ``Text``-authoring block was one
+        unmounted construction away from a crash, and the assistant block became
+        the first to author a ``Text`` and prove it.
+
+        Dropping the console is EXACT, not a fallback: it is consulted only to
+        resolve span styles given as NAMES (``content.py``:
+        ``get_style(style) if isinstance(style, str)``), and every block here
+        applies resolved ``rich.style.Style`` objects. The ANSI theme is read
+        from the active app independently, guarded the same way, either way.
+
+        ``_content`` keeps the ``Text``: it is what ``_count_rows`` measures
+        cheaply, and what the :attr:`renderable` property promises. A ``str``
+        still goes through Textual, whose ``Content.from_markup`` reading of it
+        is the behaviour the callers that pass one already rely on.
+        """
         if self._finalized:
             return
         self._content = renderable
         self.invalidate_row_measurements()
-        self.update(renderable)
+        self.update(
+            Content.from_rich_text(renderable) if isinstance(renderable, Text) else renderable
+        )
 
     def invalidate_row_measurements(self) -> None:
         """Drop the memoized row counts (content or WIDTH changed).
@@ -233,6 +260,71 @@ class TranscriptBlock(Static):
         if self._multirow_cache is None:
             self._multirow_cache = _count_rows(self._content, self.size.width or 80) > 1
         return self._multirow_cache
+
+    # -- text selection (TUI-021) -------------------------------------------
+    def copy_gutter(self, index: int) -> int:
+        """Leading CHARACTERS of rendered row ``index`` that are the block's
+        own gutter — structure the block paints, never text the model or the
+        user wrote.
+
+        The clipboard rule this serves, stated once for every block:
+
+        **A copy yields the glyphs the selection highlighted, minus each row's
+        gutter and its trailing pad.** Not the source markup: the reader
+        selected a rendered frame, and a paste that re-introduced ``**`` around
+        a word they saw in bold would be a different document from the one they
+        pointed at. This is also the only rule under which the highlight and
+        the clipboard cannot disagree — both are computed from the same rows by
+        the same :meth:`Selection.get_span`.
+
+        What that leaves out is exactly the chrome. ``UserBlock`` paints ``▌``
+        in a column its own docstring places OUTSIDE the text field;
+        ``NoticeBlock`` paints a kind glyph into a fixed four-cell field no
+        continuation row writes into; ``ToolCard``'s expansion indents two
+        cells. None of those are content, and every one of them is the kind of
+        thing that silently arrives in a paste — a pasted ``▌ def f(x):`` is
+        not runnable and a pasted ``  · `` is not a sentence.
+
+        A count rather than a prefix string because the reader may start the
+        drag INSIDE the gutter: the span start is clamped up to this column, so
+        a selection that begins on the rule still copies from the first cell of
+        prose.
+        """
+        return 0
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        """The selected text, gutter-stripped and right-trimmed, or ``None``.
+
+        Overrides Textual's default (``Widget.get_selection``, which extracts
+        ``str(self._render())`` wholesale) for two reasons:
+
+        1. It walks rows through ``Selection.get_span`` — the SAME call
+           ``Content._wrap_and_format`` uses to decide which cells to paint the
+           selection style onto — so the clipboard is the highlight by
+           construction rather than by a second implementation of the same
+           arithmetic.
+        2. It applies :meth:`copy_gutter` and drops trailing pad. Rich pads
+           every rendered row out to the full width, so without the trim a
+           three-word paste arrives with 60 spaces after it.
+
+        Returns ``None`` when the block's visual is not a ``Content`` — a Rich
+        renderable reaches the screen through ``RichVisual``, which never
+        applies ``options.selection``, so nothing was highlighted and there is
+        nothing to hand back.
+        """
+        visual = self._render()
+        if not isinstance(visual, Content):
+            return None
+        copied: list[str] = []
+        for index, row in enumerate(visual.plain.split("\n")):
+            span = selection.get_span(index)
+            if span is None:
+                continue
+            start, end = span
+            copied.append(row[max(start, self.copy_gutter(index)) : None if end == -1 else end])
+        if not copied:
+            return None
+        return "\n".join(row.rstrip() for row in copied), "\n"
 
 
 class UserBlock(TranscriptBlock):
@@ -330,6 +422,18 @@ class UserBlock(TranscriptBlock):
         self._text = text
         self.set_content(self._build())
         self.finalize()
+
+    def copy_gutter(self, index: int) -> int:
+        """The rule's columns, on EVERY row — that is what makes it a rule.
+
+        :meth:`_build` prefixes ``RULE_COLS`` cells of gutter to every row it
+        authors, blank paragraph rows included, so the count is uniform and
+        needs no row bookkeeping. Without this a copied prompt pastes as
+        ``▌ summarise the ingest path``, and a copied pasted-in snippet — the
+        case the whole treatment was designed for — pastes with a ``▌`` welded
+        to the front of every line.
+        """
+        return self.RULE_COLS
 
     def text(self) -> str:
         """The prompt as submitted, newlines and indentation intact."""
@@ -495,6 +599,16 @@ class NoticeBlock(TranscriptBlock):
         self._glyph = NOTICE_GLYPHS.get(kind, "·")
         self.set_content(self._build())
         self.finalize()
+
+    #: The kind field: the spine indent plus the glyph and its space. Every row
+    #: reserves exactly this — :meth:`_build` writes ``indent + glyph + " "`` on
+    #: the first and ``hanging`` (the same width, blank) on the rest, which is
+    #: what makes a long notice read as one statement. So the copy gutter is
+    #: uniform, and a copied notice is the sentence rather than ``  · `` and it.
+    GLYPH_COLS = SPINE_INDENT + 2
+
+    def copy_gutter(self, index: int) -> int:
+        return self.GLYPH_COLS
 
     def on_resize(self, event: object) -> None:
         """Re-wrap at the new width (the same discipline as the tool row).

@@ -162,6 +162,36 @@ AssistantBlock {
     color: $lo-fg;
 }
 
+/* DRAG-SELECTION band (TUI-021). The one place a background is allowed to mean
+ * nothing about the content under it — it marks a RANGE, and the range moves.
+ *
+ * Textual's default here is `textual-dark`'s `ansi_bright_blue` on
+ * `ansi_black` (see `theme.py`, `screen-selection-background`), which is the
+ * only saturated blue anywhere in the app and lands on prose the reader is
+ * mid-gesture over. `$lo-faint` is the answer for the one reason that
+ * distinguishes it: the band has to be visible on BOTH grounds it can fall on,
+ * the island `bg` and the tool ledger's `surface` fill, while leaving the body
+ * ink readable on top of itself. Measured on the dark ramp — `faint` is 1.97:1
+ * against `bg` and 1.81:1 against `surface` with `fg` at 7.58:1 on it (light
+ * ramp: 2.08, 1.90, 7.28). `edge` fails the first test (1.55 and 1.42 — a band
+ * you cannot find over a tool card) and `dim` fails the second (`fg` at
+ * 3.29:1, under the 4.5:1 floor for body text).
+ *
+ * The ink is NORMALISED to `fg` rather than left alone, which does flatten the
+ * markdown tints inside the band — inline code loses its `signal`, a heading
+ * its step. That is what a selection is: a mode the reader is holding for a
+ * moment, not a re-tint of the document, and it is what every terminal and
+ * editor does. Stating it also takes the choice away from Textual, whose
+ * default put `ansi_black` here.
+ *
+ * Written as the desugared descendant form because that is what `Screen`'s own
+ * `& > .screen--selection` compiles to; app CSS outranks widget DEFAULT_CSS in
+ * Textual's cascade, so this wins without a specificity fight. */
+Screen > .screen--selection {
+    background: $lo-faint;
+    color: $lo-fg;
+}
+
 /* ONE LINE PER ACTION — the row is a background-filled card, one elevation
  * step brighter than the ground (kit surface on bg).
  *

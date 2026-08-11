@@ -1358,6 +1358,38 @@ class ToolCard(TranscriptBlock):
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         self._refresh_row()
 
+    # -- text selection (TUI-021) -------------------------------------------
+    #: The icon field on the summary row: the per-tool glyph and its separator,
+    #: which every rung of :meth:`_build_row` writes as ``icon + " "`` and every
+    #: width budget in this file counts as ``+ 2``.
+    ICON_COLS = 2
+
+    def copy_gutter(self, index: int) -> int:
+        """The icon field on the summary row; the expansion's indent below it.
+
+        Both are gutter for the same reason, and the summary row's case is the
+        one worth arguing. ``tool_icon`` returns a NERD FONT private-use
+        codepoint (``\\uf120`` for bash), which is the strongest possible form
+        of the failure a copy gutter exists to prevent: pasted into a bug report
+        or an issue it is a replacement box, and it carries nothing the row does
+        not immediately restate — the tool NAME is the next field along, in
+        text. It is a fixed leading field on a single row, which is a gutter by
+        the same test that makes ``NoticeBlock``'s kind glyph one, and treating
+        the two differently would have been the inconsistency.
+
+        The rest of the row stays: name column, what ran, outcome glyph and
+        duration are the receipt, and a user who selects a settled row wants it.
+
+        Below the summary, every row is written by
+        ``_append_input_body``/``_append_output_body``/``_append_diff_body``/
+        ``_append_live_body``, each of which opens with
+        ``"\\n" + " " * OUTPUT_INDENT``. That indent is the card's own layout,
+        and it is the thing standing between a copied stderr and a paste that
+        goes straight into a bug report — or, for a diff, between ``+ added``
+        and something ``git apply`` will not read.
+        """
+        return self.ICON_COLS if index == 0 else OUTPUT_INDENT
+
     # -- rendering ----------------------------------------------------------
     def refresh_row(self) -> None:
         """Repaint at the current width — the ledger's shared column moved.
