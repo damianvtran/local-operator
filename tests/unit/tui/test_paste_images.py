@@ -26,6 +26,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import TextArea
 from textual.widgets.text_area import Selection
 
+from local_operator.harness.types import ImageContent
 from local_operator.tui.widgets.editor import (
     MAX_ATTACHMENT_BYTES,
     Editor,
@@ -44,17 +45,17 @@ def _escaped(path: str) -> str:
     return path.replace(" ", "\\ ")
 
 
-class Host(App):
+class Host(App[None]):
     def compose(self) -> ComposeResult:
         yield Editor()
 
 
-class BareHost(App):
+class BareHost(App[None]):
     def compose(self) -> ComposeResult:
         yield TextArea()
 
 
-async def _paste(app: App, pilot, text: str) -> None:
+async def _paste(app: App[None], pilot, text: str) -> None:
     app.post_message(events.Paste(text))
     await pilot.pause()
     await pilot.pause()
@@ -395,7 +396,7 @@ async def test_a_pasted_image_reaches_the_session_with_the_prompt(tmp_path) -> N
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
     path = _png(tmp_path / "a.png", 12, 34)
-    sent: list[tuple[str, list]] = []
+    sent: list[tuple[str, list[ImageContent]]] = []
 
     class Recording(FakeSession):
         async def prompt(self, text, images=None):  # type: ignore[override]
@@ -437,7 +438,7 @@ async def test_a_screenshot_with_no_words_is_a_prompt_in_itself(tmp_path) -> Non
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
     path = _png(tmp_path / "a.png", 11, 22)
-    sent: list[tuple[str, list]] = []
+    sent: list[tuple[str, list[ImageContent]]] = []
 
     class Recording(FakeSession):
         async def prompt(self, text, images=None):  # type: ignore[override]
