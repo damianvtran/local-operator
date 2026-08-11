@@ -492,6 +492,56 @@ def test_an_unprompted_child_message_lands_in_the_parents_context():
     assert "parser" in message.details["text"]
 
 
+@pytest.mark.asyncio
+async def test_a_note_sent_before_the_question_lands_does_not_answer_it():
+    """R3, ordering A. A child volunteering "I am blocked" while the parent's
+    question is still an un-injected thunk must not resolve it: the child has
+    not read the question. Two things used to be destroyed at once — the
+    answer was wrong, the question then materialized as a StaleAside and was
+    never asked, AND the note the child actually sent was consumed instead of
+    delivered."""
+    comms, _jobs, child, parent = wire()
+
+    question = asyncio.create_task(comms.ask("job-1", "are you stuck?", 5_000))
+    await wait_for(lambda: bool(child.asides))  # queued, NOT yet in context
+
+    outcome = comms.reply_to_parent("job-1", "I am blocked: no staging credentials")
+
+    assert "delivered to the parent" in outcome
+    assert "I am blocked" in hub_aside(parent.asides[0]()).details["text"]
+    assert not question.done()
+
+    # The question survives, reaches the child, and is answered normally.
+    [aside] = child.materialize()
+    assert hub_aside(aside).details["expects_reply"] is True
+    comms.reply_to_parent("job-1", "not stuck, the fixtures are slow")
+    assert (await question).text == "not stuck, the fixtures are slow"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_to_a_timed_out_question_does_not_answer_the_next_one():
+    """R3, ordering B. The child is answering Q1, which nobody is waiting for
+    any more; Q2 is queued but unread. Accepting it as Q2's answer would hand
+    the parent a reply to a question it did not ask."""
+    comms, _jobs, child, parent = wire()
+
+    first = await comms.ask("job-1", "how far along are you?", 20)
+    assert first.timed_out is True
+
+    second = asyncio.create_task(comms.ask("job-1", "are you stuck?", 5_000))
+    await wait_for(lambda: len(child.asides) == 2)
+
+    outcome = comms.reply_to_parent("job-1", "about halfway")  # answering Q1
+
+    assert "delivered to the parent" in outcome
+    assert "about halfway" in hub_aside(parent.asides[0]()).details["text"]
+    assert not second.done()
+
+    child.materialize()  # Q1 withdraws itself, Q2 lands
+    comms.reply_to_parent("job-1", "not stuck")
+    assert (await second).text == "not stuck"
+
+
 def test_resume_refuses_a_second_child_on_the_same_transcript():
     """Two children on one transcript directory is data loss, not just
     confusion: each holds its own in-memory entry list and ``compact_file``

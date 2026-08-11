@@ -411,13 +411,25 @@ class SubagentComms:
     def reply_to_parent(self, job_id: str, text: str) -> str:
         """Deliver a child's message to its parent; returns what happened.
 
-        Answers the parent's pending question when there is one, and
-        otherwise lands as a note in the parent's context — a child that
-        notices it is blocked should be able to say so unprompted.
+        Answers the parent's pending question when the child has actually
+        SEEN it, and otherwise lands as a note in the parent's context — a
+        child that notices it is blocked should be able to say so unprompted.
+
+        ``armed`` is the whole of that distinction and this path must respect
+        it exactly as the prose watcher does. A question is armed only when
+        its aside reached the child's context, so an unarmed question is one
+        the child cannot be answering: it is either still a queued thunk, or
+        one that timed out while a newer question waits. Resolving on
+        ``ask is not None`` alone accepted a child's UNPROMPTED "I am blocked"
+        as the answer to a question it had never read — and did double damage,
+        because the real question then materialized as a ``StaleAside`` and
+        was never asked, while the note the child actually sent was consumed
+        rather than delivered. Unarmed messages therefore fall through to the
+        note path below; nothing is lost either way.
         """
         record = self._records.get(job_id)
         label = record.label if record is not None else job_id
-        if record is not None and record.ask is not None and not record.ask.done():
+        if record is not None and record.armed and record.ask is not None and not record.ask.done():
             record.ask.set_result(text)
             record.armed = False
             return "answered the parent's question"
