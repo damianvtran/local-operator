@@ -949,6 +949,23 @@ class ChatRequest(BaseModel):
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
     tool_choice: Literal["auto", "none", "required"] = "auto"
+    #: This call's output has NOT been shown to anyone yet, so a failed attempt
+    #: may be discarded and retried whole.
+    #:
+    #: Transport policy rather than wire content (no ``_build_body`` reads it):
+    #: it lives here because the loop's ``stream_fn`` signature is
+    #: ``(request, signal)`` in every host and fake, and the one fact the
+    #: failover driver is missing is a property of the CALL.
+    #:
+    #: ``False`` for a turn and for an aside: their deltas reach the transcript
+    #: as they arrive, and a retry would re-render text the user already read.
+    #: ``True`` for the one-shot errands that collect the whole stream before
+    #: returning a string — the compaction summary and auto-naming — where a
+    #: stalled read (``_guarded_chunks`` gives up after 180s of silence) used to
+    #: be a permanent failure because the driver had already forwarded events it
+    #: could not take back. A failed compaction is not cosmetic: the context it
+    #: was meant to shrink keeps growing.
+    replayable: bool = False
 
 
 class StreamTextDelta(BaseModel):

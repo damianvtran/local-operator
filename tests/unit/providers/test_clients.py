@@ -25,6 +25,8 @@ from local_operator.providers.clients import (
     AnthropicClient,
     MockClient,
     OpenAICompatClient,
+    _anthropic_stream_error,
+    raise_for_status,
 )
 from local_operator.providers.failover import ProviderError
 
@@ -622,6 +624,219 @@ def test_retry_after_http_date_parsed() -> None:
     response = httpx.Response(429, headers={"retry-after": header})
     parsed = _parse_retry_after(response)
     assert parsed is not None and 8000 <= parsed <= 12000
+
+
+# ---------------------------------------------------------------------------
+# Error fidelity — what the provider actually said, and how fast it clears
+# ---------------------------------------------------------------------------
+
+
+class TestErrorMessageExtraction:
+    """The reported frame was ``✕ HTTP 404:`` — a wrong status and an EMPTY
+    message. This class covers the empty half: every body shape a provider
+    packs its explanation into has to reach the frame, because that text is
+    what says which limit was hit and when it resets.
+    """
+
+    def _error(self, response: httpx.Response) -> ProviderError:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(response)
+        return excinfo.value
+
+    def test_openai_style_error_message(self) -> None:
+        error = self._error(
+            httpx.Response(429, json={"error": {"message": "You exceeded your quota."}})
+        )
+        assert error.message == "You exceeded your quota."
+
+    def test_google_wraps_its_error_in_a_single_element_list(self) -> None:
+        """``streamGenerateContent`` answers a pre-stream failure with
+        ``[{"error": ...}]``. A mapping-only extractor read straight past the
+        list to ``response.text``, which is how a real quota error arrived with
+        its message replaced by raw JSON — or, once the body was empty, by
+        nothing at all."""
+        error = self._error(
+            httpx.Response(
+                429,
+                json=[
+                    {
+                        "error": {
+                            "code": 429,
+                            "message": "Resource has been exhausted (e.g. check quota).",
+                            "status": "RESOURCE_EXHAUSTED",
+                        }
+                    }
+                ],
+            )
+        )
+        assert error.message == "Resource has been exhausted (e.g. check quota)."
+        assert error.kind == "quota"
+
+    def test_blank_message_key_falls_through_instead_of_winning(self) -> None:
+        """``error.get("message", error)`` treated a present-but-EMPTY key as an
+        answer, so a provider that sent the field blank produced an error that
+        printed nothing."""
+        error = self._error(
+            httpx.Response(400, json={"error": {"message": "", "detail": "model_not_supported"}})
+        )
+        assert error.message == "model_not_supported"
+
+    def test_bare_error_string_and_detail_shapes(self) -> None:
+        assert self._error(httpx.Response(500, json={"error": "server overloaded"})).message == (
+            "server overloaded"
+        )
+        assert self._error(httpx.Response(422, json={"detail": "input too long"})).message == (
+            "input too long"
+        )
+
+    def test_openrouter_upstream_text_is_recovered_from_metadata_raw(self) -> None:
+        """OpenRouter's ``message`` is the useless half ("Provider returned
+        error"); the ORIGIN provider's real text is JSON-encoded one level down
+        in ``metadata.raw``. Both are kept because the raw part is the one that
+        names the limit."""
+        error = self._error(
+            httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": "Provider returned error",
+                        "code": 429,
+                        "metadata": {
+                            "provider_name": "Google",
+                            "raw": json.dumps(
+                                {"error": {"message": "Quota exceeded for quota metric 'Requests'"}}
+                            ),
+                        },
+                    }
+                },
+            )
+        )
+        assert error.message == (
+            "Provider returned error: Quota exceeded for quota metric 'Requests'"
+        )
+        assert error.kind == "quota"
+
+    def test_empty_body_still_says_something(self) -> None:
+        """The reported frame, reproduced: a gateway rejecting an unknown model
+        answers 404 with no body at all. ``ProviderError`` refuses to be
+        wordless, so the floor is the status's own meaning."""
+        error = self._error(httpx.Response(404, content=b""))
+        assert error.message == "Not Found — the provider sent no error message"
+        assert str(error) == (
+            "invalid request (HTTP 404): Not Found — the provider sent no error message"
+        )
+
+    def test_non_json_body_is_carried_through(self) -> None:
+        error = self._error(httpx.Response(502, content=b"<html>bad gateway</html>"))
+        assert error.message == "<html>bad gateway</html>"
+        assert error.kind == "transient"
+
+
+class TestRetryAfter:
+    """"try again in 40s" is the single most actionable fact in a rate-limit
+    error, and providers disagree about where to put it."""
+
+    def test_header_seconds(self) -> None:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(httpx.Response(429, json={"error": "slow down"},
+                                            headers={"retry-after": "42"}))
+        assert excinfo.value.retry_after_ms == 42_000
+        assert "retry in 42s" in str(excinfo.value)
+
+    def test_google_puts_the_delay_in_the_body_and_sends_no_header(self) -> None:
+        """Gemini quota 429s carry ``error.details[].retryDelay`` ("41s") and NO
+        ``Retry-After``, so the one number the user needs was being dropped."""
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(
+                httpx.Response(
+                    429,
+                    json={
+                        "error": {
+                            "message": "Resource has been exhausted.",
+                            "details": [
+                                {"@type": "type.googleapis.com/google.rpc.QuotaFailure"},
+                                {
+                                    "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                    "retryDelay": "41.6s",
+                                },
+                            ],
+                        }
+                    },
+                )
+            )
+        assert excinfo.value.retry_after_ms == 41_600
+        assert "retry in 42s" in str(excinfo.value)
+
+    def test_no_delay_anywhere_is_not_invented(self) -> None:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(httpx.Response(429, json={"error": "slow down"}))
+        assert excinfo.value.retry_after_ms is None
+        assert "retry in" not in str(excinfo.value)
+
+
+class TestStatusFlags:
+    """``retryable`` and ``auth_error`` are what the failover driver acts on, so
+    the mapping from status is pinned rather than inferred from behaviour."""
+
+    @pytest.mark.parametrize(
+        ("status", "retryable", "kind"),
+        [
+            (400, False, "request"),
+            (401, False, "auth"),
+            (403, False, "auth"),
+            (404, False, "request"),
+            (408, True, "timeout"),
+            (429, True, "quota"),
+            (500, True, "transient"),
+            (503, True, "transient"),
+            (504, True, "timeout"),
+            (529, True, "transient"),
+        ],
+    )
+    def test_status_maps_to_retryability_and_kind(
+        self, status: int, retryable: bool, kind: str
+    ) -> None:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(httpx.Response(status, json={"error": "boom"}))
+        assert excinfo.value.retryable is retryable
+        assert excinfo.value.kind == kind
+
+
+class TestAnthropicStreamErrorEvent:
+    """A mid-stream ``error`` event arrives on an HTTP 200, so its status has to
+    come from anthropic's ``type``. Blanket ``retryable=True`` re-sent requests
+    the API had already refused."""
+
+    def test_overloaded_is_transient(self) -> None:
+        error = _anthropic_stream_error({"type": "overloaded_error", "message": "Overloaded"})
+        assert (error.kind, error.retryable) == ("transient", True)
+        assert error.message == "overloaded_error: Overloaded"
+
+    def test_rate_limit_is_quota(self) -> None:
+        error = _anthropic_stream_error(
+            {"type": "rate_limit_error", "message": "Number of request tokens exceeded"}
+        )
+        assert (error.kind, error.retryable) == ("quota", True)
+
+    def test_invalid_request_is_not_retried(self) -> None:
+        error = _anthropic_stream_error(
+            {"type": "invalid_request_error", "message": "max_tokens too large"}
+        )
+        assert (error.kind, error.retryable, error.status) == ("request", False, 400)
+
+    def test_authentication_error_is_auth(self) -> None:
+        error = _anthropic_stream_error({"type": "authentication_error", "message": "bad key"})
+        assert (error.kind, error.auth_error) == ("auth", True)
+
+    def test_an_event_with_no_text_still_names_itself(self) -> None:
+        error = _anthropic_stream_error({"type": "api_error"})
+        assert error.message == "api_error"
+        assert str(error) == "transient provider error (HTTP 500): api_error"
+
+    def test_an_empty_event_is_not_a_silent_error(self) -> None:
+        error = _anthropic_stream_error({})
+        assert error.message == "the provider failed without reporting a reason"
+        assert error.retryable is True  # unknown type keeps the old assumption
 
 
 def test_unknown_provider_raises_value_error() -> None:

@@ -131,8 +131,10 @@ async def test_a_failing_provider_turn_does_not_paint_its_warning(
     """The reported defect, end to end: a real turn failing with a ``ProviderError``.
 
     The user switched to ``anthropic/claude-opus-5`` and every turn produced
-    ``× HTTP 400: `temperature` is deprecated for this model.`` in the
-    transcript AND a duplicate log line outside the frame. The stack is gone
+    ``× invalid request (HTTP 400): `temperature` is deprecated for this
+    model.`` in the transcript AND a duplicate log line outside the frame. The
+    kind leads the line because a status alone never told anyone what to do; see
+    ``ProviderError.__str__``. The stack is gone
     (``AgentLoop`` drops ``exc_info`` for a ``RenderedStreamError``); this
     covers the surviving one-liner, which must go to the file and NOT to the
     screen.
@@ -185,7 +187,10 @@ async def test_a_failing_provider_turn_does_not_paint_its_warning(
 
     contents = (tmp_path / "logs" / LOG_FILE_NAME).read_text(encoding="utf-8")
     assert "local_operator.harness.loop" in contents
-    assert "model stream failed: HTTP 400: `temperature` is deprecated for this model." in contents
+    assert (
+        "model stream failed: invalid request (HTTP 400): "
+        "`temperature` is deprecated for this model." in contents
+    )
 
 
 @pytest.mark.asyncio

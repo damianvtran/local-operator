@@ -24,7 +24,7 @@ import inspect
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -690,9 +690,49 @@ class AgentLoop:
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.warning("approval callback raised for %s", call.name, exc_info=True)
-                approved = False
+            except Exception as exc:
+                # A gate that CRASHED has not decided anything, and reporting it
+                # as "User denied approval" blamed the user for our own bug: the
+                # report that comes back is "it denied my command", so nobody
+                # goes looking for the exception. Two bash calls really did read
+                # `User denied approv…` in a session whose band said
+                # `! auto-approve` — a combination no user can produce — after a
+                # widget raised inside the TUI's gate.
+                #
+                # The call is still NOT run: a gate that cannot answer has
+                # granted nothing, and that half was always right. What changes
+                # is that the failure now says so in its own words, and at ERROR
+                # with the stack, because a fault inside a SECURITY gate is not
+                # a warning.
+                #
+                # Deliberately NOT re-raised out of the loop, though the argument
+                # is close. Every tool call has to come back paired with a result
+                # (``_execute_batch``), and the sibling handler below already
+                # answers a raising TOOL with an error result rather than a dead
+                # turn; trading a misleading result for an aborted turn is not
+                # the improvement. Being unmistakable is — the conservative-
+                # looking silent denial is exactly what hid this for however long
+                # it has been here, so the fix is loudness, not severity.
+                logger.error(
+                    "approval gate raised for %s; the call was NOT run",
+                    call.name,
+                    exc_info=True,
+                )
+                detail = str(exc).strip()
+                named = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+                return self._synthetic_result(
+                    call,
+                    # FIRST LINE is the card's failure label (the TUI takes
+                    # `_first_line(result_text)`), which is the row the owner
+                    # read as `User denied approv…`. It therefore carries the
+                    # whole diagnosis on its own and the detail follows below,
+                    # where the expansion and the model both get it.
+                    f"Approval gate failed for '{call.name}' — the call was not run.\n"
+                    f"{sanitize_prompt_line(named, limit=200)}\n"
+                    "This is a harness fault, not a refusal by the user; the stack is in "
+                    "the log.",
+                    details={"__approval_gate_failed": True},
+                )
             if not approved:
                 return self._synthetic_result(call, f"User denied approval for '{call.name}'.")
 
@@ -897,13 +937,21 @@ class AgentLoop:
         )
 
     @staticmethod
-    def _synthetic_result(call: ToolCall, text: str) -> ToolResult:
+    def _synthetic_result(
+        call: ToolCall, text: str, details: Mapping[str, Any] | None = None
+    ) -> ToolResult:
+        """A result the loop invented because the call never ran.
+
+        ``details`` carries an extra machine-readable marker for the cases a host
+        must tell apart. ``__synthetic`` alone cannot: "the user said no" and
+        "the approval gate crashed" are the same shape and opposite meanings.
+        """
         return ToolResult(
             tool_call_id=call.id,
             tool_name=call.name,
             is_error=True,
             content=[TextContent(text=text)],
-            details={"__synthetic": True},
+            details={"__synthetic": True, **(details or {})},
         )
 
     @staticmethod

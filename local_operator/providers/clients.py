@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import email.utils
 import json
+import re
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
@@ -46,6 +47,12 @@ from local_operator.providers.failover import ProviderError
 
 if TYPE_CHECKING:
     from local_operator.providers.auth_store import OAuthAccess
+
+
+#: "no payload supplied" — distinct from ``None``, which is the legitimate
+#: result of a non-JSON body. Lets the two extractors share one parse when the
+#: caller has it and still stand alone when it does not.
+_UNSET: Any = object()
 
 
 @runtime_checkable
@@ -74,13 +81,118 @@ class WireClient(Protocol):
 # ---------------------------------------------------------------------------
 
 
-def _parse_retry_after(response: httpx.Response) -> int | None:
-    """``Retry-After`` as milliseconds; supports seconds AND HTTP-date form."""
-    header = response.headers.get("retry-after")
-    if header is None:
-        return None
+def _error_payload(response: httpx.Response) -> Any:
+    """The parsed error body, or ``None`` when it is not JSON.
+
+    A single-element LIST is unwrapped: google's ``streamGenerateContent``
+    answers a pre-stream failure with ``[{"error": {...}}]``, and the mapping-only
+    extractor read straight past it to ``response.text``.
+    """
     try:
-        return int(float(header) * 1000)
+        payload = response.json()
+    except ValueError:
+        return None
+    if isinstance(payload, list) and len(payload) == 1:
+        return payload[0]
+    return payload
+
+
+def _first_text(*candidates: Any) -> str:
+    """The first candidate that is a non-blank string."""
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _extract_error_message(response: httpx.Response, payload: Any = _UNSET) -> str:
+    """The provider's OWN words about the failure, from whichever slot it used.
+
+    A cascade rather than one lookup, because the shapes genuinely differ and
+    the message is the useful half of the frame — it says WHICH limit and WHEN
+    it resets. Covered here:
+
+    - ``{"error": {"message": ...}}`` — openai, anthropic, google.
+    - ``{"error": "..."}`` — ollama and several openai-compatible servers.
+    - ``{"message": ...}`` / ``{"detail": ...}`` — gateways and FastAPI-shaped
+      proxies (litellm, vLLM).
+    - ``{"error": {"metadata": {"raw": "<json>"}}}`` — openrouter puts a bare
+      ``"Provider returned error"`` in ``message`` and the UPSTREAM provider's
+      real text, JSON-encoded, in ``metadata.raw``; both are kept, in that
+      order, because the raw part is the one that names the limit.
+    - anything else — the raw body, capped.
+
+    ``{"error": {"message": ""}}`` falls THROUGH to the next slot: the previous
+    ``error.get("message", error)`` treated a present-but-empty key as an
+    answer, so a provider that sent the field blank produced an error that
+    printed nothing at all.
+    """
+    if payload is _UNSET:
+        payload = _error_payload(response)
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            message = _first_text(error.get("message"), error.get("detail"), error.get("msg"))
+            upstream = _openrouter_upstream_text(error)
+            if message and upstream and upstream not in message:
+                return f"{message}: {upstream}"
+            resolved = message or upstream or _first_text(error.get("status"), error.get("code"))
+            if resolved:
+                return resolved
+            return str(error)
+        direct = _first_text(error, payload.get("message"), payload.get("detail"))
+        if direct:
+            return direct
+    return response.text[:500].strip()
+
+
+def _openrouter_upstream_text(error: Mapping[str, Any]) -> str:
+    """The upstream provider's message out of openrouter's ``metadata.raw``.
+
+    ``raw`` is a JSON *string* holding the origin provider's own error body, so
+    it is re-parsed one level. Anything unexpected degrades to the raw string
+    itself, which still says more than "Provider returned error".
+    """
+    metadata = error.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return ""
+    raw = metadata.get("raw")
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    try:
+        inner = json.loads(raw)
+    except ValueError:
+        return raw.strip()[:500]
+    if isinstance(inner, Mapping):
+        nested = inner.get("error")
+        if isinstance(nested, Mapping):
+            return _first_text(nested.get("message")) or raw.strip()[:500]
+        return _first_text(inner.get("message"), nested) or raw.strip()[:500]
+    return raw.strip()[:500]
+
+
+def _parse_retry_after(response: httpx.Response, payload: Any = _UNSET) -> int | None:
+    """How long to wait, as milliseconds, from the header OR the body.
+
+    ``Retry-After`` (seconds or HTTP-date) first. Google is the reason the body
+    is consulted too: gemini sends NO ``Retry-After`` on a quota 429 and puts
+    the delay in ``error.details[].retryDelay`` as ``"41s"``. That figure is the
+    single most actionable fact in a rate-limit error, and dropping it left the
+    frame saying only that the limit was hit.
+    """
+    header = response.headers.get("retry-after")
+    if header is not None:
+        parsed = _retry_after_from_header(header)
+        if parsed is not None:
+            return parsed
+    if payload is _UNSET:
+        payload = _error_payload(response)
+    return _retry_delay_from_payload(payload)
+
+
+def _retry_after_from_header(header: str) -> int | None:
+    try:
+        return max(0, int(float(header) * 1000))
     except ValueError:
         pass
     try:
@@ -95,36 +207,47 @@ def _parse_retry_after(response: httpx.Response) -> int | None:
     return max(0, delta_ms)
 
 
-def _extract_error_message(response: httpx.Response) -> str:
-    try:
-        payload = response.json()
-    except ValueError:
-        return response.text[:500]
-    if isinstance(payload, Mapping):
-        error = payload.get("error")
-        if isinstance(error, Mapping):
-            return str(error.get("message", error))
-        if isinstance(error, str):
-            return error
-        message = payload.get("message")
-        if message:
-            return str(message)
-    return response.text[:500]
+#: Google's ``RetryInfo.retryDelay``: a protobuf Duration rendered as seconds
+#: with an ``s`` suffix (``"41s"``, ``"1.5s"``).
+_RETRY_DELAY_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s*$")
 
 
-def _raise_for_status(response: httpx.Response) -> None:
-    """Map HTTP errors onto ProviderError with failover-relevant flags."""
+def _retry_delay_from_payload(payload: Any) -> int | None:
+    if not isinstance(payload, Mapping):
+        return None
+    error = payload.get("error")
+    details = error.get("details") if isinstance(error, Mapping) else None
+    if not isinstance(details, Sequence) or isinstance(details, (str, bytes)):
+        return None
+    for detail in details:
+        if not isinstance(detail, Mapping):
+            continue
+        match = _RETRY_DELAY_RE.match(str(detail.get("retryDelay", "")))
+        if match:
+            return max(0, int(float(match.group(1)) * 1000))
+    return None
+
+
+def raise_for_status(response: httpx.Response) -> None:
+    """Map HTTP errors onto ProviderError with failover-relevant flags.
+
+    The body is parsed ONCE and handed to both extractors: the message and the
+    retry delay can live in the same payload (google puts them there), and
+    re-reading ``response.json()`` per lookup parsed it three times.
+    """
     status = response.status_code
     if status < 400:
         return
-    message = _extract_error_message(response)
+    payload = _error_payload(response)
     auth_error = status in (401, 403)
-    retryable = status == 429 or status >= 500 or status == 408
+    # 408/504 are the two "ran out of time" statuses; 429 and 5xx are the
+    # classic retryables. Everything else in 4xx is an answer, not a blip.
+    retryable = status == 429 or status >= 500 or status in (408, 504)
     raise ProviderError(
         status,
-        message,
+        _extract_error_message(response, payload),
         retryable=retryable,
-        retry_after_ms=_parse_retry_after(response),
+        retry_after_ms=_parse_retry_after(response, payload),
         auth_error=auth_error,
     )
 
@@ -548,7 +671,7 @@ class OpenAICompatClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
-                _raise_for_status(response)
+                raise_for_status(response)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
                     break
@@ -633,7 +756,7 @@ class OpenAICompatClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
-                _raise_for_status(response)
+                raise_for_status(response)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
                     break
@@ -693,6 +816,47 @@ class OpenAICompatClient:
 
 ANTHROPIC_API_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
+
+#: Anthropic's mid-stream ``error`` events carry the diagnosis in ``type``, not
+#: in a status: the HTTP response was 200 long before one arrives. Mapping the
+#: type back to the status it would have had is what lets the shared classifier
+#: call an ``overloaded_error`` transient and an ``authentication_error`` auth,
+#: instead of the blanket ``retryable=True`` that used to re-send a request the
+#: API had already refused.
+_ANTHROPIC_ERROR_STATUS = {
+    "invalid_request_error": 400,
+    "authentication_error": 401,
+    "permission_error": 403,
+    "not_found_error": 404,
+    "request_too_large": 413,
+    "rate_limit_error": 429,
+    "api_error": 500,
+    "timeout_error": 504,
+    "overloaded_error": 529,
+}
+
+
+def _anthropic_stream_error(error: Mapping[str, Any]) -> ProviderError:
+    """One mid-stream anthropic ``error`` event as a ``ProviderError``.
+
+    The ``type`` is prepended to the message because anthropic's text alone is
+    frequently one bare word ("Overloaded"), and an unknown type keeps
+    ``retryable=True`` — the pre-existing assumption, correct for the api_error
+    and overloaded cases this event mostly carries.
+    """
+    error_type = str(error.get("type") or "")
+    status = _ANTHROPIC_ERROR_STATUS.get(error_type)
+    message = _first_text(error.get("message"))
+    if not message:
+        message = error_type or (str(error) if error else "")
+    elif error_type and error_type not in message:
+        message = f"{error_type}: {message}"
+    return ProviderError(
+        status,
+        message,
+        retryable=status is None or status == 429 or status >= 500,
+        auth_error=status in (401, 403),
+    )
 
 
 class AnthropicClient:
@@ -977,7 +1141,7 @@ class AnthropicClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
-                _raise_for_status(response)
+                raise_for_status(response)
             async for data in _iter_sse_lines(response):
                 try:
                     event = json.loads(data)
@@ -1025,8 +1189,7 @@ class AnthropicClient:
                     if "output_tokens" in raw_usage:
                         usage.output_tokens = int(raw_usage["output_tokens"])
                 elif event_type == "error":
-                    error = event.get("error") or {}
-                    raise ProviderError(None, str(error.get("message", error)), retryable=True)
+                    raise _anthropic_stream_error(event.get("error") or {})
 
         mapped = {
             "end_turn": "stop",
@@ -1175,7 +1338,7 @@ class GoogleClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
-                _raise_for_status(response)
+                raise_for_status(response)
             async for data in _iter_sse_lines(response):
                 try:
                     chunk = json.loads(data)

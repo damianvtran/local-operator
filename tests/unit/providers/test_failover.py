@@ -8,6 +8,7 @@ import random
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 import pytest
 
 from local_operator.harness.types import (
@@ -23,8 +24,10 @@ from local_operator.providers.failover import (
     ProviderError,
     RetrySettings,
     backoff_delay_ms,
+    classify_provider_error,
     expand_fallback_candidates,
     is_direct_credential_rotation_error,
+    is_transient_error,
     resolve_chain,
     resolve_next_key,
     spec_for_selector,
@@ -677,3 +680,444 @@ class TestEffortDoesNotOutliveItsModelAcrossAHop:
         swapped = spec_for_selector(base, "openai/gpt-4.1")
         assert swapped.reasoning_effort is None
         assert swapped.reasoning_efforts == ()
+
+
+
+# ---------------------------------------------------------------------------
+# Error kinds, and who owns the reported-error slot
+# ---------------------------------------------------------------------------
+
+
+class TestProviderErrorKinds:
+    """The reported defect: a quota exhaustion surfaced as ``✕ HTTP 404:``.
+
+    A status is not a diagnosis and an empty message is not an error, so both
+    the classification and the rendered line are pinned here. Retryability is
+    asserted alongside the kind on purpose — the two decisions are the same
+    decision, and a kind that reads "transient" while ``is_transient_error``
+    says otherwise would send the driver and the user different stories.
+    """
+
+    @pytest.mark.parametrize(
+        ("error", "kind", "transient"),
+        [
+            # quota: the reported case, plus the shapes providers actually use.
+            (ProviderError(429, "Too many requests", retryable=True), "quota", False),
+            (ProviderError(402, "Insufficient credits"), "quota", False),
+            (ProviderError(403, "Quota exceeded for model"), "quota", False),
+            (ProviderError(None, "Usage limit reached"), "quota", False),
+            # auth: a 401 is always the bearer, even when its body says
+            # "insufficient permissions" — which the quota matcher would claim.
+            (ProviderError(401, "insufficient permissions", auth_error=True), "auth", False),
+            (ProviderError(403, "Forbidden"), "auth", False),
+            # timeout ahead of transient: both retry, one names the cause.
+            (ProviderError(408, "Request Timeout", retryable=True), "timeout", True),
+            (ProviderError(504, "Gateway Timeout", retryable=True), "timeout", True),
+            (ProviderError(None, "ReadTimeout: stream stalled", retryable=True), "timeout", True),
+            # transient
+            (ProviderError(500, "Internal Server Error", retryable=True), "transient", True),
+            (ProviderError(529, "Overloaded", retryable=True), "transient", True),
+            (ProviderError(None, "ConnectError: connection reset", retryable=True), "transient", True),
+            # a request the provider READ and refused
+            (ProviderError(400, "`temperature` is deprecated"), "request", False),
+            (ProviderError(404, "model not found"), "request", False),
+            (ProviderError(422, "input too long"), "request", False),
+        ],
+    )
+    def test_each_kind_is_named_and_its_retryability_agrees(
+        self, error: ProviderError, kind: str, transient: bool
+    ) -> None:
+        assert error.kind == kind
+        assert classify_provider_error(error) == kind
+        assert is_transient_error(error) is transient
+
+    def test_the_three_kinds_that_must_never_be_retried(self) -> None:
+        """Retrying these burns quota and delays the honest answer: a quota
+        reset needs a wait, no retry mints a valid bearer, and the same bytes
+        get the same 400."""
+        for error in (
+            ProviderError(429, "rate limited", retryable=True),
+            ProviderError(401, "invalid api key", auth_error=True),
+            ProviderError(400, "bad request"),
+        ):
+            assert is_transient_error(error) is False
+
+    def test_a_bare_exception_gets_the_same_vocabulary(self) -> None:
+        """Not every path wraps: the embedding backend and the TUI hold raw
+        exceptions and need the same answer."""
+        assert classify_provider_error(TimeoutError()) == "timeout"
+        assert classify_provider_error(ValueError("malformed payload")) == "unknown"
+        assert is_transient_error(ValueError("malformed payload")) is False
+
+    @pytest.mark.parametrize(
+        ("error", "rendered"),
+        [
+            (
+                ProviderError(429, "Limit: 200000 tokens/min.", retryable=True, retry_after_ms=41600),
+                "rate limit or quota exceeded (HTTP 429, retry in 42s): Limit: 200000 tokens/min.",
+            ),
+            (
+                ProviderError(503, "upstream reset", retryable=True),
+                "transient provider error (HTTP 503): upstream reset",
+            ),
+            (
+                ProviderError(408, "request timed out", retryable=True),
+                "provider timeout (HTTP 408): request timed out",
+            ),
+            (
+                ProviderError(401, "invalid x-api-key", auth_error=True),
+                "authentication failed (HTTP 401): invalid x-api-key",
+            ),
+            (
+                ProviderError(400, "`temperature` is deprecated"),
+                "invalid request (HTTP 400): `temperature` is deprecated",
+            ),
+            (
+                ProviderError(None, "ConnectError: refused", retryable=True),
+                "transient provider error: ConnectError: refused",
+            ),
+        ],
+    )
+    def test_the_rendered_line_leads_with_the_kind(
+        self, error: ProviderError, rendered: str
+    ) -> None:
+        """This string IS the error frame — ``RenderedStreamError`` tells the
+        loop that ``str()`` is the whole diagnosis, and the TUI prints it
+        verbatim into a ``NoticeBlock``. The wait rides in the parenthetical so
+        it survives a long provider message being wrapped."""
+        assert str(error) == rendered
+
+    def test_an_abort_is_not_dressed_up_as_a_diagnosis(self) -> None:
+        """The user pressed the key; prefixing their own reason with a label
+        states the obvious twice."""
+        assert str(ProviderError(None, "user cancelled", kind="aborted")) == "user cancelled"
+
+    @pytest.mark.parametrize("status", [None, 404, 429, 599])
+    def test_no_provider_error_can_print_nothing(self, status: int | None) -> None:
+        """The other half of the reported frame. ``__str__`` would happily render
+        ``HTTP 404:`` forever, and no downstream care can recover text that was
+        never captured — so the floor is set at construction."""
+        for blank in ("", "   ", "\n"):
+            error = ProviderError(status, blank)
+            assert error.message.strip()
+            assert str(error).rstrip().endswith(error.message)
+            assert not str(error).rstrip().endswith(":")
+
+    def test_the_provider_own_words_are_never_editorialised(self) -> None:
+        """``message`` stays the provider's text: the classifiers read it, and
+        it is the half that says WHICH limit and WHEN it clears. Composition
+        happens only in ``__str__``."""
+        error = ProviderError(429, "  Quota exceeded. Retry after 41.6s.  ", retryable=True)
+        assert error.message == "Quota exceeded. Retry after 41.6s."
+
+
+class TestTheReportedErrorIsTheMostDiagnosticOne:
+    """The reported ``✕ HTTP 404:`` frame was a real 429 on the requested model,
+    overwritten by a bare 404 from a fallback selector the account cannot serve.
+
+    ``last_error`` was last-wins, so a longer failover walk reported the LEAST
+    informative failure of the set. The primary selector owns the slot: the user
+    asked for that model, so its failure is the news of the turn.
+    """
+
+    def _settings(self, chain: list[str]) -> dict[str, Any]:
+        return {
+            "retry": {"baseDelayMs": 1, "maxRetries": 1, "fallbackChains": {"default": chain}}
+        }
+
+    async def _run(self, errors: dict[str, ProviderError]) -> ProviderError:
+        async def client_for(spec: ModelSpec) -> Any:
+            return ScriptedClient(errors[spec.model_id])
+
+        auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(), auth, self._settings(["anthropic/claude-x"]), client_for
+            ):
+                pass
+        return excinfo.value
+
+    async def test_a_fallbacks_bare_404_cannot_mask_the_primarys_quota_error(self) -> None:
+        """The reproduction, at the driver level."""
+        error = await self._run(
+            {
+                "gpt-4o": ProviderError(
+                    429, "You exceeded your current quota.", retryable=True, retry_after_ms=42_000
+                ),
+                "claude-x": ProviderError(404, ""),
+            }
+        )
+        assert error.status == 429
+        assert str(error) == (
+            "rate limit or quota exceeded (HTTP 429, retry in 42s): "
+            "You exceeded your current quota."
+        )
+
+    async def test_the_primary_wins_even_when_it_is_the_duller_failure(self) -> None:
+        """Not "highest rank overall": the requested model's 500 is the answer to
+        "why did my turn fail", and the fallback's 401 is a broken chain entry."""
+        error = await self._run(
+            {
+                "gpt-4o": ProviderError(500, "boom", retryable=True),
+                "claude-x": ProviderError(401, "no key for anthropic", auth_error=True),
+            }
+        )
+        assert error.status == 500
+
+    async def test_a_fallback_failure_is_logged_rather_than_lost(self, caplog) -> None:
+        """It can no longer reach the frame, so a chain entry the account cannot
+        serve would otherwise fail invisibly forever."""
+        with caplog.at_level("WARNING", logger="local_operator.providers.failover"):
+            await self._run(
+                {
+                    "gpt-4o": ProviderError(429, "quota", retryable=True),
+                    "claude-x": ProviderError(404, ""),
+                }
+            )
+        assert any(
+            "fallback selector failed" in record.getMessage() and "404" in record.getMessage()
+            for record in caplog.records
+        )
+
+    async def test_a_fallback_error_is_still_reported_when_the_primary_never_failed(self) -> None:
+        """No primary error to prefer: an unconfigured provider breaks before it
+        calls anyone, and the chain's failure is then all there is."""
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return ScriptedClient(ProviderError(500, "fallback is down", retryable=True))
+
+        # No key for openai at all, so the primary never reaches a client.
+        auth = FakeAuth({"anthropic": ["k2"]})
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(), auth, self._settings(["anthropic/claude-x"]), client_for
+            ):
+                pass
+        assert "No API key configured" in excinfo.value.message
+
+
+class TestTransientFailuresAreRetriedOnEveryCallPath:
+    """"Transient errors are automatically retried on any invocation."
+
+    A turn, a subagent, an aside and the one-shot errands all reach the provider
+    through ``stream_with_failover``, so the first test covers the shared floor.
+    The one-shot path had a REAL gap: it collects the whole stream before
+    returning a string, but the driver forwarded events as they arrived, so a
+    stall part-way through was permanent — and the compaction summary is one of
+    those calls, which means the context it was meant to shrink kept growing.
+    """
+
+    async def _drive(
+        self, script: list[Any], *, replayable: bool = False, max_retries: int = 3
+    ) -> tuple[list[Any], int]:
+        """Run one request whose client raises ``script`` in order, then
+        succeeds. Returns the events seen and the number of attempts made."""
+        attempts = {"n": 0}
+
+        def flaky(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            index = attempts["n"]
+            attempts["n"] += 1
+
+            async def gen() -> AsyncIterator[Any]:
+                if index < len(script):
+                    step = script[index]
+                    if isinstance(step, tuple):
+                        # (partial events, then the failure) — a mid-stream death.
+                        for event in step[0]:
+                            yield event
+                        raise step[1]
+                    raise step
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(flaky)
+
+        request = _request().model_copy(update={"replayable": replayable})
+        settings = {
+            "retry": {"baseDelayMs": 1, "maxRetries": max_retries, "fallbackChains": {}}
+        }
+        events = [
+            event
+            async for event in stream_with_failover(
+                request, FakeAuth({"openai": ["k"]}), settings, client_for
+            )
+        ]
+        return events, attempts["n"]
+
+    async def test_a_turn_retries_a_transient_failure_before_it_streams(self) -> None:
+        events, attempts = await self._drive(
+            [ProviderError(503, "overloaded", retryable=True), httpx.ConnectError("refused")]
+        )
+        assert attempts == 3
+        assert [e.delta for e in events if isinstance(e, StreamTextDelta)] == ["done"]
+
+    async def test_a_one_shot_errand_retries_a_stall_MID_stream(self) -> None:
+        """The gap this closes. ``replayable`` buffers instead of forwarding, so
+        a half-finished attempt can be discarded whole; the caller sees exactly
+        one clean stream and no duplicated text."""
+        events, attempts = await self._drive(
+            [
+                ([StreamTextDelta(delta="half a summ")], httpx.ReadTimeout("stream stalled")),
+                ([StreamTextDelta(delta="half a summ")], httpx.ReadTimeout("stream stalled")),
+            ],
+            replayable=True,
+        )
+        assert attempts == 3
+        assert [e.delta for e in events if isinstance(e, StreamTextDelta)] == ["done"]
+
+    async def test_a_turn_does_NOT_replay_output_the_user_already_read(self) -> None:
+        """The default, and it must stay the default: those deltas are already in
+        the transcript, and re-streaming them would write the answer twice. It
+        arrives NAMED all the same — re-raised raw, a mid-stream
+        ``httpx.ReadTimeout("")`` painted an empty frame and a traceback."""
+        with pytest.raises(ProviderError) as excinfo:
+            await self._drive(
+                [([StreamTextDelta(delta="partial")], httpx.ReadTimeout(""))],
+                replayable=False,
+            )
+        assert excinfo.value.kind == "timeout"
+        assert str(excinfo.value) == "provider timeout: ReadTimeout"
+
+    async def test_the_one_shot_call_the_session_makes_is_marked_replayable(self) -> None:
+        """Wiring, not policy: ``_one_shot_complete`` is the compaction summary
+        and the auto-naming call, and the flag is what buys them the retry
+        above. Asserted on the request the session actually builds so the two
+        cannot drift apart."""
+        from local_operator.session.session import Session
+
+        seen: list[ChatRequest] = []
+
+        async def stream_fn(request: ChatRequest, signal: Any) -> AsyncIterator[Any]:
+            seen.append(request)
+            yield StreamTextDelta(delta="summary")
+
+        session = Session.__new__(Session)
+        session._model = ModelSpec(provider="openai", model_id="gpt-4o")  # type: ignore[attr-defined]
+        session._stream_fn = stream_fn  # type: ignore[attr-defined]
+        assert await session._one_shot_complete("sys", "prompt") == "summary"
+        assert seen[0].replayable is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ProviderError(400, "`temperature` is deprecated"),
+            ProviderError(404, "no such model"),
+        ],
+    )
+    async def test_a_refused_request_is_never_retried(self, error: ProviderError) -> None:
+        """One call, one answer. The same bytes get the same refusal, so a retry
+        only delays it."""
+        attempts = {"n": 0}
+
+        def refuse(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts["n"] += 1
+            raise error
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(refuse)
+
+        with pytest.raises(ProviderError):
+            async for _ in stream_with_failover(
+                _request(),
+                FakeAuth({"openai": ["k1", "k2"]}),
+                {"retry": {"baseDelayMs": 1, "maxRetries": 5, "fallbackChains": {}}},
+                client_for,
+            ):
+                pass
+        assert attempts["n"] == 1, "a refused request must not be re-sent, nor rotated onto"
+
+    async def test_an_auth_failure_rotates_but_never_re_sends_the_same_key(self) -> None:
+        """Auth is the one failure a retry cannot fix and a DIFFERENT credential
+        can, so the budget must not be spent on the rejected one."""
+        used: list[str | None] = []
+
+        def denied(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            used.append(api_key)
+            raise ProviderError(401, "invalid api key", auth_error=True)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(denied)
+
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(),
+                FakeAuth({"openai": ["k1", "k2"]}),
+                {"retry": {"baseDelayMs": 1, "maxRetries": 5, "fallbackChains": {}}},
+                client_for,
+            ):
+                pass
+        assert excinfo.value.kind == "auth"
+        # Each key tried once. Five same-key retries would have been five
+        # guaranteed 401s before the sibling that might have worked.
+        assert sorted(set(used)) == used == ["k1", "k2"]
+
+    async def test_a_long_quota_reset_surfaces_instead_of_sleeping_through_it(self) -> None:
+        """A quota exhaustion with a long reset is not transient. The user gets
+        the named error and the wait, immediately, instead of a frozen UI."""
+        attempts = {"n": 0}
+
+        def limited(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts["n"] += 1
+            raise ProviderError(429, "quota exhausted", retryable=True, retry_after_ms=3_600_000)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(limited)
+
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(),
+                FakeAuth({"openai": ["k1"]}),
+                {"retry": {"baseDelayMs": 1, "maxRetries": 10, "fallbackChains": {}}},
+                client_for,
+            ):
+                pass
+        assert attempts["n"] == 1
+        assert "retry in 1h" in str(excinfo.value)
+
+
+class TestTransportErrorsKeepTheirIdentity:
+    """``ProviderError(None, str(exc))`` printed NOTHING for the whole httpx
+    family that raises with no arguments, which is most of it."""
+
+    @pytest.mark.parametrize(
+        ("exc", "kind"),
+        [
+            (httpx.ConnectTimeout(""), "timeout"),
+            (httpx.ReadTimeout(""), "timeout"),
+            (httpx.RemoteProtocolError(""), "transient"),
+            (httpx.ConnectError("[Errno 61] Connection refused"), "transient"),
+        ],
+    )
+    async def test_an_argumentless_transport_error_still_says_what_it_was(
+        self, exc: Exception, kind: str
+    ) -> None:
+        def boom(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            raise exc
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(boom)
+
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(),
+                FakeAuth({"openai": ["k"]}),
+                {"retry": {"baseDelayMs": 1, "maxRetries": 1, "fallbackChains": {}}},
+                client_for,
+            ):
+                pass
+        assert type(exc).__name__ in excinfo.value.message
+        assert excinfo.value.kind == kind
+        assert excinfo.value.retryable is True

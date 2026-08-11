@@ -28,6 +28,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolCallComposeEvent,
     ToolContext,
+    ToolExecutionEndEvent,
     ToolResult,
 )
 from local_operator.providers.failover import ProviderError
@@ -504,6 +505,149 @@ async def test_approval_denied_returns_error_result():
     assert executed == []
     tool_result = next(m for m in messages if isinstance(m, Message) and m.role == "tool")
     assert tool_result.is_error and "approval" in tool_result.text.lower()
+
+
+class TestABrokenApprovalGateIsNotAUserRefusal:
+    """The reported defect: two bash calls read ``User denied approv… ✕ 0.0s``
+    in a session whose band said ``! auto-approve``.
+
+    The gate had raised — a widget failing mid-render inside the TUI's
+    callback — and ``except Exception: approved = False`` attributed our bug to
+    the user as a deliberate refusal. Two things were wrong with that. It blames
+    the user, so the report that comes back is "it denied my command" and nobody
+    looks for the exception; and it turns a crash in a SECURITY gate into a quiet
+    policy outcome, when a gate that could not run has not decided anything.
+    """
+
+    def _stream(self) -> ScriptedStream:
+        return ScriptedStream(
+            [
+                [
+                    tool_call_delta(0, id="c1", name="echo", args="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+    async def _run(self, gate: Any) -> tuple[ToolResult, list[str]]:
+        executed: list[str] = []
+        result: list[ToolResult] = []
+        context = LoopContext(
+            tools=[echo_tool(executed)], tool_context=ToolContext(request_approval=gate)
+        )
+        async for event in AgentLoop().run(
+            [Message.user("go")], context, make_config(self._stream()), None
+        ):
+            if isinstance(event, ToolExecutionEndEvent):
+                result.append(event.result)
+        return result[0], executed
+
+    @pytest.mark.asyncio
+    async def test_the_failure_names_itself_and_the_exception(self) -> None:
+        async def broken(name: str, summary: str) -> bool:
+            raise AttributeError("'NoneType' object has no attribute 'update'")
+
+        result, executed = await self._run(broken)
+        assert executed == [], "a gate that cannot answer has granted nothing"
+        assert result.is_error
+        text = result.text
+        assert "denied" not in text.lower(), "the user did not deny anything"
+        assert text.startswith("Approval gate failed for 'echo'")
+        assert "AttributeError: 'NoneType' object has no attribute 'update'" in text
+        assert "not a refusal by the user" in text
+
+    @pytest.mark.asyncio
+    async def test_the_first_line_alone_carries_the_diagnosis(self) -> None:
+        """The TUI labels a failed card with ``_first_line(result_text)`` and
+        then clips it, which is how the whole story reached the owner as
+        ``User denied approv…``. So line one has to be the diagnosis, not a
+        preamble to it."""
+        async def broken(name: str, summary: str) -> bool:
+            raise RuntimeError("widget exploded")
+
+        result, _ = await self._run(broken)
+        first = result.text.splitlines()[0]
+        assert first == "Approval gate failed for 'echo' — the call was not run."
+        # And the two outcomes are still distinguishable clipped to a narrow card.
+        assert first[:14] != "User denied ap"[:14]
+
+    @pytest.mark.asyncio
+    async def test_an_argumentless_exception_still_says_what_it_was(self) -> None:
+        """``str(TimeoutError())`` is the empty string — the same defect as a
+        ``ProviderError`` that renders ``HTTP 404:`` and nothing else."""
+        async def broken(name: str, summary: str) -> bool:
+            raise TimeoutError()
+
+        result, _ = await self._run(broken)
+        assert "TimeoutError" in result.text
+
+    @pytest.mark.asyncio
+    async def test_a_host_can_tell_the_two_apart_without_reading_prose(self) -> None:
+        """``__synthetic`` cannot: a refusal and a broken gate are the same shape
+        and opposite meanings."""
+
+        async def broken(name: str, summary: str) -> bool:
+            raise RuntimeError("boom")
+
+        async def deny(name: str, summary: str) -> bool:
+            return False
+
+        failed, _ = await self._run(broken)
+        refused, _ = await self._run(deny)
+        assert failed.details == {"__synthetic": True, "__approval_gate_failed": True}
+        assert refused.details == {"__synthetic": True}
+
+    @pytest.mark.asyncio
+    async def test_the_exception_is_findable_in_the_log_with_its_stack(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """At ERROR, not WARNING: a fault inside a security gate is not weather.
+        The stack is the only thing there is to diagnose from."""
+
+        async def broken(name: str, summary: str) -> bool:
+            raise RuntimeError("boom")
+
+        with caplog.at_level(logging.ERROR, logger="local_operator.harness.loop"):
+            await self._run(broken)
+        record = next(r for r in caplog.records if "approval gate raised" in r.getMessage())
+        assert record.levelno == logging.ERROR
+        assert record.exc_info is not None
+        assert "the call was NOT run" in record.getMessage()
+
+    @pytest.mark.asyncio
+    async def test_a_real_refusal_is_untouched(self) -> None:
+        """The other half must keep saying exactly what it said: the user's own
+        decision is not a fault and must not be dressed up as one."""
+
+        async def deny(name: str, summary: str) -> bool:
+            return False
+
+        result, executed = await self._run(deny)
+        assert executed == []
+        assert result.text == "User denied approval for 'echo'."
+
+    @pytest.mark.asyncio
+    async def test_a_broken_gate_does_not_abort_the_turn(self) -> None:
+        """Judgement call, pinned: the failure is loud but it is still a RESULT.
+        Every call has to come back paired (see ``_execute_batch``), and the
+        sibling handler already answers a raising TOOL with an error result
+        rather than a dead turn — so trading a misleading result for an aborted
+        turn would be a different bug, not a fix."""
+
+        async def broken(name: str, summary: str) -> bool:
+            raise RuntimeError("boom")
+
+        context = LoopContext(
+            tools=[echo_tool([])], tool_context=ToolContext(request_approval=broken)
+        )
+        messages = await AgentLoop().run_to_end(
+            [Message.user("go")], context, make_config(self._stream()), None
+        )
+        # The turn completed: the tool result was paired and the model answered.
+        assert any(
+            isinstance(m, Message) and m.role == "assistant" and m.text == "ok" for m in messages
+        )
 
 
 @pytest.mark.asyncio

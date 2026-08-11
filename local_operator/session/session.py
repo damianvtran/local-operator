@@ -1276,13 +1276,20 @@ class Session:
         return await self._one_shot_complete(system, prompt)
 
     async def _one_shot_complete(self, system: str, prompt: str) -> str:
-        """One non-tool provider call used to produce the compaction summary."""
+        """One non-tool provider call used to produce the compaction summary.
+
+        ``replayable``: nothing here reaches a screen until the whole string is
+        assembled, so a transient failure part-way through the stream can be
+        discarded and retried. Without it a single stalled read failed the
+        compaction outright and the context it was meant to shrink kept growing.
+        """
         request = ChatRequest(
             model=self._model,
             system_blocks=[system],
             messages=[Message.user(prompt)],
             tools=[],
             tool_choice="none",
+            replayable=True,
         )
         parts: list[str] = []
         async for event in self._stream_fn(request, None):
