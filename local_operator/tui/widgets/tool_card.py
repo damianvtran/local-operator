@@ -288,8 +288,8 @@ def format_duration(seconds: float) -> str:
     finished turn always leaves a mark.
 
     BOUNDED AT SIX CELLS over the whole domain, which callers rely on. The
-    widest strings are ``59m59s``, ``23h59m`` and ``98d23h``; past 99 days it
-    is ``99d+``. It used to end at ``{h}h{m}m`` with an unbounded hours field,
+    widest strings are ``59m59s``, ``23h59m`` and ``99d23h``; from 100 days it
+    is ``100d+``. It used to end at ``{h}h{m}m`` with an unbounded hours field,
     so ``100h30m`` was 7 cells and ``1000h30m`` was 8 — and
     :data:`WorkingBlock._CLOCK_COL` RESERVES cells for this rather than
     measuring them, so a wider string pushed its row over the terminal (review
@@ -317,9 +317,16 @@ def format_duration(seconds: float) -> str:
     days, remainder = divmod(total, 86_400)
     if days > 99:
         # The cap, so the width is bounded by CONSTRUCTION and not by how large
-        # anyone expected the input to get. `99d+` is honest at a magnitude
-        # where the exact figure has stopped meaning anything.
-        return "99d+"
+        # anyone expected the input to get.
+        #
+        # It says `100d+` and not `99d+` because the threshold IS 100 days, and
+        # a cap has to name the bound it actually fired at. `99d+` was the first
+        # spelling and design round 15 caught it: the row shows `99d23h`, then a
+        # minute later shows `99d+`, which reads as the duration having got
+        # SMALLER. That is the same "the number is now lying to you" failure as
+        # the clipped `100h4…` this branch exists to avoid, arriving at exactly
+        # the magnitude the clock matters most.
+        return "100d+"
     hours = remainder // 3600
     return f"{days}d{hours}h" if hours else f"{days}d"
 

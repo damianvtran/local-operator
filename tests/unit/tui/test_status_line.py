@@ -167,20 +167,26 @@ def test_duration_switches_to_days_and_stays_six_cells_wide() -> None:
     It used to end at ``{h}h{m}m`` with an unbounded hours field, so ``100h30m``
     was seven cells and pushed that row over the terminal (review round 15).
     A days branch is also simply the better reading at that magnitude, and the
-    ``99d+`` cap is what makes the bound hold by construction instead of holding
+    ``100d+`` cap is what makes the bound hold by construction instead of holding
     until someone finds a bigger number.
     """
     assert format_duration(86_400) == "1d"
     assert format_duration(86_400 + 3600 * 5) == "1d5h"
     assert format_duration(362_400) == "4d4h"
     assert format_duration(86_400 * 99 + 3600 * 23) == "99d23h"
-    assert format_duration(86_400 * 100) == "99d+"
-    assert format_duration(86_400 * 100_000) == "99d+"
+    assert format_duration(86_400 * 100) == "100d+"
+    assert format_duration(86_400 * 100_000) == "100d+"
 
-    # The whole contract in one line: no input produces a seventh cell. Sampled
-    # across every branch rather than at the boundaries alone, because the
-    # boundaries are what a future edit moves.
-    assert max(cell_len(format_duration(s)) for s in range(0, 400_000, 7)) == 6
+    # The whole contract in one line: no input produces a seventh cell. Stepped
+    # by a prime so the sweep lands off every round boundary, and carried past
+    # 100 days so it spans EVERY branch — an earlier version stopped at 400_000
+    # seconds, which is 4.6 days, and so never reached the day format it was
+    # written to defend, let alone the cap.
+    assert max(cell_len(format_duration(s)) for s in range(0, 8_700_000, 97)) == 6
+    # Negative and fractional inputs are not special-cased anywhere; they must
+    # not be able to slip a wider string past the bound either.
+    assert cell_len(format_duration(-1)) <= 6
+    assert cell_len(format_duration(59.9)) <= 6
 
 
 def test_agents_segment_is_empty_at_zero_and_pluralises() -> None:

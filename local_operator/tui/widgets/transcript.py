@@ -847,10 +847,12 @@ class WorkingBlock(TranscriptBlock):
     #: Cells reserved for the clock, CONSTANT so the label's clip point does not
     #: move as the number grows: an unreserved clock re-clipped the label at 10s,
     #: at 1m40s and at the hour, creeping the text leftward under the eye. Two
-    #: spaces of gutter plus six for the number — six because that is the widest
-    #: :func:`~local_operator.tui.widgets.tool_card.format_duration` returns
-    #: under a hundred hours (``10m10s`` through ``59m59s``), and ``_paint``
-    #: clips anything wider so the reservation holds for every input.
+    #: spaces of gutter plus six for the number — six because
+    #: :func:`~local_operator.tui.widgets.tool_card.format_duration` is bounded
+    #: at six cells over its whole domain, by construction rather than by the
+    #: values anyone listed. ``_paint`` also clips, but that is an unreachable
+    #: guard against a future unit in the formatter, NOT what makes the
+    #: reservation hold; see the note at the append.
     #:
     #: It read 7, which was two plus ``tool_card.DURATION_COL``, and that is NOT
     #: the relationship — stated because the resemblance invites re-deriving it.
@@ -862,7 +864,7 @@ class WorkingBlock(TranscriptBlock):
     #: cell at 24 and 30 columns, where it dropped the no-output notice and left
     #: a summary truncated to a bare ellipsis. Two columns, two decisions.
     #:
-    #: Pinned by ``test_the_line_holds_one_row_once_the_clock_needs_six_cells``.
+    #: Pinned by ``test_the_line_holds_one_row_whatever_the_clock_says``.
     _CLOCK_COL = 8
 
     def __init__(self, activity: str = DEFAULT_ACTIVITY, phase: str = DEFAULT_ACTIVITY) -> None:

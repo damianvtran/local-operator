@@ -349,7 +349,7 @@ async def test_the_line_holds_one_row_whatever_the_clock_says() -> None:
             line.set_content = spy  # type: ignore[method-assign]
             # Past every wall in the formatter: the minutes/hours boundary, the
             # old unbounded-hours overflow at 100h, the days branch, and the
-            # `99d+` cap — which only becomes load-bearing past 999 days, where
+            # `100d+` cap — which only becomes load-bearing past 999 days, where
             # `{d}d{h}h` would itself reach seven cells.
             for elapsed in (5, 65, 610, 3599, 7200, 86_399, 362_400, 9_000_000, 100_000_000):
                 line._phase_started = time.monotonic() - elapsed
