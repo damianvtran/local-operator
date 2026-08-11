@@ -54,6 +54,7 @@ from typing import Any, Callable, Literal
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Static
@@ -66,6 +67,7 @@ from local_operator.tui.widgets.subagent_panel import (
     SPINNER_INTERVAL_S,
     status_glyph,
 )
+from local_operator.tui.widgets import tool_card
 from local_operator.tui.widgets.tool_card import ToolCard, truncate_cells
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -81,6 +83,20 @@ from local_operator.tui.widgets.transcript import (
 #: bounded page instead of measuring an unbounded one. Read by the fold AND
 #: pinned by a test, so the two halves of the contract cannot drift silently.
 TRAJECTORY_MAX_EVENTS = 500
+
+#: Rows of a delegated brief the page shows before folding the rest away. Three
+#: carries the opening sentence or two — enough to say what was asked — while
+#: leaving the child's own work the majority of a 60-column body. Measured
+#: against the failure it replaces: a raw 8-row paste took 36% of the body at
+#: 120 columns and pushed itself entirely off a nine-step page at 60.
+INSTRUCTION_ROWS = 3
+
+#: The affordance rows, in the tool ledger's own bracketed vocabulary so the
+#: gesture does not have to be learned twice. The expand row is completed with
+#: the number of rows being withheld: `⟨expand⟩` alone does not distinguish two
+#: more lines from fifty, and that is the difference between bothering and not.
+EXPAND_HINT = tool_card.EXPAND_HINT
+COLLAPSE_AFFORDANCE = tool_card.COLLAPSE_HINT
 
 #: Cells the body's scrollbar gutter occupies, named after the
 #: ``scrollbar-size-vertical: 1`` the ``TranscriptView`` rule declares. The
@@ -379,6 +395,92 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
     return rows
 
 
+class InstructionBlock(UserBlock):
+    """The parent's delegated instruction, COLLAPSED until asked for.
+
+    The instruction is the user turn of this conversation, so it gets the block
+    the main conversation gives a user turn — same gutter rule, same verbatim
+    wrapping, no second style for one idea. Pasted whole, though, it broke the
+    page in both directions at once: a task-shaped brief runs to fifty lines,
+    so at 120 columns eight rows of it took 36% of the body, and on a
+    nine-step child it sat eighteen rows above the viewport — present,
+    invisible, and hinted at only by the scrollbar. Either way the page opened
+    mid-sentence, because the body opens at the tail where the newest step is.
+
+    So the brief is clamped to :data:`INSTRUCTION_ROWS` and the rest is one
+    keystroke or click away. That is omp's answer to the same problem
+    (``CollapsedSyntheticMessageComponent``: "collapse them behind a compact
+    summary … real user prompts stay fully rendered"), and it is the app's own
+    expansion idiom — the ``⟨expand⟩``/``⟨collapse⟩`` affordance and the
+    click/Enter pair the tool ledger already teaches, so nothing new has to be
+    learned to reach the rest of a brief.
+
+    Clamping happens in :meth:`_rows`, which is where the base class does its
+    own wrapping and paragraph handling: the clamp therefore inherits all four
+    of ``UserBlock``'s decisions, and the height pin in its ``_build`` measures
+    the clamped row count for free.
+    """
+
+    can_focus = True
+    BINDINGS = [
+        Binding("enter", "toggle", "Expand instruction", show=False),
+    ]
+
+    def __init__(self, text: str) -> None:
+        #: Set before `super().__init__`, which builds immediately.
+        self._expanded = False
+        self._hidden_rows = 0
+        super().__init__(text)
+        self.add_class("instruction-block")
+
+    def _rows(self, body: int) -> list[str]:
+        """The brief's rows, clamped to a summary plus its affordance.
+
+        The affordance row states the COST of expanding — how many rows are
+        being withheld — because "⟨expand⟩" alone does not distinguish two
+        more lines from fifty, and that is the whole difference between
+        clicking and not bothering.
+        """
+        rows = super()._rows(body)
+        if self._expanded:
+            self._hidden_rows = 0
+            return [*rows, COLLAPSE_AFFORDANCE]
+        self._hidden_rows = max(0, len(rows) - INSTRUCTION_ROWS)
+        if not self._hidden_rows:
+            return rows
+        more = f"{EXPAND_HINT} {self._hidden_rows} more line"
+        return [*rows[:INSTRUCTION_ROWS], f"{more}{'' if self._hidden_rows == 1 else 's'}"]
+
+    def action_toggle(self) -> None:
+        """Show the whole brief, or fold it back to its summary."""
+        if self._expanded or self._hidden_rows:
+            self._expanded = not self._expanded
+            self._rebuild()
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        # Stopped so one gesture does not also move the transcript behind it,
+        # the discipline every mouse handler in this app follows.
+        event.stop()
+        self.action_toggle()
+
+    def _rebuild(self) -> None:
+        """Repaint at the current width and re-ask the spacing question.
+
+        The same dance :meth:`UserBlock.on_resize` does, and for the same
+        reason: this block's row count IS its content, so a toggle is a height
+        change and the block below it may need its gap re-decided.
+        """
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build())
+        finally:
+            self._finalized = was_finalized
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.refresh_gap_around(self)
+
+
 def entry_block(entry: SubagentEntry) -> TranscriptBlock:
     """One folded entry as the block the main conversation would have used.
 
@@ -389,13 +491,7 @@ def entry_block(entry: SubagentEntry) -> TranscriptBlock:
     blank — the contract ``--resume`` replay already follows.
     """
     if entry.kind == "prompt":
-        # The parent's instruction IS the user turn of this conversation, so it
-        # gets the block the main conversation gives a user turn — same gutter
-        # rule, same wrapping, no second style for one idea. Without it the
-        # page opened on an agent working with no statement of what it had been
-        # asked to do, which is the one thing a reader cannot infer from the
-        # rest of the transcript.
-        return UserBlock(entry.text)
+        return InstructionBlock(entry.text)
     if entry.kind == "text":
         block = AssistantBlock()
         block.update_text(entry.text)
@@ -415,6 +511,16 @@ def entry_block(entry: SubagentEntry) -> TranscriptBlock:
         card.restore(state="interrupted")
     elif entry.outcome == "success":
         card.restore(state="success", result_text=entry.result_text, details=entry.details)
+    else:
+        # No outcome yet: the child's call is STILL GOING, so the card stays
+        # live. It is restored rather than left as constructed for the same
+        # reason the three settled arms are — `_started` here is when this page
+        # painted the row, not when the child's tool began, and a running card
+        # times itself from it. Left alone the row counted up from zero and
+        # reset to zero every time `_sync_body` rebuilt it under an earlier
+        # entry, which is exactly the fabricated duration this function's
+        # settled arms exist to avoid.
+        card.restore(state="running")
     return card
 
 
@@ -895,35 +1001,63 @@ class SubagentView(Vertical):
         already paints at ``fg``.
 
         Seams are ``faint`` and values ``dim``, one tone per role.
+
+        Fields DROP WHOLE rather than being truncated, on the band's own
+        ladder discipline. Left to a single trailing ellipsis the row cut
+        inside a value and lied: `⣿ running · 23…` cannot be told from 23s or
+        23m, and `⣷ runn…` spends four cells to say less than the glyph
+        already said. A field that will not fit is worth less than the one
+        before it, so it leaves and the rest stay whole.
         """
         fg = Style(color=theme_mod.semantic_color("fg"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         faint = Style(color=theme_mod.semantic_color("faint"))
 
-        row = Text(no_wrap=True, overflow="ellipsis")
-        row.append("Subagent", style=dim)
-        row.append(" · ", style=faint)
-        # Half the width at most. The label is model-written and can run to a
-        # sentence; a title that eats its own status is a title that stopped
-        # answering "is this still running".
-        row.append(truncate_cells(self._label, max(8, width // 2)), style=fg)
-        row.append("  ", style=dim)
         if self._status == "gone":
             # No glyph, no clock, no count. The ledger has swept the job, so
             # every one of those would be invented — and the fallthrough glyph
             # was ✓, the app's own mark for "this succeeded", over a run whose
             # outcome is no longer knowable.
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append("Subagent", style=dim)
+            row.append(" · ", style=faint)
+            row.append(truncate_cells(self._label, max(8, width - 26)), style=fg)
+            row.append("  ", style=dim)
             row.append("no longer on the ledger", style=dim)
             row.truncate(width, overflow="ellipsis")
             return row
+
         glyph, word, token = status_glyph(self._status, queued=self._queued, spinner_glyph=spinner)
-        row.append(glyph, style=Style(color=theme_mod.semantic_color(token)))
-        row.append(f" {word}", style=dim)
-        row.append(" · ", style=faint)
-        row.append(self._elapsed, style=dim)
+        glyph_style = Style(color=theme_mod.semantic_color(token))
+        # Most disposable first. The glyph is never dropped: it is the one
+        # field that survives a colourless frame and the only one that still
+        # answers "is this running" at a width where nothing else fits.
+        tail: list[tuple[str, Style]] = []
         if tools:
+            tail.append((f" · {tools} tool{'' if tools == 1 else 's'}", dim))
+        tail.append((f" · {self._elapsed}", dim))
+        tail.append((f" {word}", dim))
+        for dropped in range(len(tail) + 1):
+            fields = tail[dropped:]
+            # The label gets whatever the fields do not want, floored at eight
+            # cells so it never vanishes entirely — it is the page's subject.
+            spend = sum(cell_len(text) for text, _ in fields) + 13
+            label = truncate_cells(self._label, max(8, width - spend))
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append("Subagent", style=dim)
             row.append(" · ", style=faint)
-            row.append(f"{tools} tool{'' if tools == 1 else 's'}", style=dim)
+            row.append(label, style=fg)
+            row.append("  ", style=dim)
+            row.append(glyph, style=glyph_style)
+            for text, style in reversed(fields):
+                row.append(text, style=style)
+            if cell_len(row.plain) <= width:
+                return row
+        # Narrower than the breadcrumb itself: keep the two things that
+        # identify the page, and let the label take the ellipsis.
+        row = Text(no_wrap=True, overflow="ellipsis")
+        row.append(truncate_cells(self._label, max(1, width - 2)), style=fg)
+        row.append(f" {glyph}", style=glyph_style)
         row.truncate(width, overflow="ellipsis")
         return row
 
@@ -932,15 +1066,21 @@ class SubagentView(Vertical):
 
         A PAGE and not a line, and the reason is `is_near_bottom`'s two-row
         tolerance: on a LIVE page a one-line lift off the tail still counts as
-        "at the bottom", so the next `append_block` would scroll the reader
-        straight back down and the click would look like it had missed. A page
-        clears the tolerance.
+        "at the bottom", so the anchor would re-acquire on the next growth and
+        the click would look like it had missed. A page clears the tolerance.
 
         It does mean the `↑` KEY (one line, from `ScrollableContainer`'s own
         binding) and a click on the `↑` GLYPH move by different amounts. That
         is deliberate: a pointer gesture costs more than a keypress, so it buys
         more, and the arrows are the only scroll affordance a mouse has here.
+
+        Announced to the body as a USER scroll: the click landed on this page's
+        footer rather than on the transcript, so no input handler of its own
+        will see it, and an unannounced page-up is indistinguishable from the
+        anchor moving itself — which would leave the child's output following
+        the tail while the reader is trying to read back through it.
         """
+        self._body.note_user_scroll()
         if down:
             self._body.scroll_page_down()
         else:
@@ -1000,7 +1140,10 @@ class SubagentView(Vertical):
     def _hint_plan(
         self, visible: tuple[HintButton, ...], esc_label: str
     ) -> list[tuple[HintButton, str, bool]]:
-        labels = {self._scroll_label: "scroll", self._exit_hint: esc_label}
+        # The caption carries its own leading space. It is the one hint with no
+        # key in front of it, so without it the row read `↑↓scroll` while every
+        # other hint — and every hint on the aside overlay — reads `key label`.
+        labels = {self._scroll_label: " scroll", self._exit_hint: esc_label}
         plan: list[tuple[HintButton, str, bool]] = []
         for position, hint in enumerate(visible):
             # `↓` follows `↑` with no seam, so the pair still reads as one

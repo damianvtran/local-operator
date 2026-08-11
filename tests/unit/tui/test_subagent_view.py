@@ -19,15 +19,20 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.subagent_panel import GLYPH_DONE
 from local_operator.tui.widgets.subagent_view import (
+    COLLAPSE_AFFORDANCE,
+    EXPAND_HINT,
+    INSTRUCTION_ROWS,
     LEDGER_GONE_NOTE,
     TRAJECTORY_MAX_EVENTS,
     TRUNCATION_NOTE,
+    InstructionBlock,
     SubagentView,
     fold_trajectory,
 )
@@ -675,3 +680,113 @@ async def test_only_the_hints_that_do_something_answer_the_pointer() -> None:
         await pilot.hover(view._state_hint)
         assert view._state_hint._hovered is False, "an inert hint never lights"
         assert view._exit_hint._hovered is False, "and leaving restores the resting tone"
+
+
+BRIEF = "\n\n".join(
+    [
+        "Review the remediation commit on MR !412.",
+        "Every finding from round 1 must be either fixed with a commit SHA, "
+        "rejected with a reason, or deferred with a ticket.",
+        "Flag any that were silently dropped rather than restating the reply.",
+        "Do not run the full suite; the pipeline already did.",
+        "Report back with a table, one row per finding.",
+    ]
+)
+
+
+@pytest.mark.asyncio
+async def test_a_long_brief_is_folded_to_a_summary_and_opens_on_demand() -> None:
+    """Pasted whole, a delegated brief broke the page in both directions: eight
+    rows took 36% of the body at 120 columns, and on a nine-step child it sat
+    eighteen rows above a viewport that opens at the tail — present, invisible,
+    and opening mid-sentence either way."""
+    job = _job_with(TRAJECTORY)
+    job.prompt = BRIEF
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, job)
+        brief = view._body.blocks()[0]
+        assert isinstance(brief, InstructionBlock)
+        rows = brief._rows(80)
+        # The summary, plus one row saying what expanding would cost. Bare
+        # `⟨expand⟩` does not distinguish two more lines from fifty.
+        assert len(rows) == INSTRUCTION_ROWS + 1
+        assert rows[0].startswith("Review the remediation commit")
+        assert rows[-1].startswith(EXPAND_HINT)
+        assert "more line" in rows[-1]
+        full = len(UserBlock(BRIEF)._rows(80))
+        assert f"{full - INSTRUCTION_ROWS} more lines" in rows[-1]
+
+        await pilot.click(brief)
+        await pilot.pause()
+        opened = brief._rows(80)
+        assert len(opened) == full + 1, "every row of the brief, plus the fold-back"
+        assert opened[-1] == COLLAPSE_AFFORDANCE
+        assert "Report back with a table" in " ".join(opened)
+
+        await pilot.click(brief)
+        await pilot.pause()
+        assert len(brief._rows(80)) == INSTRUCTION_ROWS + 1, "and it folds back"
+
+
+@pytest.mark.asyncio
+async def test_a_brief_that_already_fits_is_offered_no_affordance() -> None:
+    """An expander with nothing to open is the "nothing happens when I click"
+    bug one step earlier, and the row it would spend is a row of the child's."""
+    job = _job_with(TRAJECTORY)
+    job.prompt = "Audit the ingest path."
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, job)
+        brief = view._body.blocks()[0]
+        assert isinstance(brief, InstructionBlock)
+        rows = brief._rows(80)
+        assert rows == ["Audit the ingest path."]
+        assert not any(EXPAND_HINT in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_the_title_drops_whole_fields_rather_than_cutting_a_value() -> None:
+    """`⣿ running · 23…` cannot be told from 23s or 23m, and `⣷ runn…` spends
+    four cells to say less than the glyph already said. A field that will not
+    fit is worth less than the one before it, so it leaves whole."""
+    job = _Job("sub-1", "RetryBudgetScout", status="running")
+    job.trajectory = [*_text("m1", "working"), _call("c1", "read", path="a.py")]
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, job)
+        elapsed = view._elapsed
+        for width in (120, 80, 60, 48, 40, 32, 24, 16, 10, 6):
+            row = view._title_row(width, "⣾", tools=1).plain
+            assert len(row) <= width or cell_len(row) <= width, (width, row)
+            # Whatever is still on the row is COMPLETE: no field is half a
+            # value. `running` never appears as a prefix of itself, and the
+            # duration never loses its unit.
+            if elapsed[:-1] and elapsed[:-1] in row:
+                assert elapsed in row, (width, row)
+            for prefix in ("runn", "run "):
+                assert not row.endswith(prefix + "…"), (width, row)
+            assert "…" not in row.split("  ")[-1] or "tool" not in row, (width, row)
+        # The glyph is the one field that never leaves: it is the only one that
+        # still answers "is this running" in a colourless frame at 6 cells.
+        assert "⣾" in view._title_row(6, "⣾", tools=1).plain
+
+
+@pytest.mark.asyncio
+async def test_the_scroll_caption_keeps_the_space_every_other_hint_has() -> None:
+    """It is the one hint with no key in front of it, so without its own
+    leading space the row read `↑↓scroll` while every other hint in the app —
+    and every hint on the aside overlay — reads `key label`."""
+    session = FakeSession()
+    session.jobs = _fake_jobs(_job_with(TRAJECTORY))
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, _job_with(TRAJECTORY))
+        assert "↑↓ scroll" in view.rendered_rows()[-1]
+        assert "↑↓scroll" not in view.rendered_rows()[-1]
