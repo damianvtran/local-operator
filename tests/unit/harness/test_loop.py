@@ -563,6 +563,7 @@ class TestABrokenApprovalGateIsNotAUserRefusal:
         then clips it, which is how the whole story reached the owner as
         ``User denied approv…``. So line one has to be the diagnosis, not a
         preamble to it."""
+
         async def broken(name: str, summary: str) -> bool:
             raise RuntimeError("widget exploded")
 
@@ -576,6 +577,7 @@ class TestABrokenApprovalGateIsNotAUserRefusal:
     async def test_an_argumentless_exception_still_says_what_it_was(self) -> None:
         """``str(TimeoutError())`` is the empty string — the same defect as a
         ``ProviderError`` that renders ``HTTP 404:`` and nothing else."""
+
         async def broken(name: str, summary: str) -> bool:
             raise TimeoutError()
 

@@ -720,6 +720,12 @@ class AgentLoop:
                 )
                 detail = str(exc).strip()
                 named = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+                # `call.name` is MODEL-controlled and lands on a card the same
+                # way the exception text does, so it gets the same guard the
+                # approval prompt above already gives it (line 687). Both
+                # outcomes sanitize it: an escape sequence in a tool name is a
+                # cleared terminal whichever branch prints it.
+                safe_name = sanitize_prompt_line(call.name, limit=120)
                 return self._synthetic_result(
                     call,
                     # FIRST LINE is the card's failure label (the TUI takes
@@ -727,14 +733,16 @@ class AgentLoop:
                     # read as `User denied approv…`. It therefore carries the
                     # whole diagnosis on its own and the detail follows below,
                     # where the expansion and the model both get it.
-                    f"Approval gate failed for '{call.name}' — the call was not run.\n"
+                    f"Approval gate failed for '{safe_name}' — the call was not run.\n"
                     f"{sanitize_prompt_line(named, limit=200)}\n"
                     "This is a harness fault, not a refusal by the user; the stack is in "
                     "the log.",
                     details={"__approval_gate_failed": True},
                 )
             if not approved:
-                return self._synthetic_result(call, f"User denied approval for '{call.name}'.")
+                return self._synthetic_result(
+                    call, f"User denied approval for '{sanitize_prompt_line(call.name, 120)}'."
+                )
 
         def on_update(update: AgentToolUpdate) -> None:
             queue.put_nowait(
@@ -951,7 +959,9 @@ class AgentLoop:
             tool_name=call.name,
             is_error=True,
             content=[TextContent(text=text)],
-            details={"__synthetic": True, **(details or {})},
+            # `__synthetic` LAST: it is the invariant this factory exists to
+            # assert, so a caller's extra markers cannot displace it.
+            details={**(details or {}), "__synthetic": True},
         )
 
     @staticmethod

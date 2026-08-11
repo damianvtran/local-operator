@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import email.utils
 import json
+import logging
 import re
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -53,6 +54,10 @@ if TYPE_CHECKING:
 #: result of a non-JSON body. Lets the two extractors share one parse when the
 #: caller has it and still stand alone when it does not.
 _UNSET: Any = object()
+
+#: Config/transport problems go to the LOG, never the terminal: this module runs
+#: under a full-screen TUI that owns stderr.
+logger = logging.getLogger("local_operator.providers.clients")
 
 
 @runtime_checkable
@@ -105,6 +110,13 @@ def _first_text(*candidates: Any) -> str:
     return ""
 
 
+#: Longest provider message carried into an error frame. Every branch of the
+#: cascade below is bounded by it: the frame is one wrapped notice line in a
+#: terminal, and a provider that answers with a 3 KB error object must not spend
+#: the transcript on it.
+MAX_ERROR_MESSAGE_CHARS = 500
+
+
 def _extract_error_message(response: httpx.Response, payload: Any = _UNSET) -> str:
     """The provider's OWN words about the failure, from whichever slot it used.
 
@@ -126,6 +138,13 @@ def _extract_error_message(response: httpx.Response, payload: Any = _UNSET) -> s
     ``error.get("message", error)`` treated a present-but-empty key as an
     answer, so a provider that sent the field blank produced an error that
     printed nothing at all.
+
+    Nothing here ever renders a Python ``repr``. An ``error`` object with no
+    readable text falls through to the raw BODY — the real wire bytes, capped —
+    and a body that is empty too returns ``""`` so that ``ProviderError``'s own
+    floor speaks instead. ``str(error)`` used to stand in that slot and put
+    ``{'message': ''}`` in the frame, which is both uglier than the status phrase
+    and, uncapped, unbounded.
     """
     if payload is _UNSET:
         payload = _error_payload(response)
@@ -135,15 +154,19 @@ def _extract_error_message(response: httpx.Response, payload: Any = _UNSET) -> s
             message = _first_text(error.get("message"), error.get("detail"), error.get("msg"))
             upstream = _openrouter_upstream_text(error)
             if message and upstream and upstream not in message:
-                return f"{message}: {upstream}"
+                return _capped(f"{message}: {upstream}")
             resolved = message or upstream or _first_text(error.get("status"), error.get("code"))
             if resolved:
-                return resolved
-            return str(error)
-        direct = _first_text(error, payload.get("message"), payload.get("detail"))
-        if direct:
-            return direct
-    return response.text[:500].strip()
+                return _capped(resolved)
+        else:
+            direct = _first_text(error, payload.get("message"), payload.get("detail"))
+            if direct:
+                return _capped(direct)
+    return _capped(response.text)
+
+
+def _capped(text: str) -> str:
+    return text.strip()[:MAX_ERROR_MESSAGE_CHARS].strip()
 
 
 def _openrouter_upstream_text(error: Mapping[str, Any]) -> str:
@@ -171,6 +194,29 @@ def _openrouter_upstream_text(error: Mapping[str, Any]) -> str:
     return raw.strip()[:500]
 
 
+#: Ceiling on any advertised wait. A ``Retry-After`` is provider-supplied and
+#: reaches SQLite: a usage-limit failure feeds ``retry_after_ms_from_error``
+#: into ``AuthStore.rotate_sibling`` → ``block_credential(block_ms=...)``, which
+#: floors the value but has no ceiling of its own. A single ``retryDelay:
+#: "99999999s"`` would therefore write a 27,777-hour block against a working
+#: credential and print ``retry in 27777h46m`` at the user. Past a day the number
+#: is not a wait any interactive session can act on, so it is clamped and the
+#: original is logged.
+MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1000
+
+
+def _clamp_retry_after(delay_ms: int, source: str) -> int:
+    if delay_ms <= MAX_RETRY_AFTER_MS:
+        return delay_ms
+    logger.warning(
+        "provider advertised a %d ms wait via %s; clamped to %d ms",
+        delay_ms,
+        source,
+        MAX_RETRY_AFTER_MS,
+    )
+    return MAX_RETRY_AFTER_MS
+
+
 def _parse_retry_after(response: httpx.Response, payload: Any = _UNSET) -> int | None:
     """How long to wait, as milliseconds, from the header OR the body.
 
@@ -179,25 +225,37 @@ def _parse_retry_after(response: httpx.Response, payload: Any = _UNSET) -> int |
     the delay in ``error.details[].retryDelay`` as ``"41s"``. That figure is the
     single most actionable fact in a rate-limit error, and dropping it left the
     frame saying only that the limit was hit.
+
+    A NON-POSITIVE header falls through to the body rather than winning. Zero is
+    not an answer to "how long": it renders as no wait at all (``__str__`` tests
+    the value for truth) and, worse, ``_same_credential_retry_allowed`` reads it
+    as a short throttle and grants an immediate same-key retry of a quota error.
+    A gateway that sends ``Retry-After: 0`` alongside google's real ``retryDelay``
+    should not erase it.
     """
     header = response.headers.get("retry-after")
     if header is not None:
         parsed = _retry_after_from_header(header)
-        if parsed is not None:
-            return parsed
+        if parsed:
+            return _clamp_retry_after(parsed, "the Retry-After header")
     if payload is _UNSET:
         payload = _error_payload(response)
-    return _retry_delay_from_payload(payload)
+    delay = _retry_delay_from_payload(payload)
+    return None if delay is None else _clamp_retry_after(delay, "the response body")
 
 
 def _retry_after_from_header(header: str) -> int | None:
     try:
+        # OverflowError as well as ValueError: `float("1e400")` is `inf`, and
+        # `int(inf * 1000)` raises rather than returning a number. Unhandled it
+        # escaped `raise_for_status` entirely, and in `ApiEmbedder._fetch` it
+        # escaped the graceful-degradation handlers too.
         return max(0, int(float(header) * 1000))
-    except ValueError:
+    except (ValueError, OverflowError):
         pass
     try:
         when = email.utils.parsedate_to_datetime(header)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if when.tzinfo is None:
         # HTTP dates are GMT; parsedate yields a naive datetime when the
@@ -208,8 +266,9 @@ def _retry_after_from_header(header: str) -> int | None:
 
 
 #: Google's ``RetryInfo.retryDelay``: a protobuf Duration rendered as seconds
-#: with an ``s`` suffix (``"41s"``, ``"1.5s"``).
-_RETRY_DELAY_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s*$")
+#: with an ``s`` suffix (``"41s"``, ``"1.5s"``). Bounded to 12 digits so a
+#: pathological body cannot build an enormous int before the clamp sees it.
+_RETRY_DELAY_RE = re.compile(r"^\s*(\d{1,12}(?:\.\d{1,6})?)s\s*$")
 
 
 def _retry_delay_from_payload(payload: Any) -> int | None:
@@ -826,8 +885,10 @@ ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_ERROR_STATUS = {
     "invalid_request_error": 400,
     "authentication_error": 401,
+    "billing_error": 402,
     "permission_error": 403,
     "not_found_error": 404,
+    "conflict_error": 409,
     "request_too_large": 413,
     "rate_limit_error": 429,
     "api_error": 500,

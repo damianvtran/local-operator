@@ -733,13 +733,14 @@ class TestErrorMessageExtraction:
 
 
 class TestRetryAfter:
-    """"try again in 40s" is the single most actionable fact in a rate-limit
+    """ "try again in 40s" is the single most actionable fact in a rate-limit
     error, and providers disagree about where to put it."""
 
     def test_header_seconds(self) -> None:
         with pytest.raises(ProviderError) as excinfo:
-            raise_for_status(httpx.Response(429, json={"error": "slow down"},
-                                            headers={"retry-after": "42"}))
+            raise_for_status(
+                httpx.Response(429, json={"error": "slow down"}, headers={"retry-after": "42"})
+            )
         assert excinfo.value.retry_after_ms == 42_000
         assert "retry in 42s" in str(excinfo.value)
 
@@ -837,6 +838,137 @@ class TestAnthropicStreamErrorEvent:
         error = _anthropic_stream_error({})
         assert error.message == "the provider failed without reporting a reason"
         assert error.retryable is True  # unknown type keeps the old assumption
+
+
+class TestNoPythonReprReachesTheFrame:
+    """``str(error)`` stood in the cascade's last slot and put a dict repr in the
+    user's error frame — for the very shape the docstring claimed to fix."""
+
+    def _error(self, response: httpx.Response) -> ProviderError:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(response)
+        return excinfo.value
+
+    def test_a_blank_message_with_no_sibling_falls_to_the_wire_body(self) -> None:
+        """The docstring's own example, which used to render
+        `invalid request (HTTP 404): {'message': ''}` — a PYTHON repr of a parsed
+        object. The fallback is now the body as the provider actually sent it:
+        valid JSON, capped, and honest that the message field came through blank.
+        A body that is genuinely empty still reaches ``_describe_bare_status`` —
+        that is the owner's reported case, covered above."""
+        error = self._error(httpx.Response(404, json={"error": {"message": ""}}))
+        assert error.message == '{"error":{"message":""}}'
+        assert "'message'" not in str(error), "a Python repr must never reach the frame"
+
+    def test_a_non_string_message_falls_to_the_raw_body_not_a_repr(self) -> None:
+        """This shape was strictly WORSE than before the cascade: `{'text': 'x'}`
+        became `{'message': {'text': 'x'}}`. The real wire bytes beat both."""
+        error = self._error(httpx.Response(400, json={"error": {"message": {"text": "nested"}}}))
+        assert "'message':" not in error.message
+        assert "nested" in error.message  # the body itself, JSON as sent
+
+    def test_every_branch_is_length_capped(self) -> None:
+        """The repr branch was the only uncapped one, so a 3 KB error object went
+        into a one-line terminal notice whole."""
+        from local_operator.providers.clients import MAX_ERROR_MESSAGE_CHARS
+
+        for payload in (
+            {"error": {"message": "x" * 4000}},
+            {"error": {"code": "y" * 4000}},
+            {"detail": "z" * 4000},
+            {"error": {"blob": "q" * 4000}},
+        ):
+            error = self._error(httpx.Response(400, json=payload))
+            assert len(error.message) <= MAX_ERROR_MESSAGE_CHARS, payload
+        assert len(self._error(httpx.Response(502, content=b"w" * 4000)).message) <= (
+            MAX_ERROR_MESSAGE_CHARS
+        )
+
+
+class TestAnAdvertisedWaitIsBounded:
+    """``retry_after_ms`` is provider-supplied and reaches SQLite: a usage-limit
+    failure feeds it to ``AuthStore.block_credential``, which floors the value
+    and has no ceiling. One ``retryDelay: "99999999s"`` wrote a 27,777-hour block
+    against a working credential and printed ``retry in 27777h46m``."""
+
+    def _delay(self, response: httpx.Response) -> int | None:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(response)
+        return excinfo.value.retry_after_ms
+
+    def test_an_absurd_body_delay_is_clamped(self) -> None:
+        from local_operator.providers.clients import MAX_RETRY_AFTER_MS
+
+        payload = {
+            "error": {
+                "message": "exhausted",
+                "details": [{"@type": "RetryInfo", "retryDelay": "99999999s"}],
+            }
+        }
+        assert self._delay(httpx.Response(429, json=payload)) == MAX_RETRY_AFTER_MS
+
+    def test_an_absurd_header_delay_is_clamped(self) -> None:
+        from local_operator.providers.clients import MAX_RETRY_AFTER_MS
+
+        response = httpx.Response(429, json={"error": "slow"}, headers={"retry-after": "99999999"})
+        assert self._delay(response) == MAX_RETRY_AFTER_MS
+
+    def test_an_overflowing_header_does_not_escape_as_overflowerror(self) -> None:
+        """``float("1e400")`` is ``inf`` and ``int(inf * 1000)`` raises. It escaped
+        ``raise_for_status`` entirely, and in ``ApiEmbedder`` it escaped the
+        degrade-gracefully handlers too."""
+        response = httpx.Response(429, json={"error": "slow"}, headers={"retry-after": "1e400"})
+        assert self._delay(response) is None
+
+    def test_a_zero_header_does_not_erase_the_bodys_real_delay(self) -> None:
+        """Zero is not an answer to "how long": the frame drops the wait entirely
+        and ``_same_credential_retry_allowed`` reads it as a short throttle and
+        grants an immediate same-key retry of a quota error."""
+        response = httpx.Response(
+            429,
+            json={
+                "error": {
+                    "message": "exhausted",
+                    "details": [{"@type": "RetryInfo", "retryDelay": "41s"}],
+                }
+            },
+            headers={"retry-after": "0"},
+        )
+        assert self._delay(response) == 41_000
+
+
+class TestEveryDocumentedAnthropicErrorTypeIsMapped:
+    """Two were missing, and an unmapped type gets ``status=None`` so
+    ``retryable = status is None`` is True — a billing failure was re-sent
+    ``max_retries`` times and read as a transient blip."""
+
+    def test_billing_and_conflict_are_not_retried(self) -> None:
+        billing = _anthropic_stream_error(
+            {"type": "billing_error", "message": "Your credit balance is too low"}
+        )
+        assert (billing.status, billing.kind, billing.retryable) == (402, "quota", False)
+        conflict = _anthropic_stream_error(
+            {"type": "conflict_error", "message": "concurrent write"}
+        )
+        assert (conflict.status, conflict.kind, conflict.retryable) == (409, "request", False)
+
+    def test_the_documented_set_is_complete(self) -> None:
+        """Anthropic documents exactly these; an omission is silently a retry."""
+        from local_operator.providers.clients import _ANTHROPIC_ERROR_STATUS
+
+        assert set(_ANTHROPIC_ERROR_STATUS) == {
+            "invalid_request_error",
+            "authentication_error",
+            "billing_error",
+            "permission_error",
+            "not_found_error",
+            "conflict_error",
+            "request_too_large",
+            "rate_limit_error",
+            "api_error",
+            "timeout_error",
+            "overloaded_error",
+        }
 
 
 def test_unknown_provider_raises_value_error() -> None:

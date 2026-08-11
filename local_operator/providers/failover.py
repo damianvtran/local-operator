@@ -70,62 +70,88 @@ _KIND_LABELS: dict[str, str] = {
     "unknown": "provider error",
 }
 
-#: Substrings that mean "you have run out", wherever the provider chose to put
-#: them. Matched against the provider's own message because the status alone is
-#: not enough: anthropic answers an OAuth credential used off-Claude-Code with
-#: an opaque 429, and google/openrouter both report quota through a 403 or a
-#: bare body.
+#: Substrings that mean "you have run out" UNAMBIGUOUSLY, wherever the provider
+#: chose to put them. Matched against the provider's own message because the
+#: status alone is not enough: anthropic answers an OAuth credential used
+#: off-Claude-Code with an opaque 429, and google/openrouter both report quota
+#: through a 403 or a bare body.
 _USAGE_LIMIT_MARKERS = (
-    "usage",
     "quota",
     "rate limit",
     "rate_limit",
+    "resource_exhausted",
     "limit reached",
-    "insufficient",
 )
+
+#: Words that USUALLY mean exhaustion and sometimes mean permission. They are
+#: separated from the set above because they are the ones that misfire: google's
+#: real 403 PERMISSION_DENIED text is "Request had insufficient authentication
+#: scopes.", which the combined set read as a quota exhaustion and rendered as
+#: `rate limit or quota exceeded (HTTP 403)` — sending the user to wait out a
+#: problem only a re-login or a scope change clears. So on a status that is
+#: ITSELF about the bearer (401/403), only the unambiguous set counts.
+_WEAK_USAGE_LIMIT_MARKERS = ("usage", "insufficient")
 
 _TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled")
 
 
 def _is_usage_limit(status: int | None, message: str) -> bool:
-    """402/429, or a 4xx/status-less body that SAYS it ran out.
+    """429, or a body that SAYS it ran out.
 
-    402 belongs here with 429: "Payment Required" is a spent balance, which is a
-    quota problem whatever the provider calls it, and refreshing the token that
-    has no credits cannot help.
+    Three bounds, each of which was a real misclassification:
 
-    The text is consulted only BELOW 500, and that bound is load-bearing rather
-    than tidiness. A 5xx is the server failing, so a 5xx body mentioning a limit
-    is still the server failing and still worth retrying. Without the bound an
-    empty-bodied 507 read as a quota exhaustion, because
-    :func:`_describe_bare_status` fills the message from the status phrase and
-    "Insufficient Storage" contains ``insufficient`` — the harness's own words
-    classifying the harness's own error. Found by enumerating every
-    ``HTTPStatus`` phrase against these markers; 408/504 collide with the
-    timeout markers too, harmlessly, since both are already timeouts by status.
+    - **Not above 500.** A 5xx is the server failing, so a 5xx body mentioning a
+      limit is still the server failing and still worth retrying. Without this an
+      empty-bodied 507 read as quota, because :func:`_describe_bare_status` fills
+      the message from the status phrase and "Insufficient Storage" contains
+      ``insufficient``. (Found by enumerating every ``HTTPStatus`` phrase against
+      these markers. 408/504 collide with the timeout markers too, harmlessly:
+      both are already timeouts by status.)
+    - **Unambiguous markers only on 401/403**, per
+      :data:`_WEAK_USAGE_LIMIT_MARKERS`.
+    - **402 is NOT here**, though it is a quota problem: this predicate also
+      drives ``AuthStore.rotate_sibling``, which PRESERVES the sticky credential
+      for a usage limit on the reasoning that the same account is first choice
+      again once the window passes. A spent balance does not come back in sixty
+      seconds, so 402 is named as quota in :func:`_classify_fields` and routed
+      past the pointless token refresh by
+      :func:`is_direct_credential_rotation_error`, without claiming that its
+      credential is worth staying on.
     """
-    if status in (402, 429):
+    if status == 429:
         return True
     if status is not None and status >= 500:
         return False
     lowered = message.lower()
-    return any(marker in lowered for marker in _USAGE_LIMIT_MARKERS)
+    if any(marker in lowered for marker in _USAGE_LIMIT_MARKERS):
+        return True
+    if status in (401, 403):
+        return False
+    return any(marker in lowered for marker in _WEAK_USAGE_LIMIT_MARKERS)
 
 
 def _classify_fields(
     status: int | None, message: str, *, retryable: bool, auth_error: bool
-) -> str:
+) -> ProviderErrorKind:
     """The kind, decided ONCE from the raw fields.
+
+    ``message`` MUST be the provider's own words, and empty when it sent none.
+    Never a message the harness synthesized: text this function wrote itself
+    coming back through the markers is how an empty-bodied 507 became a quota
+    exhaustion. :class:`ProviderError` classifies before it substitutes its
+    floor text, and :func:`wrap_transport_error` states its kind outright.
 
     Order is the whole content of this function, so it is written down:
 
     1. A 401 is always the bearer. Nothing else produces one, and a 401 body
        mentioning "insufficient permissions" must not read as a quota problem.
+       :func:`_is_usage_limit` extends the same care to 403 for the same reason.
     2. Quota next, ahead of 403: google and openrouter both report exhausted
        quota with a 403, and telling that user "authentication failed" sends
        them to re-login for a problem that a login cannot fix. This is why the
        display order differs from :func:`is_auth_error`, which stays a pure
-       401/403 rotation predicate.
+       401/403 rotation predicate. 402 joins it here rather than inside
+       ``_is_usage_limit`` — see that function for the sticky-credential reason.
     3. Timeout ahead of transient: both retry, but only one of them tells the
        user the request was too slow rather than the provider being unwell.
     4. Anything else in the 4xx range is a request the provider READ and
@@ -133,7 +159,7 @@ def _classify_fields(
     """
     if status == 401:
         return "auth"
-    if _is_usage_limit(status, message):
+    if status == 402 or _is_usage_limit(status, message):
         return "quota"
     if auth_error or status == 403:
         return "auth"
@@ -211,23 +237,25 @@ class ProviderError(RenderedStreamError):
         retryable: bool = False,
         retry_after_ms: int | None = None,
         auth_error: bool = False,
-        kind: str | None = None,
+        kind: ProviderErrorKind | None = None,
     ) -> None:
-        text = message.strip() if isinstance(message, str) else str(message)
-        if not text:
-            text = _describe_bare_status(status)
+        provider_text = message.strip() if isinstance(message, str) else str(message)
+        #: Classified BEFORE the floor text is substituted, so the classifier only
+        #: ever reads the provider's own words. Feeding it a message the harness
+        #: wrote is how an empty-bodied 507 became a quota exhaustion —
+        #: "Insufficient Storage" is the status phrase, not a provider saying it
+        #: ran out. Empty text matches no marker, so a wordless failure is
+        #: classified from its status alone, which is all the evidence there is.
+        self.kind: ProviderErrorKind = kind or _classify_fields(
+            status, provider_text, retryable=retryable, auth_error=auth_error
+        )
+        text = provider_text or _describe_bare_status(status)
         super().__init__(text)
         self.status = status
         self.message = text
         self.retryable = retryable
         self.retry_after_ms = retry_after_ms
         self.auth_error = auth_error
-        #: Derived once, here, so every reader agrees. ``kind`` is passed
-        #: explicitly only where the fields cannot say it — an abort is a
-        #: ``ProviderError`` with no status and a user-supplied reason.
-        self.kind: str = kind or _classify_fields(
-            status, text, retryable=retryable, auth_error=auth_error
-        )
 
     def __str__(self) -> str:
         """``<kind> (HTTP <status>, retry in <wait>): <the provider's words>``.
@@ -236,10 +264,14 @@ class ProviderError(RenderedStreamError):
         rides in the parenthetical rather than the tail so that "try again in
         40s" survives a long provider message being wrapped or clipped.
 
-        An abort renders as its bare reason: the user pressed the key, so
-        prefixing it with a diagnosis states the obvious twice.
+        Two cases render as the bare message, because a label would restate what
+        the text already says. An abort: the user pressed the key. And an error
+        with NO status and NO kind — which is only ever one the harness wrote
+        about itself ("No API key configured for provider 'openai'", "Failover
+        exhausted for …"); prefixing those with ``provider error:`` produced a
+        stutter and named a provider that was never called.
         """
-        if self.kind == "aborted":
+        if self.kind == "aborted" or (self.kind == "unknown" and self.status is None):
             return self.message
         facts = []
         if self.status is not None:
@@ -251,7 +283,7 @@ class ProviderError(RenderedStreamError):
         return f"{label}{detail}: {self.message}"
 
 
-def classify_provider_error(error: BaseException) -> str:
+def classify_provider_error(error: BaseException) -> ProviderErrorKind:
     """The failure kind for anything the harness can catch.
 
     A raw exception is read best-effort from its class and text, which is enough
@@ -335,8 +367,16 @@ def is_invalidated_credential_error(error: BaseException) -> bool:
 
 def is_direct_credential_rotation_error(error: BaseException) -> bool:
     """Skip the refresh-same-account step for these: refreshing a
-    valid-but-denied token cannot help, so rotate through the pool."""
-    return is_usage_limit_error(error) or (isinstance(error, ProviderError) and error.status == 403)
+    valid-but-denied token cannot help, so rotate through the pool.
+
+    402 is listed explicitly rather than through :func:`is_usage_limit_error`,
+    which deliberately excludes it: a refreshed token still has no credits, so
+    the refresh step is as pointless here as for a 403 — but a spent balance is
+    not a window that reopens, so the credential must not keep its sticky place.
+    """
+    if not isinstance(error, ProviderError):
+        return False
+    return is_usage_limit_error(error) or error.status in (402, 403)
 
 
 def retry_after_ms_from_error(error: BaseException) -> int | None:
@@ -828,12 +868,28 @@ def wrap_transport_error(exc: BaseException) -> ProviderError:
     most of the diagnosis and often all of it: ``httpx.ConnectTimeout()`` and
     ``httpx.RemoteProtocolError()`` are routinely raised with no arguments at
     all, and ``ProviderError(None, str(exc))`` turned those into an error that
-    printed nothing. It is also what lets the classifier see the word
-    "Timeout" and label the frame a timeout rather than a generic blip.
+    printed nothing.
+
+    The kind is stated OUTRIGHT rather than left to the text classifier, because
+    the text here is the harness's own and running it through the quota markers
+    made the harness misdiagnose its own bugs: a ``KeyError('usage')`` from a
+    client parsing a usage block rendered as ``rate limit or quota exceeded``,
+    and ``ValueError('insufficient data in chunk')`` did the same. The class name
+    IS legitimate evidence of a timeout; nothing in an exception's text is
+    evidence about the user's quota.
     """
     detail = str(exc).strip()
     name = type(exc).__name__
-    return ProviderError(None, f"{name}: {detail}" if detail else name, retryable=True)
+    haystack = f"{name} {detail}".lower()
+    timed_out = isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or any(
+        marker in haystack for marker in _TIMEOUT_MARKERS
+    )
+    return ProviderError(
+        None,
+        f"{name}: {detail}" if detail else name,
+        retryable=True,
+        kind="timeout" if timed_out else "transient",
+    )
 
 
 async def stream_with_failover(
@@ -885,17 +941,26 @@ async def stream_with_failover(
         """Offer ``error`` the reported-error slot, keeping the best so far.
 
         ``>=`` so that at equal rank the LATEST attempt wins, which is the
-        long-standing behaviour within one selector. A fallback's failure is
-        also logged unconditionally: it can no longer reach the frame while the
-        requested model has an error of its own to report, and a chain entry
-        the account cannot serve would otherwise fail invisibly forever.
+        long-standing behaviour within one selector.
+
+        EVERY error that does not win the slot is logged, not just a fallback's.
+        Only one failure can reach the frame, and picking the most diagnostic one
+        means the others now go somewhere the user cannot see — so they have to
+        go somewhere the reader of a log file can. A 429 on the first key
+        followed by "api key is invalid or revoked" on the sibling reports the
+        429 correctly and would otherwise mention the revoked credential
+        nowhere at all.
         """
         nonlocal reported, reported_score
-        if not primary:
-            logger.warning("fallback selector failed: %s", error)
         score = error_report_score(error, primary=primary)
         if score >= reported_score:
+            if reported is not None:
+                logger.warning("superseded by a more diagnostic failure: %s", reported)
             reported, reported_score = error, score
+        else:
+            logger.warning(
+                "%s failed: %s", "requested model" if primary else "fallback selector", error
+            )
 
     for selector in selectors:
         if signal is not None and signal.aborted:

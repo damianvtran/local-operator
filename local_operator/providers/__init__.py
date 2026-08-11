@@ -35,10 +35,12 @@ from local_operator.providers.failover import (  # noqa: F401
     backoff_delay_ms,
     classify_provider_error,
     expand_fallback_candidates,
+    is_timeout_error,
     is_transient_error,
     resolve_chain,
     resolve_next_key,
     stream_with_failover,
+    wrap_transport_error,
 )
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
@@ -66,10 +68,12 @@ __all__ = [
     "env_key_name",
     "expand_fallback_candidates",
     "get_provider_definition",
+    "is_timeout_error",
     "is_transient_error",
     "list_login_providers",
     "resolve_chain",
     "resolve_env_key",
     "resolve_next_key",
     "stream_with_failover",
+    "wrap_transport_error",
 ]

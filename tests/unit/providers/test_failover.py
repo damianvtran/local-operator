@@ -12,12 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
-from local_operator.harness.types import (
-    ChatRequest,
-    ModelSpec,
-    StreamEndEvent,
-    StreamTextDelta,
-)
+from local_operator.harness.types import ChatRequest, ModelSpec, StreamEndEvent, StreamTextDelta
 from local_operator.model.configure import build_model_spec
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
@@ -27,12 +22,15 @@ from local_operator.providers.failover import (
     backoff_delay_ms,
     classify_provider_error,
     expand_fallback_candidates,
+    is_auth_error,
     is_direct_credential_rotation_error,
     is_transient_error,
+    is_usage_limit_error,
     resolve_chain,
     resolve_next_key,
     spec_for_selector,
     stream_with_failover,
+    wrap_transport_error,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -683,7 +681,6 @@ class TestEffortDoesNotOutliveItsModelAcrossAHop:
         assert swapped.reasoning_efforts == ()
 
 
-
 # ---------------------------------------------------------------------------
 # Error kinds, and who owns the reported-error slot
 # ---------------------------------------------------------------------------
@@ -718,7 +715,11 @@ class TestProviderErrorKinds:
             # transient
             (ProviderError(500, "Internal Server Error", retryable=True), "transient", True),
             (ProviderError(529, "Overloaded", retryable=True), "transient", True),
-            (ProviderError(None, "ConnectError: connection reset", retryable=True), "transient", True),
+            (
+                ProviderError(None, "ConnectError: connection reset", retryable=True),
+                "transient",
+                True,
+            ),
             # a request the provider READ and refused
             (ProviderError(400, "`temperature` is deprecated"), "request", False),
             (ProviderError(404, "model not found"), "request", False),
@@ -775,11 +776,66 @@ class TestProviderErrorKinds:
         assert ProviderError(403, "Quota exceeded for model").kind == "quota"
         assert ProviderError(None, "Usage limit reached").kind == "quota"
 
+    def test_a_403_about_permissions_is_auth_not_quota(self) -> None:
+        """Google's real 403 PERMISSION_DENIED text is "Request had insufficient
+        authentication scopes." — which the combined marker set read as a quota
+        exhaustion and rendered `rate limit or quota exceeded (HTTP 403)`, sending
+        the user to wait out a problem only a re-login or scope grant clears.
+        This commit's own failure mode, inverted, so it is pinned both ways."""
+        for message in (
+            "Request had insufficient authentication scopes.",
+            "insufficient permissions for this model",
+            "The caller does not have permission; usage of this API is restricted",
+        ):
+            error = ProviderError(403, message)
+            assert error.kind == "auth", message
+            assert "quota" not in str(error)
+        # A 403 that really IS exhaustion still says so — google and openrouter
+        # both report quota this way, which is why the branch exists at all.
+        for message in ("Quota exceeded for model", "RESOURCE_EXHAUSTED", "rate limit reached"):
+            assert ProviderError(403, message).kind == "quota", message
+        # Rotation is unchanged either way: a denied 403 must still rotate.
+        assert is_auth_error(ProviderError(403, "insufficient authentication scopes"))
+        assert is_direct_credential_rotation_error(ProviderError(403, "whatever"))
+
+    def test_the_harness_never_diagnoses_its_own_bug_as_a_quota_problem(self) -> None:
+        """`wrap_transport_error` used to hand its own synthesized text to the
+        text classifier, so a `KeyError('usage')` raised while a client parsed a
+        usage block rendered as `rate limit or quota exceeded`. Nothing in an
+        exception's text is evidence about the user's quota."""
+        for exc in (
+            KeyError("usage"),
+            ValueError("insufficient data in chunk"),
+            RuntimeError("rate limit bookkeeping failed"),
+        ):
+            wrapped = wrap_transport_error(exc)
+            assert wrapped.kind == "transient", (exc, wrapped.kind)
+            assert wrapped.retryable is True
+        # The exception CLASS is still legitimate evidence of a timeout.
+        assert wrap_transport_error(httpx.ConnectTimeout("")).kind == "timeout"
+        assert wrap_transport_error(TimeoutError()).kind == "timeout"
+
+    def test_402_is_named_as_quota_without_claiming_its_credential_is_worth_keeping(
+        self,
+    ) -> None:
+        """A spent balance IS a quota problem to the user and a refresh cannot fix
+        it, so it reads as quota and skips the refresh step. But it must not be a
+        ``usage_limit`` to ``AuthStore.rotate_sibling``, which PRESERVES the
+        sticky credential on the reasoning that the window reopens — a balance of
+        zero does not reopen in sixty seconds."""
+        error = ProviderError(402, "Your credit balance is too low")
+        assert error.kind == "quota"
+        assert is_direct_credential_rotation_error(error) is True
+        assert is_usage_limit_error(error) is False
+        assert is_transient_error(error) is False
+
     @pytest.mark.parametrize(
         ("error", "rendered"),
         [
             (
-                ProviderError(429, "Limit: 200000 tokens/min.", retryable=True, retry_after_ms=41600),
+                ProviderError(
+                    429, "Limit: 200000 tokens/min.", retryable=True, retry_after_ms=41600
+                ),
                 "rate limit or quota exceeded (HTTP 429, retry in 42s): Limit: 200000 tokens/min.",
             ),
             (
@@ -847,9 +903,7 @@ class TestTheReportedErrorIsTheMostDiagnosticOne:
     """
 
     def _settings(self, chain: list[str]) -> dict[str, Any]:
-        return {
-            "retry": {"baseDelayMs": 1, "maxRetries": 1, "fallbackChains": {"default": chain}}
-        }
+        return {"retry": {"baseDelayMs": 1, "maxRetries": 1, "fallbackChains": {"default": chain}}}
 
     async def _run(self, errors: dict[str, ProviderError]) -> ProviderError:
         async def client_for(spec: ModelSpec) -> Any:
@@ -905,14 +959,24 @@ class TestTheReportedErrorIsTheMostDiagnosticOne:
             for record in caplog.records
         )
 
-    async def test_a_fallback_error_is_still_reported_when_the_primary_never_failed(self) -> None:
-        """No primary error to prefer: an unconfigured provider breaks before it
-        calls anyone, and the chain's failure is then all there is."""
+    async def test_the_primary_owns_the_slot_even_when_it_never_reached_a_client(self) -> None:
+        """Named for what it actually pins, which is not what it first claimed.
+
+        A provider with no key configured breaks BEFORE calling anyone, and that
+        "No API key configured" still records against the primary — so it beats
+        the fallback's 500, and the frame names the missing key rather than a
+        model the user did not ask for. That is right: the missing key is the
+        thing to fix.
+
+        It also means the primary records on every path it can take, which makes
+        "a fallback wins the slot" unreachable in practice and the terminal
+        ``Failover exhausted`` line defensive rather than live. Recorded here so
+        the next reader does not go looking for a test of either.
+        """
 
         async def client_for(spec: ModelSpec) -> Any:
             return ScriptedClient(ProviderError(500, "fallback is down", retryable=True))
 
-        # No key for openai at all, so the primary never reaches a client.
         auth = FakeAuth({"anthropic": ["k2"]})
         with pytest.raises(ProviderError) as excinfo:
             async for _ in stream_with_failover(
@@ -920,10 +984,14 @@ class TestTheReportedErrorIsTheMostDiagnosticOne:
             ):
                 pass
         assert "No API key configured" in excinfo.value.message
+        assert "fallback is down" not in excinfo.value.message
+        # And it renders without a `provider error:` stutter in front of a
+        # sentence that already names itself.
+        assert str(excinfo.value) == "No API key configured for provider 'openai'"
 
 
 class TestTransientFailuresAreRetriedOnEveryCallPath:
-    """"Transient errors are automatically retried on any invocation."
+    """ "Transient errors are automatically retried on any invocation."
 
     A turn, a subagent, an aside and the one-shot errands all reach the provider
     through ``stream_with_failover``, so the first test covers the shared floor.
@@ -964,9 +1032,7 @@ class TestTransientFailuresAreRetriedOnEveryCallPath:
             return _FnClient(flaky)
 
         request = _request().model_copy(update={"replayable": replayable})
-        settings = {
-            "retry": {"baseDelayMs": 1, "maxRetries": max_retries, "fallbackChains": {}}
-        }
+        settings = {"retry": {"baseDelayMs": 1, "maxRetries": max_retries, "fallbackChains": {}}}
         events = [
             event
             async for event in stream_with_failover(
@@ -1022,8 +1088,12 @@ class TestTransientFailuresAreRetriedOnEveryCallPath:
             seen.append(request)
             yield StreamTextDelta(delta="summary")
 
+        # `__new__` plus the two attributes `_one_shot_complete` reads. Brittle by
+        # nature — it is coupled to the private attrs that method happens to touch
+        # — but the alternative is standing a whole Session up to assert one flag.
         session = Session.__new__(Session)
-        session._model = ModelSpec(provider="openai", model_id="gpt-4o")  # type: ignore[attr-defined]
+        spec = ModelSpec(provider="openai", model_id="gpt-4o")
+        session._model = spec  # type: ignore[attr-defined]
         session._stream_fn = stream_fn  # type: ignore[attr-defined]
         assert await session._one_shot_complete("sys", "prompt") == "summary"
         assert seen[0].replayable is True
