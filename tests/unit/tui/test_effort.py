@@ -123,8 +123,8 @@ async def test_the_band_states_the_level_beside_the_model() -> None:
         await _boot(pilot, app)
         await pilot.pause()
         band = _band(app)
-    assert "◐ high" in band
-    assert 0 < band.index("◐") < band.index("⌂")
+    assert "▴ high" in band
+    assert 0 < band.index("▴") < band.index("⌂")
 
 
 @pytest.mark.asyncio
@@ -273,7 +273,7 @@ async def test_a_non_reasoning_model_offers_nothing_and_says_so() -> None:
         level = _level(app)
     # No effort segment at all — not "reasoning", not a level. Its ABSENCE is
     # what makes the segment informative when it is there.
-    assert "◐" not in band
+    assert "▴" not in band
     assert "reasoning" not in band and "high" not in band
     assert "not adjustable" in refusal
     assert "not adjustable" in key_answer
@@ -342,7 +342,7 @@ async def test_setting_the_level_it_is_already_on_says_so_rather_than_drawing_an
 @pytest.mark.asyncio
 async def test_a_model_with_a_ladder_and_no_level_reads_auto_on_both_surfaces() -> None:
     """OpenAI boots unset by design, so this is the first frame most OpenAI
-    users see. It used to read `◐ reasoning` — a word on no ladder — while the
+    users see. It used to read `▴ reasoning` — a word on no ladder — while the
     listing marked nothing at all, leaving no surface answering "what is it
     running at".
     """
@@ -353,7 +353,7 @@ async def test_a_model_with_a_ladder_and_no_level_reads_auto_on_both_surfaces() 
         band = _band(app)
         await _submit(pilot, app, "/effort")
         listing = [n for n in _notices(app) if "reasoning effort" in n][-1]
-    assert "◐ auto" in band
+    assert "▴ auto" in band
     assert "●auto" in listing
 
 
@@ -370,7 +370,7 @@ async def test_a_model_that_reasons_without_a_ladder_keeps_the_word_reasoning() 
         band = _band(app)
         await _submit(pilot, app, "/effort")
         answer = _notices(app)[-1]
-    assert "◐ reasoning" in band
+    assert "▴ reasoning" in band
     assert answer == "reasoning effort: not adjustable on deepseek/deepseek-reasoner"
 
 
@@ -460,7 +460,7 @@ async def test_effort_auto_on_a_model_with_no_documented_default_sends_nothing()
         band = _band(app)
     assert level is None
     assert "nothing sent" in receipt
-    assert "◐ auto" in band
+    assert "▴ auto" in band
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +509,7 @@ def test_a_child_on_another_model_is_not_given_the_parents_effort() -> None:
     # pins is that the parent's level did not follow its model out of the frame.
     assert "claude" not in child.lower()
     assert "high" not in child
-    assert "◐" not in child
+    assert "▴" not in child
 
 
 def test_a_child_on_the_parents_model_keeps_the_level_it_is_actually_running() -> None:

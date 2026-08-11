@@ -54,7 +54,25 @@ _SPINNER_INTERVAL_S = 0.08
 #: for exactly that reason (the omp reference uses them; it can afford to).
 #: Geometric and technical symbols only, so no Nerd font is required.
 ICON_MODEL = "◆"
-ICON_EFFORT = "◐"
+#: Reasoning effort. A CATEGORY marker like every other icon here — the value is
+#: the word beside it (`▴ high`), and the glyph never varies with the rung. A
+#: varying glyph would buy one cell of redundancy and cost a legend nobody is
+#: given; the owner's own reference reads its effort glyph as a category mark
+#: too.
+#:
+#: It was `◐`, which is the wrong constant for a category: that glyph belongs to
+#: a series (`◐◑◒◓`) that encodes FRACTIONS, so a half-filled circle reads as a
+#: gauge — and it showed the identical half-filled mark beside `low` and beside
+#: `xhigh`, which is either a stuck meter or a mark contradicting the word next
+#: to it. A triangle carries no fill to misread.
+#:
+#: Triangles are also the one glyph family this band does not otherwise use, so
+#: it cannot be confused with the model diamond, the cost diamond, the MCP circle
+#: or the agents circle. `●` was rejected for the opposite reason: it already
+#: means "the current row" in the model picker and "the rung in force" in
+#: `/effort`'s listing, and a glyph with two meanings in one feature is worse
+#: than a plain one with none.
+ICON_EFFORT = "▴"
 ICON_CWD = "⌂"
 ICON_AGENTS = "◍"
 ICON_JOBS = "⊞"
@@ -146,15 +164,18 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
-    # Second-to-last, just ahead of mcp. This rung only EXISTS while the
-    # tool-approval gate has been disarmed for the session, so it is an alarm by
-    # the same argument mcp's failure branch is one — but it is the WIDEST
-    # segment in the band (`! auto-approve` is 14 cells against `⊙ 3 MCP`'s 7),
-    # and this ladder sheds by what a drop BUYS. Dropping the widest alarm first
-    # is what lets the narrow one survive to the very last step, so a cramped
-    # terminal keeps saying something rather than falling straight to the
-    # truncated tail. The mode is still not silent when it goes: `/approvals`
-    # reports it, and the notice that latched it is in the transcript.
+    # Second-to-last, just ahead of mcp — but only while mcp is an ALARM, which
+    # is the one case something here beats it for last place (see
+    # :func:`_narrowest_survivor_last`; in every quiet ladder this rung IS the
+    # last survivor). It only EXISTS while the tool-approval gate is disarmed,
+    # so it is an alarm by the same argument mcp's failure branch is one — but
+    # it is the WIDEST segment in the band (`! auto-approve` is 14 cells against
+    # `⊙ 3 MCP`'s 7), and this ladder sheds by what a drop BUYS. Dropping the
+    # widest alarm first is what lets the narrow one survive to the very last
+    # step, so a cramped terminal keeps saying something rather than falling
+    # straight to the truncated tail. The mode is still not silent when it goes:
+    # `/approvals` reports it, and the notice that latched it is in the
+    # transcript.
     "approvals",
     # DEAD LAST *when it is an alarm*, mirroring the reference's
     # `flexShrink={0}` on this indicator. Two reasons it then outlives even the
@@ -173,53 +194,50 @@ _DROP_LADDER: tuple[str, ...] = (
 
 #: Rungs whose painted width is not knowable from the ladder. ``cwd`` is as wide
 #: as the user's path — a basename alone runs from 3 cells to 30 — so it can
-#: never be relied on as the thing that still fits at the narrowest width.
+#: never be relied on as the thing that still fits at the narrowest width. The
+#: render walk is monotone (it sheds until the row fits and can never add a
+#: segment back), so a ladder ending on one of these sheds a bounded segment to
+#: make room for a path that then does not fit either, and paints neither. No
+#: ladder may end on one; ``test_status_line`` holds every variant to it.
 _UNBOUNDED_RUNGS = frozenset({"cwd"})
 
 
 def _narrowest_survivor_last(rungs: list[str]) -> list[str]:
-    """Re-seat ``approvals`` so it is not the last rung standing — usually.
+    """Re-seat ``approvals`` off last place — but only when ``mcp`` can take it.
 
     Every ``_x_before_cwd`` helper below promotes one rung, and promoting a rung
     leaves whatever FOLLOWED it at the end of the ladder. In this ladder that is
     reliably ``approvals`` — the 14-cell segment the authored order sheds FIRST,
-    precisely because dropping it buys the most width. Left last it outlives the
-    narrow segments it was supposed to make room for, inverting the argument.
+    precisely because dropping it buys the most width.
 
-    Factored out rather than repeated: it was written inline for the mcp move,
-    and the next promotion (context) silently did not re-apply it.
+    Last place goes to the narrowest BOUNDED rung, and that rule was written
+    when the only rung competing for it was ``mcp``: 7 cells against 14, and its
+    failure branch is an alarm too, so it wins on both counts. The rule then
+    fired in ladders where ``mcp`` had been promoted away, and handed last place
+    to whatever happened to be there instead — the context percentage — which is
+    not the same trade at all. Measured by a design pass across 13 widths with a
+    healthy MCP: at 56 cells the band read ``◆ Claude Opus 5 › ⣿  ▦ 49.6%/1M ‹ !
+    auto-approve`` and at 48 it read ``◆ Claude Opus 5 › ⣟  ▦ 49.6%/1M``. A
+    narrow terminal quietly stopped saying that every tool runs without asking,
+    in order to keep a compaction forecast.
 
-    **The exception is load-bearing, not a let-out.** The repair is refused when
-    it would strand an UNBOUNDED rung last, because the render walk is monotone:
-    it sheds down the ladder until the row fits and can never add a segment
-    back. Ending on ``cwd`` therefore means the band sheds the armed
-    ``! auto-approve`` alarm to make room for a path that then does not fit
-    either, and paints neither.
+    So the rule is: last place goes to the narrowest bounded rung, and an ALARM
+    outranks a reading. ``mcp`` is the only rung that beats ``approvals`` on
+    both, so the repair applies exactly when ``mcp`` would land there. Anywhere
+    else the alarm stays last, which also settles a disagreement the two quiet
+    ladders used to have with each other: with an estimated context reading the
+    alarm already survived to the end (the repair was refused there because it
+    would have stranded the unbounded ``cwd`` last), and with an exact one it
+    did not.
 
-    The decisive argument is PARITY WITH MAIN, not blank cells. Main's boot band
-    carries no estimate, so it uses the quiet ladder and keeps the alarm; a band
-    that ends on ``cwd`` disagrees with main about which of {path, alarm}
-    survives at 172 of the widths swept (20-95 cells x 7 basenames), and this
-    rule brings that to zero. Blank cells are the symptom and they do not argue
-    it cleanly either way — from 47 cells up the swap trades an ink-heavy path
-    for a shorter alarm, which the blank-cell count scores as worse and main
-    scores as correct.
-
-    Concretely, with a 24-character basename and the gate disarmed: the alarm
-    first fits at 36 cells, and from 36 to 46 the previous ordering painted
-    ``◆ kimi-k2-thinking`` alone. A 14-cell alarm that always fits beats an
-    unbounded path that may not, and the alarm is the only place the band admits
-    the approval gate is disarmed.
-
-    So the rule is really "the last survivor must be BOUNDED, and should be the
-    narrowest such rung". Those agree everywhere except the quiet estimate
-    ladder, where the only other candidate is the path.
+    The alarm is not silent when it finally goes: ``/approvals`` reports the
+    mode, and the notice that latched it is in the transcript.
     """
     if rungs[-1] != "approvals":
         return rungs
     repaired = [step for step in rungs if step != "approvals"]
     repaired.insert(len(repaired) - 1, "approvals")
-    if repaired[-1] in _UNBOUNDED_RUNGS:
+    if repaired[-1] != "mcp":
         return rungs
     return repaired
 
@@ -325,11 +343,54 @@ def format_context_usage(tokens: int, window: int) -> str:
     credential renders ``—``. Two spellings of "unknown" in one row would read
     as two different states.
     """
+    return context_spelling(tokens, window, form="full")
+
+
+#: The forms a context reading may be written in, widest first. Named rather
+#: than inlined at each site because the band and the subagent rows show the
+#: SAME child's reading four rows apart, and they were spelling it two ways —
+#: `▦ 24.1%/200k` above `24%/200k`. Cost never had that problem because both
+#: sides go through `format_cost` and differ only by a documented magnitude
+#: rule; this gives the context reading the same treatment.
+#:
+#: * ``full``  — ``24.1%/200k``. What the band always shows.
+#: * ``nodec`` — ``24%/200k``. Two cells cheaper, denominator kept, so two
+#:   children on different windows stay comparable.
+#: * ``short`` — ``24%``. Seven cells cheaper; the denominator is the half a
+#:   reader can recover by opening the child's page.
+#:
+#: Only the rows reduce. The band has one segment and the cells to spell it
+#: whole, so a band that shortened would be shortening for no reason.
+CONTEXT_FORMS = ("full", "nodec", "short")
+
+
+def context_spelling(tokens: int, window: int, *, form: str = "full") -> str:
+    """One context reading in one of :data:`CONTEXT_FORMS`.
+
+    Empty when there is nothing to report, so every caller's segment
+    disappears on the same test. A percentage needs a denominator: with no
+    window the spend is reported against an explicit unknown rather than
+    against an invented one, and that is true of every form.
+
+    A rounded ``0%`` over a non-zero reading is refused in all of them, for
+    the reason a confident ``$0.0000`` over real spend is refused — a child
+    holding three thousand tokens is not holding none.
+    """
     if tokens <= 0:
         return ""
     if window <= 0:
-        return f"{format_context_tokens(tokens)}/—"
-    return f"{tokens / window * 100:.1f}%/{format_window(window)}"
+        return f"{format_context_tokens(tokens)}/—" if form != "short" else (
+            format_context_tokens(tokens)
+        )
+    percent = tokens / window * 100
+    if form == "short":
+        return f"{percent:.0f}%" if percent >= 1 else "<1%"
+    denominator = format_window(window)
+    if form == "nodec":
+        return f"{max(percent, 0.5):.0f}%/{denominator}"
+    if percent < 0.05:
+        return f"<0.1%/{denominator}"
+    return f"{percent:.1f}%/{denominator}"
 
 
 def format_cost(cost: float) -> str:
@@ -597,10 +658,16 @@ class StatusLine:
         # is dropped until something has been rendered, which is the honest
         # starting state: nothing has been shown yet.
         self._dropped: frozenset[str] = frozenset(_DROP_LADDER)
-        # True once the user has answered a tool-approval prompt with "allow
-        # all": a session-wide mode with no persistent indicator is how a
-        # disarmed gate gets forgotten about.
+        # True while the tool-approval gate is disarmed — by the prompt's "allow
+        # all", by `/approvals auto`, or by a saved default adopted at boot: a
+        # session-wide mode with no persistent indicator is how a disarmed gate
+        # gets forgotten about.
         self._approvals_auto: bool = False
+        # And whether that mode is the SAVED default rather than this session's
+        # choice. Two different promises — "until I close this window" and
+        # "every window from now on" — and the alarm is the only place a user
+        # sees either without running a command.
+        self._approvals_always: bool = False
         # Cumulative ACTIVE processing time: the sum of turn durations, not
         # wall clock since launch. A session left open over lunch has not
         # been working for two hours, and reporting that it has makes the
@@ -656,6 +723,7 @@ class StatusLine:
         conversation_name: str | None = None,
         mcp: McpStatus | None = None,
         approvals_auto: bool | None = None,
+        approvals_always: bool | None = None,
     ) -> None:
         """Update any subset of segments and repaint the band."""
         if model_label is not None:
@@ -680,6 +748,8 @@ class StatusLine:
             self._mcp = mcp
         if approvals_auto is not None:
             self._approvals_auto = approvals_auto
+        if approvals_always is not None:
+            self._approvals_always = approvals_always
         if cost is not None:
             self._cost = cost
         if conversation_name is not None:
@@ -893,6 +963,20 @@ class StatusLine:
             if shimmer_enabled():
                 tail.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
                 tail.append(" ", style=dim)
+        if self._subagent is not None and self._subagent.label:
+            # The name goes on the IRREDUCIBLE row too. Without it this path
+            # emitted `⣾ ◆ Gemini 2.5 Pro Preview` while the session's own
+            # model was something else entirely — a child's model on screen
+            # attributed to nobody, which is worse than dropping the model
+            # with it. The docstring on the wide path calls this segment
+            # never-dropped; below 48 columns that was a claim and not a fact.
+            tail.append(f"{ICON_AGENTS} ", style=dim)
+            tail.append(
+                truncate_cells(self._subagent.label, max(1, width - cell_len(tail.plain))),
+                style=Style(color=theme_mod.semantic_color("label")),
+            )
+            tail.truncate(width, overflow="ellipsis")
+            return tail
         model_label = self._shown_model_label()
         label = (
             format_model_label(model_label, short=True, name=self._shown_model_name())
@@ -1053,10 +1137,17 @@ class StatusLine:
             # because the loop below paints icons `dim` — which made the one alarm
             # in the band its quietest mark (4.18:1, against the same `!` at
             # 9.4:1 in the transcript).
+            # `always` when the mode is the SAVED default, and nothing when it is
+            # only this session's. The alarm already answers "is the gate
+            # disarmed"; the one extra word answers the question that follows it,
+            # "until when", which is otherwise only reachable by running a
+            # command. Six cells, and the segment sheds as one unit, so the
+            # narrow-width behaviour is unchanged.
+            armed = f"{ICON_APPROVALS} auto-approve"
             parts.append(
                 (
                     "",
-                    f"{ICON_APPROVALS} auto-approve",
+                    f"{armed} always" if self._approvals_always else armed,
                     Style(color=theme_mod.semantic_color("warning"), bold=True),
                 )
             )
