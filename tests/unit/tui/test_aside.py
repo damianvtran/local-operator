@@ -349,7 +349,7 @@ async def test_the_card_rests_on_the_end_of_the_chat_not_on_top_of_it() -> None:
 
 @pytest.mark.asyncio
 async def test_an_aside_question_never_enters_the_prompt_history() -> None:
-    """"esc discards it" has to be true of UP as well as of the transcript.
+    """ "esc discards it" has to be true of UP as well as of the transcript.
 
     ``Editor._submit`` records history BEFORE it posts, so the aside had to
     borrow the recording off rather than unwind it afterwards. Reproduced
@@ -412,7 +412,9 @@ async def test_ctrl_c_dismisses_the_aside_so_its_own_warning_is_readable() -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("act", ["clear", "approval"])
-async def test_the_aside_yields_to_anything_that_acts_on_the_conversation(act) -> None:  # noqa: ANN001
+async def test_the_aside_yields_to_anything_that_acts_on_the_conversation(
+    act: str,
+) -> None:
     """A floating card must not outlive the conversation it is a question about.
 
     ``ctrl+l`` wipes the ledger the aside is asking about; a tool approval is a
