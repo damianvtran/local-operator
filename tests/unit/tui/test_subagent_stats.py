@@ -236,6 +236,11 @@ def test_the_row_the_page_is_showing_keeps_only_what_the_page_does_not_say() -> 
     independently.
     """
     job = Job(
+        # Named HERE rather than leaned on from the class default, because the
+        # name is what this test is about: an assertion that reaches 170 lines
+        # up for the label it names is how this one came to name a child the
+        # fixture never built.
+        label="schema migration",
         status="failed",
         settled=True,
         error_text="provider error: 429 rate limited",
@@ -475,7 +480,52 @@ def test_the_child_band_survives_a_narrow_terminal() -> None:
     )
     narrow = status.render_text(60).plain
     assert cell_len(narrow) <= 60, narrow
-    assert _model_shown(CHILD_MODEL, short=True) in narrow, narrow  # never sheds
+    # Sheds no earlier than the parent's model would; the one rung where it DOES
+    # yield is the irreducible row under an overlay, which is pinned below.
+    assert _model_shown(CHILD_MODEL, short=True) in narrow, narrow
+
+
+def test_no_width_paints_a_childs_model_with_nothing_saying_whose_it_is() -> None:
+    """D9, as an invariant over the whole ladder rather than at one width.
+
+    The irreducible row used to emit the CHILD's model under the PARENT's
+    session with nothing naming the child — `◆ Gemini 2.5 Pro Preview` while
+    the session itself was on Opus 5, a model on screen attributed to nobody.
+    So the NAME is the segment that never drops and the model is what yields
+    to it, which inverts the ladder's order everywhere else and is why it is
+    written down on :attr:`SubagentBand.model_label`.
+
+    Stated over every width rather than at the one that happened to break,
+    because the ladder is re-tuned often and the misattribution is silent:
+    the frame stays plausible, it just credits the wrong session.
+    """
+    from local_operator.tui.widgets.status_line import ICON_AGENTS, ICON_MODEL
+
+    name = "IngestAuditor"
+
+    def frame_at(width: int) -> str:
+        status = _band(width)
+        status.set_subagent(
+            SubagentBand(
+                model_label=CHILD_MODEL,
+                label=name,
+                context_tokens=48_200,
+                context_window=200_000,
+                cost="$0.465",
+                duration=485.0,
+            )
+        )
+        return status.render_text(width).plain
+
+    for width in range(120, 19, -1):
+        frame = frame_at(width)
+        assert cell_len(frame) <= width, (width, frame)
+        # The owner rides every rung: whatever else the band has given up by
+        # here, a reader can still tell whose numbers these are.
+        assert ICON_AGENTS in frame and name in frame, (width, frame)
+    # And at the narrow end the MODEL is what went — not the row overflowing,
+    # and not the name going with it.
+    assert ICON_MODEL not in frame_at(20), frame_at(20)
 
 
 # -- the two ends wired together ---------------------------------------------

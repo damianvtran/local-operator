@@ -379,8 +379,10 @@ def context_spelling(tokens: int, window: int, *, form: str = "full") -> str:
     if tokens <= 0:
         return ""
     if window <= 0:
-        return f"{format_context_tokens(tokens)}/—" if form != "short" else (
-            format_context_tokens(tokens)
+        return (
+            f"{format_context_tokens(tokens)}/—"
+            if form != "short"
+            else (format_context_tokens(tokens))
         )
     percent = tokens / window * 100
     if form == "short":
@@ -586,8 +588,14 @@ class SubagentBand:
 
     #: Never empty in practice: a child with no recorded model of its own is
     #: running the parent's, so the caller resolves that before constructing
-    #: this. The band never drops the model segment, and "which model is
-    #: replying" has an answer here even when nothing else does.
+    #: this. The band keeps the model segment down every rung of the ladder,
+    #: and "which model is replying" has an answer here even when nothing else
+    #: does — with ONE exception, which is the narrow end of an overlay. Below
+    #: the last aligned rung the irreducible row carries `◍ <name>` alone
+    #: (:meth:`StatusLine._render`), because a child's model with no owner
+    #: beside it reads as the SESSION's model and misattributes the one fact
+    #: this class exists to keep straight. The name is the segment that never
+    #: drops; the model yields to it, and only there.
     model_label: str = ""
     #: The child's own name, which REPLACES the parent's running-agent counter
     #: while the overlay is up. Without it the band interleaves three owners
