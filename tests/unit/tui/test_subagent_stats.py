@@ -976,7 +976,6 @@ async def test_a_swept_child_is_dropped_from_the_stats_cache() -> None:
         assert set(panel._stats) == {"j0"}
 
 
-
 @pytest.mark.asyncio
 async def test_a_spinning_row_repaints_without_a_layout_pass() -> None:
     """The sheet fixes a row at ``height: 1`` and the row is built no-wrap to
