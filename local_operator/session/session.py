@@ -222,6 +222,42 @@ def _replayed_user_message(content: list[Content], entry_id: str | None) -> Mess
     return message
 
 
+#: Stands in for an image the provider refused, so the turn that follows it
+#: still makes sense. A silently shortened message would leave the model
+#: reading a summary whose "the screenshots below" no longer has any below.
+IMAGE_DROPPED_NOTICE = "[image omitted: the provider rejected it and it has been dropped]"
+
+
+def _without_images(messages: list[Message]) -> list[Message]:
+    """Every message with its image blocks replaced by a one-line notice.
+
+    Used after a provider has refused an image (see
+    :func:`~local_operator.providers.failover.is_image_rejection`). Applied to
+    the RENDERED history rather than to the transcript, so nothing is destroyed:
+    the archive keeps its frames, ``/export`` still has them, and a later
+    session on a provider that accepts them is unaffected.
+
+    Consecutive images collapse to ONE notice. A snapcompact archive replays as
+    fifty-odd frames between two text edges, and fifty identical apology lines
+    would cost more context than the summary they are standing in for.
+    """
+    out: list[Message] = []
+    for message in messages:
+        if not any(isinstance(block, ImageContent) for block in message.content):
+            out.append(message)
+            continue
+        content: list[Content] = []
+        for block in message.content:
+            if isinstance(block, ImageContent):
+                if content and getattr(content[-1], "text", None) == IMAGE_DROPPED_NOTICE:
+                    continue
+                content.append(TextContent(text=IMAGE_DROPPED_NOTICE))
+            else:
+                content.append(block)
+        out.append(message.model_copy(update={"content": content}))
+    return out
+
+
 def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
     """Ids of messages already carrying the pruning pass's ``pruned`` marker.
 
@@ -339,6 +375,13 @@ class Session:
         )
         self._system_blocks_provider = system_blocks_provider
         self._convert_to_llm = convert_to_llm or _default_convert_to_llm
+        #: Set once a provider refuses a request because of an image block, and
+        #: never cleared: from then on this session renders its history without
+        #: images. See :func:`~local_operator.providers.failover.is_image_rejection`
+        #: for why recovery has to be sticky rather than per-request — the
+        #: offending block is IN the history, so an un-degraded retry sends it
+        #: again, and the session is otherwise unusable for good.
+        self._images_rejected = False
         self._compaction_settings = _coerce_compaction_settings(compaction_settings)
         self._yolo = yolo
         self._has_ui = has_ui
@@ -432,6 +475,61 @@ class Session:
         # 4M input tokens, zero task calls). Merge them in now that the
         # session's own context exists.
         self._merge_capability_tools()
+
+    def _render_history(self, messages: list[AgentMessage]) -> list[Message]:
+        """The configured transcript→LLM conversion, minus anything a provider
+        has already refused.
+
+        Every path that builds wire history goes through here rather than
+        calling ``_convert_to_llm`` directly, because the degrade has to hold
+        for ALL of them. Compaction is the one that matters most: it has to
+        send the history to summarise it, so a poisoned block makes even the
+        escape hatch fail (anthropics/claude-code#50708).
+        """
+        rendered = self._convert_to_llm(messages)
+        return _without_images(rendered) if self._images_rejected else rendered
+
+    async def _degrade_if_image_rejected(self, error: BaseException | str) -> None:
+        """Stop sending images if that is what the provider just refused.
+
+        Idempotent and one-way. The block is in the HISTORY, so without this
+        every later request re-sends it and fails identically — reload replays
+        it, and ``/compact`` cannot run either because summarising means
+        sending the history first. That is the reported symptom: a session that
+        answers every prompt, forever, with the same 400.
+
+        Not a preventable condition on our side. Anthropic accept the same
+        bytes for hours and then start refusing them
+        (anthropics/claude-code#50708), so validating on the way in cannot
+        close it; the only defence is to notice and stop.
+
+        The turn that discovered this still fails — the request is already
+        spent, and retrying it here would mean re-entering the loop from inside
+        its own end event, past the boundary bookkeeping this branch has
+        already had to repair twice. The next turn, and ``/reload``, both
+        succeed, which is the difference between a session that recovers and
+        one that is finished.
+        """
+        # Imported HERE, not at module scope: this module is the CLI's
+        # composition root and docs/REWRITE.md forbids module-level provider
+        # imports, because they are what makes importing a session expensive
+        # (and, done at the top of this file, cyclic).
+        from local_operator.providers.failover import is_image_rejection
+
+        if self._images_rejected or not is_image_rejection(error):
+            return
+        self._images_rejected = True
+        logger.warning("provider rejected an image; dropping images from this session's context")
+        await self._emit(
+            NoticeEvent(
+                text=(
+                    "The provider rejected an image in this conversation's history. "
+                    "Images have been dropped from the context so the session keeps "
+                    "working — send your message again."
+                ),
+                kind="warning",
+            )
+        )
 
     def _merge_capability_tools(self) -> None:
         """Add the tools gated on this session's own capabilities.
@@ -861,7 +959,7 @@ class Session:
 
             config = LoopConfig(
                 model=self._model,
-                convert_to_llm=self._convert_to_llm,
+                convert_to_llm=self._render_history,
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
@@ -892,6 +990,8 @@ class Session:
                         # the pair), and the continuation queue is dropped so
                         # no further run can open a second boundary inside the
                         # same prompt (§B).
+                        if event.error is not None:
+                            await self._degrade_if_image_rejected(event.error)
                         self._abort_requested = True
                         self._continuation_queue.clear()
                         self._held_end = None
@@ -1241,7 +1341,7 @@ class Session:
                 }
             )
 
-        llm_history = self._convert_to_llm(list(self._context.messages))
+        llm_history = self._render_history(list(self._context.messages))
         if not llm_history:
             return CompactionOutcome(
                 ran=False,
@@ -1387,7 +1487,7 @@ class Session:
             # like with like. The provider's own figure is not available until
             # the next request.
             tokens_after = compaction_api.estimate_messages_tokens(
-                self._convert_to_llm(list(self._context.messages))
+                self._render_history(list(self._context.messages))
             )
             await self._emit(
                 CompactionEndEvent(
@@ -1560,7 +1660,7 @@ class Session:
         request = ChatRequest(
             model=self._model,
             system_blocks=list(blocks),
-            messages=self._convert_to_llm([*self._wire_legal_snapshot(), *turns]),
+            messages=self._render_history([*self._wire_legal_snapshot(), *turns]),
             tools=[],
             tool_choice="none",
         )

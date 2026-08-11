@@ -283,6 +283,57 @@ class ProviderError(RenderedStreamError):
         return f"{label}{detail}: {self.message}"
 
 
+#: Provider wordings that mean "an image block in this request is unusable".
+#: Matched on the provider's OWN message, because no status distinguishes it:
+#: it arrives as a plain 400 alongside every other malformed-request refusal.
+#:
+#: This is worth naming as its own condition because of how it FAILS. The image
+#: lives in the conversation history, so once one is rejected every subsequent
+#: request carries it again and gets the same 400 — including compaction, which
+#: has to send the history to summarise it. The session is then unrecoverable
+#: from inside: reload replays the same blocks, and /compact cannot run either.
+#: Anthropic have had this open for over a year across many reports
+#: (anthropics/claude-code#19031, #24387, #47391, #50708), where the same bytes
+#: are accepted for hours and then refused, so the client cannot prevent it by
+#: validating on the way in — it can only stop being poisoned by it.
+_IMAGE_REJECTION_MARKERS = (
+    "could not process image",
+    "image could not be processed",
+    "unable to process image",
+    "invalid image",
+    "does not match the provided media type",
+    "image exceeds",
+    "unsupported image",
+)
+
+
+def is_image_rejection(error: BaseException | str) -> bool:
+    """Did the provider refuse the request BECAUSE of an image block?
+
+    Accepts either the exception or its RENDERED form, because the two callers
+    hold different things: the client layer catches a :class:`ProviderError`,
+    while ``AgentEndEvent.error`` carries the already-rendered
+    ``"<kind> (HTTP <status>): <provider's words>"`` string that the UI shows.
+
+    Gated on the kind as well as the wording, either way round. A 5xx that
+    happens to mention an image is the provider failing, not a bad block, and
+    the degrade this drives is STICKY — so misreading weather as a poisoned
+    image would quietly strip every image from the rest of the session for no
+    reason. On the rendered form the gate is the kind's own label, so the two
+    paths agree by construction instead of by a duplicated status range.
+    """
+    if isinstance(error, ProviderError):
+        if error.status is not None and not 400 <= error.status < 500:
+            return False
+        haystack = error.message.lower()
+    else:
+        text = error if isinstance(error, str) else str(error)
+        haystack = text.lower()
+        if not haystack.startswith(_KIND_LABELS["request"]):
+            return False
+    return any(marker in haystack for marker in _IMAGE_REJECTION_MARKERS)
+
+
 def classify_provider_error(error: BaseException) -> ProviderErrorKind:
     """The failure kind for anything the harness can catch.
 

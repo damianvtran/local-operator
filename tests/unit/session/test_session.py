@@ -20,6 +20,7 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     CustomMessage,
+    ImageContent,
     Message,
     ModelSpec,
     StreamEndEvent,
@@ -29,7 +30,8 @@ from local_operator.harness.types import (
     TextContent,
     ToolResult,
 )
-from local_operator.session.session import Session
+from local_operator.providers.failover import ProviderError
+from local_operator.session.session import IMAGE_DROPPED_NOTICE, Session
 from local_operator.session.transcript import Transcript
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
@@ -958,3 +960,112 @@ class TestMeasurementCosts:
             assert await task > 0
         finally:
             await session.dispose()
+
+
+class PoisonedThenFine:
+    """Raises the provider's image refusal on the first call, then behaves.
+
+    Models the reported failure exactly: the block is in HISTORY, so the
+    refusal is not tied to what the user just typed and recurs on every
+    request until something stops sending it.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[ChatRequest] = []
+        self.calls = 0
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        self.requests.append(request)
+        self.calls += 1
+        first = self.calls == 1
+
+        async def gen():
+            if first:
+                raise ProviderError(400, "Could not process image")
+            yield StreamTextDelta(delta="ok")
+            yield StreamEndEvent(stop_reason="endTurn")
+
+        return gen()
+
+
+def _image_blocks(request: ChatRequest) -> int:
+    return sum(
+        isinstance(block, ImageContent) for message in request.messages for block in message.content
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_image_the_provider_refuses_does_not_brick_the_session(tmp_path):
+    """The reported bug: every turn after the refusal failed identically.
+
+    An image block lives in the conversation history, so once the provider
+    starts refusing it, the next request sends it again and gets the same 400 —
+    and so does the one after that, and so does ``/compact``, which has to send
+    the history in order to summarise it. The session could only be abandoned.
+
+    Not preventable on our side: providers accept the same bytes for hours and
+    then start refusing them (anthropics/claude-code#50708), so the client
+    cannot validate its way out. It can only notice and stop.
+    """
+    stream = PoisonedThenFine()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[TextContent(text="look at this"), ImageContent(data="Zm9v")],
+            )
+        ]
+    )
+
+    await session.prompt("does it work")
+    assert stream.calls == 1
+    assert _image_blocks(stream.requests[0]) == 1, "the poisoned block was sent, as it must be"
+    assert session._images_rejected, "the refusal was not recognised"
+
+    # The whole point: the NEXT turn goes through.
+    await session.prompt("try again")
+    assert stream.calls == 2
+    assert _image_blocks(stream.requests[1]) == 0, "the session is still sending the bad image"
+    sent = [
+        block.text
+        for message in stream.requests[1].messages
+        for block in message.content
+        if isinstance(block, TextContent)
+    ]
+    assert "look at this" in sent, "the surrounding turn was dropped along with the image"
+    assert IMAGE_DROPPED_NOTICE in sent, "the model was left with a silent hole"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_failure_leaves_images_alone(tmp_path):
+    """The degrade is permanent and invisible, so it must not fire on weather.
+
+    A 5xx or an unrelated 400 has nothing to do with the images, and stripping
+    them would quietly cost the model every screenshot for the rest of the
+    session.
+    """
+
+    class AlwaysDown:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.requests.append(request)
+
+            async def gen():
+                raise ProviderError(503, "upstream connect error")
+                yield  # pragma: no cover - generator shape only
+
+            return gen()
+
+    stream = AlwaysDown()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [Message(role="user", content=[TextContent(text="hi"), ImageContent(data="Zm9v")])]
+    )
+    await session.prompt("go")
+    assert not session._images_rejected
+    assert _image_blocks(stream.requests[0]) == 1
+    await session.dispose()

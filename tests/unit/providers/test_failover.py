@@ -29,6 +29,7 @@ from local_operator.providers.failover import (
     expand_fallback_candidates,
     is_auth_error,
     is_direct_credential_rotation_error,
+    is_image_rejection,
     is_transient_error,
     is_usage_limit_error,
     resolve_chain,
@@ -1254,3 +1255,60 @@ class TestTransportErrorsKeepTheirIdentity:
         assert type(exc).__name__ in excinfo.value.message
         assert excinfo.value.kind == kind
         assert excinfo.value.retryable is True
+
+
+def test_an_image_rejection_is_recognised_in_both_the_raised_and_rendered_forms() -> None:
+    """The predicate has two callers holding two different things.
+
+    The client layer catches a ``ProviderError``; ``AgentEndEvent.error``
+    carries the already-rendered string the UI shows. Both must agree, because
+    what they drive is a STICKY degrade — a session that stops sending images
+    for the rest of its life.
+    """
+    raised = ProviderError(400, "Could not process image")
+    assert is_image_rejection(raised)
+    # The rendered form is what the session actually receives.
+    assert str(raised) == "invalid request (HTTP 400): Could not process image"
+    assert is_image_rejection(str(raised))
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Could not process image",
+        "Image could not be processed",
+        "messages.31.content.4.image.source.base64.data: Image does not match "
+        "the provided media type image/jpeg",
+        "Unsupported image format",
+    ],
+)
+def test_the_wordings_providers_actually_use_are_all_recognised(message: str) -> None:
+    """Sampled from the reports this degrade exists for, not invented:
+    anthropics/claude-code#12009, #13594, #31142, #50708."""
+    assert is_image_rejection(ProviderError(400, message))
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (503, "Could not process image"),  # weather, not a bad block
+        (500, "Could not process image"),
+        (400, "max_tokens: must be less than the model's context window"),
+        (400, "credit balance is too low"),
+        (429, "rate limit exceeded"),
+    ],
+)
+def test_only_a_client_side_image_refusal_degrades_the_session(status: int, message: str) -> None:
+    """The cost of a false positive is silent and permanent — every image
+    stripped from the rest of the session — so a 5xx that merely mentions an
+    image must not trip it, and neither may any other 4xx."""
+    assert not is_image_rejection(ProviderError(status, message))
+
+
+def test_the_rendered_form_is_gated_on_the_kind_not_on_a_guessed_status() -> None:
+    """The string carries no parseable status, so the gate is the kind's own
+    label. A transient error whose body mentions an image renders as
+    ``transient provider error (...)`` and must not match."""
+    transient = ProviderError(503, "Could not process image")
+    assert str(transient).startswith("transient provider error")
+    assert not is_image_rejection(str(transient))
