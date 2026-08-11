@@ -14,6 +14,7 @@ import requests
 from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
+from local_operator.harness.types import ModelSpec
 from local_operator.model.configure import (
     DEFAULT_TEMPERATURE,
     calculate_cost,
@@ -23,6 +24,9 @@ from local_operator.model.configure import (
     validate_model,
 )
 from local_operator.model.registry import ModelInfo
+from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.failover import FallbackTarget
+from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 
 
 @pytest.fixture
@@ -235,6 +239,220 @@ def test_configure_model_openrouter_via_client(mock_openrouter_client):
 def test_create_stream_fn_returns_callable():
     stream_fn = create_stream_fn(MagicMock(), None)
     assert callable(stream_fn)
+
+
+def _oauth(access: str, account_id: str) -> dict[str, Any]:
+    return {
+        "access": access,
+        "refresh": f"refresh-{access}",
+        "expires": 10**15,
+        "account_id": account_id,
+    }
+
+
+def _anthropic_usage(used_percent: float) -> UsageReport:
+    return UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:5h",
+                label="5 hour",
+                amount=UsageAmount(used=used_percent, limit=100.0, unit="percent"),
+                window="5h",
+                shared=True,
+                resets_at_ms=10**15,
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_usage_preflight_rotates_accounts_before_providers(tmp_path) -> None:
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    second = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return _anthropic_usage(100.0 if access_token == "oauth-a" else 25.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert store.is_blocked(first.id, "anthropic")
+        assert not store.is_blocked(second.id, "anthropic")
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == second.id
+        assert stream._route_state.active is None
+        assert any("trying another anthropic account" in notice for notice in notices)
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_usage_preflight_exhausts_accounts_then_uses_provider_fallback(tmp_path) -> None:
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    second = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {
+                    "default": [
+                        {
+                            "provider": "anthropic",
+                            "model": "claude-opus-5",
+                            "effort": "low",
+                        },
+                        {
+                            "provider": "openai",
+                            "model": "gpt-5.3-codex",
+                            "effort": "high",
+                        },
+                    ]
+                },
+            }
+        },
+        session_id="session-a",
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+        ):
+            await stream.preflight_usage(model)
+
+        assert store.is_blocked(first.id, "anthropic")
+        assert store.is_blocked(second.id, "anthropic")
+        assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex", "high")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_usage_reserve_can_reduce_effort_without_blocking_account(tmp_path) -> None:
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {
+                    "default": [
+                        {
+                            "provider": "anthropic",
+                            "model": "claude-opus-5",
+                            "effort": "low",
+                        }
+                    ]
+                },
+            }
+        },
+        session_id="session-a",
+    )
+    model = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        reasoning=True,
+        reasoning_effort="high",
+    )
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(95.0),
+        ):
+            await stream.preflight_usage(model)
+
+        assert not store.is_blocked(account.id, "anthropic")
+        assert stream._route_state.active == FallbackTarget("anthropic/claude-opus-5", "low")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_transport_fallback_cooldown_skips_quota_probe(tmp_path) -> None:
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True}},
+        session_id="session-a",
+    )
+    stream._primary_selector = "anthropic/claude-opus-5"
+    await stream._route_state.activate(
+        FallbackTarget("openai/gpt-5.3-codex"),
+        "provider failure",
+        cooldown_ms=60_000,
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage") as fetch:
+            await stream.preflight_usage(model)
+        fetch.assert_not_called()
+        assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_preflight_warns_when_primary_credentials_are_blocked(tmp_path) -> None:
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.block_credential(account.id, "anthropic", block_ms=60_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage") as fetch:
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+        fetch.assert_not_called()
+        assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+        assert notices == [
+            "anthropic credentials temporarily unavailable — "
+            "falling back to openai/gpt-5.3-codex"
+        ]
+    finally:
+        await stream.close()
+        store.close()
 
 
 # ---------------------------------------------------------------------------
