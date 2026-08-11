@@ -21,11 +21,17 @@ import pytest
 from local_operator.harness.types import CompactionEndEvent, CompactionStartEvent
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui.app import OperatorApp, compaction_receipt
-from local_operator.tui.events import CompactionEnded
+from local_operator.tui.events import (
+    CompactionEnded,
+    TurnBoundaryEnd,
+    TurnEnded,
+    TurnStarted,
+)
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_slash_echo import _boot, _submit
+from tests.unit.tui.test_working_line import _started
 
 
 def _notices(app: OperatorApp) -> list[str]:
@@ -191,6 +197,13 @@ async def test_a_reload_during_a_pass_does_not_brick_the_app() -> None:
                 break
         assert app._compacting, "the pass never started, so this proves nothing"
 
+        # ARM the hold. Without this the test only covers `_compacting` and the
+        # held-prompt assertion below is vacuously true — which is exactly how
+        # the first version of this test passed with that line removed.
+        await _submit(pilot, app, "summarise the parser work above")
+        assert app._prompt_held_for_compaction == "summarise the parser work above"
+        assert session.prompts == [], "the hold did not intercept it"
+
         # The dying session never emits its end event: disposal drops it.
         replacement = SlowCompaction()
         app._session_factory = lambda: _factory(replacement)  # type: ignore[assignment]
@@ -200,8 +213,24 @@ async def test_a_reload_during_a_pass_does_not_brick_the_app() -> None:
 
         assert not app._compacting, "the hold outlived the session that armed it"
         assert app._prompt_held_for_compaction == "", "the held prompt survived"
+        # Handed back, not destroyed: the app had already promised the user it
+        # was queued, and `clear_blocks` took both that promise and their echo.
+        assert app._editor().text == "summarise the parser work above"
 
-        # The real proof: the app can still talk to the model.
+        # Run a pass in the REPLACEMENT session. If the stale hold survived,
+        # its `on_compaction_ended` drains it and sends the old text here.
+        app._cmd_compact()
+        for _ in range(30):
+            await pilot.pause()
+            if app._compacting:
+                break
+        replacement.release.set()
+        for _ in range(40):
+            await pilot.pause()
+        assert replacement.prompts == [], "text from the dead conversation was sent"
+
+        # And the real proof: the app can still talk to the model.
+        app._editor().load_text("")
         await _submit(pilot, app, "hello again")
         for _ in range(60):
             await pilot.pause()
@@ -209,6 +238,46 @@ async def test_a_reload_during_a_pass_does_not_brick_the_app() -> None:
                 break
 
     assert replacement.prompts == ["hello again"], "the prompt was swallowed"
+
+
+@pytest.mark.asyncio
+async def test_a_reload_does_not_carry_an_interrupted_count_into_the_next_session() -> None:
+    """The per-turn card count must not suppress the NEXT session's notice.
+
+    ``_interrupted_cards`` exists so an aborted turn does not print a
+    standalone "interrupted" row on top of cards that each already say so. It
+    is cleared only by ``on_turn_ended``, which the dying session never
+    reaches — so a reload while cards were interrupted carried the count into
+    the replacement, and its first aborted turn silently printed nothing on
+    the strength of cards belonging to a conversation the user cannot see.
+    """
+    session = SlowCompaction()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        # A turn with a live tool call, stopped: the count arms.
+        app.post_message(TurnStarted())
+        app.post_message(_started("c0", "bash", command="sleep 600"))
+        await pilot.pause()
+        app.post_message(TurnBoundaryEnd())
+        await pilot.pause()
+        assert app._interrupted_cards > 0, "no cards were interrupted, so this proves nothing"
+
+        replacement = SlowCompaction()
+        app._session_factory = lambda: _factory(replacement)  # type: ignore[assignment]
+        await app._reload_session()
+        for _ in range(20):
+            await pilot.pause()
+
+        # An aborted turn in the NEW session with nothing in flight: the
+        # standalone notice is the only thing that can say it stopped.
+        app.post_message(TurnStarted())
+        await pilot.pause()
+        app.post_message(TurnEnded(aborted=True, error=None))
+        for _ in range(20):
+            await pilot.pause()
+
+        assert "interrupted" in _notices(app), "the stale count swallowed the notice"
 
 
 @pytest.mark.asyncio

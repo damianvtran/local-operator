@@ -1112,6 +1112,13 @@ class OperatorApp(App[None]):
         # opened by announcing `running bash` for a bash call that died with
         # the previous session.
         self._retire_live_tool_cards()
+        # And the COUNT is per-turn too. It exists so an aborted turn does not
+        # print a standalone "interrupted" notice on top of cards that each
+        # already say so, and it is cleared only by the turn-end handler, which
+        # the dying session never reaches. Left set, the replacement session's
+        # first aborted turn would suppress its notice on the strength of cards
+        # that belonged to a conversation the user cannot see any more.
+        self._interrupted_cards = 0
         if self._controller is not None:
             # BEFORE disposal, always: the ledger is being rebuilt from the
             # replacement session, so the dying session's terminal events have
@@ -1144,12 +1151,25 @@ class OperatorApp(App[None]):
         # conversation and slash commands are not gated on it, so `/reload`
         # during one is an ordinary thing for a user to do.
         #
-        # The held prompt is DISCARDED rather than carried: it was typed into
-        # the conversation that is being thrown away, and replaying it into the
-        # replacement would send the new session text its user never addressed
-        # to it.
+        # The held prompt is not SENT — it was typed into the conversation
+        # being thrown away, and replaying it would hand the replacement text
+        # its user never addressed to it. But it is not destroyed either: the
+        # app promised "queued — sends when compaction finishes" before taking
+        # it, and `clear_blocks()` below removes both that promise and the
+        # user's own echo of what they typed, so a silent discard loses words
+        # the user watched being accepted. It goes back to the composer, which
+        # is the repo's existing answer for the same problem — `_close_aside`
+        # hands the stashed main-chat draft back rather than dropping it.
+        # Sending stays the user's decision, which is what it was before the
+        # hold took it.
         self._compacting = False
-        self._prompt_held_for_compaction = ""
+        held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
+        if held:
+            editor = self._editor()
+            # Never clobber something typed since: the draft in the box is
+            # newer than the prompt we are handing back.
+            if not editor.text.strip():
+                editor.load_text(held)
         # Unconditional, and this is the whole discipline: the ledger is only
         # ever as old as the session on screen. Clearing after controller
         # detachment keeps old-session events out of the replacement
