@@ -171,19 +171,46 @@ def default_effort(model_id: str) -> str | None:
 def resolve_effort(model_id: str, requested: str | None) -> str | None:
     """The level ``model_id`` should run at given a ``requested`` one.
 
-    Kept when the model accepts it, otherwise replaced by that model's own
-    default (or dropped). This is the whole guard against a level outliving the
-    model it was chosen for — ``/model`` switching to a non-reasoning model, or
-    a fallback chain swapping Claude for a model with a different ladder. The
-    carried-over value would either 400 the turn or be discarded while the band
-    went on claiming it.
+    Kept when the model accepts it; otherwise clamped to the NEAREST rung that
+    model has. This is the guard against a level outliving the model it was
+    chosen for — ``/model`` switching models, or a fallback swapping Claude for
+    a model with a different ladder — where the carried value would either 400
+    the turn or be discarded while the band went on claiming it.
+
+    Nearest, not "the target's default", which is what it used to do and which
+    silently INVERTED the user's intent in one direction. ``none`` is not a
+    level like the others: it is the user saying do not reason. Falling back to
+    the default sent a user who had turned reasoning off on an OpenAI model to
+    Anthropic's ``high`` on the failover hop — a bill they had explicitly opted
+    out of, arriving with no keystroke and no notice. Clamping preserves the
+    direction of the request: the floor of the ladder for ``none``, the ceiling
+    for ``max`` on a model that stops at ``high``.
+
+    The default is still the answer when NOTHING was requested — the difference
+    is that a request is now honoured as far as the target can express it,
+    rather than discarded whole.
+
+    Ties break DOWNWARD. A level equidistant between two rungs is a level the
+    target cannot express either way, and the cheaper reading is the one the
+    user can undo by pressing the key; the expensive one they pay for first.
     """
     support = effort_support(model_id)
     if support is None:
         return None
-    if requested and requested.lower() in support.levels:
-        return requested.lower()
-    return support.default
+    if not requested:
+        return support.default
+    wanted = requested.lower()
+    if wanted in support.levels:
+        return wanted
+    if wanted not in EFFORT_ORDER:
+        # Not a level at all (stale state, a hand-edited config). Nothing to
+        # clamp toward, so the model's own default is the only honest answer.
+        return support.default
+    rank = EFFORT_ORDER.index(wanted)
+    return min(
+        support.levels,
+        key=lambda name: (abs(EFFORT_ORDER.index(name) - rank), EFFORT_ORDER.index(name)),
+    )
 
 
 def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:

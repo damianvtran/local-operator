@@ -13,9 +13,11 @@ would send, not the app's remembered choice.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from textual.geometry import Size
+from textual.widgets import Static
 
 from local_operator.model.configure import build_model_spec
 from local_operator.tui.app import OperatorApp
@@ -459,3 +461,73 @@ async def test_effort_auto_on_a_model_with_no_documented_default_sends_nothing()
     assert level is None
     assert "nothing sent" in receipt
     assert "◐ auto" in band
+
+
+# ---------------------------------------------------------------------------
+# The child's page: whose level is the band naming?
+# ---------------------------------------------------------------------------
+
+
+class _Dock:
+    """The band widget a ``StatusLine`` paints into.
+
+    Not a real ``Static``: constructing one needs a running app, and these
+    three are the fast band tests that deliberately do not start a Pilot. Same
+    stand-in ``tests/unit/tui/test_subagent_stats.py`` uses, for the same
+    reason — the two members ``StatusLine`` touches, and nothing else.
+    """
+
+    def __init__(self, width: int = 120) -> None:
+        self.size = Size(width, 1)
+        self.content: Any = ""
+
+    def update(self, renderable: Any) -> None:
+        self.content = renderable
+
+
+def _overlay_band() -> Any:
+    """A band on the parent's model at `high`, ready for an overlay."""
+    from local_operator.tui.widgets.status_line import StatusLine
+
+    status = StatusLine(cast(Static, _Dock()))
+    status.update(model_label="anthropic/claude-opus-5", effort="high", cwd="/tmp")
+    return status
+
+
+def test_a_child_on_another_model_is_not_given_the_parents_effort() -> None:
+    """Effort is a property of the MODEL, which is the one thing the child's
+    page exists because the child can change. The parent's level beside the
+    child's model name is not merely stale: `gpt-4.1` has no ladder at all, so
+    `high` there is a level that model cannot be running."""
+    from local_operator.tui.widgets.status_line import SubagentBand
+
+    status = _overlay_band()
+    assert "high" in status.render_text(120).plain
+    status.set_subagent(SubagentBand(model_label="openai/gpt-4.1"))
+    child = status.render_text(120).plain
+    # The model text itself belongs to another owner's tests; what this one
+    # pins is that the parent's level did not follow its model out of the frame.
+    assert "claude" not in child.lower()
+    assert "high" not in child
+    assert "◐" not in child
+
+
+def test_a_child_on_the_parents_model_keeps_the_level_it_is_actually_running() -> None:
+    """The normal path — a child built on the parent's spec inherits the level
+    with it — so blanking unconditionally would hide a true reading on the
+    common case. Same rule `_shown_model_name` already applies to the label."""
+    from local_operator.tui.widgets.status_line import SubagentBand
+
+    status = _overlay_band()
+    status.set_subagent(SubagentBand(model_label="anthropic/claude-opus-5"))
+    assert "high" in status.render_text(120).plain
+
+
+def test_closing_the_page_reveals_the_parents_level_again() -> None:
+    from local_operator.tui.widgets.status_line import SubagentBand
+
+    status = _overlay_band()
+    before = status.render_text(120).plain
+    status.set_subagent(SubagentBand(model_label="openai/gpt-4.1"))
+    status.set_subagent(None)
+    assert status.render_text(120).plain == before

@@ -740,13 +740,38 @@ class StatusLine:
         return self._active_seconds + (self._clock() - self._turn_started_at)
 
     # -- overlay ---------------------------------------------------------------
-    # Four segments answer from the overlay when one is set, and the rest are
-    # left alone deliberately: cwd, MCP, effort and the approval alarm describe
-    # the HOST, which the child shares — it runs in the same directory, on the
+    # Five segments answer from the overlay when one is set, and the rest are
+    # left alone deliberately: cwd, MCP and the approval alarm describe the
+    # HOST, which the child shares — it runs in the same directory, on the
     # parent's live MCP surface, under the same approval policy. Re-pointing
     # those would say something changed when nothing did. The counters (agents,
     # jobs) are the parent's ledger, and that ledger is what the page is a
     # window onto.
+    #
+    # EFFORT used to be in that host list and did not belong there: it is a
+    # property of the MODEL, which is the one thing this overlay exists because
+    # the child can change. The parent's level beside the child's model name was
+    # not merely stale — a child on another family's model can be shown a level
+    # that model's ladder does not contain.
+    def _shown_effort(self) -> str:
+        """The effort level for whichever model the band is describing.
+
+        Same rule as :meth:`_shown_model_name`, for the same reason: a child
+        built on the parent's spec IS running the parent's level (the spec is
+        copied whole, effort included), and that is the normal path, so blanking
+        it unconditionally would hide a true reading on the common case.
+
+        A DIFFERENT model gets nothing rather than a guess. The overlay carries
+        no level of its own, and the segment's whole contract is that it names
+        the level in force — an empty segment says "not known here", which is
+        the only honest thing the band can say about a ladder it cannot see.
+        """
+        if self._subagent is not None:
+            if self._subagent.model_label == self._model_label:
+                return self._effort
+            return ""
+        return self._effort
+
     def _shown_model_label(self) -> str:
         if self._subagent is not None:
             return self._subagent.model_label
@@ -923,9 +948,10 @@ class StatusLine:
                     None,
                 )
             )
-        if self._effort and "effort" not in dropped:
+        effort = self._shown_effort()
+        if effort and "effort" not in dropped:
             parts.append(
-                (ICON_EFFORT, self._effort, Style(color=theme_mod.semantic_color("label")), None)
+                (ICON_EFFORT, effort, Style(color=theme_mod.semantic_color("label")), None)
             )
         if self._cwd and "cwd" not in dropped:
             rendered = format_cwd(self._cwd, short="cwd" in short)

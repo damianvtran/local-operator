@@ -120,10 +120,25 @@ class TestALevelCannotOutliveItsModel:
     def test_a_shared_level_carries_across(self) -> None:
         assert resolve_effort("gpt-5.4", "medium") == "medium"
 
-    def test_a_level_the_target_lacks_falls_back_to_its_default(self) -> None:
+    def test_a_level_above_the_targets_ceiling_clamps_to_the_ceiling(self) -> None:
         """`xhigh` on a model whose ladder stops at `high` is a 400 on the very
         request a fallback was supposed to rescue."""
         assert resolve_effort("claude-opus-4-5-20251101", "xhigh") == "high"
+        assert resolve_effort("claude-opus-4-5-20251101", "max") == "high"
+
+    def test_none_clamps_to_the_floor_rather_than_escalating_to_the_default(self) -> None:
+        """`none` is not a level like the others — it is the user saying do not
+        reason. Resolving it to the target's default sent someone who had turned
+        reasoning OFF on an OpenAI model to Anthropic's `high` on a failover hop:
+        a bill they had explicitly opted out of, with no keystroke and no notice.
+        The floor of the target's ladder is the nearest thing it can express."""
+        assert resolve_effort("claude-opus-5", "none") == "low"
+        assert resolve_effort("o3", "none") == "low"
+
+    def test_an_unrecognised_value_still_falls_back_to_the_default(self) -> None:
+        """Stale state or a hand-edited config: there is no rung to clamp
+        toward, so the model's own default is the only honest answer."""
+        assert resolve_effort("claude-opus-5", "turbo") == "high"
 
     def test_a_model_without_a_ladder_drops_it_entirely(self) -> None:
         assert resolve_effort("gpt-4.1", "high") is None
