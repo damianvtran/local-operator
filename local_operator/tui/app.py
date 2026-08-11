@@ -58,7 +58,7 @@ from local_operator.logger import current_log_file
 # boot path nothing the lazy-import discipline above is protecting.
 from local_operator.model.effort import default_effort, next_effort
 from local_operator.session import naming
-from local_operator.session.protocol import CompactionOutcome, SessionProtocol
+from local_operator.session.protocol import SessionProtocol
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import ArgumentChoice, ArgumentMode, SlashCommand
 from local_operator.tui.costs import job_cost, turn_cost
@@ -558,6 +558,18 @@ class OperatorApp(App[None]):
         #: (compaction, a provider retry); everything else is DERIVED from the
         #: live cards, so it cannot drift out of step with the ledger.
         self._working_fallback: str = DEFAULT_ACTIVITY
+        #: Whether a compaction pass is in flight, from `compaction_start` to
+        #: `compaction_end`. Tracked HERE rather than asked of the session
+        #: because both triggers announce themselves through those events, so one
+        #: flag covers the automatic pass and `/compact` alike. It is what stops
+        #: a prompt being sent into a history that is being rewritten.
+        self._compacting: bool = False
+        #: Whether the working line on screen was mounted by a compaction (a
+        #: manual pass has no turn to mount one), so only the handler that
+        #: started it takes it away.
+        self._compaction_owns_working_block: bool = False
+        #: A prompt typed DURING a pass, sent when the pass ends.
+        self._prompt_held_for_compaction: str = ""
         #: This session's OWN spend, accumulated per turn. The number the band
         #: shows is this plus every child's — see :meth:`_spend_total`.
         self._total_cost: float = 0.0
@@ -2291,6 +2303,36 @@ class OperatorApp(App[None]):
             # in the conversation that actually says what the task is.
             self._maybe_name_conversation(text)
             return
+        # A COMPACTION holds the same lock a turn does, and `is_streaming` is
+        # False for it (no turn is running), so without this the fall-through
+        # called `prompt()`, which raises while the history is being rewritten —
+        # the user's row would sit in the ledger as if sent, the agent would
+        # never see it, and the text would be gone. That is the identical failure
+        # the steer branch above exists to prevent, one lock holder over. Held
+        # and sent by `on_compaction_ended`, in the same "it will be sent"
+        # language, because a pass is minutes on a long conversation.
+        if self._compacting:
+            self._prompt_held_for_compaction = text
+            self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
+            self._maybe_name_conversation(text)
+            return
+        self._start_turn(text)
+        # Detached, and deliberately AFTER the turn is dispatched: the title
+        # is decoration, and decoration must never sit in front of the user's
+        # first reply.
+        self._maybe_name_conversation(text)
+
+    def _start_turn(self, text: str) -> None:
+        """Run one user prompt as a turn, reporting a failure as a notice.
+
+        Extracted from :meth:`_submit_prompt` so a prompt HELD through a
+        compaction is dispatched by exactly the same path when the pass ends —
+        the alternative was re-entering `_submit_prompt`, which would write the
+        user's row into the ledger a second time.
+        """
+        session = self._session
+        if session is None or self._status is None:
+            return
         self._status.update(streaming=True)
 
         async def run_prompt() -> None:
@@ -2305,10 +2347,6 @@ class OperatorApp(App[None]):
                 self._status.update(streaming=False)
 
         self.run_worker(run_prompt(), thread=False, group="turns")
-        # Detached, and deliberately AFTER the turn is dispatched: the title
-        # is decoration, and decoration must never sit in front of the user's
-        # first reply.
-        self._maybe_name_conversation(text)
 
     # -- conversation naming --------------------------------------------------
     def _maybe_name_conversation(self, text: str) -> None:
@@ -2915,11 +2953,12 @@ class OperatorApp(App[None]):
             return
         if not outcome.ran:
             self._system_notice(outcome.detail or "compaction did not run", "warning")
-            return
-        self._settle_context_reading(outcome)
+        # A pass that RAN needs nothing further here: the band is settled from
+        # the END EVENT, in `on_compaction_ended`, so the automatic trigger gets
+        # the same treatment instead of leaving its own reading stale.
 
-    def _settle_context_reading(self, outcome: CompactionOutcome) -> None:
-        """Move the band's context reading to what the pass left behind.
+    def _settle_context_reading(self, tokens_before: int, tokens_after: int) -> None:
+        """Move the band's context reading to what a compaction left behind.
 
         The band reports the size of the next REQUEST — system blocks, tool
         schemas and history — while a compaction's two figures measure the
@@ -2927,8 +2966,8 @@ class OperatorApp(App[None]):
         transfers exactly, and taking it off is the only way the band agrees
         with the receipt that just said the context shrank. Left alone, the
         reading stays at the pre-compaction size until the next turn's usage
-        arrives, which is precisely the "it did nothing" frame this command
-        exists to stop showing.
+        arrives, which is the "it did nothing" frame ``/compact`` exists to stop
+        showing — and an automatic pass shows it for the same reason.
 
         Floored at the post-pass history, which a live run made necessary: on a
         200k-window vision session the band read 12.3k after the pass and on the
@@ -2943,11 +2982,11 @@ class OperatorApp(App[None]):
         the provider's own: the arithmetic came from compaction's tokenizer, so
         the result is no longer a number the wire reported.
         """
-        saved = outcome.tokens_before - outcome.tokens_after
+        saved = tokens_before - tokens_after
         if self._status is None or saved <= 0:
             return
         self._status.update(
-            context_tokens=max(outcome.tokens_after, self._status.context_tokens - saved),
+            context_tokens=max(tokens_after, self._status.context_tokens - saved),
             context_is_estimate=True,
             context_window=_context_window(self._session),
         )
@@ -5234,15 +5273,45 @@ class OperatorApp(App[None]):
         # slow: without this the line says "thinking" through a minute of
         # summarisation the notice above it announced and then never revisits.
         self._working_fallback = "compacting context"
+        # A MANUAL pass has no turn around it, so no `agent_start` mounted a
+        # working line for the fallback to fill and no `_status.update` marked
+        # the session busy — the reason above applied only to the automatic
+        # trigger, and a multi-minute pass under an idle band is also what makes
+        # a user reasonably start typing (see `_submit_prompt`). Mounted here
+        # instead, and remembered so only the line this handler started is the
+        # line it takes away.
+        self._compacting = True
+        self._compaction_owns_working_block = self._working_block is None
+        if self._compaction_owns_working_block:
+            self._start_working_block()
+            if self._status is not None:
+                self._status.update(streaming=True)
         self._refresh_working_activity()
 
     def on_compaction_ended(self, message: CompactionEnded) -> None:
         if message.success:
             self._append_block(NoticeBlock(compaction_receipt(message), "info"))
+            # BOTH triggers, not just `/compact`: the band reports the size of
+            # the next request, and an automatic pass that left it at the
+            # pre-compaction figure is the same stale frame for the same reason.
+            # The event carries the figures, so this is the one place that can
+            # serve both.
+            self._settle_context_reading(message.tokens_before, message.tokens_after)
         else:
             self._append_block(NoticeBlock("compaction failed", "error"))
+        self._compacting = False
+        if self._compaction_owns_working_block:
+            self._compaction_owns_working_block = False
+            self._dismiss_working_block()
+            if self._status is not None:
+                self._status.update(streaming=False)
         self._working_fallback = DEFAULT_ACTIVITY
         self._refresh_working_activity()
+        # A prompt typed DURING the pass was held rather than sent into a
+        # history being rewritten; now the history is settled, it goes.
+        held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
+        if held:
+            self._start_turn(held)
 
     def on_retry_started(self, message: RetryStarted) -> None:
         body = f"retry {message.attempt}: {message.error}"

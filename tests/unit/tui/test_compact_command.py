@@ -14,6 +14,8 @@ hat.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from local_operator.harness.types import CompactionEndEvent, CompactionStartEvent
@@ -73,6 +75,107 @@ class BrokenCompaction(FakeSession):
     async def compact_now(self) -> CompactionOutcome:
         self._answer_compaction()
         raise RuntimeError("transcript is locked")
+
+
+class SlowCompaction(FakeSession):
+    """Announces the pass, then waits — the multi-minute window a user types in."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+        self.compact_outcome = CompactionOutcome(
+            ran=True, strategy="context-full", tokens_before=90_000, tokens_after=30_000
+        )
+
+    async def compact_now(self) -> CompactionOutcome:
+        outcome = self._answer_compaction()
+        self.emit(CompactionStartEvent(reason="manual"))
+        await self.release.wait()
+        self.emit(
+            CompactionEndEvent(
+                reason="manual",
+                success=True,
+                strategy=outcome.strategy,
+                tokens_before=outcome.tokens_before,
+                tokens_after=outcome.tokens_after,
+            )
+        )
+        return outcome
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_typed_during_a_pass_is_held_and_then_sent() -> None:
+    """The pass holds the turn lock, and ``is_streaming`` is False for it — so
+    without the hold the submit path called ``prompt()``, which raises while the
+    history is being rewritten: the user's row sat in the ledger as if sent and
+    the text was gone. Same failure the steer branch prevents for a running
+    turn, one lock holder over.
+    """
+    session = SlowCompaction()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._cmd_compact()
+        for _ in range(30):
+            await pilot.pause()
+            if app._compacting:
+                break
+        await _submit(pilot, app, "and now analyse the parser")
+        held = app._prompt_held_for_compaction
+        queued = _notices(app)
+        sent_during = list(session.prompts)
+
+        session.release.set()
+        for _ in range(60):
+            await pilot.pause()
+            if session.prompts:
+                break
+        sent_after = list(session.prompts)
+        rows = [
+            block.text()
+            for block in app.query_one(TranscriptView).blocks()
+            if type(block).__name__ == "UserBlock"
+        ]
+
+    assert held == "and now analyse the parser"
+    assert "queued — sends when compaction finishes" in queued
+    assert sent_during == []  # nothing reached the session mid-pass
+    assert sent_after == ["and now analyse the parser"]  # and nothing was lost
+    # Exactly ONE user row: the hold must not write the text into the ledger twice.
+    assert rows.count("and now analyse the parser") == 1
+
+
+@pytest.mark.asyncio
+async def test_the_automatic_pass_gets_the_same_receipt_and_band_update() -> None:
+    """The property the whole design claims: the two triggers differ only in what
+    starts them. An automatic pass emits the same events, so it gets the same
+    receipt line and the same band correction — reached without ``/compact``
+    being typed at all."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        assert app._status is not None
+        app._status.update(context_tokens=150_000, context_is_estimate=False)
+        session.emit(CompactionStartEvent(reason="context-window"))
+        session.emit(
+            CompactionEndEvent(
+                reason="context-window",
+                success=True,
+                strategy="context-full",
+                tokens_before=120_000,
+                tokens_after=40_000,
+            )
+        )
+        for _ in range(20):
+            await pilot.pause()
+        notices = _notices(app)
+        tokens = app._status.context_tokens
+
+    assert "compacting context…" in notices
+    assert "context compacted · 120.0k → 40.0k tokens (67% smaller), via summary" in notices
+    assert tokens == 70_000  # 150 000 - 80 000
+    assert session.compactions == 0  # nobody asked; the gate fired
 
 
 @pytest.mark.asyncio
