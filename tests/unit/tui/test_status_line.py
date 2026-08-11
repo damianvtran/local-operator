@@ -159,6 +159,30 @@ def test_duration_drops_units_that_stop_carrying_information() -> None:
     assert format_duration(3725) == "1h2m"
 
 
+def test_duration_switches_to_days_and_stays_six_cells_wide() -> None:
+    """Callers RESERVE cells for this string, so its width is part of its
+    contract — ``WorkingBlock._CLOCK_COL`` sizes a row against it rather than
+    measuring what comes back.
+
+    It used to end at ``{h}h{m}m`` with an unbounded hours field, so ``100h30m``
+    was seven cells and pushed that row over the terminal (review round 15).
+    A days branch is also simply the better reading at that magnitude, and the
+    ``99d+`` cap is what makes the bound hold by construction instead of holding
+    until someone finds a bigger number.
+    """
+    assert format_duration(86_400) == "1d"
+    assert format_duration(86_400 + 3600 * 5) == "1d5h"
+    assert format_duration(362_400) == "4d4h"
+    assert format_duration(86_400 * 99 + 3600 * 23) == "99d23h"
+    assert format_duration(86_400 * 100) == "99d+"
+    assert format_duration(86_400 * 100_000) == "99d+"
+
+    # The whole contract in one line: no input produces a seventh cell. Sampled
+    # across every branch rather than at the boundaries alone, because the
+    # boundaries are what a future edit moves.
+    assert max(cell_len(format_duration(s)) for s in range(0, 400_000, 7)) == 6
+
+
 def test_agents_segment_is_empty_at_zero_and_pluralises() -> None:
     assert format_agents(0) == ""
     assert format_agents(-1) == ""

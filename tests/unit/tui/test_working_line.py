@@ -31,10 +31,13 @@ how the app routes messages internally.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
 from rich.cells import cell_len
+from rich.console import RenderableType
+from rich.text import Text
 
 from local_operator.harness.types import (
     ToolCallComposeEvent,
@@ -56,10 +59,9 @@ from local_operator.tui.events import (
     TurnEnded,
     TurnStarted,
 )
-from local_operator.tui.widgets.tool_card import format_duration, truncate_cells
+from local_operator.tui.widgets.tool_card import format_duration
 from local_operator.tui.widgets.transcript import (
     DEFAULT_ACTIVITY,
-    SPINE_INDENT,
     NoticeBlock,
     TranscriptView,
     WorkingBlock,
@@ -284,9 +286,9 @@ async def test_the_clock_survives_a_label_change_within_one_phase() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_line_holds_one_row_once_the_clock_needs_six_cells() -> None:
+async def test_the_line_holds_one_row_whatever_the_clock_says() -> None:
     """The row reserves cells for the clock instead of measuring it, so the
-    reservation has to fit the widest clock the formatter can return.
+    reservation has to hold for every clock the formatter can return.
 
     It reserved five — the width of every duration anyone had watched — and
     ``format_duration`` returns six from ``10m10s`` up to ``59m59s``. The
@@ -301,21 +303,71 @@ async def test_the_line_holds_one_row_once_the_clock_needs_six_cells() -> None:
     was silently absorbing the extra cell at 60, 80 and 200 columns while 120
     wrapped. Swept across widths here for exactly that reason.
 
-    ``layout=False`` on this row now rests on this invariant: the block tells
-    the transcript it is one row and repaints without a layout pass, so a row
-    that wraps paints outside its own box rather than merely looking wrong.
+    ``100h``+ is in the sweep because the hours branch used to be ``{h}h{m}m``
+    with an UNBOUNDED hours field, so six cells was the widest only below a
+    hundred hours (review round 15). ``format_duration`` now carries a days
+    branch and a ``99d+`` cap, so it is bounded by construction; this sweeps
+    past both walls to say so.
+
+    Driven by winding ``_phase_started`` back, because that is what ``_paint``
+    reads. Three earlier versions of this test set ``_clock`` directly and were
+    all VACUOUS — ``_paint`` recomputes it from the phase start on every call,
+    so every mutation passed. Reading the painted strips is vacuous too:
+    Textual clips each strip to the widget's box before it lands in the render
+    cache, so a line composed one cell too wide arrives already trimmed. What
+    is asserted here is the text ``_paint`` HANDS the widget, against the
+    widget's own box — narrower than the terminal by the transcript's gutters,
+    so asserting against the app width would pass trivially.
     """
-    for seconds in (5, 65, 610, 3599, 7200):
-        clock = format_duration(seconds)
-        for width in (60, 80, 120, 200):
-            block = WorkingBlock("running a tool with a long model-supplied label " * 3)
-            block._clock = clock
-            head = f"{block._SPINNER[0]} "
-            room = max(width - SPINE_INDENT - cell_len(head) - block._CLOCK_COL, 8)
-            composed = (
-                " " * SPINE_INDENT + head + truncate_cells(block._activity, room) + f"  {clock}"
-            )
-            assert cell_len(composed) <= width, (clock, width, composed)
+    for width in (24, 60, 80, 120, 200):
+        # A fresh app per width: an `OperatorApp` runs once, and `run_test` on a
+        # second context for the same instance hangs waiting for a screen that
+        # is never mounted again.
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(width, 20)) as pilot:
+            await pilot.pause(0.25)
+            app.post_message(TurnStarted())
+            app.post_message(_started("c0", "read", path="a.py"))
+            await pilot.pause(0.1)
+            line = _working(app)
+            assert line is not None, width
+            line.set_activity("running a tool with a long model-supplied label " * 3)
+            box = line.size.width
+            assert box > 0, (width, box)
+
+            composed: list[tuple[float, str]] = []
+            original = line.set_content
+
+            def spy(content: RenderableType, **kw: Any) -> None:
+                # `_paint` always composes a `Text`; asserted rather than cast,
+                # so a change to a plain `str` fails here instead of quietly
+                # skipping the width check this test exists for.
+                assert isinstance(content, Text), type(content)
+                composed.append((elapsed, content.plain))
+                original(content, **kw)
+
+            line.set_content = spy  # type: ignore[method-assign]
+            # Past every wall in the formatter: the minutes/hours boundary, the
+            # old unbounded-hours overflow at 100h, the days branch, and the
+            # `99d+` cap — which only becomes load-bearing past 999 days, where
+            # `{d}d{h}h` would itself reach seven cells.
+            for elapsed in (5, 65, 610, 3599, 7200, 86_399, 362_400, 9_000_000, 100_000_000):
+                line._phase_started = time.monotonic() - elapsed
+                line._paint()
+            line.set_content = original  # type: ignore[method-assign]
+
+            assert len(composed) == 9, (width, composed)
+            for elapsed, text in composed:
+                assert "\n" not in text, (width, elapsed, text)
+                assert cell_len(text) <= box, (width, box, elapsed, text)
+                # The clock is PRESENT, not merely fitting: the defect was the
+                # number being dropped to make the row fit, which an
+                # width-only assertion cannot see.
+                assert text.rstrip().endswith(format_duration(elapsed)), (
+                    width,
+                    elapsed,
+                    text,
+                )
 
 
 @pytest.mark.asyncio

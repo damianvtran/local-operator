@@ -280,12 +280,29 @@ def _format_bytes(count: int) -> str:
 
 
 def format_duration(seconds: float) -> str:
-    """Active processing time: ``9s``, ``41m1s``, ``1h2m``.
+    """Active processing time: ``9s``, ``41m1s``, ``1h2m``, ``4d5h``.
 
     Units are dropped once they stop carrying information: past an hour the
     seconds are noise, and a whole minute renders as ``5m`` rather than
     ``5m0s``. Sub-second work renders as ``0s`` rather than vanishing, so a
     finished turn always leaves a mark.
+
+    BOUNDED AT SIX CELLS over the whole domain, which callers rely on. The
+    widest strings are ``59m59s``, ``23h59m`` and ``98d23h``; past 99 days it
+    is ``99d+``. It used to end at ``{h}h{m}m`` with an unbounded hours field,
+    so ``100h30m`` was 7 cells and ``1000h30m`` was 8 — and
+    :data:`WorkingBlock._CLOCK_COL` RESERVES cells for this rather than
+    measuring them, so a wider string pushed its row over the terminal (review
+    round 15).
+
+    The days branch is also the more readable answer at that magnitude, which
+    is the reason it is a branch and not a clamp: clipping the number to fit
+    would render ``100h40m`` as ``100h4…``, and ``100h4m``, ``100h40m`` and
+    ``100h45m`` all collapse to that same string. Prose survives truncation
+    because the reader reconstructs it; a duration does not — and this number
+    is load-bearing exactly when it is largest, since a phase that has been
+    running for days is the "is this stuck" question the clock exists to
+    answer (design round 14).
     """
     total = int(seconds)
     if total < 60:
@@ -293,9 +310,18 @@ def format_duration(seconds: float) -> str:
     if total < 3600:
         minutes, secs = divmod(total, 60)
         return f"{minutes}m{secs}s" if secs else f"{minutes}m"
-    hours, remainder = divmod(total, 3600)
-    minutes = remainder // 60
-    return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+    if total < 86_400:
+        hours, remainder = divmod(total, 3600)
+        minutes = remainder // 60
+        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+    days, remainder = divmod(total, 86_400)
+    if days > 99:
+        # The cap, so the width is bounded by CONSTRUCTION and not by how large
+        # anyone expected the input to get. `99d+` is honest at a magnitude
+        # where the exact figure has stopped meaning anything.
+        return "99d+"
+    hours = remainder // 3600
+    return f"{days}d{hours}h" if hours else f"{days}d"
 
 
 def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:

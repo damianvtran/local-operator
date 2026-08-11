@@ -847,10 +847,22 @@ class WorkingBlock(TranscriptBlock):
     #: Cells reserved for the clock, CONSTANT so the label's clip point does not
     #: move as the number grows: an unreserved clock re-clipped the label at 10s,
     #: at 1m40s and at the hour, creeping the text leftward under the eye. Two
-    #: spaces plus the six the tool ledger gives its own duration column
-    #: (``tool_card.DURATION_COL``), inlined because that module imports this one
-    #: — and pinned to it by ``test_the_clock_column_fits_the_widest_duration``,
-    #: because the two constants are one decision written in two places.
+    #: spaces of gutter plus six for the number — six because that is the widest
+    #: :func:`~local_operator.tui.widgets.tool_card.format_duration` returns
+    #: under a hundred hours (``10m10s`` through ``59m59s``), and ``_paint``
+    #: clips anything wider so the reservation holds for every input.
+    #:
+    #: It read 7, which was two plus ``tool_card.DURATION_COL``, and that is NOT
+    #: the relationship — stated because the resemblance invites re-deriving it.
+    #: ``DURATION_COL`` is 5 and stays 5: the ledger row MEASURES its rendered
+    #: status runs, so a six-cell duration simply pads the column and every
+    #: downstream budget follows it. This row reserves instead, and only a
+    #: reserving caller can be wrong about the width. Widening ``DURATION_COL``
+    #: to "resync" the two was tried in review round 14 and reverted: it cost a
+    #: cell at 24 and 30 columns, where it dropped the no-output notice and left
+    #: a summary truncated to a bare ellipsis. Two columns, two decisions.
+    #:
+    #: Pinned by ``test_the_line_holds_one_row_once_the_clock_needs_six_cells``.
     _CLOCK_COL = 8
 
     def __init__(self, activity: str = DEFAULT_ACTIVITY, phase: str = DEFAULT_ACTIVITY) -> None:
@@ -957,7 +969,19 @@ class WorkingBlock(TranscriptBlock):
             line.append_text(shimmer_text(label, self._frame_ms))
         else:
             line.append(label, style=dim)
-        line.append(f"  {self._clock}", style=dim)
+        # The clamp is a GUARD and is expected never to fire: `format_duration`
+        # is bounded at six cells by construction, which is what `_CLOCK_COL`
+        # reserves. It is here because this row RESERVES rather than measures,
+        # so the day the formatter grows a unit, the failure lands as a row
+        # painting outside a box it has already told the transcript is one row
+        # tall — silent, and nowhere near the edit that caused it.
+        #
+        # Clipping is the right shape for a guard and would be the WRONG shape
+        # for the everyday path: `100h40m` cut to `100h4…` is indistinguishable
+        # from `100h4m` and `100h45m`, and this number matters most exactly when
+        # it is largest. That is why the fix for the overflow review round 15
+        # found is a days branch in the formatter, not a clip here.
+        line.append(f"  {truncate_cells(self._clock, self._CLOCK_COL - 2)}", style=dim)
         # `layout=False`: this row is ONE row by construction (see above — the
         # label is clipped, never wrapped), so its footprint cannot move and the
         # update is a repaint. The default laid the whole screen out again on
