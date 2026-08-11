@@ -45,23 +45,6 @@ from ..harness.test_loop import make_config
 from .test_app_pilot import FakeSession, _factory
 
 
-@pytest.fixture(autouse=True)
-def restore_root_logger():
-    """Undo the process-global logging state these tests deliberately mutate."""
-    root = logging.getLogger()
-    saved_handlers = list(root.handlers)
-    saved_level = root.level
-    saved_last_resort = logging.lastResort
-    saved_add_handler = logging.Logger.addHandler
-    try:
-        yield
-    finally:
-        logging.Logger.addHandler = saved_add_handler  # type: ignore
-        logging.lastResort = saved_last_resort
-        root.handlers[:] = saved_handlers
-        root.setLevel(saved_level)
-
-
 def _frame(app: OperatorApp) -> list[str]:
     """The painted frame as plain text, one entry per row."""
     return [strip.text for strip in app.screen._compositor.render_strips()]

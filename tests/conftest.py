@@ -24,6 +24,7 @@ one that has to opt in.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -83,6 +84,43 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     for name in _AMBIENT_VARS:
         monkeypatch.delenv(name, raising=False)
     yield home
+
+
+@pytest.fixture(autouse=True)
+def restore_root_logger() -> Iterator[None]:
+    """Give every test the process-global logging state back as it found it.
+
+    Logging is the one piece of global state a Python test suite cannot avoid
+    sharing, and this suite had no isolation for it at all. The failure that
+    forced this fixture: importing ``local_operator.server.app`` — which
+    collection does for the whole session the moment one server test module is
+    selected — left a stderr ``StreamHandler`` on the root logger, so
+    ``tests/unit/mcp/test_auth.py``'s "the browser's chatter goes to the LOG,
+    not the terminal" assertion saw the log ON the terminal and failed. Alone
+    it passed. That is the signature of leaked global state, and answering it
+    per-test is a fix that has to be remembered every time.
+
+    Restores what the modules under test actually mutate: root handlers and
+    level, plus ``lastResort``, ``raiseExceptions`` and ``Logger.addHandler``,
+    which :mod:`local_operator.logger`'s silencing patches in place. This
+    replaces the identical fixtures that ``tests/unit/test_logger.py`` and
+    ``tests/unit/tui/test_logger_silence.py`` each kept locally: they were
+    right, they were just scoped to the two files that already knew.
+    """
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_level = root.level
+    saved_last_resort = logging.lastResort
+    saved_raise = logging.raiseExceptions
+    saved_add_handler = logging.Logger.addHandler
+    try:
+        yield
+    finally:
+        logging.Logger.addHandler = saved_add_handler  # type: ignore[method-assign]
+        logging.lastResort = saved_last_resort
+        logging.raiseExceptions = saved_raise
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
 
 
 @pytest.fixture
