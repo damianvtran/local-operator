@@ -81,6 +81,28 @@ def _hard_clip(text: str, limit: int) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def _omission_note(url_omitted: int, budget_omitted: int, *, more: bool) -> str:
+    """One line saying how many sources were dropped AND why.
+
+    The two causes are reported separately when both fired, because they point
+    the model at different next actions and it cannot tell them apart from a
+    bare count. ``more`` distinguishes "some results are shown, these are
+    additional" from "nothing is shown at all".
+
+    Previously this was one number with the cause hardcoded to the context
+    limit, which was simply wrong for a URL omission; dropping the cause
+    entirely fixed the inaccuracy and lost the actionability with it.
+    """
+    parts: list[str] = []
+    if budget_omitted:
+        parts.append(f"{budget_omitted} by the context limit")
+    if url_omitted:
+        parts.append(f"{url_omitted} for an unusable URL")
+    total = url_omitted + budget_omitted
+    lead = f"{total} {'more ' if more else ''}result{'s' if total != 1 else ''} omitted"
+    return f"{lead} ({', '.join(parts)})" if parts else lead
+
+
 def _render_response(response: SearchResponse) -> tuple[str, int]:
     """Bounded model context, and HOW MANY sources it left out.
 
@@ -98,12 +120,19 @@ def _render_response(response: SearchResponse) -> tuple[str, int]:
         failures = "Fallbacks: " + _clip("; ".join(response.failures), 600)
 
     source_blocks: list[str] = []
-    omitted = 0
+    # The two causes are counted apart because they imply OPPOSITE next moves
+    # for the model: a budget omission means "your query matched too much,
+    # narrow it", an unusable-URL omission means "that one result cannot be
+    # fetched, the query was fine". Collapsing them into one number threw that
+    # away, and the footer below tells the model to call `browser` with a URL
+    # the response may have just declined to supply.
+    omitted_url = 0
+    omitted_budget = 0
     for source_position, source in enumerate(response.sources):
         # A clipped URL is not actionable. Omit the whole candidate instead so
         # every URL that reaches model context can be passed to browser verbatim.
         if len(source.url) > MODEL_URL_MAX_CHARS:
-            omitted += 1
+            omitted_url += 1
             continue
         index = len(source_blocks) + 1
         title = _clip(source.title, MODEL_TITLE_MAX_CHARS)
@@ -117,22 +146,18 @@ def _render_response(response: SearchResponse) -> tuple[str, int]:
         # Reserve enough room for the explicit omission marker so the hard cap
         # never silently cuts a URL or leaves a half-result in model context.
         if len(trial) + 80 > MODEL_CONTEXT_MAX_CHARS:
-            omitted += len(response.sources) - source_position
+            omitted_budget += len(response.sources) - source_position
             break
         source_blocks.append(block)
 
+    omitted = omitted_url + omitted_budget
     if source_blocks:
         sources = "Sources:\n" + "\n".join(source_blocks)
         if omitted:
-            sources += f"\n… {omitted} more result{'s' if omitted != 1 else ''} omitted"
+            sources += f"\n… {_omission_note(omitted_url, omitted_budget, more=True)}"
         sections.append(sources)
     elif response.sources:
-        # Same plural guard as the sibling branch above. "by the context limit"
-        # is deliberately NOT claimed here: a source is also omitted when its
-        # URL exceeds MODEL_URL_MAX_CHARS, which reaches this branch too, so
-        # naming one of the two causes would be wrong half the time.
-        omitted = len(response.sources)
-        sections.append(f"… {omitted} result{'s' if omitted != 1 else ''} omitted")
+        sections.append(f"… {_omission_note(omitted_url, omitted_budget, more=False)}")
     if failures:
         sections.append(failures)
     sections.append(_SOURCE_FOOTER)

@@ -82,33 +82,53 @@ def test_model_search_context_is_bounded_and_points_to_full_page_fetch() -> None
     assert omitted > 0
 
 
-def test_a_single_omitted_source_is_not_reported_in_the_plural() -> None:
-    """One over-long URL is "1 result omitted", and no cause is claimed.
+def test_an_omission_says_how_many_and_why() -> None:
+    """The two causes imply opposite next moves, so they are reported apart.
 
-    The all-omitted branch is reached by BOTH the context budget and the
-    per-URL cap, so naming either one would be wrong half the time. It
-    previously said "1 results omitted by the context limit" — plural, and
-    attributing a cause that this case does not have.
+    A budget omission means "the query matched too much, narrow it"; an
+    unusable-URL omission means "that result cannot be fetched, the query was
+    fine". The message went from a hardcoded "by the context limit" (wrong for
+    a URL omission) to a bare count (accurate but unactionable) to naming the
+    cause it actually knows. The footer tells the model to call `browser` with
+    a URL, so "we dropped one because its URL was unusable" is the difference
+    between a sensible next call and a confused one.
     """
-    response = SearchResponse(
-        provider="duckduckgo",
-        auth_mode="credential-free",
-        answer="",
-        sources=[
-            SearchSource(
-                title="t",
-                url="https://example.com/" + "x" * MODEL_URL_MAX_CHARS,
-                snippet="s",
-            )
-        ],
+    long_url = "https://example.com/" + "x" * MODEL_URL_MAX_CHARS
+
+    def _response(sources: list[SearchSource]) -> SearchResponse:
+        return SearchResponse(
+            provider="duckduckgo",
+            auth_mode="credential-free",
+            answer="",
+            sources=sources,
+        )
+
+    # Sole source, unusable URL: singular, and the cause is the URL.
+    rendered, omitted = _render_response(
+        _response([SearchSource(title="t", url=long_url, snippet="s")])
     )
-
-    rendered, omitted = _render_response(response)
-
     assert omitted == 1
-    assert "1 result omitted" in rendered
-    assert "1 results" not in rendered
-    assert "context limit" not in rendered
+    assert "1 result omitted (1 for an unusable URL)" in rendered
+    assert "1 results" not in rendered, "plural for one result"
+    assert "context limit" not in rendered, "a URL omission is not a budget omission"
+
+    # Both causes at once: each is named with its own count.
+    rendered, omitted = _render_response(
+        _response(
+            [SearchSource(title="t", url=long_url, snippet="s")]
+            + [
+                SearchSource(
+                    title=f"t{i}",
+                    url=f"https://example.com/{i}",
+                    snippet="snippet " * 400,
+                )
+                for i in range(20)
+            ]
+        )
+    )
+    assert omitted > 1
+    assert "by the context limit" in rendered
+    assert "1 for an unusable URL" in rendered
 
 
 @pytest.mark.asyncio
