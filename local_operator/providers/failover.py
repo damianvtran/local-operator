@@ -88,11 +88,26 @@ _TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled
 
 
 def _is_usage_limit(status: int | None, message: str) -> bool:
-    #: 402 belongs here with 429: "Payment Required" is a spent balance, which
-    #: is a quota problem whatever the provider calls it, and refreshing the
-    #: token that has no credits cannot help.
+    """402/429, or a 4xx/status-less body that SAYS it ran out.
+
+    402 belongs here with 429: "Payment Required" is a spent balance, which is a
+    quota problem whatever the provider calls it, and refreshing the token that
+    has no credits cannot help.
+
+    The text is consulted only BELOW 500, and that bound is load-bearing rather
+    than tidiness. A 5xx is the server failing, so a 5xx body mentioning a limit
+    is still the server failing and still worth retrying. Without the bound an
+    empty-bodied 507 read as a quota exhaustion, because
+    :func:`_describe_bare_status` fills the message from the status phrase and
+    "Insufficient Storage" contains ``insufficient`` — the harness's own words
+    classifying the harness's own error. Found by enumerating every
+    ``HTTPStatus`` phrase against these markers; 408/504 collide with the
+    timeout markers too, harmlessly, since both are already timeouts by status.
+    """
     if status in (402, 429):
         return True
+    if status is not None and status >= 500:
+        return False
     lowered = message.lower()
     return any(marker in lowered for marker in _USAGE_LIMIT_MARKERS)
 

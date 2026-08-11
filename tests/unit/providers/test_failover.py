@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import AsyncIterator
+from http import HTTPStatus
 from typing import Any
 
 import httpx
@@ -748,6 +749,31 @@ class TestProviderErrorKinds:
         assert classify_provider_error(TimeoutError()) == "timeout"
         assert classify_provider_error(ValueError("malformed payload")) == "unknown"
         assert is_transient_error(ValueError("malformed payload")) is False
+
+    def test_no_5xx_is_ever_read_as_a_quota_exhaustion(self) -> None:
+        """Found by enumerating every ``HTTPStatus`` phrase against the quota
+        markers: an empty-bodied 507 was classified ``quota``, because the
+        empty-message floor fills the text from the status phrase and
+        "Insufficient Storage" contains ``insufficient`` — the harness's own
+        words classifying the harness's own error, and a retryable server fault
+        turned into "your quota is gone".
+
+        The general rule this pins: a 5xx is the server failing, so a 5xx that
+        MENTIONS a limit is still the server failing and still worth retrying.
+        """
+        for status in HTTPStatus:
+            if int(status) < 500:
+                continue
+            error = ProviderError(int(status), "", retryable=True)
+            assert error.kind in ("transient", "timeout"), (int(status), status.phrase, error.kind)
+        assert ProviderError(507, "").kind == "transient"
+        assert ProviderError(503, "rate limit on the upstream pool", retryable=True).kind == (
+            "transient"
+        )
+        # And the bound does not cost the real quota shapes, which are all 4xx
+        # or carry no status at all.
+        assert ProviderError(403, "Quota exceeded for model").kind == "quota"
+        assert ProviderError(None, "Usage limit reached").kind == "quota"
 
     @pytest.mark.parametrize(
         ("error", "rendered"),
