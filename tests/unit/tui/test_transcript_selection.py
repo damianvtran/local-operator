@@ -70,6 +70,7 @@ from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
     RichBlock,
+    TranscriptBlock,
     TranscriptView,
     UserBlock,
 )
@@ -117,7 +118,7 @@ def _brand_markdown() -> None:
     install_markdown_theme()
 
 
-def _copy_all(app: StyledTranscriptApp, widget: object) -> str | None:
+def _copy_all(app: StyledTranscriptApp, widget: TranscriptBlock) -> str | None:
     """The clipboard after selecting the whole of ``widget`` and copying.
 
     Goes through ``Screen.get_selected_text`` rather than calling
@@ -129,10 +130,10 @@ def _copy_all(app: StyledTranscriptApp, widget: object) -> str | None:
     return app.screen.get_selected_text()
 
 
-async def _mounted(app: StyledTranscriptApp, *blocks: object) -> TranscriptView:
+async def _mounted(app: StyledTranscriptApp, *blocks: TranscriptBlock) -> TranscriptView:
     view = app.query_one(TranscriptView)
     for block in blocks:
-        view.append_block(block)  # type: ignore[arg-type]
+        view.append_block(block)
     return view
 
 
@@ -441,15 +442,19 @@ async def test_frame_is_unchanged_by_the_flatten() -> None:
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(64, 40)) as pilot:
-        from local_operator.tui.widgets.transcript import TranscriptBlock
-
         flat = AssistantBlock()
         raw = TranscriptBlock()
         await _mounted(app, flat, raw)
         flat.update_text(MARKDOWN)
         flat.finalize_text()
         raw.set_content(Markdown(MARKDOWN))
-        raw.styles.height = flat.styles.height.value
+        # The comparison block is given the SAME height, so both render the same
+        # number of strips; `flat` pins its own and `raw` would be measured.
+        # Read from the PIN, not from `size`: the pin is written synchronously by
+        # `_apply_rows`, whereas `size` is zero until the layout has run.
+        pinned = flat.styles.height
+        assert pinned is not None, "the flatten did not pin a height"
+        raw.styles.height = pinned.value
         await pilot.pause()
 
         flat._render_content()
@@ -475,7 +480,9 @@ async def test_height_is_pinned_to_the_row_count() -> None:
         block.update_text(MARKDOWN)
         block.finalize_text()
         await pilot.pause()
-        assert block.styles.height.value == len(MARKDOWN_ROWS)
+        pinned = block.styles.height
+        assert pinned is not None, "height left to auto — the block is being MEASURED"
+        assert pinned.value == len(MARKDOWN_ROWS)
         assert block.size.height == len(MARKDOWN_ROWS)
 
 
@@ -494,16 +501,19 @@ async def test_resize_rebuilds_at_the_new_width() -> None:
         block.update_text(" ".join(["ingest"] * 40))
         block.finalize_text()
         await pilot.pause()
-        wide = block.styles.height.value
+        wide = block.size.height
 
-        app._on_resize_hook = None  # no-op; the resize below drives the widget
         await pilot.resize_terminal(40, 40)
         await pilot.pause()
         await pilot.pause()
-        narrow = block.styles.height.value
+        narrow = block.size.height
 
         assert narrow > wide
-        assert block.size.height == narrow
+        # The PIN moved too, not just the layout: a stale pin is the exact
+        # failure mode — rows rebuilt at the new width, height still reserving
+        # the old count.
+        repinned = block.styles.height
+        assert repinned is not None and repinned.value == narrow
         copied = _copy_all(app, block)
         assert copied is not None
         # Re-wrapped, but still the same words in the same order.
@@ -618,13 +628,20 @@ async def test_selection_band_is_the_brand_step_not_textuals_blue() -> None:
 
         band = theme_mod.semantic_color("faint").lower()
         ink = theme_mod.semantic_color("fg").lower()
-        painted = {
-            (
-                segment.style.color.get_truecolor().hex.lower(),
-                segment.style.bgcolor.get_truecolor().hex.lower(),
-            )
-            for strip in block._render_cache.lines
-            for segment in strip._segments
-            if segment.text.strip()
-        }
+        painted: set[tuple[str, str]] = set()
+        for strip in block._render_cache.lines:
+            for segment in strip._segments:
+                if not segment.text.strip():
+                    continue
+                style = segment.style
+                # Asserted rather than filtered: a painted cell with no colour
+                # is the band FAILING to reach it, which is the whole feature,
+                # and a comprehension that skipped it would pass vacuously.
+                assert style is not None, f"no style at all on {segment.text!r}"
+                colour, ground = style.color, style.bgcolor
+                assert colour is not None, f"no ink on {segment.text!r}"
+                assert ground is not None, f"the band never painted {segment.text!r}"
+                painted.add(
+                    (colour.get_truecolor().hex.lower(), ground.get_truecolor().hex.lower())
+                )
         assert painted == {(ink, band)}
