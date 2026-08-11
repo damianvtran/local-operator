@@ -54,6 +54,7 @@ consequences worth naming rather than discovering:
 from __future__ import annotations
 
 import pytest
+from rich.cells import cell_len
 from rich.console import Group
 from rich.markdown import Markdown
 from rich.text import Text
@@ -459,9 +460,51 @@ async def test_frame_is_unchanged_by_the_flatten() -> None:
 
         flat._render_content()
         raw._render_content()
-        assert [strip.text for strip in flat._render_cache.lines] == [
-            strip.text for strip in raw._render_cache.lines
+        # Compared with each row's trailing pad removed, which is what "must not
+        # move a cell" actually means. The flatten pads a BLANK row out to the
+        # block width where Rich emits nothing at all: visually identical (both
+        # are background), but not byte-identical, and it is load-bearing — a
+        # zero-cell row takes no selection style, so a multi-paragraph answer
+        # highlighted as disconnected slabs while `get_selection` returned one
+        # continuous string (design round 12, D2). Right-stripping keeps the
+        # real invariant: every painted glyph in the same place on the same row.
+        assert [strip.text.rstrip() for strip in flat._render_cache.lines] == [
+            strip.text.rstrip() for strip in raw._render_cache.lines
         ]
+
+
+@pytest.mark.asyncio
+async def test_the_highlight_over_a_blank_row_is_not_a_hole() -> None:
+    """A selection spanning paragraphs paints one band, not a stack of slabs.
+
+    Design round 12, D2. Rich pads a row that has CONTENT out to the block
+    width but emits a row that has none as nothing at all, and the selection
+    style is applied to the cells a row HAS — so the blank rows between
+    paragraphs took 0 cells of highlight while ``get_selection`` returned one
+    continuous string. The highlight has to describe what gets copied, and a
+    reader dragging over a four-paragraph answer saw four disconnected blocks.
+
+    Asserted on the CONTENT's rows rather than the painted strips, because
+    that is where the selection style is applied — the compositor pads the
+    strip afterwards either way, which is exactly why this was invisible until
+    someone measured the highlight itself.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(64, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text("First paragraph.\n\nSecond paragraph.\n\nThird.")
+        block.finalize_text()
+        await pilot.pause()
+
+        rendered = block.renderable
+        assert isinstance(rendered, Text), "the flatten did not produce a Text"
+        rows = rendered.plain.split("\n")
+        blanks = [row for row in rows if not row.strip()]
+        assert blanks, "no blank row between the paragraphs, so this proves nothing"
+        assert all(
+            cell_len(row) == cell_len(rows[0]) for row in rows
+        ), f"a row cannot take the selection style: {[cell_len(r) for r in rows]}"
 
 
 @pytest.mark.asyncio

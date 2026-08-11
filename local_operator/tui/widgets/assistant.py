@@ -90,14 +90,30 @@ def flatten(renderable: RenderableType, width: int, console: Console | None = No
         console = Console(width=width, theme=brand_markdown_theme())
     options = console.options.update(width=width, height=None, highlight=False)
     text = Text(end="")
+    # Cells emitted on the row currently being built. Rich pads a row that has
+    # CONTENT out to the full width, but emits a row that has none as nothing
+    # at all — so a blank line between two paragraphs was zero cells wide.
+    # Selection paints the cells a row actually has, so a multi-paragraph
+    # answer highlighted as a stack of disconnected slabs with unpainted gaps
+    # between them, while `get_selection` returned one continuous string. The
+    # highlight has to describe what gets copied; padding the blank rows is
+    # what makes the band continuous.
+    #
+    # Safe for the clipboard: `TranscriptBlock.get_selection` drops each row's
+    # trailing pad, which it already had to do for the content rows Rich pads.
+    row_cells = 0
     for segment in console.render(renderable, options):
         if segment.control:
             continue
         for index, part in enumerate(segment.text.split("\n")):
             if index:
+                if row_cells == 0:
+                    text.append(" " * width)
                 text.append("\n")
+                row_cells = 0
             if part:
                 text.append(part, segment.style)
+                row_cells += cell_len(part)
     # Rich closes every block with a newline; kept, that is a blank row the
     # markdown never had, and one row of height the block would reserve and
     # never paint.
