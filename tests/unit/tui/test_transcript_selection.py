@@ -58,6 +58,7 @@ from rich.console import Group
 from rich.markdown import Markdown
 from rich.text import Text
 from textual.content import Content
+from textual.geometry import Offset
 from textual.selection import Selection
 from textual.visual import RichVisual
 
@@ -223,6 +224,7 @@ async def test_markdown_copies_as_the_rendered_frame() -> None:
         await pilot.pause()
 
         copied = _copy_all(app, block)
+        assert copied is not None, "the agent message contributed nothing to the copy"
         assert copied == "\n".join(MARKDOWN_ROWS)
         # The five constructs, called out so a failure says WHICH one moved.
         assert "**" not in copied and "plan" in copied  # bold
@@ -365,7 +367,7 @@ async def test_partial_selection_copies_only_the_highlighted_rows() -> None:
         block.finalize_text()
         await pilot.pause()
         # From the start of the fence's first row to mid-way through its second.
-        selection = Selection.from_offsets(_offset(5, 0), _offset(6, 8))
+        selection = Selection.from_offsets(Offset(x=0, y=5), Offset(x=8, y=6))
         assert block.get_selection(selection) == ("def f(x):\n    retu", "\n")
 
 
@@ -382,14 +384,8 @@ async def test_a_drag_starting_inside_the_gutter_still_copies_from_the_prose() -
         block = UserBlock("summarise the ingest path")
         await _mounted(app, block)
         await pilot.pause()
-        selection = Selection.from_offsets(_offset(0, 0), _offset(0, 11))
+        selection = Selection.from_offsets(Offset(x=0, y=0), Offset(x=11, y=0))
         assert block.get_selection(selection) == ("summarise", "\n")
-
-
-def _offset(row: int, column: int):
-    from textual.geometry import Offset
-
-    return Offset(column, row)
 
 
 # -- the flatten's own claims ------------------------------------------------
