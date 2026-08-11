@@ -829,10 +829,19 @@ Screen.subagent SubagentRow.current {
  * gutter lives HERE rather than on the body, so all four share one left edge;
  * the body's own TranscriptView padding is dropped for the same reason. The
  * right cell is spent so the chrome stops where the body's reserved scrollbar
- * column starts. */
+ * column starts.
+ *
+ * The BOTTOM cell is this page's share of the transcript's trailing row: the
+ * page takes the transcript's region, so it inherits the region's contract that
+ * whatever is above the composer ends in a row of ground. Measured at 120x40
+ * without it, `↑↓scroll · esc back to conversation · read-only` sat directly on
+ * `❯ Read-only — press esc to reply` and the two chrome lines fused into one
+ * four-row panel. It cannot come from the body's `TranscriptView` padding,
+ * which the class below deliberately zeroes — the hint row is BELOW the body,
+ * so the row has to be the page's. */
 .subagent-view {
     height: 1fr;
-    padding: 1 1 0 1;
+    padding: 1 1 1 1;
 }
 
 .subagent-view-title {

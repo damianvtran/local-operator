@@ -332,3 +332,34 @@ async def test_the_band_join_does_not_double(size: tuple[int, int]) -> None:
             assert _seam(app) == 1, _frame(app)[-12:]
         finally:
             builtin.TODO_STORE.pop(session.session_id, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+async def test_the_subagent_page_ends_in_ground_too(size: tuple[int, int]) -> None:
+    """The page takes the transcript's REGION, so it inherits its contract.
+
+    Its last row is the exit hint, and flush on the composer the two chrome
+    lines fused: `esc back to conversation · read-only` directly above `❯
+    Read-only — press esc to reply` read as one four-row panel rather than as a
+    page over an input. The row cannot come from the body's own
+    ``TranscriptView`` padding — the hint is BELOW the body — so it is the
+    page container's, which is the same "one owner per join" rule the dock
+    column follows.
+    """
+    from tests.unit.tui.test_subagent_view import (
+        TRAJECTORY,
+        FakeSession as PageSession,
+        _async_factory,
+        _job_with,
+        _open,
+    )
+
+    app = OperatorApp(_async_factory(PageSession()))
+    async with app.run_test(size=size) as pilot:
+        view = await _open(pilot, app, _job_with(TRAJECTORY))
+        await _settle(pilot)
+
+        assert view.is_mounted
+        assert _seam(app) == 1, _frame(app)[-8:]
+        assert "esc" in _last_painted_row(app), _frame(app)[-8:]
