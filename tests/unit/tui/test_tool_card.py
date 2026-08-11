@@ -23,7 +23,8 @@ hexes so a ramp change moves one file, not this suite.
 from __future__ import annotations
 
 import unicodedata
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
@@ -1642,7 +1643,16 @@ def test_the_result_replaces_the_streamed_tail_rather_than_joining_it() -> None:
     """Two accounts of one output, and the streamed one is the truncated,
     out-of-date one. It goes when the real result lands — along with the clock,
     on every settle path including the failing one, which was the only path
-    that never stopped it."""
+    that never stopped it.
+
+    The clock is SEEDED rather than started. These cards are never mounted, so
+    ``_start_clock``'s message-pump guard means ``_clock_timer`` is ``None`` for
+    their whole life and an ``is None`` assertion after the settle passes no
+    matter what the settle does — deleting the ``_settle_live()`` call this
+    defends left the suite green. A stub that records its own ``stop`` is the
+    difference between asserting the timer was retired and asserting one never
+    existed.
+    """
     for settle in (
         lambda c: c.mark_done("exit code: 0\nreal output"),
         lambda c: c.mark_failed("boom", "exit code: 1\nreal output"),
@@ -1651,10 +1661,13 @@ def test_the_result_replaces_the_streamed_tail_rather_than_joining_it() -> None:
         card = ToolCard("t", "bash", {"command": "sleep 5"})
         card._expanded = True
         card.set_partial_detail("--- stdout ---\npartial output")
+        stopped: list[int] = []
+        card._clock_timer = cast(Any, SimpleNamespace(stop=lambda: stopped.append(1)))
         assert card._live
         settle(card)
-        assert card._live == []
+        assert stopped == [1]
         assert card._clock_timer is None
+        assert card._live == []
         assert "partial output" not in card._build_content(80).plain
 
 

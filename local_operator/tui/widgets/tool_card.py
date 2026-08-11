@@ -219,9 +219,19 @@ LIVE_INGEST_CHARS = 64 * 1024
 #: empty output area is byte-identical to a FINISHED call that printed
 #: nothing, and those two frames mean opposite things.
 LIVE_HEADER_RUNNING = "⋯ running"
-#: Appended when the call is live but has not printed anything yet. "no
-#: output" alone is the SETTLED card's answer and means "never will"; this one
-#: means "not yet", and the difference is whether the user should keep waiting.
+#: Appended when nothing has STREAMED to this card yet. "no output" alone is
+#: the SETTLED card's answer and means "never will"; this one means "not yet",
+#: and the difference is whether the user should keep waiting.
+#:
+#: It is a statement about the CARD's buffer, not about the tool, and against
+#: the real producer that is a narrow window: bash's first 500 ms update is
+#: `--- stdout ---\n(empty)\n--- stderr ---\n(empty)`, four non-blank lines,
+#: which fills the buffer and lifts this caveat on a command that has printed
+#: nothing. Deliberately not special-cased — the card would have to parse one
+#: tool's private banner format to tell an empty payload from a full one, and
+#: it refuses that everywhere else (see :meth:`set_partial_detail`). The
+#: banners are themselves legible as "nothing yet", so the frame stays honest;
+#: it is this clause that stops being load-bearing, not the card.
 LIVE_HEADER_PENDING = "no output yet"
 #: How often a live card repaints, in seconds. ONE timer drives both the
 #: duration on the collapsed row and the streaming body, for the reason the
@@ -601,8 +611,12 @@ class ToolCard(TranscriptBlock):
         #: count above is a floor rather than a total (see
         #: :meth:`set_partial_detail`) and the marker must not quote a number.
         self._live_elided = False
-        #: Set by an arriving update, consumed by the clock tick. This one bit
-        #: IS the coalescing: N updates between two ticks cost one repaint.
+        #: Set by an arriving update, consumed by the clock tick. The
+        #: coalescing itself comes from `set_partial_detail` never repainting
+        #: and the tick repainting on its own schedule; what this bit adds is
+        #: the answer to "can the card have changed HEIGHT" — only a tick that
+        #: took new output may have, and only that tick needs the container's
+        #: gap and scroll work (see :meth:`_tick_clock`).
         self._live_dirty = False
         #: The model's stated reason for this call, sanitised, or None. Carried
         #: on the card but never RENDERED by it (see ``_summary`` above): the
@@ -622,7 +636,15 @@ class ToolCard(TranscriptBlock):
         self._clock_timer: Timer | None = None
         self._duration: float | None = None
         self._error: str = ""
-        self._started = time.monotonic()
+        #: When THIS card's execution began, or ``None`` when the card cannot
+        #: know. ``None`` is the replay case and it is not a missing value to
+        #: be defaulted: a card rebuilt by a surface that is re-painting a
+        #: recorded trajectory (`subagent_view.entry_block`) was constructed
+        #: when the page painted, not when the tool started, so a duration
+        #: measured from here would be how long ago the panel drew the row.
+        #: The settled states already refuse to invent that number — see
+        #: :meth:`restore` — and the running state has to refuse it too.
+        self._started: float | None = time.monotonic()
         self._expanded = False
         self._hovered = False
         #: True while the row holds keyboard focus. Tracked separately from
@@ -648,7 +670,7 @@ class ToolCard(TranscriptBlock):
     def mark_done(self, result_text: str = "", details: dict[str, Any] | None = None) -> None:
         """Record success with elapsed duration; the row goes quiet."""
         self._settle_live()
-        self._duration = time.monotonic() - self._started
+        self._duration = self._elapsed()
         self._state = "success"
         self._absorb_result(result_text, details)
         self.remove_class("tool-running")
@@ -671,7 +693,7 @@ class ToolCard(TranscriptBlock):
         # the clock now runs for the whole of `running` too, so every failing
         # tool would have left a 1 Hz timer repainting a finalized card.
         self._settle_live()
-        self._duration = time.monotonic() - self._started
+        self._duration = self._elapsed()
         self._state = "error"
         self._error = _strip_control_sequences(" ".join(error.split())) or "error"
         self._absorb_result(result_text or error, details)
@@ -695,12 +717,21 @@ class ToolCard(TranscriptBlock):
             # from 40 columns down.
             self._compose_facts = f"{size} composed"
             self._summary = f"never sent · {self._compose_facts}"
-        self._duration = time.monotonic() - self._started
+        self._duration = self._elapsed()
         self._state = "interrupted"
         self.remove_class("tool-running")
         self.add_class("tool-interrupted")
         self._refresh_row()
         self.finalize()
+
+    def _elapsed(self) -> float | None:
+        """Seconds this call has been running, or ``None`` when unknowable.
+
+        ``None`` propagates rather than collapsing to ``0.0``: a card that
+        never learned when its call started must paint a blank column, not a
+        number that says the tool returned instantly.
+        """
+        return None if self._started is None else time.monotonic() - self._started
 
     def restore(
         self,
@@ -710,22 +741,39 @@ class ToolCard(TranscriptBlock):
         details: dict[str, Any] | None = None,
         error: str = "",
     ) -> None:
-        """Settle a card for a call that ran in a PREVIOUS session.
+        """Adopt a card for a call from a PREVIOUS session, or another agent's.
 
         Separate from :meth:`mark_done` / :meth:`mark_failed` for one reason:
-        those three all compute ``_duration`` from ``self._started``, which for
-        a row mounted during replay is the moment the row was mounted. That is
+        those three compute ``_duration`` from ``self._started``, which for a
+        row mounted during replay is the moment the row was mounted. That is
         not how long the tool took, it is how long ago the app painted the row,
         and it renders as ``0.0s`` on every card in a resumed conversation.
         The transcript does not record durations, so replay leaves
         ``_duration`` at ``None`` and the column paints blank.
 
-        ``state`` is ``"success"``, ``"error"`` or ``"interrupted"`` — the last
+        ``state`` is ``"success"``, ``"error"``, ``"interrupted"`` — the third
         for a call whose result is not in the transcript, which is what a
-        session killed mid-turn leaves behind.
+        session killed mid-turn leaves behind — or ``"running"``.
+
+        ``"running"`` exists for the same reason the other three do, one step
+        further on. `subagent_view.entry_block` rebuilds a child's whole
+        trajectory as blocks, and an entry with no outcome yet is a call that
+        is STILL GOING: the card has to stay live. It just must not time
+        itself, because its ``_started`` is when the page painted the row —
+        so ``_started`` is cleared here and the running row blanks its
+        duration exactly as its settled siblings blank theirs. Without this
+        the replayed live row counted up from zero (and reset to zero every
+        time an earlier entry changed and the page rebuilt it), inventing
+        precisely the number this method exists to refuse.
         """
         self._settle_live()
         self._state = state
+        self._started = None
+        if state == "running":
+            # Still live: it keeps `tool-running`, it is not finalized, and the
+            # expansion still offers the command. Only the clock is withheld.
+            self._refresh_row()
+            return
         self.remove_class("tool-running")
         if state == "error":
             self._error = _strip_control_sequences(" ".join(error.split())) or "error"
@@ -813,7 +861,13 @@ class ToolCard(TranscriptBlock):
         out of a lifecycle method and leave an unawaited coroutine behind. With
         no clock the row simply stops animating between events, which is the
         right degradation for a timer whose entire job is cosmetic.
+
+        A REPLAYED live card (``restore(state="running")``) gets none: it has
+        no start time to count from and nothing streams into it, so every
+        tick would repaint an unchanged row. See :attr:`_started`.
         """
+        if self._started is None:
+            return
         if self._clock_timer is None and self.is_running:
             self._clock_timer = self.set_interval(CLOCK_INTERVAL_S, self._tick_clock)
 
@@ -835,13 +889,17 @@ class ToolCard(TranscriptBlock):
             self._stop_clock()
             return
         # The duration is on the row whether or not output moved, so the tick
-        # always repaints a running card — the clock IS the "not hung" signal
-        # and skipping the paint would freeze it. `_live_dirty` is cleared here
-        # rather than gating the paint.
+        # always REPAINTS a running card — the clock IS the "not hung" signal
+        # and skipping the paint would freeze it.
+        grew = self._live_dirty
         self._live_dirty = False
-        # Collapsed, the card is one row and cannot reflow anything: skip the
-        # container work entirely, which is the common case by a wide margin.
-        if not self._expanded:
+        # …but only a tick that took new output can have changed the card's
+        # HEIGHT, and only a height change concerns the container. Collapsed,
+        # the card is one row and cannot reflow anything at all; expanded with
+        # nothing new, the gap and scroll work below would run once a second
+        # per open card — a linear `_blocks.index` scan and a deferred
+        # `scroll_end` — to re-settle a layout that did not move.
+        if not self._expanded or not grew:
             self._refresh_row()
             return
         parent = self.parent if isinstance(self.parent, TranscriptView) else None
@@ -1262,12 +1320,17 @@ class ToolCard(TranscriptBlock):
     def _flash_notice(self) -> None:
         """Put the inert-row answer in the hint slot for a couple of seconds.
 
-        A RUNNING tool has no output yet but will; a settled one never will.
-        Saying which is the difference between "wait" and "there is nothing
-        here", and the row is the only place the user is looking.
+        A call still being DICTATED has no output yet but will; a settled one
+        never will. Saying which is the difference between "wait" and "there is
+        nothing here", and the row is the only place the user is looking.
+
+        ``composing`` is now the ONLY live state that reaches here. A running
+        card expands — onto its command and its streamed output — so
+        ``activate`` toggles it rather than falling through to this, and the
+        `⟨still running⟩` answer belongs to the row that genuinely has nothing
+        behind the affordance yet.
         """
-        live = self._state in ("running", "composing")
-        self._notice = RUNNING_NOTICE if live else NO_OUTPUT_NOTICE
+        self._notice = RUNNING_NOTICE if self._state == "composing" else NO_OUTPUT_NOTICE
         self._refresh_row()
         if self._notice_timer is not None:
             self._notice_timer.stop()
@@ -1383,15 +1446,25 @@ class ToolCard(TranscriptBlock):
         accent = Style(color=theme_mod.semantic_color("accent"))
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
-        elapsed = format_duration(max(0, int(time.monotonic() - self._started)))
         # State, then time, then the caveat — read left to right that is "it is
         # running / for this long / and has printed nothing", which is the
         # order the questions are asked in. The caveat last also means it
         # simply disappears when the first line arrives, instead of the row
         # rewriting itself around a moving middle.
-        header = f"{LIVE_HEADER_RUNNING} · {elapsed}"
-        if not self._live:
-            header = f"{header} · {LIVE_HEADER_PENDING}"
+        #
+        # Both trailing clauses are dropped for a REPLAYED live card, which
+        # knows neither. It has no start time (see :attr:`_started`), and
+        # nothing streams into it — the surface rebuilding it never calls
+        # `set_partial_detail` — so `no output yet` there is not a caveat that
+        # will lift, it is a permanent claim about a child's tool that this
+        # card has no way to make. `⋯ running` alone is the whole of what it
+        # honestly knows.
+        header = LIVE_HEADER_RUNNING
+        elapsed = self._elapsed()
+        if elapsed is not None:
+            header = f"{header} · {format_duration(max(0, int(elapsed)))}"
+            if not self._live:
+                header = f"{header} · {LIVE_HEADER_PENDING}"
         row.append("\n" + indent, style=dim)
         # Accent, the same ink the running icon spends: this row is the card's
         # answer to "is it alive", and it has to survive a still frame.
@@ -1767,9 +1840,20 @@ class ToolCard(TranscriptBlock):
             # Two blanks stand in for `<glyph> `, so the number lands in exactly
             # the column the ✓ beside it will use when it settles. The spine
             # holds and the row does not jump on settling.
+            #
+            # A REPLAYED live row reports nothing at all. `subagent_view`
+            # rebuilds a child's trajectory into cards and leaves the
+            # outcome-less ones running, where `_started` is when the PAGE
+            # painted the row — so this counted up from zero and reset to zero
+            # every time an earlier entry changed. A clock started from the
+            # wrong zero is worse than no clock, and the settled rows on that
+            # same page already blank the column for exactly this reason.
+            elapsed = self._elapsed()
+            if elapsed is None:
+                return []
             dim = Style(color=theme_mod.semantic_color("dim"))
-            elapsed = format_duration(max(0, int(time.monotonic() - self._started)))
-            return [("  ", dim), (elapsed.rjust(DURATION_COL), dim)]
+            text = format_duration(max(0, int(elapsed)))
+            return [("  ", dim), (text.rjust(DURATION_COL), dim)]
         core = self._outcome_runs(cap, terse=terse)
         diff = self._diff_runs()
         if not diff:
