@@ -53,20 +53,26 @@ consequences worth naming rather than discovering:
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 from rich.cells import cell_len
 from rich.console import Group
 from rich.markdown import Markdown
 from rich.text import Text
+from textual import events
 from textual.content import Content
 from textual.geometry import Offset
 from textual.selection import Selection
 from textual.visual import RichVisual
 
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.app import OperatorApp
 from local_operator.tui.glyphs import tool_icon
 from local_operator.tui.markdown_theme import install_markdown_theme
 from local_operator.tui.widgets.assistant import AssistantBlock, flatten
+from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -75,7 +81,9 @@ from local_operator.tui.widgets.transcript import (
     TranscriptView,
     UserBlock,
 )
+from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.conftest import StyledTranscriptApp
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 #: The message every markdown assertion below is made against: bold, inline
 #: code, a link, an ordered list and a fenced block, which are exactly the five
@@ -688,3 +696,227 @@ async def test_selection_band_is_the_brand_step_not_textuals_blue() -> None:
                     (colour.get_truecolor().hex.lower(), ground.get_truecolor().hex.lower())
                 )
         assert painted == {(ink, band)}
+
+
+# -- the copy itself ---------------------------------------------------------
+#
+# Reported from the field after the highlight shipped: "while I can highlight
+# text from agent messages, pressing cmd+C to copy does not copy to clipboard".
+# It cannot: Ghostty binds ``super+c=copy_to_clipboard:mixed`` WITHOUT
+# ``performable:``, so cmd+C is eaten by the terminal, which then copies its
+# own (empty) selection — the app never sees the key. Ctrl+C is the interrupt.
+# With no key left to bind, the RELEASE is the copy, and these pin that path
+# through the real app: the mouse events a terminal actually sends, the
+# clipboard Textual actually writes, and the toast that is the only reason a
+# working copy is distinguishable from the broken one that was reported.
+def _mouse(app: OperatorApp, kind: type, x: int, y: int) -> Any:
+    """One SGR mouse report, as ``Screen._forward_event`` receives it."""
+    return kind(
+        app.screen,
+        x=x,
+        y=y,
+        delta_x=0,
+        delta_y=0,
+        button=1,
+        shift=False,
+        meta=False,
+        ctrl=False,
+        screen_x=x,
+        screen_y=y,
+    )
+
+
+async def _drag(app: OperatorApp, pilot: Any, start: tuple[int, int], end: tuple[int, int]) -> None:
+    """Press, move, release — the gesture, not a hand-set ``selections`` dict.
+
+    Driven through the events because the copy hangs off ``TextSelected``,
+    which only a real release posts; assigning ``screen.selections`` would
+    assert the formatting and skip the trigger.
+    """
+    app.screen._forward_event(_mouse(app, events.MouseDown, *start))
+    await pilot.pause()
+    app.screen._forward_event(_mouse(app, events.MouseMove, *end))
+    await pilot.pause()
+    app.screen._forward_event(_mouse(app, events.MouseUp, *end))
+    await pilot.pause()
+    await pilot.pause()
+
+
+async def _seeded(app: OperatorApp, pilot: Any) -> AssistantBlock:
+    """One prompt and one FINISHED answer in the transcript, settled.
+
+    Three properties this has to guarantee before a drag means anything,
+    because each of them changes the FRAME and therefore the clipboard:
+
+    * **The splash is gone.** Appended through the app's own path rather than
+      straight into the view, because that is what retires ``WelcomeView`` —
+      leave it displayed and it overlaps the transcript's rows, so a press
+      lands on no content widget and Textual widens the selection to the whole
+      container. Seen intermittently before this: the same drag copied the
+      prompt as well as the answer, in three runs out of eight.
+
+    * **Finalized.** Mid-stream the flatten splices a settled prefix to a live
+      tail and loses one blank row at the join (pinned by
+      ``test_streaming_copy_is_the_streaming_frame``), so an unfinalized block
+      would have these tests asserting the paragraph break away.
+    * **Built at its real width.** ``AssistantBlock._flat_width`` falls back to
+      ``FALLBACK_WIDTH`` while the block has no size, so text applied before
+      the first layout is folded at the wrong width and only ``on_resize``
+      puts it right. Asserted rather than waited out: a test that drags a
+      half-settled frame does not fail, it counts a different number of rows.
+    """
+    app._append_block(UserBlock("summarise the ingest path"))
+    block = AssistantBlock()
+    app._append_block(block)
+    await pilot.pause()
+    block.update_text("Here is the **plan** with `inline_code`.\n\nSecond paragraph here.")
+    block.finalize_text()
+    await pilot.pause()
+    await pilot.pause()
+    assert not app.query_one(WelcomeView).display
+    assert block.size.width and block._built_width == block.size.width
+    return block
+
+
+def _pilot_app(session: FakeSession | None = None) -> OperatorApp:
+    """The real app over a fake session, with the checker's objection in ONE place.
+
+    ``FakeSession`` is what every pilot suite here drives, but pyright will not
+    accept it as a ``SessionProtocol`` — the mismatch is member variance rather
+    than a missing member — so constructing the app inline puts the same error
+    on every test that does it. Confined here instead.
+    """
+    return OperatorApp(cast("Any", lambda: _factory(session or FakeSession())))
+
+
+@pytest.mark.asyncio
+async def test_releasing_a_drag_puts_the_frame_on_the_clipboard() -> None:
+    """The acceptance case: highlight an answer, let go, it is copied.
+
+    ``_clipboard`` is what ``App.copy_to_clipboard`` sets on its way to the
+    OSC 52 write, so this is the byte sequence the terminal is handed — checked
+    end to end against Ghostty 1.3.2 in cmux by replaying that escape and
+    reading ``pbpaste``.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        block = await _seeded(app, pilot)
+        app._clipboard = ""
+
+        await _drag(app, pilot, (block.region.x, block.region.y), (79, 23))
+
+        # The RENDERED frame, which is the whole rule: no ``**`` around
+        # "plan", no backticks around "inline_code", no trailing pad — and the
+        # paragraph break kept, because the reader selected two paragraphs.
+        assert app._clipboard.splitlines() == [
+            "Here is the plan with inline_code.",
+            "",
+            "Second paragraph here.",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_says_so() -> None:
+    """A silent copy is indistinguishable from the bug that was reported.
+
+    The count is the assertion, not merely the word: a toast that fired on an
+    empty selection would be the same lie in the other direction.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        block = await _seeded(app, pilot)
+        toast = app.query_one(Toast)
+        assert toast.message == ""
+
+        await _drag(app, pilot, (block.region.x, block.region.y), (79, 23))
+        assert toast.message == "copied 3 lines"
+        # The card cannot drift from what was taken: the count is recomputed
+        # from the clipboard rather than restated.
+        assert toast.message == f"copied {len(app._clipboard.splitlines())} lines"
+
+        # A plain click clears the selection before posting `TextSelected`, so
+        # it must copy nothing and leave the previous card alone rather than
+        # announcing a copy that did not happen.
+        toast.dismiss_toast()
+        await _drag(app, pilot, (block.region.x, block.region.y), (block.region.x, block.region.y))
+        assert toast.message == ""
+
+
+@pytest.mark.asyncio
+async def test_the_app_frame_never_reaches_the_clipboard() -> None:
+    """A drag that overshoots the transcript copies the answer, not the app.
+
+    Measured before ``Chrome``: the same gesture pasted ``❯`` and the whole
+    status band — ``◆ test/model › ⌂ ~/local-operator`` and its interior
+    padding — under the answer. Textual sweeps EVERY widget the drag crosses
+    into ``selections``, and the transcript's neighbours are the composer's
+    chevron and the band, so overshooting by one row is the common case rather
+    than an edge one.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).insert("draft prompt in the composer")
+        await _seeded(app, pilot)
+
+        await _drag(app, pilot, (0, 0), (79, 23))
+
+        assert "❯" not in app._clipboard
+        assert "auto-approve" not in app._clipboard
+        assert "draft prompt" not in app._clipboard
+        # Trailing pad is the other half of the same rule: a paste that carries
+        # the frame's width is as unusable as one that carries its furniture.
+        assert app._clipboard.splitlines() == [row.rstrip() for row in app._clipboard.splitlines()]
+        assert app._clipboard
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("focus_transcript", [False, True])
+async def test_a_live_selection_never_swallows_the_interrupt(focus_transcript: bool) -> None:
+    """Ctrl+C is the interrupt with text highlighted, from either focus.
+
+    Textual's ``Screen`` binds ``ctrl+c,super+c`` to ``screen.copy_text`` and
+    sits between the focused widget and the App in the binding chain, so before
+    ``TranscriptScreen`` this gesture copied and ``aborts`` stayed EMPTY — and
+    stayed empty for every later press, because ``action_copy_text`` never
+    clears the selection. Both focuses are driven because the app reaches both:
+    a drag beginning ON a block focuses the transcript, one beginning in the
+    gutter leaves the composer focused, and only the composer's path goes
+    through ``Editor._on_key``.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        block = await _seeded(app, pilot)
+        await _drag(app, pilot, (block.region.x, block.region.y), (79, 23))
+        assert app.screen.selections, "the selection must still be live for this to mean anything"
+
+        if focus_transcript:
+            app.query_one(TranscriptView).focus()
+        else:
+            app.query_one(Editor).focus()
+        await pilot.pause()
+
+        session.aborts.clear()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert session.aborts == ["interrupted"]
+
+
+@pytest.mark.asyncio
+async def test_the_highlight_outlives_the_copy() -> None:
+    """Releasing copies; it does not also wipe what the user pointed at.
+
+    The band is the only record of WHAT was taken — the toast says an act
+    happened, not its extent — so clearing it on release would read as the
+    selection having been lost at the moment it was used.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        block = await _seeded(app, pilot)
+        await _drag(app, pilot, (block.region.x, block.region.y), (79, 23))
+        assert block in app.screen.selections

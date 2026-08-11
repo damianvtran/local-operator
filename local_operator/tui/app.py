@@ -32,12 +32,14 @@ from rich.console import Group
 from rich.style import Style
 from rich.terminal_theme import TerminalTheme
 from rich.text import Text
+from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.css.query import NoMatches
-from textual.events import DescendantBlur, DescendantFocus
+from textual.events import DescendantBlur, DescendantFocus, TextSelected
 from textual.geometry import Size
+from textual.screen import Screen
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
@@ -462,6 +464,65 @@ class _ProviderRows(NamedTuple):
     problem: str
 
 
+class Chrome(Static):
+    """A frame element the app draws for itself, and never lets a copy pick up.
+
+    Textual collects EVERY widget a drag passes over into
+    ``Screen.selections`` and concatenates their ``get_selection``. Measured at
+    80x24 with one user block and one answer, a drag that overshot the
+    transcript by a row copied::
+
+        summarise the ingest path
+        First line of the answer.
+        Second paragraph here.
+        ❯
+        ◆ test/model › ⌂ ~/local-operator                     ! auto-approve always
+
+    The last two rows are the composer's chevron and the status band — the
+    app's own furniture, pasted into the middle of someone's bug report,
+    interior padding and all. That is the "terminal artifacts" the report
+    names, and it is the rule ``TranscriptBlock.copy_gutter`` already states
+    for a block's own gutter: chrome is not content. ``ALLOW_SELECT`` keeps
+    these out of the selection walk entirely (``textual.walk``), so they are
+    not highlighted either — the band and the clipboard stay one claim.
+
+    Not used for the transcript's own chrome (the user rule, the notice glyph
+    field): those rows also carry text, so they are stripped per row by
+    ``copy_gutter`` instead.
+    """
+
+    ALLOW_SELECT = False
+
+
+class TranscriptScreen(Screen[None]):
+    """The default screen, with Textual's Ctrl+C copy taken back out.
+
+    ``Screen.BINDINGS`` in textual 8.2.8 carries
+    ``Binding("ctrl+c,super+c", "screen.copy_text", …)``, and the Screen sits
+    BETWEEN the focused widget and the App in ``_binding_chain``. So the stock
+    arrangement is: Ctrl+C copies whenever a selection happens to be live and
+    interrupts only when one is not — and ``action_copy_text`` does not clear
+    the selection, so nothing ever makes it not-live again.
+
+    Measured before this override, in a pilot driving a real drag: after
+    releasing a selection over an answer, Ctrl+C set ``app._clipboard`` and
+    ``session.aborts`` stayed EMPTY. The abort was not delayed, it was gone,
+    and it stayed gone for every later press until the user happened to click
+    somewhere. Ctrl+C is this app's interrupt and the first rung of its exit
+    ladder (:meth:`OperatorApp.action_interrupt`); a key that stops the agent
+    cannot be conditional on whether some text is highlighted three screens up.
+
+    Skipping rather than rebinding, so the fall-through is Textual's own:
+    ``SkipAction`` makes ``_check_bindings`` keep walking the chain, and the
+    next ``ctrl+c`` in it is the App's ``interrupt``. Nothing is lost by
+    dropping the copy, because the copy already happened when the drag ended —
+    see :meth:`OperatorApp.on_text_selected`.
+    """
+
+    def action_copy_text(self) -> None:
+        raise SkipAction()
+
+
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
@@ -691,6 +752,19 @@ class OperatorApp(App[None]):
         self._effort_refusal_shown: str | None = None
 
     # -- composition --------------------------------------------------------
+    def get_default_screen(self) -> Screen[None]:
+        """The app's own Screen, for the one binding it removes.
+
+        Textual's default is a bare ``Screen``; this one differs only in
+        :meth:`TranscriptScreen.action_copy_text`. The id matches the stock
+        ``get_default_screen`` so the layout classes the app flips on
+        ``self.screen`` (``boot``, ``subagent``, ``aside``) and the sheet's
+        ``Screen.boot`` rules keep addressing the same node — a subclass still
+        matches a ``Screen`` type selector, because Textual builds a widget's
+        CSS type names from its whole base chain.
+        """
+        return TranscriptScreen(id="_default")
+
     def compose(self) -> ComposeResult:
         # The welcome splash is the transcript's EMPTY STATE, so it is mounted
         # INSIDE the transcript rather than beside it: that hands it exactly the
@@ -731,10 +805,10 @@ class OperatorApp(App[None]):
                 yield self._subagent_panel
                 yield self._todo_panel
             with Container(id="input-shell"):
-                yield Static(id="status-band")
+                yield Chrome(id="status-band")
                 editor = Editor(commands=SLASH_COMMANDS)
                 with Horizontal(id="input-row"):
-                    yield Static("❯", id="prompt-chevron")
+                    yield Chrome("❯", id="prompt-chevron")
                     yield editor
                 # The picker is the editor's, but it cannot be the editor's
                 # CHILD: it has to draw across the full panel width, outside the
@@ -1643,6 +1717,70 @@ class OperatorApp(App[None]):
         # server that does not exist.
         for name, error in sorted(outcome.failures.items()):
             self._system_notice(f"MCP {name} failed: {error}", "error")
+
+    # -- text selection (TUI-021) -------------------------------------------
+    def on_text_selected(self, event: TextSelected) -> None:
+        """Releasing a drag IS the copy. There is no key left to bind.
+
+        Reported: "while I can highlight text from agent messages, pressing
+        cmd+C to copy does not copy to clipboard". It does not, and no change
+        to this app could make that keystroke arrive. Ghostty binds it itself —
+        ``ghostty +list-keybinds`` prints ``super+c=copy_to_clipboard:mixed``,
+        without the ``performable:`` prefix that would forward the key when the
+        action cannot run — so cmd+C is consumed by the terminal, which then
+        copies ITS selection. A Textual selection is painted by the app into
+        the alt screen; the terminal has no selection of its own and copies
+        nothing. Exactly the reported symptom.
+
+        The keys that do arrive are all spoken for. Ctrl+C is the interrupt and
+        the first rung of the exit ladder — Textual's stock Screen binding was
+        quietly taking it whenever a selection was live, which is the bug
+        :class:`TranscriptScreen` removes, not one to build on. So the gesture
+        carries itself: the selection the user just made, at the moment they
+        finish making it, is what they wanted. ``TextSelected`` fires once per
+        mouse release (``Screen._forward_event``), and a plain click clears the
+        selection before posting it, so a click copies nothing.
+
+        The clipboard write is OSC 52 (``App.copy_to_clipboard``), which is what
+        makes this work over ssh and inside a multiplexer as well as locally.
+        Verified end to end against this terminal — Ghostty 1.3.2 inside cmux —
+        by writing the escape to its tty and reading ``pbpaste`` back, at sizes
+        from 1 KB to 500 KB.
+
+        The selection stays highlighted afterwards. It is the only record of
+        WHAT was taken; the toast says an act happened, the band says what it
+        was, and dropping the band on release would read as the selection
+        having been lost.
+        """
+        self._copy_selection()
+
+    def _copy_selection(self) -> None:
+        """Put the highlighted text on the clipboard, and say so.
+
+        Routed through ``Screen.get_selected_text`` rather than reaching into
+        the blocks, because that is the call that already filters out the
+        widgets which return ``None`` and joins the rest in select order —
+        including the per-row gutter strip and pad trim
+        ``TranscriptBlock.get_selection`` does. The highlight and the clipboard
+        are then the same computation, which is the property the block's
+        docstring claims and the only one that keeps them from disagreeing.
+
+        A block whose visual is a Rich renderable rather than a ``Content``
+        contributes NOTHING and the rows around it close up silently — see
+        ``TranscriptBlock.get_selection``. That is a property of the block, not
+        of this method: a block that wants to be copyable has to reach the
+        screen as ``Content``.
+
+        Both of ``get_selected_text``'s empty answers are the same news here:
+        ``None`` for no selection at all, ``""`` for a selection over widgets
+        that every one of them declined.
+        """
+        text = self.screen.get_selected_text()
+        if not text:
+            return
+        self.copy_to_clipboard(text)
+        lines = text.count("\n") + 1
+        self.query_one(Toast).show(f"copied {lines} line{'' if lines == 1 else 's'}")
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
