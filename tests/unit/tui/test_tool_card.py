@@ -1419,6 +1419,63 @@ def test_a_running_row_names_its_command_not_its_argument_bytes() -> None:
     assert "cd ~/local-operator && git remote" in settled
 
 
+def test_a_short_identity_summary_was_never_broken_and_must_stay_that_way() -> None:
+    """The CONTROL case, asserted beside the broken one.
+
+    A settled MCP row rendered correctly throughout::
+
+        🛡 workspace_get_gmail_mes…  damian@gominerva.com full        ✓  0.5s
+
+    — real identity arguments, correctly truncated, one duration on the right
+    and no `· Ns` artefact in the headline. So the shared path through
+    ``_summary_from_args`` was never the problem, and the fix must not have
+    moved this row by a cell.
+
+    The two differ in ONE property, which is the whole diagnosis: summary
+    LENGTH. ``_label_min_width`` is computed from the summary, so a
+    twenty-five-cell identity clears the threshold at every realistic width
+    and a seventy-five-cell command clears none of them — which is why the
+    ladder fired for shell-shaped calls and only for them. Asserted here so a
+    future change to either row has to keep both true at once.
+    """
+    identity = ToolCard("t", "workspace_get_gmail_messages_content_batch")
+    identity.set_composing(240, "workspace_get_gmail_messages_content_batch")
+    identity.begin_running(
+        "workspace_get_gmail_messages_content_batch",
+        {"user_google_email": "damian@gominerva.com", "format": "full"},
+        None,
+    )
+    identity.mark_done("ok\nmore")
+
+    shell = ToolCard("t", "bash")
+    shell.set_composing(199, "bash")
+    shell.begin_running(
+        "bash",
+        {"command": 'cd ~/local-operator && git remote -v; echo "--- gitconfig"; cat .git/config'},
+        None,
+    )
+    shell.mark_done("exit code: 0\nok")
+
+    for width in (80, 100, 120):
+        identity_row = identity._build_row(width).plain
+        shell_row = shell._build_row(width).plain
+        # The control: unchanged, and never carrying a compose artefact.
+        assert "damian@gominerva.com full" in identity_row
+        assert "240 B" not in identity_row
+        assert width >= identity._label_min_width()  # never on the ladder
+        # The row that was broken, now telling the same kind of truth.
+        assert "cd ~/local-operator && git remote" in shell_row
+        assert "199 B" not in shell_row
+        # Both settle into exactly ONE duration, in the same column. ` · ` is
+        # the compose facts' own separator (`199 B · 1s`), so its absence is
+        # what says no second clock reached the headline — which was the
+        # difference between the two rows in the reported frames.
+        for row in (identity_row, shell_row):
+            assert row.rstrip().endswith("s")
+            assert " · " not in row
+        assert identity_row.index(ICON_SUCCESS) == shell_row.index(ICON_SUCCESS)
+
+
 def test_the_command_is_abbreviated_to_the_row_by_one_rule_in_every_state() -> None:
     """"Abbreviated within the available horizontal line space" — and the SAME
     abbreviation running as settled, so a call cannot read as one thing while
