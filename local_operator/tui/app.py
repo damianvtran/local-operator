@@ -4799,7 +4799,14 @@ class OperatorApp(App[None]):
         return None
 
     def on_tool_updated(self, message: ToolUpdated) -> None:
-        """TUI-007: stream the partial result into the card's summary."""
+        """TUI-007: feed the partial result into the card's LIVE view.
+
+        Into the expansion, not the summary: the summary is the command, which
+        a running row must keep (the card is the fact, the working line is the
+        intent). The card neither repaints nor bounds anything here — it
+        coalesces the update onto its own 1 Hz clock, so a command printing a
+        line a millisecond costs one repaint a second.
+        """
         card = self._tool_cards.get(message.event.tool_call_id)
         if card is None:
             return

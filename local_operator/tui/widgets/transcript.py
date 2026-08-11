@@ -870,7 +870,7 @@ class TranscriptView(ScrollableContainer):
         self._blocks.insert(index, block)
         if hasattr(block, "tool_name"):
             self._invalidate_name_col()
-        stick_to_bottom = self._is_near_bottom()
+        stick_to_bottom = self.is_near_bottom()
         # `before=None` is Textual's own "append" — one mount call either way.
         self.mount(block, before=tail if tail in self._blocks else None)
         # The gap above was decided while the block was still UNMOUNTED, where
@@ -1102,8 +1102,16 @@ class TranscriptView(ScrollableContainer):
         if self._on_clear is not None:
             self._on_clear()
 
-    def _is_near_bottom(self) -> bool:
-        """True when the viewport sits at (or within 2 rows of) the bottom."""
+    def is_near_bottom(self) -> bool:
+        """True when the viewport sits at (or within 2 rows of) the bottom.
+
+        Public because a block can now GROW in place — a live tool card
+        streaming output — and growth has the same "follow the tail, but only
+        if the reader was already at the tail" question that mounting does.
+        A reader who has scrolled up to read something is reading it, and
+        yanking them back to the bottom because a card elsewhere gained a row
+        is the reflow bug this branch has already fixed twice.
+        """
         max_offset = self.virtual_size.height - self.size.height
         if max_offset <= 0:
             return True

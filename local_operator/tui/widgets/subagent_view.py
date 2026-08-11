@@ -930,7 +930,7 @@ class SubagentView(Vertical):
     def _scroll_body(self, *, down: bool) -> None:
         """Move the transcript one page, the way PgUp/PgDn do.
 
-        A PAGE and not a line, and the reason is `_is_near_bottom`'s two-row
+        A PAGE and not a line, and the reason is `is_near_bottom`'s two-row
         tolerance: on a LIVE page a one-line lift off the tail still counts as
         "at the bottom", so the next `append_block` would scroll the reader
         straight back down and the click would look like it had missed. A page
