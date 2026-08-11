@@ -31,9 +31,9 @@ from local_operator.tui.widgets.command_picker import (
     slash_context,
 )
 from local_operator.tui.widgets.editor import (
+    ArgumentQueryOpened,
     Editor,
     EditorSubmitted,
-    ProviderQueryOpened,
 )
 from tests.unit.tui.conftest import TCSS_PATH
 
@@ -106,7 +106,7 @@ class PickerHarnessApp(App[None]):
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         self.submissions.append(message.text)
 
-    def on_provider_query_opened(self, message: ProviderQueryOpened) -> None:
+    def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
         # Stands in for the app's controller-backed answer. The harness keeps the
         # two sets distinct so `/logout` can be shown to offer strictly less.
         message.stop()

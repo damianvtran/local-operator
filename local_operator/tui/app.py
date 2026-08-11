@@ -60,7 +60,7 @@ from local_operator.model.effort import default_effort, next_effort
 from local_operator.session import naming
 from local_operator.session.protocol import CompactionOutcome, SessionProtocol
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.autocomplete import ArgumentChoice, ArgumentMode, SlashCommand
 from local_operator.tui.costs import job_cost, turn_cost
 from local_operator.tui.events import (
     AssistantDelta,
@@ -98,12 +98,12 @@ from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     DEFAULT_PLACEHOLDER,
     READ_ONLY_PLACEHOLDER,
+    ArgumentQueryOpened,
     Editor,
     EditorQuit,
     EditorSubmitted,
     InterruptRequested,
     ModelQueryOpened,
-    ProviderQueryOpened,
     StopRequested,
 )
 from local_operator.tui.widgets.model_picker import ModelRow
@@ -217,7 +217,15 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # NOT an echo. The argument is a setting, not words the model is given, and
     # the receipt names the resulting level — the durable fact — where the typed
     # word is only how it was reached. Exactly `/approvals`' rule.
-    SlashCommand("effort", "Show or set reasoning effort (shift+tab cycles)"),
+    SlashCommand(
+        "effort",
+        "Show or set reasoning effort (shift+tab cycles)",
+        # OPTIONAL: the space offers this model's rungs, and a bare `/effort`
+        # still prints the ladder with the current one marked. The list is what
+        # the printed ladder could never be — the rungs are OFFERED rather than
+        # transcribed by hand from a line of prose.
+        arguments=ArgumentMode.OPTIONAL,
+    ),
     # The listing is the receipt.
     SlashCommand("provider", "List providers and their login/usage state"),
     # The listing is the receipt.
@@ -253,15 +261,29 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("compact", "Compact the context now"),
     # The receipt states the resulting mode, which is the durable fact; the
     # typed argument is only how it was reached.
-    SlashCommand("approvals", "Show or set tool approval mode (ask | auto)"),
+    SlashCommand(
+        "approvals",
+        # Names the SCOPE word, not the modes: the modes are rows in the list a
+        # space opens, where they can carry which one is live and which one the
+        # next launch will use. `default` is the half a list cannot teach on its
+        # own, because a user has to suspect it exists to go looking for it —
+        # the same job `PERSIST_HINT` does on `/model`.
+        "Show or set tool approval mode; add default to keep it",
+        arguments=ArgumentMode.OPTIONAL,
+    ),
     # The listing is the receipt.
     SlashCommand("skills", "List loaded skills"),
     # The listing is the receipt.
     SlashCommand("mcp", "List MCP servers"),
     # The flow narrates itself: URL block, progress notices, then success.
-    SlashCommand("login", "Authenticate a provider"),
+    # REQUIRED for both: bare, neither has anything to run — the provider list
+    # IS the command, which is why completing the word opens it instead of
+    # submitting a no-op over the list it just drew.
+    SlashCommand("login", "Authenticate a provider", arguments=ArgumentMode.REQUIRED),
     # The worker reports the removal, naming the provider.
-    SlashCommand("logout", "Remove stored provider credentials"),
+    SlashCommand(
+        "logout", "Remove stored provider credentials", arguments=ArgumentMode.REQUIRED
+    ),
 ]
 
 
@@ -580,6 +602,12 @@ class OperatorApp(App[None]):
         # without the latch it would mount a fresh question for a dead turn).
         self._approval: ApprovalBlock | None = None
         self._approve_all: bool = False
+        # What a NEW session opens in, read from config at mount and rewritten
+        # by `/approvals default <mode>`. Held beside `_approve_all` rather than
+        # re-read per use because the two are ONE state to a reader — "is the
+        # gate armed, and will it still be tomorrow" — and the list, the band
+        # and the bare report all have to answer both halves from the same pair.
+        self._approvals_default_auto: bool = False
         # Which TURN a stop belongs to, rather than a flag someone has to clear.
         # `_turn_epoch` counts turn boundaries; `_approvals_denied_epoch` records
         # the epoch a stop/teardown armed the deny latch in. An asker captures the
@@ -736,6 +764,11 @@ class OperatorApp(App[None]):
 
         self._status = StatusLine(self.query_one("#status-band", Static))
         self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
+        # Straight after the band exists and before the session is asked for:
+        # the saved mode has to be in force by the time the first tool can ask,
+        # and the band has to say so on the boot frame rather than on whichever
+        # later event happens to repaint it.
+        self._load_approvals_default()
         editor = self.query_one(Editor)
         # Installed here rather than in the Editor's constructor: the editor is
         # built inside `compose`, before the app has anything for it to call, and a
@@ -1851,7 +1884,7 @@ class OperatorApp(App[None]):
         batch.
         """
         if answer == "a":
-            self._approve_all = True
+            self._set_approve_all(True)
             # States the CHANGE, not its duration: "for the rest of this
             # session" stays in the transcript at full warning after
             # `/approvals ask` has re-armed the gate, leaving the loudest ink on
@@ -1862,8 +1895,28 @@ class OperatorApp(App[None]):
                     "warning",
                 )
             )
-            if self._status is not None:
-                self._status.update(approvals_auto=True)
+
+    def _set_approve_all(self, approve_all: bool) -> None:
+        """THE writer of the auto-approve mode, band included.
+
+        One method because the band is an ASSERTION about the gate, and the two
+        were set from four places apiece with nothing tying them together. That
+        is not hypothetical tidiness: an owner's frame showed `! auto-approve`
+        beside two tool calls reporting `User denied approval`, and the first
+        hour of diagnosing it went on establishing whether the band was lying —
+        which the code could not answer, because nothing made it impossible.
+        Now the band cannot say anything the gate does not do, since the only
+        way to change either is to change both.
+
+        The persisted default rides along for the same reason: `! auto-approve`
+        and `! auto-approve always` are two different promises, and which one is
+        true is decided by the pair of flags this method owns.
+        """
+        self._approve_all = approve_all
+        if self._status is not None:
+            self._status.update(
+                approvals_auto=approve_all, approvals_always=self._approvals_default_auto
+            )
 
     def _deny_queued_approvals(self) -> None:
         """Refuse the live prompt AND every ask still queued behind it.
@@ -1955,47 +2008,177 @@ class OperatorApp(App[None]):
         self._clear_transcript()
 
     def _cmd_approvals(self, arg: str, notice: NoticeFn) -> None:
-        """``/approvals [ask|auto]`` — the way BACK from "allow all".
+        """``/approvals [default] [ask|auto]`` — the mode, and how long it lasts.
 
-        "Allow all" disarms a safety gate for the whole session, so it needs a
-        stated mode and a route back; a one-way switch answered by a single
-        keystroke is the part that made it a footgun rather than a shortcut.
-        Bare ``/approvals`` reports, which is also how a user who cannot
-        remember what they pressed finds out.
+        "Allow all" disarms a safety gate, so it needs a stated mode and a route
+        back; a one-way switch answered by a single keystroke is the part that
+        made it a footgun rather than a shortcut. Bare ``/approvals`` reports,
+        which is also how a user who cannot remember what they pressed finds out.
+
+        ``default`` is the SAME word ``/model`` uses for the same promotion, in
+        the same position, and that is the whole argument for spelling it this
+        way rather than as ``/approvals-default`` or a ``--save`` flag: a user
+        learns "put ``default`` in front of the value to keep it" once and it
+        holds on the second command they meet it on. It also composes the same
+        way — ``/model default p/id`` switches AND saves, and so does this, so
+        nobody has to run two commands to end up in the state they asked for.
+
+        The two scopes are genuinely different commitments — "auto-approve for
+        the next hour" versus "auto-approve every session from now on" — so the
+        receipts do not share a sentence: a session change says ``(this
+        session)`` and names the command that would make it stick, and a saved
+        one names the FILE and the KEY, which is the only claim a user can check
+        without quitting.
         """
-        mode = arg.strip().lower()
+        argument = arg.strip().lower()
+        persist = argument == "default" or argument.startswith("default ")
+        mode = argument[len("default ") :].strip() if persist else argument
+        if persist and not mode:
+            # Bare `/approvals default` means "keep the mode I am in", exactly as
+            # bare `/model default` means "keep the model I am on". The sentence
+            # a user has after switching is "make THIS the default", and making
+            # them retype the word they just typed is a transcription exercise.
+            mode = "auto" if self._approve_all else "ask"
         if mode in ("ask", "on", "prompt"):
-            self._approve_all = False
-            # Also clears the turn-scoped deny latch: this command's whole
-            # promise is "tools will prompt again", and a latch left armed
-            # would make that statement false for the rest of the run.
-            self._allow_approvals_again()
-            if self._status is not None:
-                self._status.update(approvals_auto=False)
-            notice("tool approvals: ask — write and command tools will prompt again")
+            wanted_auto = False
+        elif mode in ("auto", "off", "yolo"):
+            wanted_auto = True
+        elif mode:
+            # Rejected: nothing changed, so the boot composition survives it
+            # (see `_cmd_usage`). The receipts that DID run stay on `notice`.
+            self._system_notice(
+                f"unknown approval mode {mode!r} — use ask or auto, "
+                "or default ask / default auto to keep it",
+                "warning",
+            )
             return
-        if mode in ("auto", "off", "yolo"):
-            self._approve_all = True
+        else:
+            self._report_approvals(notice)
+            return
+        if wanted_auto:
             # The prompt ON SCREEN is part of "every tool runs without asking".
             # Setting the mode and leaving it pending printed the loudest notice
             # in the app next to a question still waiting for an answer, with the
             # tool behind it parked on a future nothing was going to settle — the
             # `A` key never had this gap because it answers through the widget.
             self._answer_live_approval_as_allowed()
-            if self._status is not None:
-                self._status.update(approvals_auto=True)
-            notice("tool approvals: auto — every tool runs without asking", "warning")
-            return
-        if mode:
-            # Rejected: nothing changed, so the boot composition survives it
-            # (see `_cmd_usage`). The two receipts below DID run and stay on
-            # `notice`.
-            self._system_notice(f"unknown approval mode {mode!r} — use ask or auto", "warning")
-            return
-        if self._approve_all:
-            notice("tool approvals: auto — /approvals ask restores prompting", "warning")
         else:
-            notice("tool approvals: ask — write and command tools prompt before running")
+            # Also clears the turn-scoped deny latch: this command's whole
+            # promise is "tools will prompt again", and a latch left armed
+            # would make that statement false for the rest of the run.
+            self._allow_approvals_again()
+        saved_to = ""
+        problem = ""
+        if persist:
+            # Written BEFORE the flags move so the band cannot advertise `always`
+            # on the strength of a write that failed. The live switch happens
+            # either way: a read-only config dir is a reason not to promise the
+            # next launch anything, not a reason to refuse the session the mode
+            # it asked for.
+            saved_to, problem = self._save_approvals_default(wanted_auto)
+            if not problem:
+                self._approvals_default_auto = wanted_auto
+        self._set_approve_all(wanted_auto)
+        if problem:
+            notice(problem, "warning")
+        elif persist:
+            # Names the file and the key, like `/model default`. "Saved" alone is
+            # a claim the user cannot check without relaunching.
+            kind = "warning" if wanted_auto else "info"
+            notice(
+                f"tool approvals: {mode_word(wanted_auto)} — saved to {saved_to}: "
+                f"tool_approval_mode {mode_word(wanted_auto)} "
+                "(this session and every new one)",
+                kind,
+            )
+        elif wanted_auto:
+            notice(
+                "tool approvals: auto — every tool runs without asking (this session) — "
+                "/approvals default auto saves it for new sessions",
+                "warning",
+            )
+        else:
+            notice(
+                "tool approvals: ask — write and command tools will prompt again "
+                "(this session)"
+            )
+
+    def _report_approvals(self, notice: NoticeFn) -> None:
+        """What a bare ``/approvals`` prints: the live mode AND the saved one.
+
+        Both halves, always, because the state is genuinely two-valued and the
+        band can only carry one of them. A session switched away from its saved
+        default is the case that needs saying out loud — the user is one relaunch
+        from a mode they last chose days ago, and nothing else on the screen
+        would ever mention it.
+
+        The `warning` tint follows the LIVE mode, not the saved one: the tint
+        answers "is the gate disarmed right now".
+        """
+        live = mode_word(self._approve_all)
+        saved = mode_word(self._approvals_default_auto)
+        effect = (
+            "every tool runs without asking"
+            if self._approve_all
+            else "write and command tools prompt before running"
+        )
+        if live == saved:
+            notice(
+                f"tool approvals: {live} — {effect}; new sessions open the same way",
+                "warning" if self._approve_all else "info",
+            )
+            return
+        notice(
+            f"tool approvals: {live} (this session) — {effect}; "
+            f"new sessions open in {saved} — /approvals default {live} changes that",
+            "warning" if self._approve_all else "info",
+        )
+
+    def _save_approvals_default(self, auto: bool) -> tuple[str, str]:
+        """Write the boot default to config: ``(saved_to, problem)``.
+
+        Same shape and the same failure policy as ``/model default``'s write: a
+        config dir that cannot be written is reported in the receipt and does not
+        take down a working prompt. Imported at the call site, like that one, so
+        the TUI's import cost does not carry the config stack for a command most
+        sessions never run.
+        """
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            manager = ConfigManager(config_dir())
+            manager.set_config_value("tool_approval_mode", mode_word(auto))
+            return _home_relative(str(manager.config_file)), ""
+        except Exception as error:  # config write failure
+            return "", (
+                f"approvals mode changed for this session, but could not save default: {error}"
+            )
+
+    def _load_approvals_default(self) -> None:
+        """Adopt the saved boot default, at mount, before the session exists.
+
+        The read half of ``/approvals default``. A config value nothing reads
+        back is not persistence, it is a file the app writes to itself — so this
+        runs before the first turn can ask for approval, and it goes through
+        :meth:`_set_approve_all` like every other route, which is what makes the
+        band right on the boot frame rather than on the first command.
+
+        Silent on failure. An unreadable config means the safe mode, and a
+        session that opened prompting is a session that asks a question the user
+        can answer — the failure mode in the other direction is a gate the user
+        believes is armed.
+        """
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            saved = ConfigManager(config_dir()).get_config_value("tool_approval_mode", "ask")
+        except Exception:
+            logger.debug("could not read the saved tool approval mode", exc_info=True)
+            return
+        self._approvals_default_auto = str(saved).strip().lower() == "auto"
+        self._set_approve_all(self._approvals_default_auto)
 
     def _clear_transcript(self) -> None:
         self._transcript_view().clear_blocks()  # fires the on_clear hook
@@ -4070,24 +4253,45 @@ class OperatorApp(App[None]):
         plural = "exchange" if len(pairs) == 1 else "exchanges"
         self._notice(f"forked {len(pairs)} aside {plural} into the chat")
 
-    # -- provider argument list ---------------------------------------------
-    def on_provider_query_opened(self, message: ProviderQueryOpened) -> None:
-        """The buffer just entered ``/login …`` or ``/logout …`` — fill the list.
+    # -- argument lists -------------------------------------------------------
+    def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
+        """The buffer just entered ``/<command> …`` — fill that command's list.
 
         Answered on the MESSAGE for the same reason the model list is: every route
         into the list (typing the space, being completed into it by the command
         picker) then arrives at one place with one set of rows.
+
+        ONE handler for every list-taking command, dispatching on the word. The
+        registry states THAT a command offers values
+        (:attr:`SlashCommand.arguments`) and this states WHICH, at the moment the
+        list opens — which is what lets every row carry live state: the credential
+        a ``/logout`` row would remove, the mode ``/approvals`` is in and the one
+        it will boot in, the rungs THIS model accepts.
         """
         message.stop()
         editor = self._editor()
         picker = editor.picker
-        if editor.provider_command != message.command:
+        if editor.argument_command != message.command:
             # The message is one message-loop tick old, and a tick is enough for
             # the user to have deleted the command or typed over it. Verified:
             # setting the buffer to `/logout ` and then to a sentence still
             # appended the notice below, attaching it to a command that no longer
             # exists. The buffer is the authority on which list is open, here as
             # much as in the editor's own resync.
+            return
+        if message.command == "approvals":
+            picker.set_choices(self._approval_choices())
+            picker.set_notice("")
+            return
+        if message.command == "effort":
+            levels = self._effort_levels()
+            picker.set_choices(self._effort_choices(levels))
+            # The one list that is legitimately empty for a reason no query would
+            # fix: this model takes no effort key at all, which is what a bare
+            # `/effort` says in the transcript. Said here too, because a user who
+            # opened the list is looking at the list, not at the ledger.
+            label = getattr(self._session, "model_label", "") or "this model"
+            picker.set_notice("" if levels else _effort_unavailable(label))
             return
         if self._providers is None:
             # Same degradation as the handlers themselves: no controller means no
@@ -4116,6 +4320,81 @@ class OperatorApp(App[None]):
         # picker it is in the user's eye-line, self-clearing, unrepeatable, and it
         # costs the transcript nothing.
         picker.set_notice(reason)
+
+    def _approval_choices(self) -> list[ArgumentChoice]:
+        """The four rows ``/approvals`` offers: two modes × two scopes.
+
+        FOUR rows rather than two, and rather than a ``default`` row that then
+        asks for a second word. The scope is the part of this decision that was
+        invisible — "auto-approve for the next hour" and "auto-approve forever"
+        were the same keystroke — so it is a COLUMN the eye can compare down,
+        not a modifier the user has to remember to prepend. A ``default`` row
+        leading to a second list would put the mode back behind a keystroke the
+        list cannot show, which is the complaint this whole change answers.
+
+        Every row is a complete, runnable argument (``default auto`` is what the
+        buffer receives and what the handler parses), so choosing from the list
+        and typing it out are the same command reaching the same code.
+
+        ``detail`` carries the scope AND where the user already stands, because
+        those are one question at the moment of choosing: `this session ·
+        current` is the live mode, `every session · saved` is what the next
+        launch will open in, and a user who set one but not the other can see
+        both marks at once. ``alert`` on ``default auto`` only: it is the one
+        row whose effect outlives the window it is typed in.
+        """
+        live_auto = self._approve_all
+        saved_auto = self._approvals_default_auto
+        session_mark = " · current"
+        saved_mark = " · saved"
+        return [
+            ArgumentChoice(
+                "ask",
+                "Prompt before write and command tools",
+                aliases=("on", "prompt"),
+                detail="this session" + ("" if live_auto else session_mark),
+            ),
+            ArgumentChoice(
+                "auto",
+                "Run every tool without asking",
+                aliases=("off", "yolo"),
+                detail="this session" + (session_mark if live_auto else ""),
+            ),
+            ArgumentChoice(
+                "default ask",
+                "Prompt, saved as the default",
+                detail="every session" + ("" if saved_auto else saved_mark),
+            ),
+            ArgumentChoice(
+                "default auto",
+                "Never prompt, saved as the default",
+                detail="every session" + (saved_mark if saved_auto else ""),
+                alert=True,
+            ),
+        ]
+
+    def _effort_choices(self, levels: tuple[str, ...]) -> list[ArgumentChoice]:
+        """``auto`` plus this model's ladder, the rung in force marked.
+
+        ``auto`` leads for the reason it leads the printed listing: it is a rung
+        of its own — the state a model with no level set is in, and the argument
+        that returns to it — and without it every OpenAI reasoning model, which
+        boots unset, would open a list with nothing marked.
+
+        No per-level description. ``low``/``medium``/``high`` are the words
+        themselves; prose beside each would be invented distinctions in a column
+        the user is scanning for one they already understand.
+        """
+        current = getattr(_model_spec(self._session), "reasoning_effort", None) or "auto"
+        rungs = ("auto", *levels)
+        return [
+            ArgumentChoice(
+                name,
+                "The model's own default" if name == "auto" else "",
+                detail="current" if name == current else "",
+            )
+            for name in rungs
+        ]
 
     def _provider_choices(self, command: str) -> _ProviderRows:
         """Provider rows for ``/login`` or ``/logout``, in registry order.

@@ -30,10 +30,16 @@ attached" variant to keep in step.
 
 The picker under the field serves two lists. While the command WORD is open it
 offers commands; once the word is terminated by a space, ``/model`` hands the
-model picker its query and ``/login``/``/logout`` put the SAME command picker
-into argument mode over the provider list. Which one is live is decided by
-parsing the buffer (``slash_context`` versus ``slash_argument``), so two lists
-can never be open at once.
+model picker its query and every command the registry marks as taking a value
+(``SlashCommand.arguments``) puts the SAME command picker into argument mode
+over that command's values — providers for ``/login``, modes for
+``/approvals``, this model's rungs for ``/effort``. Which one is live is
+decided by parsing the buffer (``slash_context`` versus ``slash_argument``), so
+two lists can never be open at once.
+
+Nothing here filters what may be SUBMITTED. The list ranks what is typed and
+offers a completion; a user who knows the value types it and presses Enter, and
+never sees the difference.
 """
 
 from __future__ import annotations
@@ -48,7 +54,7 @@ from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult
 
-from local_operator.tui.autocomplete import SlashCommand
+from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 from local_operator.tui.widgets.command_picker import (
     CommandPicker,
     PickerMode,
@@ -105,15 +111,17 @@ class ModelQueryOpened(Message):
         super().__init__()
 
 
-class ProviderQueryOpened(Message):
-    """Posted when the buffer enters ``/login …`` or ``/logout …``.
+class ArgumentQueryOpened(Message):
+    """Posted when the buffer enters ``/<command> …`` for a list-taking command.
 
-    Carries the command WORD because the two lists are different sets — every
-    loginable provider versus only the ones holding a stored credential — and the
-    app cannot recover which one from the buffer once the message is queued.
+    Carries the command WORD because every list is a different set — every
+    loginable provider, only the ones holding a credential, the two approval
+    modes, the rungs THIS model accepts — and the app cannot recover which one
+    from the buffer once the message is queued.
 
     Like :class:`ModelQueryOpened` it fires on the TRANSITION only, so the app
-    reads the credential store once per opening rather than once per keystroke.
+    builds the rows once per opening rather than once per keystroke. That is
+    what makes a list affordable when filling it costs a credential-store read.
     """
 
     def __init__(self, command: str) -> None:
@@ -156,21 +164,11 @@ class Editor(TextArea):
     #: the same list.
     MODEL_COMMANDS = ("model", "models")
 
-    #: Command words whose ARGUMENT is a provider id. These drive the SAME picker
-    #: the command word uses, in its argument mode.
-    PROVIDER_COMMANDS = ("login", "logout")
-
-    #: Provider commands that DESTROY something. `/logout` removes a credential
-    #: and an OAuth one costs another browser round trip to get back, so its rows
-    #: are gated harder than the shared ambiguity rule gates the rest: see
-    #: :meth:`_picker_choice_is_unambiguous` and :meth:`_apply_command`.
+    #: Commands that DESTROY what a chosen row names. `/logout` removes a
+    #: credential and an OAuth one costs another browser round trip to get back,
+    #: so its rows are gated harder than the shared ambiguity rule gates the
+    #: rest: see :meth:`_picker_choice_is_unambiguous` and :meth:`_apply_command`.
     DESTRUCTIVE_COMMANDS = ("logout",)
-
-    #: Every command whose argument drives a list. Completing one of these opens
-    #: that list, which IS the outcome of the keystroke — running the bare command
-    #: as well would echo a no-op into the transcript and clear the buffer the
-    #: list was just opened over.
-    LIST_COMMANDS = MODEL_COMMANDS + PROVIDER_COMMANDS
 
     def __init__(
         self,
@@ -182,13 +180,21 @@ class Editor(TextArea):
         # through _sync_picker().
         self._picker = CommandPicker(self._apply_command)
         self._model_picker = ModelPicker(self._apply_model)
-        # Which provider command the argument list is currently open for, or None
-        # when the buffer is not in one. This is the transition edge the
-        # ProviderQueryOpened message rides: without it the app would rebuild the
-        # credential list on every character typed into the query. Assigned here
-        # for the same reason as the pickers — _sync_picker() reads it during
+        # Which list-taking command the argument list is currently open for, or
+        # None when the buffer is not in one. This is the transition edge the
+        # ArgumentQueryOpened message rides: without it the app would rebuild
+        # the rows on every character typed into the query. Assigned here for
+        # the same reason as the pickers — _sync_picker() reads it during
         # super().__init__().
-        self._provider_command: str | None = None
+        self._argument_command: str | None = None
+        # Command words (primaries AND aliases) whose argument opens the value
+        # list, and the subset of those the bare command cannot stand without.
+        # DERIVED from the registry in :meth:`set_commands` rather than listed
+        # here: a hand-kept tuple beside a registry that already states the fact
+        # is a second source of truth, and the way it fails is a command whose
+        # description advertises options the editor never offers.
+        self._argument_commands: tuple[str, ...] = ()
+        self._required_argument_commands: tuple[str, ...] = ()
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
         super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
@@ -277,17 +283,17 @@ class Editor(TextArea):
         return self._model_picker
 
     @property
-    def provider_command(self) -> str | None:
-        """Which provider command the buffer's argument list is open for, if any.
+    def argument_command(self) -> str | None:
+        """Which command the buffer's argument list is open for, if any.
 
-        Exposed so the app can check that a ``ProviderQueryOpened`` it is handling
-        still describes the buffer. The message is one message-loop tick old, and
-        a tick is enough for the user to have typed over the command — answering a
-        stale one attaches a notice to a command that no longer exists. The buffer
-        stays the single authority; this is how a reader outside the widget asks
-        it, rather than parsing the text a second time.
+        Exposed so the app can check that an ``ArgumentQueryOpened`` it is
+        handling still describes the buffer. The message is one message-loop tick
+        old, and a tick is enough for the user to have typed over the command —
+        answering a stale one attaches rows to a command that no longer exists.
+        The buffer stays the single authority; this is how a reader outside the
+        widget asks it, rather than parsing the text a second time.
         """
-        return self._provider_command
+        return self._argument_command
 
     def set_model_handler(self, handler: Callable[[ModelRow], None] | None) -> None:
         """Install what a chosen model DOES.
@@ -350,8 +356,40 @@ class Editor(TextArea):
         self._history_index = None
 
     def set_commands(self, commands: list[SlashCommand]) -> None:
-        """Slash commands offered to the picker (sync, no I/O)."""
+        """Slash commands offered to the picker (sync, no I/O).
+
+        Also re-derives which words open a VALUE list after their space, and
+        which of those the bare command cannot stand without. Both sets include
+        aliases, because a user who typed the alias must get the same list —
+        that is the bug ``MODEL_COMMANDS`` spells ``models`` out for.
+        """
         self._picker.set_commands(commands)
+        self._argument_commands = tuple(
+            name
+            for command in commands
+            if command.arguments is not ArgumentMode.NONE
+            for name in command.names
+        )
+        self._required_argument_commands = tuple(
+            name
+            for command in commands
+            if command.arguments is ArgumentMode.REQUIRED
+            for name in command.names
+        )
+
+    def opens_a_list(self, name: str) -> bool:
+        """Whether completing the command word ``name`` opens a list INSTEAD of
+        running it.
+
+        True for the model picker's words and for every ``REQUIRED`` argument
+        command: there, opening the list IS the outcome of the keystroke, and
+        submitting as well would run a no-op and clear the buffer the list was
+        just drawn over. An ``OPTIONAL`` one answers something when bare
+        (``/approvals`` reports the mode, ``/effort`` the ladder), so Enter
+        still sends it and the list is left as an offer for the next keystroke.
+        """
+        lowered = name.lower()
+        return lowered in self.MODEL_COMMANDS or lowered in self._required_argument_commands
 
     def clear_content(self) -> None:
         """Empty the buffer and leave history navigation."""
@@ -426,7 +464,7 @@ class Editor(TextArea):
                     return
         if key == "escape" and self._picker.is_pending():
             # The rows are one message-loop tick behind the keystroke that opened
-            # the list — the app answers ProviderQueryOpened — and for that tick
+            # the list — the app answers ArgumentQueryOpened — and for that tick
             # the picker is in argument mode holding nothing, so an `is_open()`
             # gate DROPPED the Esc: the user dismissed the list and then watched
             # it appear anyway. Dismissing an empty argument list records the
@@ -481,7 +519,7 @@ class Editor(TextArea):
                         # the transcript, cleared the buffer, and made the app put
                         # the query back to reopen a list the keystroke had already
                         # opened. One keystroke, one outcome.
-                        if key == "enter" and name.lower() not in self.LIST_COMMANDS:
+                        if key == "enter" and not self.opens_a_list(name):
                             self._submit()
                     elif key == "tab":
                         # Tab never sends, so it can safely take the highlighted
@@ -598,21 +636,21 @@ class Editor(TextArea):
         provider argument, so the branch below is which LIST it derives, not which
         widget is visible.
         """
-        provider_argument = slash_argument(self.text, self.PROVIDER_COMMANDS)
-        if provider_argument is None:
-            self._provider_command = None
+        list_argument = slash_argument(self.text, self._argument_commands)
+        if list_argument is None:
+            self._argument_command = None
             self._picker.sync(self.text)
         else:
             command = self._command_word()
-            if command != self._provider_command:
-                self._provider_command = command
+            if command != self._argument_command:
+                self._argument_command = command
                 # Drop the previous command's rows before asking for this one's.
                 # `/login` offers every provider and `/logout` only the ones with a
                 # credential, so carrying them across would briefly offer a logout
                 # from an account the user never had.
                 self._picker.set_choices([])
-                self.post_message(ProviderQueryOpened(command or ""))
-            self._picker.sync_argument(provider_argument)
+                self.post_message(ArgumentQueryOpened(command or ""))
+            self._picker.sync_argument(list_argument)
         argument = slash_argument(self.text, self.MODEL_COMMANDS)
         if argument is None:
             if self._model_picker.is_open():
@@ -703,7 +741,7 @@ class Editor(TextArea):
         """
         return (
             self._picker.mode is PickerMode.ARGUMENT
-            and self._provider_command in self.DESTRUCTIVE_COMMANDS
+            and self._argument_command in self.DESTRUCTIVE_COMMANDS
         )
 
     def _picker_query(self) -> str | None:
@@ -715,7 +753,7 @@ class Editor(TextArea):
         credential) cannot drift apart.
         """
         if self._picker.mode is PickerMode.ARGUMENT:
-            return slash_argument(self.text, self.PROVIDER_COMMANDS)
+            return slash_argument(self.text, self._argument_commands)
         context = slash_context(self.text)
         return None if context is None else context.query
 
@@ -776,7 +814,7 @@ class Editor(TextArea):
         space terminates the argument, so the matcher would stop matching and Tab
         would appear to fill the field and abandon it in one keystroke.
         """
-        argument = slash_argument(self.text, self.PROVIDER_COMMANDS)
+        argument = slash_argument(self.text, self._argument_commands)
         if argument is None:
             return
         # The argument is by construction the TAIL of the buffer (everything after

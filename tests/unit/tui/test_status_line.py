@@ -771,24 +771,28 @@ def test_a_healthy_mcp_count_sheds_before_the_cwd_and_the_model_label() -> None:
     assert alarm_alone, "a danger count must survive a width the cwd cannot"
 
 
-def test_the_quiet_ladder_moves_mcp_without_promoting_the_widest_alarm() -> None:
+def test_the_quiet_ladder_moves_mcp_and_leaves_the_alarm_last() -> None:
     """One ordering, two positions for one rung — not two hand-maintained
     ladders that can drift apart on the next reordering.
 
-    With one caveat the first version got wrong: lifting `mcp` out of last place
-    leaves whatever followed it at the end, and that is `approvals` — the 14-cell
-    segment the full ladder sheds FIRST precisely because dropping it buys the
-    most width. Left last, it outlived the context number in the quiet band,
-    inverting the ladder's whole argument. The narrowest survivor goes last.
+    Lifting `mcp` out of last place leaves whatever followed it at the end, and
+    that is `approvals`. An earlier pass treated that as damage and re-seated it
+    behind the context number, on the rule "the narrowest bounded rung goes
+    last". That rule was written against `mcp` — 7 cells, and an alarm — and
+    handing last place to a READING instead is not the same trade: with a
+    healthy MCP the band stopped saying `! auto-approve` at 48 cells in order to
+    keep `▦ 49.6%/1M`. An alarm outranks a reading, so the widest alarm stays
+    last in every ladder where `mcp` is not there to take it.
     """
     assert drop_ladder(McpStatus(configured=2, connected=1, failed=True)) is _DROP_LADDER
     assert drop_ladder(McpStatus(configured=2, connected=2)) is _DROP_LADDER_QUIET
     assert drop_ladder(McpStatus()) is _DROP_LADDER_QUIET
     assert _DROP_LADDER[-1] == "mcp"
     assert _DROP_LADDER_QUIET.index("mcp") == _DROP_LADDER_QUIET.index("cwd") - 1
-    # The quiet band's last survivor is the context number, not the widest alarm.
-    assert _DROP_LADDER_QUIET[-1] == "context"
-    assert _DROP_LADDER_QUIET.index("approvals") < _DROP_LADDER_QUIET.index("context")
+    # With mcp promoted there is no narrower ALARM to take last place, so the
+    # gate's own alarm keeps it — and outlives the context number.
+    assert _DROP_LADDER_QUIET[-1] == "approvals"
+    assert _DROP_LADDER_QUIET.index("context") < _DROP_LADDER_QUIET.index("approvals")
     # Same rungs in both ladders: the reorder moves things, it never drops one.
     assert sorted(_DROP_LADDER) == sorted(_DROP_LADDER_QUIET)
 
@@ -865,11 +869,11 @@ def test_the_last_surviving_rung_is_always_bounded() -> None:
     ladder with a 24-character basename, that cost the alarm across 34-46 cells
     and paid for it with up to 29 blank ones.
 
-    ``approvals`` is normally kept off the end for the opposite reason — at 14
+    ``approvals`` is kept off the end only where ``mcp`` can take it. At 14
     cells it is the widest rung, which is why the authored order sheds it first
-    — but "widest" only outranks "reliably fits" while a bounded alternative
-    exists. On the quiet estimate ladder it does not, so the alarm goes last
-    there and nowhere else.
+    — but "widest" outranks "is an alarm" only when the rung taking last place
+    is an alarm too, and ``mcp`` is the only one that is. In both quiet ladders
+    it has been promoted away, so the gate's alarm goes last there.
     """
     variants = {
         "full": _DROP_LADDER,
@@ -882,11 +886,11 @@ def test_the_last_surviving_rung_is_always_bounded() -> None:
         # A promotion reorders; it never adds or loses a rung.
         assert sorted(ladder) == sorted(_DROP_LADDER), f"{name} changed the rung set"
 
-    # The widest alarm is kept off the end wherever a bounded rung can take it.
+    # The widest alarm is kept off the end only where the narrower ALARM exists
+    # to take it; a reading never displaces it.
     assert _DROP_LADDER[-1] == "mcp"
-    assert _DROP_LADDER_QUIET[-1] == "context"
+    assert _DROP_LADDER_QUIET[-1] == "approvals"
     assert _DROP_LADDER_ESTIMATE[-1] == "mcp"
-    # The one exception, and the only ladder where the alternative is the path.
     assert _DROP_LADDER_QUIET_ESTIMATE[-1] == "approvals"
     assert _DROP_LADDER_QUIET_ESTIMATE.index("context") < _DROP_LADDER_QUIET_ESTIMATE.index(
         "cwd"
