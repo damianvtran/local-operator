@@ -29,6 +29,7 @@ from rich.text import Text
 from textual.color import Color
 
 from local_operator.harness.types import AgentMessage
+from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import SLASH_COMMANDS, OperatorApp
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
@@ -536,6 +537,13 @@ class FakeSession:
 
     async def adopt_aside(self, messages: list[Any]) -> None:
         self.adopted.append(list(messages))
+
+    async def compact_now(self) -> CompactionOutcome:
+        # No history to compact: this fake never carries a conversation, which
+        # is the state a real session answers with the same refusal.
+        return CompactionOutcome(
+            ran=False, reason="nothing_to_compact", detail="nothing to compact"
+        )
 
 
 class FakeProviders:

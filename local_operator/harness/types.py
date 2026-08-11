@@ -787,14 +787,30 @@ class SubagentEndEvent(AgentEvent[Literal["subagent_end"]]):
 
 
 class CompactionStartEvent(AgentEvent[Literal["compaction_start"]]):
+    """A compaction pass began. ``reason`` is ``context-window`` for the
+    automatic trigger, ``manual`` when the user asked for it."""
+
     type: Literal["compaction_start"] = "compaction_start"
     reason: str
 
 
 class CompactionEndEvent(AgentEvent[Literal["compaction_end"]]):
+    """A compaction pass settled.
+
+    ``tokens_before``/``tokens_after`` size the LLM-visible history either side
+    of the pass, by the same local ruler, so a host can report what the pass
+    ACHIEVED — compaction is slow and its effect is invisible in the
+    transcript, so "context compacted" alone asks the user to take it on faith.
+    Both are zero when the pass failed, and ``strategy`` is the concrete
+    mechanism that ran (``snapcompact`` or ``context-full``).
+    """
+
     type: Literal["compaction_end"] = "compaction_end"
     reason: str
     success: bool
+    strategy: str = ""
+    tokens_before: int = 0
+    tokens_after: int = 0
 
 
 class RetryStartEvent(AgentEvent[Literal["retry_start"]]):

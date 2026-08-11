@@ -19,6 +19,7 @@ import pytest
 
 from local_operator.harness.types import NoticeEvent, TextContent
 from local_operator.session.mcp_status import McpStartupOutcome
+from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_LAYOUT_CLASS,
@@ -51,6 +52,16 @@ class FakeSession:
         self.disposed = False
         self._handlers: list[Any] = []
         self._history: list[Any] = []
+        #: `/compact` requests this fake was asked for, and the answer it gives.
+        #: A fake carries no history, so the honest default is the refusal a
+        #: real session returns for an empty conversation; tests that want a
+        #: successful pass stage their own outcome.
+        self.compactions = 0
+        self.compact_outcome = CompactionOutcome(
+            ran=False,
+            reason="nothing_to_compact",
+            detail="nothing to compact: the whole conversation is ~0 tokens",
+        )
 
     @property
     def session_id(self) -> str:
@@ -143,6 +154,18 @@ class FakeSession:
 
     async def adopt_aside(self, messages: list[Any]) -> None:
         self.adopted.append(list(messages))
+
+    async def compact_now(self) -> CompactionOutcome:
+        return self._answer_compaction()
+
+    def _answer_compaction(self) -> CompactionOutcome:
+        """Count the request and answer with the staged outcome.
+
+        Split out so subclasses can override :meth:`compact_now` (to raise, or
+        to block) without losing the count every test reads.
+        """
+        self.compactions += 1
+        return self.compact_outcome
 
     def history(self) -> list[Any]:
         return getattr(self, "_history", [])

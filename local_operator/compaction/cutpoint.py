@@ -74,8 +74,13 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
     reaches ``keep_recent_tokens``, then snaps forward to the next valid cut
     message (role ``user``, or ``assistant`` without pending tool calls, or a
     compaction-summary marker). Returns ``None`` when the accumulated region
-    already covers everything (all tokens in the kept region) or when the cut
-    lands at ``<= 1`` (nothing left to summarize).
+    already covers everything (all tokens in the kept region) or when fewer
+    than two REAL messages fall before the cut (nothing worth summarizing —
+    a previous compaction's marker does not count, it is already a summary).
+
+    That ``None`` is also the answer an on-demand compaction gets when there is
+    nothing to do, so it is a decision a host reports, not just an internal
+    short-circuit: see ``Session.compact_now``.
 
     HARD RULE: the returned index never points at a tool-role message or at an
     assistant message whose tool-call results follow it — orphaned tool calls
@@ -145,8 +150,15 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
                 "provider rejects that"
             )
 
-    if index <= 1:
-        # Summarizing zero or one message is not worth the cache rewrite.
+    # Summarizing zero or one message is not worth the cache rewrite — counted
+    # over REAL messages, because a previous compaction's marker is not history
+    # to summarize, it is a summary already. Identical to the old ``index <= 1``
+    # on a history with no marker (every message counts), and correct on one
+    # with: a manual ``/compact`` pressed straight after a pass would otherwise
+    # summarize the previous summary plus a single message, re-compressing what
+    # was already compressed for almost no headroom.
+    summarizable = sum(1 for m in messages[:index] if not _is_compaction_marker(m))
+    if summarizable <= 1:
         return None
     return index
 

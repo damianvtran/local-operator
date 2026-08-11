@@ -36,6 +36,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from local_operator.compaction.tokens import approx_text_tokens
@@ -84,6 +85,7 @@ from local_operator.harness.wake import (
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
+from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.transcript import Transcript
 
 if TYPE_CHECKING:
@@ -104,6 +106,32 @@ _CONTINUATION_PROMPT = (
 #: MAX_PAUSED_TURN_CONTINUATIONS): a compaction pass that keeps clearing the
 #: recovery band must not re-prompt forever.
 _MAX_CONTINUATIONS = 8
+
+
+@dataclass(frozen=True, slots=True)
+class _CompactionPlan:
+    """One compaction pass, decided but not yet committed.
+
+    Exists so the automatic gate and the manual ``/compact`` share a single
+    decision AND a single commit (:meth:`Session._plan_compaction` /
+    :meth:`Session._run_compaction`) instead of two entry points that would be
+    free to disagree about the strategy, the cut point or the events.
+
+    ``compaction_api`` is the lazily imported module, carried on the plan
+    because the import is the first thing the decision does and the commit
+    needs the same one (a missing package degrades to no compaction, so it can
+    never be a module-level import).
+    """
+
+    compaction_api: Any
+    settings: Any
+    strategy: str
+    llm_history: list[AgentMessage]
+    cut: int
+    #: Context size for the transcript entry: ``max(provider-reported, local)``.
+    context_tokens: int
+    #: Local estimate over the pre-pass history — the receipt's "before".
+    tokens_before: int
 
 
 def _coerce_compaction_settings(settings: Any) -> Any:
@@ -367,6 +395,11 @@ class Session:
         self._signal: AbortSignal | None = None
         self._is_streaming = False
         self._turn_lock = asyncio.Lock()  # serializes prompt() and wake deliveries
+        # True only while an ON-DEMAND compaction holds ``_turn_lock``. The
+        # automatic pass runs inside a turn and is covered by ``_is_streaming``;
+        # this one runs between turns, so a caller that finds the lock held
+        # needs a way to tell WHICH holder it is looking at (see `prompt`).
+        self._compacting = False
         self._turn_task: asyncio.Task[None] | None = None  # in-flight turn (wake deliveries)
 
         self.jobs = AsyncJobManager()
@@ -555,14 +588,23 @@ class Session:
 
         Reentrancy: ``_turn_lock`` is consulted FIRST — if a live turn (user
         prompt or wake delivery) holds it, a concurrent ``prompt`` is
-        rejected outright instead of queueing behind it. ``_is_streaming`` is
-        then re-checked under the lock to close the race where streaming was
+        rejected outright instead of queueing behind it — including the lock an
+        on-demand compaction holds, which the rejection names. ``_is_streaming``
+        is then re-checked under the lock to close the race where streaming was
         set between the lock probe and the acquire.
         """
         if self._disposed:
             raise RuntimeError("session is disposed")
         if self._turn_lock.locked():
-            raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
+            # An on-demand compaction holds the same lock a turn does, and for
+            # the same reason — it is rewriting the history a request would be
+            # built from. Saying "already streaming" for it would send the user
+            # looking for a turn that is not there.
+            raise RuntimeError(
+                "context compaction is running; the prompt can be sent once it finishes"
+                if self._compacting
+                else "session is already streaming; use steer() to inject mid-turn"
+            )
         await self._turn_lock.acquire()
         try:
             # A fresh user prompt supersedes any earlier interrupt request.
@@ -1053,10 +1095,12 @@ class Session:
             logger.warning("could not journal pruned tool outputs: %s", exc)
 
     async def _maybe_compact(self) -> None:
-        """Post-turn compaction check; lazy-imports the compaction API so a
-        missing module degrades to no-compaction.
+        """Post-turn compaction check — the AUTOMATIC trigger.
 
-        Order (binding orchestrator decisions):
+        Everything except the trigger itself is shared with the manual one
+        (:meth:`compact_now`): :meth:`_plan_compaction` decides, and
+        :meth:`_run_compaction` commits. Order (binding orchestrator
+        decisions):
 
         1. ``prune_tool_outputs`` over the LLM history (in-place blanking of
            superseded/useless tool outputs) BEFORE the trigger math.
@@ -1070,18 +1114,114 @@ class Session:
         5. After a successful pass, schedule auto-continue only when the
            residual cleared the recovery band (``residual <= 0.8 * threshold``).
         """
+        planned = await self._plan_compaction(respect_threshold=True)
+        if isinstance(planned, CompactionOutcome):
+            # Refused: below threshold, disabled, nothing worth summarizing.
+            # The automatic path has nobody to tell — a turn that did not need
+            # compacting must not narrate that fact every time.
+            return
+        outcome = await self._run_compaction(planned, reason="context-window")
+        if not outcome.ran:
+            return
+
+        # (5) Recovery band: only schedule a continuation when the pass
+        # actually created headroom (an anti-thrash guard).
+        if getattr(planned.settings, "auto_continue", False):
+            compaction_api = planned.compaction_api
+            threshold = compaction_api.resolve_threshold_tokens(
+                self._model.context_window, planned.settings
+            )
+            if outcome.tokens_after <= compaction_api.RECOVERY_BAND * threshold:
+                self._continuation_queue.append(Message.user(_CONTINUATION_PROMPT))
+
+    async def compact_now(self) -> CompactionOutcome:
+        """Compact the context NOW, on the user's explicit request (``/compact``).
+
+        The manual trigger runs THE SAME PASS as the automatic one — one
+        :meth:`_plan_compaction`, one :meth:`_run_compaction`, one strategy
+        resolver, one pair of ``compaction_start``/``compaction_end`` events —
+        with the threshold gate skipped, because the user asking IS the
+        trigger. A second entry point would be free to drift: the manual pass
+        would keep summarizing with a text model long after the automatic one
+        had moved a vision model onto snapcompact.
+
+        Every state a manual trigger can be pressed in that the automatic gate
+        never sees comes back as a REFUSAL with a reason, never as silence: the
+        bug this method fixes was a ``/compact`` that changed nothing, and a
+        refusal nobody can see is the same frame.
+        """
+        if self._compacting:
+            return CompactionOutcome(
+                ran=False,
+                reason="already_running",
+                detail="a compaction is already running",
+            )
+        if self._is_streaming or self._turn_lock.locked():
+            # A running turn owns the message list — the loop holds it across
+            # tool batches — and rebuilding it under the loop is how a tool
+            # call loses the result it is waiting for. The turn LOCK is
+            # consulted as well as the streaming flag for the reason
+            # :meth:`adopt_aside` spells out: the flag covers ``_run_turn``
+            # alone, while the lock is held across the whole pipeline including
+            # a post-compaction auto-continuation, and the gap between them is
+            # a window a manual pass must not splice into.
+            return CompactionOutcome(
+                ran=False,
+                reason="turn_running",
+                detail=(
+                    "a turn is still running — compaction rewrites the history the turn is "
+                    "holding, so it has to wait for the turn to finish"
+                ),
+            )
+        # HELD for the whole pass, exactly as a turn holds it: the pass replaces
+        # ``_context.messages``, and a prompt or a wake delivery that started in
+        # the middle would build its request from a history being rewritten
+        # underneath it. `_compacting` is what lets `prompt` say WHY it is
+        # refusing while this is in flight.
+        await self._turn_lock.acquire()
+        self._compacting = True
+        try:
+            planned = await self._plan_compaction(respect_threshold=False)
+            if isinstance(planned, CompactionOutcome):
+                return planned
+            return await self._run_compaction(planned, reason="manual")
+        finally:
+            self._compacting = False
+            self._turn_lock.release()
+
+    async def _plan_compaction(
+        self, *, respect_threshold: bool
+    ) -> _CompactionPlan | CompactionOutcome:
+        """Everything decided BEFORE a pass commits, for both triggers.
+
+        Returns a plan when a compaction should run, or the
+        :class:`CompactionOutcome` explaining why it must not. ``respect_threshold``
+        is the ONLY difference between the two callers: the automatic gate fires
+        on the context size, the manual one fires because it was asked.
+
+        Side effects happen here on purpose: pruning (in-place blanking of
+        superseded tool outputs) runs before the trigger math, so a context the
+        prune alone brought back under the line never buys a summary. It also
+        means a manual ``/compact`` on a context with nothing to summarize has
+        still reclaimed whatever the prune found.
+        """
         try:
             from local_operator.compaction import api as compaction_api
         except ImportError:
-            return
+            return CompactionOutcome(
+                ran=False,
+                reason="unavailable",
+                detail="compaction is not available in this build",
+            )
 
         settings = self._compaction_settings or compaction_api.CompactionSettings()
-        if not settings.enabled:
-            return
-
         strategy = self._resolve_strategy(settings)
-        if strategy == "off":
-            return
+        if not settings.enabled or strategy == "off":
+            return CompactionOutcome(
+                ran=False,
+                reason="disabled",
+                detail="compaction is switched off in config (values.compaction)",
+            )
         if settings.threshold_tokens <= 0 and settings.threshold_percent <= 0:
             # Resolve through the API so the §C default, the 600k absolute cap
             # AND the max_threshold_tokens defensive ceiling stay in ONE
@@ -1097,6 +1237,12 @@ class Session:
             )
 
         llm_history = self._convert_to_llm(list(self._context.messages))
+        if not llm_history:
+            return CompactionOutcome(
+                ran=False,
+                reason="nothing_to_compact",
+                detail="the conversation is empty — there is nothing to compact",
+            )
 
         # (1) Prune before deciding: blanked outputs shrink the estimate and
         # may avoid a compaction pass entirely. Mutates messages in place.
@@ -1115,32 +1261,61 @@ class Session:
             self._last_usage.context_tokens if self._last_usage is not None else None
         )
 
-        # Cheap proof first. ``should_compact`` is strictly monotonic in
-        # context_tokens and ``compaction_context_tokens`` is monotonic in the
-        # local estimate, so a rigorous UPPER bound that already fails the
-        # threshold test proves the exact estimate fails it too — same early
-        # return, same observable behaviour. This matters because the first
-        # exact estimate in a process loads tiktoken's cl100k_base table
-        # (~84 ms, ~43.6 MB RSS, measured with scripts/bench_base_overhead.py),
-        # and compaction runs on EVERY turn while the typical session never
-        # comes near its threshold — so every short run was buying a 43.6 MB
-        # tokenizer to be told "no".
-        bound = compaction_api.messages_tokens_upper_bound(llm_history)
-        if not compaction_api.should_compact(
-            compaction_api.compaction_context_tokens(provider_reported, bound),
-            self._model.context_window,
-            settings,
-        ):
-            return
+        if respect_threshold:
+            # Cheap proof first. ``should_compact`` is strictly monotonic in
+            # context_tokens and ``compaction_context_tokens`` is monotonic in
+            # the local estimate, so a rigorous UPPER bound that already fails
+            # the threshold test proves the exact estimate fails it too — same
+            # early return, same observable behaviour. This matters because the
+            # first exact estimate in a process loads tiktoken's cl100k_base
+            # table (~84 ms, ~43.6 MB RSS, measured with
+            # scripts/bench_base_overhead.py), and compaction runs on EVERY
+            # turn while the typical session never comes near its threshold —
+            # so every short run was buying a 43.6 MB tokenizer to be told
+            # "no". A MANUAL pass is going to load it anyway, so it skips
+            # straight to the exact figure it has to report.
+            bound = compaction_api.messages_tokens_upper_bound(llm_history)
+            if not compaction_api.should_compact(
+                compaction_api.compaction_context_tokens(provider_reported, bound),
+                self._model.context_window,
+                settings,
+            ):
+                return CompactionOutcome(ran=False, reason="below_threshold")
 
         local_estimate = compaction_api.estimate_messages_tokens(llm_history)
         context_tokens = compaction_api.compaction_context_tokens(provider_reported, local_estimate)
-        if not compaction_api.should_compact(context_tokens, self._model.context_window, settings):
-            return
+        if respect_threshold and not compaction_api.should_compact(
+            context_tokens, self._model.context_window, settings
+        ):
+            return CompactionOutcome(ran=False, reason="below_threshold")
 
         cut = compaction_api.find_cut_point(llm_history, settings.keep_recent_tokens)
         if cut is None or cut <= 0:
-            return
+            # ``find_cut_point`` is the ONE definition of "worth summarizing":
+            # the kept window has to reach ``keep_recent_tokens`` and at least
+            # two real messages have to fall outside it. Both states a manual
+            # trigger runs into land here — a context too small to have older
+            # history, and a context whose older history a previous pass has
+            # already summarized — so the refusal names which one it is rather
+            # than guessing.
+            keep_recent = settings.keep_recent_tokens
+            if local_estimate <= keep_recent:
+                detail = (
+                    f"nothing to compact: the whole conversation is ~{local_estimate:,} tokens "
+                    f"and the most recent {keep_recent:,} are kept verbatim"
+                )
+            else:
+                detail = (
+                    "nothing left to compact: everything older than the recent window is "
+                    "already summarized"
+                )
+            return CompactionOutcome(
+                ran=False,
+                reason="nothing_to_compact",
+                detail=detail,
+                tokens_before=local_estimate,
+                tokens_after=local_estimate,
+            )
 
         # The kept window must start at an entry the transcript can replay:
         # first_kept_entry_id is persisted and matched on resume, and a cut
@@ -1152,18 +1327,45 @@ class Session:
                 "compaction cut rejected: kept[0].id %s is not a transcript entry",
                 llm_history[cut].id,
             )
-            return
+            return CompactionOutcome(
+                ran=False,
+                reason="cut_not_replayable",
+                detail=(
+                    "the history has no replayable cut point yet — compaction would drop the "
+                    "messages it keeps on the next resume"
+                ),
+                tokens_before=local_estimate,
+                tokens_after=local_estimate,
+            )
 
-        await self._emit(CompactionStartEvent(reason="context-window"))
+        return _CompactionPlan(
+            compaction_api=compaction_api,
+            settings=settings,
+            strategy=strategy,
+            llm_history=llm_history,
+            cut=cut,
+            context_tokens=context_tokens,
+            tokens_before=local_estimate,
+        )
+
+    async def _run_compaction(self, plan: _CompactionPlan, *, reason: str) -> CompactionOutcome:
+        """Commit one compaction pass — THE pass, for both triggers.
+
+        ``reason`` rides the two events so a host can tell an automatic pass
+        from one the user asked for while keeping one vocabulary for both
+        (``compacting context…`` / ``context compacted``).
+        """
+        compaction_api = plan.compaction_api
+        await self._emit(CompactionStartEvent(reason=reason))
         try:
-            to_summarize = llm_history[:cut]
-            kept = llm_history[cut:]
+            to_summarize = plan.llm_history[: plan.cut]
+            kept = plan.llm_history[plan.cut :]
             summary, preserve_data = await self._produce_summary(
-                compaction_api, to_summarize, strategy
+                compaction_api, to_summarize, plan.strategy
             )
             first_kept_entry_id = kept[0].id
             await self._transcript.append_compaction(
-                summary, first_kept_entry_id, context_tokens, preserve_data=preserve_data
+                summary, first_kept_entry_id, plan.context_tokens, preserve_data=preserve_data
             )
             marker_details: dict[str, Any] = {"summary": summary}
             if preserve_data is not None:
@@ -1174,22 +1376,33 @@ class Session:
                 details=marker_details,
             )
             self._context.messages = [marker, *kept]
-            await self._emit(CompactionEndEvent(reason="context-window", success=True))
-
-            # (5) Recovery band: only schedule a continuation when the pass
-            # actually created headroom (an anti-thrash guard).
-            if getattr(settings, "auto_continue", False):
-                threshold = compaction_api.resolve_threshold_tokens(
-                    self._model.context_window, settings
+            # Measured with the SAME ruler as ``plan.tokens_before`` (the local
+            # estimate over the converted history), so the difference is a real
+            # saving a receipt can quote and the recovery band below compares
+            # like with like. The provider's own figure is not available until
+            # the next request.
+            tokens_after = compaction_api.estimate_messages_tokens(
+                self._convert_to_llm(list(self._context.messages))
+            )
+            await self._emit(
+                CompactionEndEvent(
+                    reason=reason,
+                    success=True,
+                    strategy=plan.strategy,
+                    tokens_before=plan.tokens_before,
+                    tokens_after=tokens_after,
                 )
-                residual = compaction_api.estimate_messages_tokens(
-                    self._convert_to_llm(list(self._context.messages))
-                )
-                if residual <= compaction_api.RECOVERY_BAND * threshold:
-                    self._continuation_queue.append(Message.user(_CONTINUATION_PROMPT))
-        except Exception:
+            )
+            return CompactionOutcome(
+                ran=True,
+                strategy=plan.strategy,
+                tokens_before=plan.tokens_before,
+                tokens_after=tokens_after,
+            )
+        except Exception as exc:
             logger.warning("compaction failed", exc_info=True)
-            await self._emit(CompactionEndEvent(reason="context-window", success=False))
+            await self._emit(CompactionEndEvent(reason=reason, success=False))
+            return CompactionOutcome(ran=False, reason="failed", detail=f"compaction failed: {exc}")
 
     def _resolve_strategy(self, settings: Any) -> str:
         """'auto' | 'context-full' | 'snapcompact' | 'off'.

@@ -50,6 +50,7 @@ from local_operator.harness.types import (  # noqa: E402
     Usage,
 )
 from local_operator.tui.app import OperatorApp  # noqa: E402
+from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
 from local_operator.tui.widgets.welcome import WelcomeView  # noqa: E402
 
@@ -172,6 +173,13 @@ class FakeSession:
 
     async def adopt_aside(self, messages: list[Any]) -> None:
         self.adopted.append(list(messages))
+
+    async def compact_now(self) -> CompactionOutcome:
+        # No history to compact: this fake never carries a conversation, which
+        # is the state a real session answers with the same refusal.
+        return CompactionOutcome(
+            ran=False, reason="nothing_to_compact", detail="nothing to compact"
+        )
 
 
 async def _factory(session: FakeSession) -> FakeSession:

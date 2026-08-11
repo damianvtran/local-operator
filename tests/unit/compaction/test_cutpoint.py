@@ -85,6 +85,29 @@ def test_no_cut_when_cut_would_be_trivial():
     assert find_cut_point(messages2, keep2) is None
 
 
+def test_no_cut_when_only_a_previous_summary_and_one_message_precede_it():
+    """A prior marker is not history to summarize — it is already a summary.
+
+    The state an on-demand ``/compact`` pressed straight after a pass lands in:
+    the context is ``[marker, older, recent…]``, so a raw index test sees two
+    messages before the cut and re-summarizes the previous summary plus one
+    message, spending a provider call and a full cache rewrite to compress what
+    is already compressed. Counted over REAL messages, there is one, and one is
+    not worth the pass.
+    """
+    marker = CustomMessage(custom_type="compaction_summary", details={"summary": "s" * 400})
+    messages = [marker, _big_user(), Message.user("tail")]
+    keep = estimate_tokens(messages[2]) + 10
+    assert find_cut_point(messages, keep) is None
+
+    # Two real messages before the cut and the pass IS worth running — the rule
+    # is "fewer than two summarizable", not "any marker present".
+    with_two = [marker, _big_user(), _big_user(), _big_user(), Message.user("tail")]
+    cut = find_cut_point(with_two, keep)
+    assert cut == 3
+    assert [m for m in with_two[:cut] if m is not marker] == with_two[1:3]
+
+
 def test_none_when_snap_runs_past_end():
     """Trailing tool cluster with nothing valid after it -> None."""
     messages = [

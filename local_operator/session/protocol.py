@@ -14,6 +14,7 @@ superseded — UIs must handle that (see docs/REWRITE.md, stream D).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, Protocol, runtime_checkable
 
 from local_operator.harness.approval import ApprovalGate
@@ -24,6 +25,38 @@ from local_operator.harness.types import (
     ModelSpec,
     Usage,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionOutcome:
+    """What one explicit compaction request did — see :meth:`SessionProtocol.compact_now`.
+
+    A manual trigger can be pressed in states the automatic gate never sees (a
+    turn still streaming, a context too small to be worth a pass, a context
+    already compacted), so "did not run" is a first-class answer that has to
+    carry WHY: a host that cannot tell a refusal from a no-op reproduces the
+    bug where ``/compact`` silently changed nothing.
+
+    ``reason`` is the stable code (``turn_running``, ``disabled``,
+    ``nothing_to_compact``, ``cut_not_replayable``, ``below_threshold``,
+    ``unavailable``, ``failed``); ``detail`` is the one-sentence explanation a
+    front end can show verbatim, written HERE rather than in each host so the
+    TUI, exec mode and the server cannot each invent their own wording for the
+    same refusal.
+
+    ``tokens_before``/``tokens_after`` are the conversation's size measured by
+    the SAME local ruler on both sides of the pass (compaction's own
+    estimator over the LLM-visible history), so their difference is the saving
+    a receipt can quote. They exclude the system blocks and tool schemas,
+    which a compaction does not touch.
+    """
+
+    ran: bool
+    reason: str = ""
+    detail: str = ""
+    strategy: str = ""
+    tokens_before: int = 0
+    tokens_after: int = 0
 
 
 @runtime_checkable
@@ -140,6 +173,25 @@ class SessionProtocol(Protocol):
         context and the transcript. Raises while a turn is running — the loop
         owns the message list for the duration, and splicing into a tool batch
         makes it unsendable.
+        """
+        ...
+
+    # --- context ----------------------------------------------------------
+    async def compact_now(self) -> CompactionOutcome:
+        """Compact the conversation context NOW, on the user's request.
+
+        THE SAME PASS the automatic gate runs when the context fills up — same
+        strategy resolution (snapcompact for a vision model, a language summary
+        otherwise), same cut point, same transcript entry, same
+        ``compaction_start``/``compaction_end`` events — with the threshold
+        check skipped, because the user asking IS the trigger. Backs the TUI's
+        ``/compact``.
+
+        Never raises for a state it can describe: a turn still running, a
+        context too small to be worth summarizing, compaction disabled in
+        config. Those come back as a :class:`CompactionOutcome` with
+        ``ran=False`` and a reason to show, so a host can always say why
+        nothing happened.
         """
         ...
 

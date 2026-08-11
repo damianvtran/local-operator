@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from local_operator.tui.app import OperatorApp
+from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.todo_panel import TodoPanel
 
@@ -123,6 +124,13 @@ class FakeSession:
 
     async def adopt_aside(self, messages: list[Any]) -> None:
         self.adopted.append(list(messages))
+
+    async def compact_now(self) -> CompactionOutcome:
+        # No history to compact: this fake never carries a conversation, which
+        # is the state a real session answers with the same refusal.
+        return CompactionOutcome(
+            ran=False, reason="nothing_to_compact", detail="nothing to compact"
+        )
 
 
 def _async_factory(session: FakeSession):

@@ -112,6 +112,7 @@ from local_operator.tui.widgets.status_line import (
     McpStatus,
     StatusLine,
     SubagentBand,
+    format_context_tokens,
     format_cost,
 )
 from local_operator.tui.widgets.subagent_panel import (
@@ -244,7 +245,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # row, as a real turn rather than an echo.
     SlashCommand("btw", "Ask a side question off the record (esc closes it)"),
     # Prints an explanation and changes nothing.
-    SlashCommand("compact", "Explain context compaction"),
+    # NOT an echo, and the receipt is the reason. The pass narrates itself
+    # through the same `compacting context…` / `context compacted · 128.4k →
+    # 21.9k tokens` notices the automatic one emits, and a refusal says why it
+    # did not run — nothing typed here reaches the model, so a user row above
+    # that would only restate the word.
+    SlashCommand("compact", "Compact the context now"),
     # The receipt states the resulting mode, which is the durable fact; the
     # typed argument is only how it was reached.
     SlashCommand("approvals", "Show or set tool approval mode (ask | auto)"),
@@ -2638,7 +2644,7 @@ class OperatorApp(App[None]):
             # what was recorded is what the user typed.
             self._cmd_btw(arg, text)
         elif command == "/compact":
-            notice("compaction runs automatically when the context fills up.")
+            self._cmd_compact()
         elif command == "/approvals":
             self._cmd_approvals(arg, notice)
         elif command == "/skills":
@@ -2670,6 +2676,83 @@ class OperatorApp(App[None]):
             # rejected selector. It also keeps the splash on screen behind the
             # warning, so a first-action typo never leaves a blank frame.
             self._system_notice(f"unknown command: {parts[0]} — try /help", "warning")
+
+    # -- context ------------------------------------------------------------
+    def _cmd_compact(self) -> None:
+        """``/compact`` — run a compaction pass now.
+
+        It used to print "compaction runs automatically when the context fills
+        up" and change nothing, which is a help topic, not a command: the owner
+        reported it as a command that "just echoes a description". Compaction on
+        demand is a real need — the moment before handing the agent a big task
+        is exactly when a user wants the context cleared, and waiting for the
+        automatic threshold means paying full price for every turn until then.
+
+        The pass itself is ``SessionProtocol.compact_now``, which is the SAME
+        pass the automatic gate runs (same strategy resolution, same events), so
+        the two cannot drift. This method only decides whether there is a
+        session to ask, and hands the awaiting to a worker: a compaction is one
+        summarization request over the whole conversation, minutes on a long
+        one, and blocking the dispatch would freeze the UI for all of it.
+        """
+        session = self._session
+        if session is None:
+            # ``_system_notice``: nothing ran, so the conversation has not
+            # started and the boot composition must survive it — the same rule
+            # every rejecting branch in `_run_slash_command` follows.
+            self._system_notice("no session yet — there is no context to compact", "warning")
+            return
+        # NOT exclusive. Textual's exclusivity CANCELS the running worker, and
+        # cancelling a pass mid-summarization would leave the session having
+        # announced `compacting context…` with no end event to retire it. The
+        # session refuses a second concurrent pass itself (``already_running``),
+        # which is one authority for the whole question instead of two.
+        self.run_worker(self._compact_worker(session), thread=False, group="compact")
+
+    async def _compact_worker(self, session: SessionProtocol) -> None:
+        """Await one manual compaction and report what it did.
+
+        A pass that RUNS narrates itself through the ``compaction_start`` /
+        ``compaction_end`` events the automatic path already emits — one
+        vocabulary for both triggers, and the receipt with the token pair is
+        rendered from the end event in :meth:`on_compaction_ended`. So this
+        worker only reports what those events never cover: a refusal, and a
+        crash. Both go through ``_system_notice`` because nothing changed.
+        """
+        try:
+            outcome = await session.compact_now()
+        except Exception as exc:  # noqa: BLE001 — a failed pass must not kill the app
+            logger.debug("manual compaction failed", exc_info=True)
+            self._system_notice(f"compaction failed: {exc}", "error")
+            return
+        if not outcome.ran:
+            self._system_notice(outcome.detail or "compaction did not run", "warning")
+            return
+        self._discount_context_reading(outcome.tokens_before - outcome.tokens_after)
+
+    def _discount_context_reading(self, saved_tokens: int) -> None:
+        """Take a compaction's saving off the band's context reading.
+
+        The band reports the size of the next REQUEST — system blocks, tool
+        schemas and history — while a compaction's two figures measure the
+        HISTORY alone. The pass changes only the history, so the difference
+        transfers exactly, and subtracting it is the only way the band agrees
+        with the receipt that just said the context shrank. Left alone, the
+        reading stays at the pre-compaction size until the next turn's usage
+        arrives, which is precisely the "it did nothing" frame this command
+        exists to stop showing.
+
+        Demoted to an ESTIMATE even when the figure it was subtracted from was
+        the provider's own: the subtrahend comes from compaction's local
+        tokenizer, so the result is no longer a number the wire reported.
+        """
+        if self._status is None or saved_tokens <= 0:
+            return
+        self._status.update(
+            context_tokens=max(0, self._status.context_tokens - saved_tokens),
+            context_is_estimate=True,
+            context_window=_context_window(self._session),
+        )
 
     # -- model --------------------------------------------------------------
     def _cmd_model(self, arg: str, notice: NoticeFn) -> None:
@@ -4853,7 +4936,7 @@ class OperatorApp(App[None]):
 
     def on_compaction_ended(self, message: CompactionEnded) -> None:
         if message.success:
-            self._append_block(NoticeBlock("context compacted", "info"))
+            self._append_block(NoticeBlock(compaction_receipt(message), "info"))
         else:
             self._append_block(NoticeBlock("compaction failed", "error"))
         self._working_fallback = DEFAULT_ACTIVITY
@@ -4926,6 +5009,54 @@ def _context_window(session) -> int:
     """
     window = getattr(_model_spec(session), "context_window", 0) or 0
     return int(window) if window > 0 else 0
+
+
+#: How the two compaction mechanisms are named in the receipt. ``context-full``
+#: is the config spelling of "ask a model to summarize the history in words";
+#: printing it verbatim asks the reader to know the setting, and the word that
+#: distinguishes it from the other mechanism is the mechanism itself.
+_STRATEGY_LABELS = {"snapcompact": "snapcompact", "context-full": "summary"}
+
+
+def compaction_receipt(message: CompactionEnded) -> str:
+    """``context compacted`` plus what the pass achieved.
+
+    Compaction is the slowest thing a session does with nothing to show: the
+    transcript on screen is untouched, only the model's view of it shrank. The
+    bare notice therefore asked the user to take a minute of waiting on faith,
+    and the owner's report of a ``/compact`` that "just echoes a description"
+    is the same complaint one step earlier — a compaction with no visible
+    result cannot be told from one that never ran.
+
+    The token pair is that result, and the strategy names WHICH pass produced
+    it (a vision model's image frames or a written summary) — the only
+    externally visible difference between the two mechanisms. Both are
+    dropped when the pass reported no figures (a host on an older event) or
+    when they fail to show a reduction, because a receipt claiming a saving
+    that did not happen is worse than the bare line.
+    """
+    before, after = message.tokens_before, message.tokens_after
+    if before <= 0 or after <= 0 or after >= before:
+        return "context compacted"
+    saved = f"{(1 - after / before) * 100:.0f}% smaller"
+    detail = f"{format_context_tokens(before)} → {format_context_tokens(after)} tokens ({saved})"
+    label = _STRATEGY_LABELS.get(message.strategy, message.strategy)
+    if label:
+        detail += f", via {label}"
+    return f"context compacted · {detail}"
+
+
+def mode_word(auto: bool) -> str:
+    """The approval mode as the ONE word every surface spells it with.
+
+    The receipts, the bare report, the picker rows, the config file and the
+    command's own argument all say ``ask`` or ``auto``, and they say it through
+    here. The alternative is what the feature had — ``auto`` in the receipt,
+    ``True`` in the band's parameter, ``off``/``yolo`` accepted but never
+    printed — which is how a user ends up unsure whether two lines are
+    describing the same setting.
+    """
+    return "auto" if auto else "ask"
 
 
 def _effort_unavailable(label: str) -> str:

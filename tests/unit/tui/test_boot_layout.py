@@ -39,6 +39,7 @@ from textual.css.query import NoMatches
 from textual.screen import Screen
 
 from local_operator.harness.types import AgentMessage
+from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_CARD_CLASS,
@@ -157,6 +158,13 @@ class FakeSession:
 
     async def adopt_aside(self, messages: list[Any]) -> None:
         self.adopted.append(list(messages))
+
+    async def compact_now(self) -> CompactionOutcome:
+        # No history to compact: this fake never carries a conversation, which
+        # is the state a real session answers with the same refusal.
+        return CompactionOutcome(
+            ran=False, reason="nothing_to_compact", detail="nothing to compact"
+        )
 
 
 async def _factory(session: FakeSession) -> FakeSession:

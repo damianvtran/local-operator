@@ -193,12 +193,27 @@ class CompactionStarted(Message):
 
 
 class CompactionEnded(Message):
-    """Context compaction finished."""
+    """Context compaction finished.
 
-    def __init__(self, reason: str, success: bool) -> None:
+    Carries what the pass achieved (the history size either side of it, and the
+    strategy that ran) so the notice can report a result rather than only the
+    fact that something happened.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        success: bool,
+        strategy: str = "",
+        tokens_before: int = 0,
+        tokens_after: int = 0,
+    ) -> None:
         super().__init__()
         self.reason = reason
         self.success = success
+        self.strategy = strategy
+        self.tokens_before = tokens_before
+        self.tokens_after = tokens_after
 
 
 class RetryStarted(Message):
@@ -474,7 +489,15 @@ class EventController:
         self._post(CompactionStarted(event.reason))
 
     def _handle_compaction_end(self, event: CompactionEndEvent) -> None:
-        self._post(CompactionEnded(event.reason, event.success))
+        self._post(
+            CompactionEnded(
+                event.reason,
+                event.success,
+                event.strategy,
+                event.tokens_before,
+                event.tokens_after,
+            )
+        )
 
     def _handle_retry_start(self, event: RetryStartEvent) -> None:
         self._post(RetryStarted(event.attempt, event.error, event.fallback_model))
