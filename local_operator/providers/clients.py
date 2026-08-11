@@ -202,6 +202,27 @@ def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[
     }
 
 
+def _reasoning_effort(request: ChatRequest) -> str | None:
+    """The effort level to send, or ``None`` when the key must not appear.
+
+    Same omission rule as :func:`_sampling_params`, and for the same reason: a
+    model with no effort ladder rejects the key however politely it is spelled,
+    so the body must not carry it at all. Each client then places the value
+    under its own family's key — the level names are shared vocabulary, the
+    key is not.
+
+    The level is re-checked against the spec's ladder rather than trusted,
+    because the spec is mutable at runtime: ``/effort`` and ``shift+tab`` write
+    it, and a fallback can swap the model underneath it. A value the model does
+    not accept is dropped here rather than sent, which costs one turn's worth of
+    depth instead of the whole turn.
+    """
+    level = request.model.reasoning_effort
+    if not level or level not in request.model.reasoning_efforts:
+        return None
+    return level
+
+
 def _message_to_openai(message: Message) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
@@ -402,6 +423,17 @@ class OpenAICompatClient:
         if max_tokens and max_tokens > 0:
             body["max_tokens"] = max_tokens
         body.update(_sampling_params(request))
+        effort = _reasoning_effort(request)
+        if effort is not None:
+            # Chat-completions spells it flat and top-level; the Responses body
+            # below nests the same value under `reasoning`. Aggregators fronting
+            # OpenAI-shaped endpoints take the same key: measured live through
+            # OpenRouter on 2026-08-11, `reasoning_effort: "low"` to
+            # `openai/gpt-5.4` and `openai/o4-mini` both answered 200. That is
+            # the extent of what was measured — an Anthropic model reached
+            # through an aggregator, and the top rungs (`xhigh`/`max`), were not
+            # exercised, so treat those as expected-to-work rather than proven.
+            body["reasoning_effort"] = effort
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
         return body
@@ -486,6 +518,9 @@ class OpenAICompatClient:
         if max_tokens and max_tokens > 0:
             body["max_output_tokens"] = max_tokens
         body.update(_sampling_params(request))
+        effort = _reasoning_effort(request)
+        if effort is not None:
+            body["reasoning"] = {"effort": effort}
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
         return body
@@ -911,6 +946,14 @@ class AnthropicClient:
                 "required": {"type": "any"},
             }.get(request.tool_choice, {"type": "auto"})
         body.update(_sampling_params(request))
+        effort = _reasoning_effort(request)
+        if effort is not None:
+            # `output_config`, NOT a `thinking` budget: Anthropic's effort
+            # parameter covers ALL tokens in the response — text, tool calls and
+            # thinking — and needs no beta header, where a thinking budget only
+            # bounds the thinking block and requires it to be enabled. See
+            # https://platform.claude.com/docs/en/build-with-claude/effort.
+            body["output_config"] = {"effort": effort}
         if request.stop_sequences:
             body["stop_sequences"] = list(request.stop_sequences)
         return body
@@ -1064,6 +1107,12 @@ class GoogleClient:
         if max_tokens and max_tokens > 0:
             generation_config["maxOutputTokens"] = max_tokens
         generation_config.update(_sampling_params(request, top_p_key="topP"))
+        # No effort key here, deliberately: Gemini's named thinking tiers belong
+        # to the Interactions API, while this client speaks `generateContent`,
+        # where the shipped 2.5-series models take a token budget instead. No
+        # Gemini model is given an effort ladder for that reason
+        # (``model.effort``), so `_reasoning_effort` would return None anyway —
+        # the note is here because its absence is a decision, not an oversight.
         if request.stop_sequences:
             generation_config["stopSequences"] = list(request.stop_sequences)
         body["generationConfig"] = generation_config

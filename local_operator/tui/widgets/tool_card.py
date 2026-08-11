@@ -81,6 +81,7 @@ Widths measured through ``rich.cells.cell_len`` only (one width model).
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Any
@@ -100,6 +101,7 @@ from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL_MAX,
     TranscriptBlock,
     TranscriptView,
+    wrap_cells,
 )
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
@@ -184,6 +186,12 @@ OUTPUT_INDENT = 2
 #: transcript into a scroll trap. The head is kept (it carries the command's
 #: framing) and the remainder is announced on a dim marker row.
 EXPAND_MAX_LINES = 40
+#: Per-ARGUMENT cap in the expansion. Much tighter than the output cap because
+#: a payload argument is unbounded by design — `write` carries a whole file in
+#: `content` — and the block exists to answer "what was this call", which a
+#: dozen rows settles. A truncated command is the one thing it must never be,
+#: and no realistic command reaches this.
+INPUT_MAX_LINES = 12
 #: Last-resort width for a card built before it has been laid out. Content
 #: rendered at this width is corrected by the first resize.
 FALLBACK_WIDTH = 80
@@ -319,6 +327,55 @@ def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
     if not parts:
         parts = [text for value in args.values() if (text := _scalar_text(value))]
     return " ".join(parts[:2]) or tool_name
+
+
+def _argument_text(value: object) -> str:
+    """One argument value as the expansion should print it.
+
+    Unlike :func:`_scalar_text` this keeps NEWLINES — a heredoc or a multi-line
+    patch is the shape of the thing being reported, and flattening it to one
+    line is what made the collapsed row unable to carry it in the first place.
+    Structured values are JSON so they are at least readable and unambiguous;
+    ``default=str`` because an argument dict reaching here has already been
+    through the provider and may hold anything.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    try:
+        return json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def clean_intent(intent: str | None) -> str | None:
+    """A model-supplied intent, safe to paint, or ``None``.
+
+    The harness sanitises and bounds this before it reaches the event, so this
+    is a boundary re-check rather than the primary defence: the TUI also runs
+    against embedders and replayed transcripts that construct cards directly,
+    and an escape sequence in a string painted on every frame clears the
+    terminal (the same hazard ``tool_name`` is guarded against below).
+
+    An empty or whitespace-only intent collapses to ``None`` so callers can
+    write ``intent or <fallback>`` and get the fallback rather than a blank row.
+
+    CASE and a trailing period are normalised because this string shares a row
+    with app-authored labels. The prompt asks the model for sentence case, and
+    every other micro-label in this app is lowercase (`interrupted`,
+    `context compacted`, `never sent`, `thinking`), so an unnormalised intent
+    made the one row that alternates between the two look like two different
+    components from one frame to the next. Only an ordinary capitalised word is
+    lowered — `MCP`, `SQL` and `README.md` keep their shape.
+    """
+    if not intent:
+        return None
+    cleaned = _strip_control_sequences(" ".join(intent.split())).rstrip(".")
+    head, _, rest = cleaned.partition(" ")
+    if head[:1].isupper() and head[1:].islower():
+        cleaned = head.lower() + (" " + rest if rest else "")
+    return cleaned or None
 
 
 def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
@@ -464,11 +521,39 @@ class ToolCard(TranscriptBlock):
         # erase-display in it clears the terminal without the tool even running.
         self.tool_name = _strip_control_sequences(tool_name)
         self.add_class("tool-card", "tool-running")
-        # Sanitised at the boundary: args and intent can carry escapes too
-        # (a bash command containing a colour code, an MCP tool's intent).
-        self._summary = _strip_control_sequences(
-            intent or _summary_from_args(tool_name, args or {})
-        )
+        # The row's IDENTITY: what the call was made against. Sanitised at the
+        # boundary because argument values are model-controlled too (a bash
+        # command can carry a colour code).
+        #
+        # Deliberately NOT the ``intent``, which is available here and used by
+        # the working line instead. The two say different kinds of thing: an
+        # intent is the model's CLAIM about what it is doing, the arguments are
+        # what it actually ran. A user scrolls the ledger back precisely when
+        # those two might disagree, and a card captioned with the claim would
+        # hide the disagreement — so the receipt keeps the fact and the
+        # transient working line carries the claim. (Reported from the field as
+        # bash rows that could not say which command they had run.)
+        self._summary = _strip_control_sequences(_summary_from_args(tool_name, args or {}))
+        #: The call's arguments, kept WHOLE for the expansion. The collapsed
+        #: row can only ever show a truncated identity, so without this there
+        #: was no state of the card — collapsed or expanded — from which a user
+        #: could learn what actually ran: the expansion showed exit code, stdout
+        #: and stderr and never the command. A receipt that cannot name what it
+        #: is a receipt for is not auditable.
+        self._args: dict[str, object] = dict(args or {})
+        #: A streaming partial result, shown INSTEAD of the summary while the
+        #: tool runs and dropped when it settles. Held separately because it
+        #: used to overwrite ``_summary`` outright and nothing restored it: a
+        #: bash row whose last fragment was `--- stderr --- (empty)` carried
+        #: that as its settled receipt forever, so the row's own progress
+        #: destroyed the only record of what it had run.
+        self._partial = ""
+        #: The model's stated reason for this call, sanitised, or None. Carried
+        #: on the card but never RENDERED by it (see ``_summary`` above): the
+        #: working line reads it from here so that "which calls are live and
+        #: what did the model say it was doing" stays one dictionary rather than
+        #: two that can disagree.
+        self.intent = clean_intent(intent)
         self._state: str = "running"
         # Composing-row bookkeeping: bytes seen so far, when dictation started,
         # and the clock that keeps the row visibly alive through a provider's
@@ -694,19 +779,34 @@ class ToolCard(TranscriptBlock):
         self._started = time.monotonic()
         self._state = "running"
         # The same construction the constructor uses, so an adopted row is
-        # byte-identical to one that had never been a composing row.
-        self._summary = _strip_control_sequences(
-            intent or _summary_from_args(self.tool_name, args or {})
-        )
+        # byte-identical to one that had never been a composing row — including
+        # taking the ARGUMENTS rather than the intent (see the constructor for
+        # why the receipt keeps the fact).
+        self._summary = _strip_control_sequences(_summary_from_args(self.tool_name, args or {}))
+        self._args = dict(args or {})
+        self._partial = ""
+        # The EXECUTION's intent supersedes whatever the announcement carried,
+        # for the same reason the name does: a partial intent scraped from a
+        # still-streaming call is a draft, and this event carries the finished
+        # one. Kept when the execution reports none, so a compose-time intent is
+        # not thrown away by a provider that omits it on start.
+        self.intent = clean_intent(intent) or self.intent
         self._refresh_row()
 
     def set_partial_detail(self, detail: str) -> None:
-        """Replace the running summary with a streaming partial result line."""
+        """Show a streaming partial result in place of the summary, for now.
+
+        Held in its own field rather than written over ``_summary``. Overwriting
+        it destroyed the row's identity permanently: the last fragment a bash
+        call streamed became its settled receipt, so four finished rows read
+        ``--- stdout --- (empty) --- stderr --- (empty)`` and none of them could
+        say which command it had run. Progress is transient; identity is not.
+        """
         if self._state != "running":
             return
         cleaned = _strip_control_sequences(" ".join(detail.split()))
         if cleaned:
-            self._summary = cleaned
+            self._partial = cleaned
             self._refresh_row()
 
     def _absorb_result(self, result_text: str, details: dict[str, Any] | None) -> None:
@@ -756,6 +856,13 @@ class ToolCard(TranscriptBlock):
         Either the plain result output, or a write/edit diff (which can be
         present on its own — a new-file write's summary line is one sentence
         while its diff is the whole file).
+
+        Deliberately NOT "or it has arguments", though the expansion now leads
+        with them. That would make every row expandable and retire the inert-row
+        answer (``⟨no output⟩``), which is a separate affordance decision — and
+        the row that could not name its command is by definition one WITH
+        output, so the reported case is covered either way. A card with no
+        output still cannot be opened to see what it ran; that gap is known.
         """
         return bool(self._output) or bool(self._diff)
 
@@ -1012,15 +1119,74 @@ class ToolCard(TranscriptBlock):
             self._finalized = was_finalized
 
     def _build_content(self, width: int) -> Text:
-        """The card: the one-row summary, plus the output when expanded."""
+        """The card: the one-row summary, plus the CALL and its result expanded.
+
+        The call comes FIRST, before the output, because it is the question a
+        reader opens the card to answer. Reported from the field on an expanded
+        bash card that listed exit code, stdout and stderr and never the
+        command — leaving no state of the card, collapsed or expanded, from
+        which a user could learn what had run.
+        """
         row = self._build_row(width)
         if not self._expanded:
             return row
+        self._append_input_body(row, width)
         if self._diff:
             self._append_diff_body(row, width)
         elif self._output:
             self._append_output_body(row, width)
         return row
+
+    def _append_input_body(self, row: Text, width: int) -> None:
+        """The arguments the call was made with, one labelled block per key.
+
+        WRAPPED, not truncated: the collapsed row is where a command is cut to
+        fit, and the expansion exists precisely to show what the cut hid. Long
+        payloads are still bounded per key — a ``write`` carries the whole file
+        in ``content``, and a card that painted it would be a file viewer with
+        a tool row on top — so each value keeps its head and reports the rest as
+        a count, which is the same bargain the output block strikes.
+        """
+        if not self._args:
+            return
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        label = Style(color=theme_mod.semantic_color("label"))
+        body = Style(color=theme_mod.semantic_color("fg"))
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        for key, value in self._args.items():
+            text = _strip_control_sequences(_argument_text(value))
+            if not text:
+                continue
+            # The KEY is model-controlled too — an MCP server or a hallucinated
+            # call names it — so it gets the same stripping the value and
+            # `tool_name` get, and a bound: an unbounded key drove the value's
+            # width budget to a single cell while wrapping over several rows.
+            key_text = truncate_cells(_strip_control_sequences(str(key)), TOOL_NAME_COL_MAX)
+            head = f"{key_text}: "
+            # The label is wrapped WITH the value rather than printed and then
+            # the value clipped to fit beside it. Clipping silently deleted the
+            # middle of the first row — a 100-column `pytest … -k expansion
+            # --maxfail=1` rendered as `-k expa… --maxfail=1`, which is not a
+            # shortened command but a different one, and this block exists
+            # precisely so that a command the collapsed row had to cut can be
+            # read whole.
+            rows: list[str] = []
+            for index, source in enumerate(text.splitlines() or [""]):
+                rows.extend(wrap_cells(f"{head}{source}" if not index else source, line_width))
+            shown = rows[:INPUT_MAX_LINES]
+            for index, line in enumerate(shown):
+                row.append("\n" + indent, style=dim)
+                if index == 0 and line.startswith(head):
+                    row.append(head, style=label)
+                    row.append(line[len(head) :], style=body)
+                else:
+                    row.append(line, style=body)
+            hidden = len(rows) - len(shown)
+            if hidden > 0:
+                row.append("\n" + indent, style=dim)
+                marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+                row.append(truncate_cells(marker, line_width), style=dim)
 
     def _append_output_body(self, row: Text, width: int) -> None:
         """The plain-result expansion (bash/read/etc.): one line per row.
@@ -1212,7 +1378,13 @@ class ToolCard(TranscriptBlock):
             if width < self._label_min_width() or cell_len(summary) > budget:
                 summary = truncate_cells(self._compose_facts, budget)
         else:
-            summary = truncate_cells(self._summary, budget)
+            # A streaming fragment displaces the identity only WHILE the tool
+            # runs. Once it has settled the row is a receipt and has to name
+            # what it ran, so the partial is simply not consulted rather than
+            # cleared — a card restored from a transcript has no partial at all,
+            # and one code path covers both.
+            live = self._partial if self._state == "running" else ""
+            summary = truncate_cells(live or self._summary, budget)
 
         row = _row_text()
         # The icon carries the running state: accent while live (D26 — a still

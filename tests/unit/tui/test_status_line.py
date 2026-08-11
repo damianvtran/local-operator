@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import cast
+from typing import Any, cast
 
 from rich.cells import cell_len
 from textual.widgets import Static
@@ -167,12 +167,81 @@ def test_cwd_is_home_relative_then_basename() -> None:
     assert format_cwd("/opt/thing", short=True) == "thing"
 
 
-def test_model_label_sheds_only_its_provider_prefixes() -> None:
+def test_an_unnamed_model_sheds_only_its_provider_prefixes() -> None:
+    """The behaviour every model had before display names, and the one an
+    aggregator id nobody has curated still gets: no name exists, so the selector
+    is the honest rendering and ``short`` keeps its last path segment."""
     assert format_model_label("openrouter/moonshotai/kimi-k2", short=False) == (
         "openrouter/moonshotai/kimi-k2"
     )
     assert format_model_label("openrouter/moonshotai/kimi-k2", short=True) == "kimi-k2"
     assert format_model_label("ollama", short=True) == "ollama"
+
+
+def test_a_named_model_renders_its_name_instead_of_its_selector() -> None:
+    """The headline of the change, measured: 23 cells of selector become 13 of
+    name, which is what makes room for the effort segment beside it."""
+    assert format_model_label("anthropic/claude-opus-5", short=False) == "Claude Opus 5"
+    assert cell_len("Claude Opus 5") < cell_len("anthropic/claude-opus-5")
+
+
+def test_a_listing_name_reaches_the_band_for_a_model_no_registry_row_covers() -> None:
+    """``name`` is the route by which a model the registry has not been taught
+    about is named at all — the registry provably lags a direct provider's
+    releases, and that is the case ``ModelSpec.display_name`` exists for."""
+    assert (
+        format_model_label("anthropic/claude-opus-6", short=False, name="Claude Opus 6")
+        == "Claude Opus 6"
+    )
+
+
+def test_a_resold_model_keeps_its_selector_however_the_reseller_names_it() -> None:
+    """Both shipped aggregators list the same models under the same names — 398 of
+    ~400 in their real cached catalogues — so a reseller's name cannot say which
+    route is answering, and the route is what differs in price and quota."""
+    for provider in ("openrouter", "radient"):
+        selector = f"{provider}/moonshotai/kimi-k2"
+        assert (
+            format_model_label(selector, short=False, name="MoonshotAI: Kimi K2 0711") == selector
+        )
+
+
+def test_the_band_refuses_a_name_another_model_already_answers_to() -> None:
+    """A band printing a shared name could not say which model was replying, so
+    the segment stays wide instead. Constructed rather than taken from the
+    registry: the one shipped duplicate was a data defect and has been fixed, and
+    a live listing renaming a model onto a sibling's name is how this reaches a
+    user now."""
+    borrowed = "Claude Opus 5"  # owned by anthropic/claude-opus-5
+    assert format_model_label("openai/some-proxy-id", short=False, name=borrowed) == (
+        "openai/some-proxy-id"
+    )
+
+
+def test_the_bands_name_is_the_string_the_picker_offered() -> None:
+    """One model, one name.
+
+    Crosses the real boundary rather than comparing the band to itself: the
+    picker paints ``CatalogueEntry.label``, so the assertion reads that label off
+    ``ProviderController.static_catalogue()`` and compares it to what this segment
+    renders. Computing both sides from ``naming.model_label`` would have stayed
+    green if either controller call site were changed to ``.compact``, which is
+    precisely the disagreement the test is named for.
+    """
+    from local_operator.providers.controller import ProviderController
+
+    # `static_catalogue` is the one method that reads no credentials, so the
+    # store is genuinely unused here; cast rather than build a stub whose
+    # only job would be to never be called.
+    entries = ProviderController(auth_store=cast(Any, None)).static_catalogue()
+    checked = 0
+    for entry in entries:
+        if entry.provider != "anthropic":
+            continue
+        band = format_model_label(entry.selector, short=False, name=entry.label)
+        assert band == entry.label, f"{entry.selector}: band {band!r} != picker {entry.label!r}"
+        checked += 1
+    assert checked, "no anthropic rows in the static catalogue"
 
 
 def test_cost_keeps_its_precision_ladder() -> None:

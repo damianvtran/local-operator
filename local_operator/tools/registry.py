@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
+from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
 from local_operator.tools import builtin
 
@@ -32,6 +33,7 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "task": lambda context: builtin.build_task_tool(context),
     "wait": lambda context: builtin.build_wait_tool(context),
     "jobs": lambda context: builtin.build_jobs_tool(context),
+    "hub": lambda context: builtin.build_hub_tool(context),
     "list_variables": lambda _context: builtin.build_list_variables_tool(),
     "read_variable": lambda _context: builtin.build_read_variable_tool(),
     "browser": lambda _context: builtin.build_browser_tool(_context),
@@ -53,6 +55,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "task",
     "wait",
     "jobs",
+    "hub",
     "list_variables",
     "read_variable",
     "browser",
@@ -80,5 +83,13 @@ def create_tools(context: ToolContext, enabled: Sequence[str] | None = None) -> 
             continue
         tool = builder(context)
         if tool is not None:
+            # The `i` intent property is added HERE, not in each params model:
+            # one choke point cannot grow holes as tools are added, and a
+            # working line that narrates intent for some calls and mechanics
+            # for the rest is worse than one that never tries. The transform
+            # only prepends a property inside `parameters`; the tool list this
+            # function returns keeps its order, which the prompt cache depends
+            # on (see the module docstring).
+            tool.parameters = apply_intent_schema(tool.parameters)
             tools.append(tool)
     return tools

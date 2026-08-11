@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -139,6 +140,20 @@ class FakeSession:
     # lifecycle
     async def dispose(self) -> None:
         self.disposed = True
+
+    async def complete_aside(
+        self,
+        turns: list[Any],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> str:
+        # exec mode never opens an aside; present only so the fake still
+        # satisfies SessionProtocol, which is what these tests type against.
+        return ""
+
+    async def adopt_aside(self, messages: list[Any]) -> None:
+        return None
 
 
 def _success_script(reply: str = "Hello from the agent") -> list[AgentEvent]:

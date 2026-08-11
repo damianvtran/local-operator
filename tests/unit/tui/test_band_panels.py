@@ -10,6 +10,7 @@ isolated widget calls that can pass while the wiring is dead.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -29,6 +30,8 @@ class FakeSession:
         self._handlers: list[Any] = []
         self.jobs: Any = None
         self._history: list[Any] = []
+        self.asides: list[list[Any]] = []
+        self.adopted: list[list[Any]] = []
 
     @property
     def session_id(self) -> str:
@@ -104,6 +107,22 @@ class FakeSession:
     def emit(self, event: Any) -> None:
         for handler in list(self._handlers):
             handler(event)
+
+    async def complete_aside(
+        self,
+        turns: list[Any],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> str:
+        # Recorded, not answered: the aside's no-trace contract is proven
+        # against the real Session in tests/unit/session/test_aside.py. Here
+        # the only thing that must hold is that the app can call it.
+        self.asides.append(list(turns))
+        return ""
+
+    async def adopt_aside(self, messages: list[Any]) -> None:
+        self.adopted.append(list(messages))
 
 
 def _async_factory(session: FakeSession):
@@ -214,8 +233,8 @@ async def test_todo_panel_renders_items_with_done_and_pending() -> None:
 
 
 @pytest.mark.asyncio
-async def test_subagent_panel_opens_trajectory_modal() -> None:
-    """Clicking/selecting a subagent row pushes the trajectory modal replaying
+async def test_subagent_panel_opens_full_page_view() -> None:
+    """Clicking/selecting a subagent row opens the full-page view rendering
     the job's retained events — the click-through a user reaches the child's
     work through."""
     session = FakeSession()
@@ -256,18 +275,15 @@ async def test_subagent_panel_opens_trajectory_modal() -> None:
         await pilot.pause()
         sub = app.query_one(SubagentPanel)
         assert sub.display is True
-        # open the trajectory through the same callback the row uses
-        app._open_subagent_trajectory("sub-1")
+        # open the page through the same callback the row uses
+        app._open_subagent_view("sub-1")
         await pilot.pause()
-        from local_operator.tui.widgets.trajectory import TrajectoryScreen
+        from local_operator.tui.widgets.subagent_view import SubagentView
 
-        screens = [s for s in app.screen_stack if isinstance(s, TrajectoryScreen)]
-        assert screens, "a trajectory modal should be pushed"
-        rows = [
-            str(getattr(b, "content", "")).replace("\n", " ") for b in screens[0]._body.children
-        ]
-        rendered = "".join(rows)
+        view = app.query_one(SubagentView)
+        rendered = " ".join(view.rendered_rows())
         assert "child did it" in rendered, rendered
+        assert "summarize workspace" in rendered, rendered
 
 
 @pytest.mark.asyncio

@@ -54,10 +54,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # exactly this reason (it also arrives with pydantic).
 from typing_extensions import TypeVar
 
-# One-way, in-package dependency: ``wake`` is pure schedule data plus a timer
-# and imports nothing else from the harness, so naming its schedule type here
-# cannot cycle. It buys the wake-scheduler contract on ``ToolContext`` a real
-# element type instead of ``Any``.
+# One-way, in-package dependencies: ``approval`` (the gate's type plus the one
+# arity resolver) and ``wake`` (pure schedule data plus a timer) each import
+# nothing else from the harness, so naming their types here cannot cycle. They
+# buy the approval-gate and wake-scheduler contracts on ``ToolContext`` real
+# types instead of ``Any``.
+from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.wake import WakeSchedule
 
 # ---------------------------------------------------------------------------
@@ -395,13 +397,24 @@ class ToolContext(BaseModel):
     cwd: str = "."
     session_id: str = ""
     agent_id: str = ""
+    # Which BACKGROUND JOB this execution belongs to, so a host can scope an
+    # approval decision to the work that provoked it instead of to every
+    # request that follows. ``None`` is the foreground: the session's own turn.
+    # Not telemetry and not an identity — ``session_id``/``agent_id`` already
+    # say who is asking; this says on whose behalf, which is the part a host
+    # cannot otherwise recover. Live failure it exists for: a subagent running
+    # past the end of its parent's turn inherited that turn's approval state
+    # and had its tools denied with no prompt shown to anyone.
+    job_id: str | None = None
     has_ui: bool = False
     # Resolver hook for lazy internal URLs (``skill://`` and ``guide://``);
     # returns content or None when the URL is not handled. Installed by session.
     resolve_internal_url: Callable[[str], str | None] | None = None
     # Approval callback: returns True when the user approved. Tools with an
-    # approval tier call this before mutating side effects.
-    request_approval: Callable[[str, str], Awaitable[bool]] | None = None
+    # approval tier call this before mutating side effects. Two shapes are
+    # accepted (see harness/approval.py); call it through ``ask_approval``
+    # rather than directly, which is what picks the one this host wrote.
+    request_approval: ApprovalGate | None = None
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process
@@ -435,6 +448,15 @@ class ToolContext(BaseModel):
     # advertised at all (createIf) rather than advertised and always
     # failing.
     jobs: JobManagerProtocol | None = None
+    # The parent↔child messaging surface behind the ``hub`` tool
+    # (``harness.comms.SubagentComms``). Typed ``Any`` for the same import-
+    # cycle reason ``jobs`` is a Protocol: ``harness.comms`` imports this
+    # module. A CHILD carries its PARENT's instance — that is what lets
+    # ``hub`` inside a subagent reach the agent that delegated to it, and
+    # what ``is_child(job_id)`` uses to decide which shape of the tool to
+    # advertise. ``None`` means no subagent engine, and the tool is then not
+    # advertised at all (createIf).
+    subagent_comms: Any | None = None
 
 
 ToolExecuteFn = Callable[
@@ -660,12 +682,20 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     left. ``tool_call_id`` is the provider's id when it has arrived and an
     index-derived placeholder before that, so a UI can correlate this with the
     ``tool_execution_start`` that eventually follows.
+
+    ``intent`` is the model's own ``i`` narration, scraped out of the partial
+    JSON as soon as its string closes and ``None`` until then — never a
+    half-word, because a label growing character by character on a repainting
+    row reads worse than no label. This is the highest-value place the field
+    appears: ``argument_bytes`` says the agent is alive, and only the intent
+    says what for, across the longest silence of the turn.
     """
 
     type: Literal["tool_call_compose"] = "tool_call_compose"
     tool_call_id: str
     tool_name: str
     argument_bytes: int = 0
+    intent: str | None = None
 
 
 class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):
@@ -874,6 +904,35 @@ class ModelSpec(BaseModel):
     # model-name knowledge; see the note there for why it keys on the model
     # rather than the provider.
     supports_sampling_params: bool = True
+    # The reasoning-effort ladder this model accepts, ASCENDING, and the level
+    # it is currently set to. Same division of labour as the flag above: derived
+    # once in ``build_model_spec`` from ``model.effort`` so no wire client and no
+    # widget has to recognise a model name, and the KEY IS OMITTED rather than
+    # sent with a null when the model exposes no knob — a provider that rejects
+    # the key rejects it just as hard with an empty value.
+    #
+    # Two fields rather than one because the pair answers two different
+    # questions asked by different callers: the wire clients need "what do I
+    # send", the status band and ``/effort`` need "what else could this be set
+    # to". An empty ``reasoning_efforts`` is the non-reasoning model, and it is
+    # what makes ``/effort`` able to say so instead of accepting a level the
+    # request would silently drop.
+    reasoning_efforts: tuple[str, ...] = ()
+    reasoning_effort: str | None = None
+    # The model's HUMAN name as metadata resolution found it — "Claude Opus 5"
+    # for ``anthropic/claude-opus-5``, "MoonshotAI: Kimi K2" for an OpenRouter
+    # id no registry row covers. Carried on the spec rather than looked up by
+    # the reader because ``build_model_spec`` already holds the resolved
+    # ``ModelInfo`` and then threw the name away, which left the status band
+    # with nothing to print but the selector and left an aggregator model — the
+    # case with no curated name at all — permanently unnamable without a disk
+    # read inside a repaint.
+    #
+    # A RAW name, not a display decision: ``model/naming.py`` owns whether it is
+    # safe to show and how it narrows. Empty means resolution had none, which is
+    # different from "no name exists" and is why the readers fall back rather
+    # than treat this as authoritative.
+    display_name: str = ""
 
 
 class ChatRequest(BaseModel):

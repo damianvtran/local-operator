@@ -37,6 +37,31 @@ class SlashCommand:
     name: str
     description: str = ""
     aliases: tuple[str, ...] = field(default_factory=tuple)
+    #: Whether running the command may write what was typed into the visible
+    #: ledger as a user row.
+    #:
+    #: Keyword-only and defaulting to FALSE because the transcript is a
+    #: reading record, not a keystroke log: every handler in
+    #: ``local_operator.tui.app`` already reports what it did — a panel, a
+    #: listing, a notice naming the new state — so an echo above that receipt
+    #: is a second row saying the same thing. ``True`` is for the one case the
+    #: receipt cannot cover: an argument that becomes something the MODEL is
+    #: told (``/goal <text>`` rides the system prompt's volatile tail), where
+    #: the ledger's job is to show what the model was given, attributed to the
+    #: user who gave it.
+    #:
+    #: The registry decides WHETHER; the handler decides WHEN, by calling
+    #: ``OperatorApp._echo_user_command`` at the point its effect has actually
+    #: landed. Splitting it that way is what keeps the row honest: written
+    #: before dispatch, ``/goal`` claimed the model had been given words for
+    #: its read-only form, for ``/goal clear``, and for a set REJECTED because
+    #: the session had not started yet.
+    #:
+    #: The flag lives on the registry entry, not in the submit handler, so the
+    #: policy is read next to the command it governs; ``SLASH_COMMANDS`` is
+    #: pinned entry-by-entry in ``tests/unit/tui/test_slash_echo.py`` so a new
+    #: command cannot be added without stating its choice.
+    echo: bool = field(default=False, kw_only=True)
 
     @property
     def names(self) -> tuple[str, ...]:

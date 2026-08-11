@@ -4,6 +4,7 @@ from typing import Any, Coroutine, cast
 
 import pytest
 
+from local_operator.harness.intent import INTENT_FIELD, INTENT_PROPERTY
 from local_operator.harness.types import AgentTool, ToolContext, ToolResult
 from local_operator.tools import builtin
 from local_operator.tools.registry import (
@@ -37,6 +38,13 @@ class _FakeJobs:
         return False
 
 
+class _FakeComms:
+    """Just enough surface for build_hub_tool: the role test it branches on."""
+
+    def is_child(self, job_id: str | None) -> bool:
+        return False
+
+
 def _launcher(label: str, prompt: str) -> str:
     return "job-fake"
 
@@ -49,6 +57,7 @@ def _engine_context(**kwargs) -> ToolContext:
         wake_scheduler=_FakeScheduler(),
         subagent_launcher=_launcher,
         jobs=_FakeJobs(),
+        subagent_comms=_FakeComms(),
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -83,16 +92,55 @@ def test_every_tool_has_schema_and_metadata() -> None:
         # JSON Schema derived from the pydantic params model
         assert tool.parameters.get("type") == "object"
         assert "properties" in tool.parameters
-        # A zero-arg tool (e.g. list_variables, jobs) legitimately has no params.
-        if tool.parameters["properties"] == {}:
+        # A zero-arg tool (e.g. list_variables, jobs) legitimately has no params
+        # of its own. `i` is injected into every schema, so "no params" is now
+        # "nothing but `i`".
+        own = {k: v for k, v in tool.parameters["properties"].items() if k != INTENT_FIELD}
+        if own == {}:
             assert tool.name in ("list_variables", "jobs")
         else:
-            assert tool.parameters.get("properties")
+            assert own
         # presentation + scheduling metadata are populated
         assert tool.label
         assert tool.description
         assert tool.approval_tier in ("read", "write", "exec")
         assert tool.concurrency in ("shared", "exclusive")
+
+
+def test_every_tool_advertises_the_intent_property() -> None:
+    """The narration field has to be on EVERY tool. A working line that reports
+    intent for some calls and mechanics for the rest flips register mid-turn,
+    which is worse than never trying."""
+    for tool in create_tools(_engine_context()):
+        properties = tool.parameters["properties"]
+        assert properties[INTENT_FIELD] == INTENT_PROPERTY, tool.name
+        # First, because models emit keys in schema order and the streaming
+        # scrape can only surface a LEADING intent early.
+        assert next(iter(properties)) == INTENT_FIELD, tool.name
+        # Optional: under `extra="forbid"` a required narration field would
+        # turn an omitted intent into a failed call.
+        assert INTENT_FIELD not in tool.parameters.get("required", []), tool.name
+
+
+def test_intent_injection_leaves_tool_order_untouched() -> None:
+    """The tools array rides in the prompt-cache prefix; injecting a property
+    must not perturb which tools are advertised or in what order."""
+    context = _engine_context()
+    assert [tool.name for tool in create_tools(context)] == DEFAULT_TOOL_NAMES
+    subset = ["grep", "bash", "read"]
+    assert [tool.name for tool in create_tools(context, subset)] == subset
+
+
+def test_no_builtin_declares_its_own_intent_parameter() -> None:
+    """`i` is the harness's name. If a params model ever claims it, injection
+    silently skips that tool and the loop stops lifting its narration — so the
+    collision is pinned here rather than discovered as a missing working line."""
+    for name, build in TOOL_BUILDERS.items():
+        tool = build(_engine_context())
+        if tool is None:
+            continue
+        # Builders are read raw here, BEFORE create_tools injects anything.
+        assert INTENT_FIELD not in (tool.parameters.get("properties") or {}), name
 
 
 def test_concurrency_tiers_match_scheduling_model() -> None:

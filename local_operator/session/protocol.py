@@ -14,9 +14,16 @@ superseded — UIs must handle that (see docs/REWRITE.md, stream D).
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable, Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
-from local_operator.harness.types import AgentMessage, EventHandler, Message, ModelSpec
+from local_operator.harness.approval import ApprovalGate
+from local_operator.harness.types import (
+    AgentMessage,
+    EventHandler,
+    Message,
+    ModelSpec,
+    Usage,
+)
 
 
 @runtime_checkable
@@ -99,6 +106,43 @@ class SessionProtocol(Protocol):
         """
         ...
 
+    async def complete_aside(
+        self,
+        turns: list[AgentMessage],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Usage], None] | None = None,
+    ) -> str:
+        """Answer a side question against the live context WITHOUT joining it.
+
+        Reads what a real turn reads — the live system blocks and the whole
+        message list — and writes nothing: no transcript entry, no append to
+        the conversation, no events. ``turns`` are appended for this request
+        only, which is how a caller supplies the side question itself (and any
+        in-flight assistant text it is painting but the context does not carry
+        yet). No tools.
+
+        It is NOT free: the request carries the whole conversation. Nothing is
+        recorded, so ``on_usage`` reports the provider's own figures to
+        whatever the host counts spend with.
+
+        Backs the TUI's ``/btw`` aside overlay. The no-trace guarantee is the
+        feature: dismissing the overlay must leave the conversation, and the
+        model's view of it, exactly as they were found.
+        """
+        ...
+
+    async def adopt_aside(self, messages: list[Message]) -> None:
+        """Promote an off-the-record aside exchange into the conversation.
+
+        The user's explicit opt-out of :meth:`complete_aside`'s no-trace
+        contract: appends the messages as ordinary turns to both the live
+        context and the transcript. Raises while a turn is running — the loop
+        owns the message list for the duration, and splicing into a tool batch
+        makes it unsendable.
+        """
+        ...
+
     # --- driving turns ----------------------------------------------------
     async def prompt(self, text: str) -> None:
         """Run one user turn to completion (awaitable) or raise."""
@@ -124,7 +168,7 @@ class SessionProtocol(Protocol):
         """Abort the running turn; the engine emits an aborted agent_end."""
         ...
 
-    def set_approval_handler(self, handler: Callable[[str, str], Awaitable[bool]] | None) -> None:
+    def set_approval_handler(self, handler: ApprovalGate | None) -> None:
         """Replace the host's tool-approval gate for write/exec tier tools.
 
         A front end that OWNS the terminal must own approvals with it: the

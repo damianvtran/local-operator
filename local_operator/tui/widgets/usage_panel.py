@@ -37,12 +37,11 @@ from typing import Any
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
-from textual.app import NoScreen
 from textual.message import Message
-from textual.screen import Screen
 from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 #: Bar geometry. The bar is the only element here that can be made narrower
@@ -656,12 +655,13 @@ class UsagePanel(Static):
         self._repaint()
 
     # -- geometry ------------------------------------------------------------
+    # Shared with the aside card via ``widgets.overlay``: every card on the
+    # toast layer has to answer "how wide", "how many rows above the dock" and
+    # "where does the host go" identically, and two copies of that arithmetic
+    # is how one card ends up centred against the screen and the other against
+    # the ground. See that module for why each answer is what it is.
     def _screen_size(self) -> tuple[int, int]:
-        try:
-            size = self.screen.size
-        except NoScreen:
-            return 80, 24
-        return max(20, size.width), max(8, size.height)
+        return overlay.screen_size(self)
 
     def panel_width(self) -> int:
         width, _ = self._screen_size()
@@ -671,38 +671,7 @@ class UsagePanel(Static):
         return max(1, self.panel_width() - PANEL_PADDING_CELLS)
 
     def _rows_above_dock(self) -> int:
-        """Rows the card may occupy: the ground ABOVE the docked input panel.
-
-        NOT "the screen height less a constant". The prompt is DOCKED, so the
-        layout engine reserves its rows before it offers the rest to anything
-        else, and how many it takes is a function of the editor's line count,
-        the subagent/todo band and the boot layout — five rows to ten across the
-        sizes the tests sweep. Measured against a constant instead, the card ran
-        over the prompt at every size once the report was long enough to scroll:
-        ``❯  Message Local Ope  24 windows · ↑↓ scroll`` sharing one row (D19).
-
-        The absolute and relative boxes are reconciled HERE and handed back as a
-        COUNT, so no caller can mix them: ``region`` is absolute while
-        ``screen.size`` is the content box that ``Screen { padding: 1 }`` insets,
-        and subtracting one from the other is what made a centred card look a
-        cell off-centre in an earlier round.
-
-        The bound is read off whatever is docked rather than off an id: the
-        invariant is "the card covers no docked surface", and a rule that names
-        ``#input-dock`` would go quietly back to overlapping if the dock were
-        ever renamed. Hosts with nothing docked (the widget-only test app) get
-        the whole content box, which is the same answer by the same rule.
-        """
-        try:
-            screen = self.screen
-        except NoScreen:
-            return self._screen_size()[1]
-        content = screen.content_region
-        ceiling = content.bottom
-        for sibling in screen.children:
-            if sibling.display and sibling.styles.dock == "bottom":
-                ceiling = min(ceiling, sibling.region.y)
-        return max(1, ceiling - content.y)
+        return overlay.rows_above_dock(self)
 
     def _fit(self) -> tuple[int, int, int]:
         """``(rows above the dock, gutter rows, body budget)`` — one measurement.
@@ -717,13 +686,19 @@ class UsagePanel(Static):
         gutter = PANEL_PADDING_ROWS if rows >= SQUEEZE_ROWS else 0
         return rows, gutter, max(1, rows - PANEL_HEIGHT_MARGIN - CHROME_ROWS - gutter)
 
-    def sync_layout(self) -> None:
-        """Repaint when the screen or live dock changed around an open card."""
+    def sync_layout(self, *, force: bool = False) -> None:
+        """Repaint when the screen or live dock changed around an open card.
+
+        ``force`` bypasses the guard for the resize path, where the fingerprint
+        is read before the dock has finished re-arranging and so compares two
+        stale numbers. Same signature as the aside card's, because one caller
+        drives both.
+        """
         if not self.display or not self.is_mounted:
             return
         width, height = self._screen_size()
         fingerprint = (width, height, self._rows_above_dock())
-        if fingerprint != self._layout_shown:
+        if force or fingerprint != self._layout_shown:
             self._repaint()
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -917,31 +892,7 @@ class UsagePanel(Static):
         return pulled if pulled > self._offset else end
 
     def _recentre(self, width: int, height: int) -> None:
-        """Centre the host in the ground ABOVE the docked input panel.
-
-        The host is ``width: auto`` so it hugs this card, exactly as the toast's
-        does: a widget owns its whole region and Textual blanks all of it, so a
-        stretched host on the overlay layer erases the transcript either side of
-        the panel. Centring therefore cannot be ``align: center middle`` in the
-        stylesheet — that needs the stretched host — and is done here instead.
-
-        Horizontally the symmetric screen inset cancels, which a painted-frame
-        test pins. Vertically there is NO such cancellation: the input is docked
-        at the bottom. Centring against the whole screen put the lower half of a
-        tall card on top of the prompt even though ``_fit`` had correctly sized
-        it for the rows above that dock (D19). The same available-row count must
-        therefore size AND place the card.
-        """
-        parent = self.parent
-        if parent is None or isinstance(parent, Screen):
-            # A panel mounted straight on the screen must not move the screen.
-            return
-        screen_width, _ = self._screen_size()
-        rows_above_dock = self._rows_above_dock()
-        parent.styles.offset = (
-            max(0, (screen_width - width) // 2),
-            max(0, (rows_above_dock - height) // 2),
-        )
+        return overlay.recentre(self, width, height)
 
     def _repaint(self) -> None:
         if not self.display or not self.is_mounted:

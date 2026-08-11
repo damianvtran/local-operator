@@ -100,6 +100,10 @@ class ModelRow:
 
     provider: str
     model_id: str
+    #: The model's display name, already through ``model/naming.py``'s honesty
+    #: rule upstream — so it is either a name that identifies this model alone or
+    #: the selector itself, never a name two models answer to. Empty means the
+    #: caller had none; the row then shows its selector and nothing more.
     label: str = ""
     context_window: int = 0
     input_price: float = 0.0
@@ -513,6 +517,51 @@ class ModelPicker(Static):
             # provider prefix is what goes. The selector is still unambiguous in
             # practice because the list is scoped by whatever the user typed.
             line.append(truncate_cells(row.model_id, budget), style=id_style)
+        # The DISPLAY NAME, second and parenthesised. The status band shows this
+        # string and nothing else once a model is running, so a picker that
+        # offered only the selector gave the user two names for one model with no
+        # way to connect them. Second rather than first because the selector is
+        # what `/model` takes and what the ranking matches, so it stays the row's
+        # identity; this only has to be recognisable next to it.
+        #
+        # Bracketed rather than set off by whitespace because it can NEVER be a
+        # column: names start at whatever column each selector ends at (27, 38
+        # and 33 on one measured 120-cell frame), and sizing a real column over
+        # the visible rows would make it jump on every keystroke — the same
+        # failure `_numbers` documents and refuses. A parenthetical reads as
+        # deliberate at a ragged origin where a bare second field reads as two
+        # columns that failed to line up.
+        #
+        # Suppressed when it carries nothing the selector already said, which is
+        # every model whose name resolution declined to shorten it — those rows
+        # would otherwise print their own id twice.
+        name = row.label.strip()
+        if name and name not in (row.model_id, row.selector):
+            # Measured against a layout that ALWAYS reserves the numbers run,
+            # even at the widths where it is not painted. Sized against the
+            # painted layout instead, the annotation GREW as the window shrank:
+            # crossing below `_NUMBERS_MIN_WIDTH` freed ~13 cells and handed all
+            # of them here, so at 56 columns the row read `Cla…` and at 55 it read
+            # `Claude Opus 4.5…`. Content appearing as space disappears is the
+            # kind of thing a reader stops trusting a layout over.
+            always = self._numbers(row)
+            room = (
+                width
+                - _EDGE_MARGIN
+                - cell_len(always)
+                - (_COLUMN_GAP if always else 0)
+                - cell_len(mark)
+                - cell_len(line.plain)
+                - _COLUMN_GAP
+            )
+            # WHOLE OR NOTHING. Truncation keeps the head, and the head of a model
+            # name is the vendor word every sibling row already shares: at 60
+            # columns two anthropic rows both read `Claude…` while the part that
+            # tells them apart — `4.5 (2025-11-01)` — is exactly what was cut. A
+            # secondary aid that cannot be read should not spend cells.
+            if room >= cell_len(name) + 2:
+                line.append(" " * _COLUMN_GAP, style=bg)
+                line.append(f"({name})", style=provider_style)
         if mark:
             line.append(mark, style=mark_style)
         if numbers:

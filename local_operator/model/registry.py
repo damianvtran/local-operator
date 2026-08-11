@@ -199,6 +199,9 @@ class ModelInfo(BaseModel):
         cache_writes_price (Optional[float]): Cost per million tokens for cache writes.
         cache_reads_price (Optional[float]): Cost per million tokens for cache reads.
         description (Optional[str]): Description of the model.
+        limits_from_listing (bool): The window and max_tokens on this row were
+        transcribed from the provider's own live listing on a date, so a live
+        listing supersedes them.
         recommended (Optional[bool]): Whether the model is recommended for use in Local
         Operator.  This is determined based on community usage and feedback.
     """
@@ -214,6 +217,14 @@ class ModelInfo(BaseModel):
     description: str = Field(..., description="Description of the model")
     id: str = Field(..., description="Unique identifier for the model")
     name: str = Field(..., description="Display name for the model")
+    limits_from_listing: bool = Field(
+        default=False,
+        description=(
+            "This row's context_window/max_tokens were TRANSCRIBED from the provider's "
+            "own live listing on a date, rather than being independent knowledge. A live "
+            "listing therefore supersedes them and resolution should go and ask."
+        ),
+    )
     recommended: bool = Field(
         default=False,
         description=(
@@ -307,17 +318,7 @@ def static_models(hosting: str) -> Dict[str, "ModelInfo"]:
     offering a model that does not exist, and for exactly those providers the live
     listing is authoritative anyway.
     """
-    maps: Dict[str, Dict[str, ModelInfo]] = {
-        "anthropic": anthropic_models,
-        "openai": openai_models,
-        "google": google_models,
-        "deepseek": deepseek_models,
-        "alibaba": qwen_models,
-        "mistral": mistral_models,
-        "kimi": kimi_models,
-        "xai": xai_models,
-    }
-    return dict(maps.get(hosting, {}))
+    return dict(_STATIC_MODEL_MAPS.get(hosting, {}))
 
 
 unknown_model_info: ModelInfo = ModelInfo(
@@ -349,10 +350,18 @@ anthropic_models: Dict[str, ModelInfo] = {
     # be right when the listing cannot be reached — the shipped 200k family floor is
     # what made a 1M-context Opus 5 session compact at 160k and report `1.8%/200k`.
     #
-    # Every price is 0.0 on purpose. `/v1/models` quotes none, and 0.0 is this
-    # registry's "unknown": the status band renders a price as fact, so a plausible
-    # guess is worse than an absent number. Add a price here only from Anthropic's
-    # published pricing page, per id.
+    # Prices are Anthropic's OWN, transcribed from the "Model pricing" table at
+    # https://platform.claude.com/docs/en/about-claude/pricing read 2026-08-10, in
+    # this registry's unit of dollars per MILLION tokens. `/v1/models` quotes no
+    # prices at all, which is why they arrived here as 0.0 placeholders and stayed
+    # that way: 0.0 is this registry's "unknown", so the status band rendered
+    # "cost unavailable" for the entire current generation while the older
+    # OpenRouter-priced rows costed fine. Add a price here only from that page.
+    #
+    # `cache_writes_price` is the FIVE-MINUTE write (1.25x base input), not the
+    # 1h write (2x): the Anthropic client sends `cache_control: {"type":
+    # "ephemeral"}` with no `ttl` (clients.py:426/755), which is the 5m cache.
+    # `cache_reads_price` is the cache hit at 0.1x base input.
     #
     # `supports_prompt_cache=True` is a family property (every Claude from 3 on
     # accepts `cache_control`) rather than a listing field; `supports_images` IS a
@@ -364,8 +373,11 @@ anthropic_models: Dict[str, ModelInfo] = {
         context_window=1_000_000,
         supports_images=True,
         supports_prompt_cache=True,
-        input_price=0.0,
-        output_price=0.0,
+        limits_from_listing=True,
+        input_price=5.0,  # $5 / MTok
+        output_price=25.0,  # $25 / MTok
+        cache_writes_price=6.25,  # $6.25 / MTok (5m write)
+        cache_reads_price=0.50,  # $0.50 / MTok
         description=(
             "Anthropic's Claude Opus 5 flagship: 1M-token context window and 128k "
             "of output, with adaptive thinking and effort tiers up to max."
@@ -379,8 +391,18 @@ anthropic_models: Dict[str, ModelInfo] = {
         context_window=1_000_000,
         supports_images=True,
         supports_prompt_cache=True,
-        input_price=0.0,
-        output_price=0.0,
+        limits_from_listing=True,
+        # The rate ACTUALLY in effect: Anthropic's introductory pricing for Sonnet
+        # 5 runs through 2026-08-31, and the standard $3/$15/$3.75/$0.30 takes over
+        # on 2026-09-01. Both rows are published on the same page, cache legs
+        # included, so this is a transcription rather than a choice between two
+        # wrong numbers — and `test_the_sonnet_5_introductory_price_has_not_expired`
+        # fails the build on the changeover date naming the exact edit, so the row
+        # cannot silently under-report by a third the way a bare comment would let it.
+        input_price=2.0,  # $2 / MTok introductory; $3 from 2026-09-01
+        output_price=10.0,  # $10 / MTok introductory; $15 from 2026-09-01
+        cache_writes_price=2.50,  # $2.50 / MTok (5m write); $3.75 from 2026-09-01
+        cache_reads_price=0.20,  # $0.20 / MTok; $0.30 from 2026-09-01
         description=(
             "Claude Sonnet 5: the balanced tier of the 5 generation, with the same "
             "1M-token context window and 128k output as Opus 5."
@@ -394,8 +416,11 @@ anthropic_models: Dict[str, ModelInfo] = {
         context_window=1_000_000,
         supports_images=True,
         supports_prompt_cache=True,
-        input_price=0.0,
-        output_price=0.0,
+        limits_from_listing=True,
+        input_price=10.0,  # $10 / MTok
+        output_price=50.0,  # $50 / MTok
+        cache_writes_price=12.50,  # $12.50 / MTok (5m write)
+        cache_reads_price=1.0,  # $1 / MTok
         description="Claude Fable 5: 1M-token context window and 128k of output.",
         recommended=False,
     ),
@@ -406,8 +431,11 @@ anthropic_models: Dict[str, ModelInfo] = {
         context_window=1_000_000,
         supports_images=True,
         supports_prompt_cache=True,
-        input_price=0.0,
-        output_price=0.0,
+        limits_from_listing=True,
+        input_price=5.0,  # $5 / MTok
+        output_price=25.0,  # $25 / MTok
+        cache_writes_price=6.25,  # $6.25 / MTok (5m write)
+        cache_reads_price=0.50,  # $0.50 / MTok
         description="Claude Opus 4.8: 1M-token context window and 128k of output.",
         recommended=False,
     ),
@@ -418,8 +446,11 @@ anthropic_models: Dict[str, ModelInfo] = {
         context_window=1_000_000,
         supports_images=True,
         supports_prompt_cache=True,
-        input_price=0.0,
-        output_price=0.0,
+        limits_from_listing=True,
+        input_price=5.0,  # $5 / MTok
+        output_price=25.0,  # $25 / MTok
+        cache_writes_price=6.25,  # $6.25 / MTok (5m write)
+        cache_reads_price=0.50,  # $0.50 / MTok
         description="Claude Opus 4.7: 1M-token context window and 128k of output.",
         recommended=False,
     ),
@@ -430,8 +461,11 @@ anthropic_models: Dict[str, ModelInfo] = {
         context_window=1_000_000,
         supports_images=True,
         supports_prompt_cache=True,
-        input_price=0.0,
-        output_price=0.0,
+        limits_from_listing=True,
+        input_price=5.0,  # $5 / MTok
+        output_price=25.0,  # $25 / MTok
+        cache_writes_price=6.25,  # $6.25 / MTok (5m write)
+        cache_reads_price=0.50,  # $0.50 / MTok
         description="Claude Opus 4.6: 1M-token context window and 128k of output.",
         recommended=False,
     ),
@@ -442,8 +476,11 @@ anthropic_models: Dict[str, ModelInfo] = {
         context_window=1_000_000,
         supports_images=True,
         supports_prompt_cache=True,
-        input_price=0.0,
-        output_price=0.0,
+        limits_from_listing=True,
+        input_price=3.0,  # $3 / MTok
+        output_price=15.0,  # $15 / MTok
+        cache_writes_price=3.75,  # $3.75 / MTok (5m write)
+        cache_reads_price=0.30,  # $0.30 / MTok
         description="Claude Sonnet 4.6: 1M-token context window and 128k of output.",
         recommended=False,
     ),
@@ -457,8 +494,11 @@ anthropic_models: Dict[str, ModelInfo] = {
         context_window=200_000,
         supports_images=True,
         supports_prompt_cache=True,
-        input_price=0.0,
-        output_price=0.0,
+        limits_from_listing=True,
+        input_price=5.0,  # $5 / MTok
+        output_price=25.0,  # $25 / MTok
+        cache_writes_price=6.25,  # $6.25 / MTok (5m write)
+        cache_reads_price=0.50,  # $0.50 / MTok
         description="Claude Opus 4.5: 200k-token context window and 64k of output.",
         recommended=False,
     ),
@@ -469,8 +509,11 @@ anthropic_models: Dict[str, ModelInfo] = {
         context_window=1_000_000,
         supports_images=True,
         supports_prompt_cache=True,
-        input_price=0.0,
-        output_price=0.0,
+        limits_from_listing=True,
+        input_price=3.0,  # $3 / MTok
+        output_price=15.0,  # $15 / MTok
+        cache_writes_price=3.75,  # $3.75 / MTok (5m write)
+        cache_reads_price=0.30,  # $0.30 / MTok
         description="Claude Sonnet 4.5: 1M-token context window and 64k of output.",
         recommended=False,
     ),
@@ -481,8 +524,11 @@ anthropic_models: Dict[str, ModelInfo] = {
         context_window=200_000,
         supports_images=True,
         supports_prompt_cache=True,
-        input_price=0.0,
-        output_price=0.0,
+        limits_from_listing=True,
+        input_price=1.0,  # $1 / MTok
+        output_price=5.0,  # $5 / MTok
+        cache_writes_price=1.25,  # $1.25 / MTok (5m write)
+        cache_reads_price=0.10,  # $0.10 / MTok
         description="Claude Haiku 4.5: 200k-token context window and 64k of output.",
         recommended=False,
     ),
@@ -1039,7 +1085,16 @@ google_models: Dict[str, ModelInfo] = {
     ),
     "gemini-2.0-flash-thinking-exp-01-21": ModelInfo(
         id="gemini-2.0-flash-thinking-exp-01-21",
-        name="Gemini 2.0 Flash Thinking Exp",
+        # The release token, in the same parenthesised shape every other dated
+        # row here uses. It is not decoration: this row and
+        # `gemini-2.0-flash-thinking-exp-1219` below shipped the IDENTICAL name,
+        # so any surface that renders the name rather than the id — the status
+        # band, the model picker's label column — could not say which of the two
+        # was answering, and they differ by an 8x output limit (65,536 against
+        # 8,192). `model/naming.py` refuses a shared name and falls back to the
+        # 42-cell selector, so the duplicate cost the band its whole left group
+        # at narrow widths as well.
+        name="Gemini 2.0 Flash Thinking Exp (01-21)",
         max_tokens=65_536,
         context_window=1_048_576,
         supports_images=True,
@@ -1051,7 +1106,7 @@ google_models: Dict[str, ModelInfo] = {
     ),
     "gemini-2.0-flash-thinking-exp-1219": ModelInfo(
         id="gemini-2.0-flash-thinking-exp-1219",
-        name="Gemini 2.0 Flash Thinking Exp",
+        name="Gemini 2.0 Flash Thinking Exp (1219)",
         max_tokens=8192,
         context_window=32_767,
         supports_images=True,
@@ -1871,3 +1926,25 @@ xai_models: Dict[str, ModelInfo] = {
         recommended=False,
     ),
 }
+
+#: Every hosting whose model rows this module SHIPS, keyed by hosting id.
+#:
+#: Hoisted out of :func:`static_models` because two questions need it and only
+#: one of them names a hosting: a display-name index has to enumerate every
+#: curated name at once to find out which ones are shared by two models (see
+#: ``model/naming.py``), and rebuilding that from a hard-coded second list of
+#: hostings would rot the moment a provider is added here and not there.
+_STATIC_MODEL_MAPS: Dict[str, Dict[str, "ModelInfo"]] = {
+    "anthropic": anthropic_models,
+    "openai": openai_models,
+    "google": google_models,
+    "deepseek": deepseek_models,
+    "alibaba": qwen_models,
+    "mistral": mistral_models,
+    "kimi": kimi_models,
+    "xai": xai_models,
+}
+
+#: The hostings :func:`static_models` can answer for. Ordered as declared above
+#: so anything built by walking it is reproducible run to run.
+STATIC_MODEL_HOSTINGS: tuple[str, ...] = tuple(_STATIC_MODEL_MAPS)

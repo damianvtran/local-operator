@@ -31,6 +31,7 @@ from local_operator.harness.types import (
     RenderedStreamError,
     StreamEvent,
 )
+from local_operator.model.effort import resolve_effort, supported_efforts
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess
@@ -383,9 +384,25 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> str | None:
             extra = sorted(set(entry) - {"provider", "model", "model_id"})
             if extra:
                 # Named rather than swallowed. A chain entry that silently
-                # drops half of what the user wrote is the next bug report:
-                # `effort` in particular reads like it should re-tier the
-                # fallback, and ``ModelSpec`` has nowhere to put it today.
+                # drops half of what the user wrote is the next bug report,
+                # and `effort` in particular reads like it should re-tier the
+                # fallback.
+                #
+                # It is STILL not honoured now that ``ModelSpec`` has a
+                # ``reasoning_effort``, and the reason is the chain's SHAPE
+                # rather than the missing field. A chain is a flat list of
+                # selector strings deduped by selector, so there is nowhere to
+                # attach a per-attempt level: the config that motivated the key
+                # lists the same model twice at two efforts, and honouring that
+                # needs the dedupe key to become (selector, effort). That is a
+                # fallback-policy feature — "retry cheaper on failure" — with a
+                # design of its own, not a spare field on this one.
+                #
+                # Validation is NOT the obstacle, and an earlier version of this
+                # comment wrongly said it was: a level would be clamped at hop
+                # time by :func:`spec_for_selector`, after a wildcard has been
+                # materialised into a concrete model, exactly as the user's own
+                # chosen level already is.
                 logger.warning(
                     "retry.fallbackChains[%s]: ignoring unsupported key(s) %s on entry %s/%s"
                     " — only provider/model are honoured",
@@ -461,9 +478,41 @@ def parse_selector(selector: str) -> tuple[str, str]:
 
 
 def spec_for_selector(base: ModelSpec, selector: str) -> ModelSpec:
-    """Clone ``base`` with the provider/model swapped in (knobs carry over)."""
+    """Clone ``base`` with the provider/model swapped in (knobs carry over).
+
+    The reasoning-effort pair is the exception, and has to be: its valid
+    values are a property of the MODEL, so carrying it across a swap sends
+    ``xhigh`` to a model whose ladder stops at ``high`` (a 400 on the request
+    that was supposed to rescue the turn) or to one with no ladder at all.
+
+    It is NOT the only model-derived knob on this spec, and the comment used to
+    imply it was. ``supports_sampling_params`` is derived from the model id the
+    same way and is still carried over unchanged, so a hop from ``gpt-4.1`` to
+    ``o3`` takes ``temperature``/``top_p`` to an endpoint that rejects them.
+    That predates this clamp and is left alone deliberately — it is a separate
+    fix with its own tests — but it is the same class of bug and is written
+    down here rather than left to be rediscovered.
+
+    :func:`resolve_effort` keeps the chosen level when the fallback accepts it
+    and falls back to that model's own default when it does not, so a user who
+    asked for cheap thinking still gets it wherever it is available.
+    """
     provider, model_id = parse_selector(selector)
-    return base.model_copy(update={"provider": provider, "model_id": model_id})
+    return base.model_copy(
+        update={
+            "provider": provider,
+            "model_id": model_id,
+            "reasoning_efforts": supported_efforts(model_id),
+            "reasoning_effort": resolve_effort(model_id, base.reasoning_effort),
+            # Same argument as the effort pair above, applied to identity rather
+            # than to a knob: a display name is a fact about the MODEL, so
+            # carrying it over labels the rescue model with the name of the one
+            # that just failed. Cleared rather than re-resolved because that
+            # would be a metadata lookup on the retry path; the readers all
+            # degrade to the selector, which the two fields above just corrected.
+            "display_name": "",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------

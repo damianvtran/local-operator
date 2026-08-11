@@ -29,7 +29,7 @@ from typing import Any, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from local_operator.harness.types import AbortSignal
+from local_operator.harness.types import AbortSignal, Usage
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,48 @@ class AsyncJob(BaseModel):
     # ``getattr(job, "trajectory", None)`` must be able to tell "no child
     # events recorded" apart from "this job type has none".
     trajectory: list[dict[str, Any]] | None = None
+    # The instruction a ``task`` job was launched with, verbatim. ``label`` is
+    # a short summary the launcher wrote for a status line, so it cannot stand
+    # in for this: a reader looking at a child's transcript otherwise sees an
+    # agent working with no statement of what it was asked to do. Recorded
+    # HERE because the prompt is not recoverable anywhere else a host can
+    # reach — ``Session.prompt`` feeds it straight into the turn pipeline
+    # without emitting an event, so it never reaches ``trajectory``.
+    #
+    # Unbounded on purpose, unlike ``trajectory``: this is one string the
+    # launcher already holds for the life of the job, and it does not grow.
+    # ``None`` (not "") on job types that have no prompt, same convention as
+    # ``trajectory`` — a probing host must be able to tell "not recorded"
+    # apart from "launched with an empty instruction".
+    prompt: str | None = None
+    # -- child accounting (``task`` jobs) ------------------------------------
+    # Both default ``None``, never 0/"": a reader must be able to tell "not
+    # recorded" from "recorded as nothing". Written by the subagent runner and
+    # its relay (``harness/subagent.py``), read by the TUI's subagent panel and
+    # by parent-side cost aggregation.
+    #
+    # The CHILD session's ``provider/model_id``, captured once when the child
+    # is built. Read off the child, never off the parent: ``run_subagent``
+    # takes a ``model_spec`` override, and a child running on a different
+    # model is exactly the fact this records.
+    model_label: str | None = None
+    # Cumulative provider-reported usage for the child, summed over each
+    # assistant ``message_end`` — not just the final one, because a tool-using
+    # child spends most of its tokens in the earlier model calls of the same
+    # run. ``context_tokens`` is point-in-time (the LAST reported value) and
+    # is therefore replaced rather than summed.
+    usage: Usage | None = None
+    # The CHILD model's context window, so a reader can render usage as a
+    # PERCENTAGE of what the child actually has. Captured at launch beside
+    # ``model_label``, off the spec the child was already built with — never
+    # resolved on a render path. The panel used to call ``resolve_model_info``
+    # while painting at 12.5 fps; once registry rows gained
+    # ``limits_from_listing`` a memo miss became a provider discovery fetch,
+    # measured at 45 ms warm-disk, 222 ms cold and up to the 10 s discovery
+    # timeout against a slow host — ten seconds of a TUI not reading the
+    # keyboard, which no try/except can catch. It cannot change under a
+    # running child, so once is right. ``0`` = not recorded.
+    context_window: int = 0
 
 
 class AsyncJobManager:

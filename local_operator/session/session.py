@@ -39,6 +39,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Seque
 from typing import TYPE_CHECKING, Any
 
 from local_operator.compaction.tokens import approx_text_tokens
+from local_operator.harness.approval import ApprovalGate
+from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
 from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.subagent import run_subagent
@@ -66,6 +68,7 @@ from local_operator.harness.types import (
     StaleAside,
     StreamEvent,
     StreamTextDelta,
+    StreamUsageEvent,
     TextContent,
     ToolContext,
     Usage,
@@ -156,7 +159,12 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # compaction cut landing on a rendered marker can still locate
             # ``first_kept_entry_id`` on replay.
             out.append(_render_compaction_marker(message, entry_id=message.id))
-        elif message.custom_type == WAKE_PROMPT_MESSAGE_TYPE:
+        elif message.custom_type in (WAKE_PROMPT_MESSAGE_TYPE, HUB_MESSAGE_TYPE):
+            # A hub message renders exactly like a wake delivery: the sender
+            # already formatted ``details["text"]``, and it must reach the
+            # model as a user turn or the agent it was addressed to never
+            # sees it. Unlisted custom types are dropped (bookkeeping), which
+            # is precisely the trap a new aside type falls into.
             out.append(
                 Message(
                     role="user",
@@ -251,8 +259,29 @@ class Session:
         has_ui: bool = False,
         cwd: str | None = None,
         skill_resolver: Callable[[str], str | None] | None = None,
-        request_approval: Callable[[str, str], Awaitable[bool]] | None = None,
+        request_approval: "ApprovalGate | None" = None,
         goal_state: GoalState | None = None,
+        #: The variables surface behind list_variables/read_variable. Held by
+        #: the SESSION because ``_build_tool_context`` is rebuilt every turn:
+        #: a store passed only to the factory's context reached the createIf
+        #: check that decides the tools exist, and never the context they run
+        #: against, so both tools read a bare process-env store in every
+        #: session while a configured store sat unused beside them.
+        variables: Any | None = None,
+        #: Which background job this session IS, when it is a subagent run.
+        #: Carried so a host can tell a delegated call's approval request apart
+        #: from the parent turn's — a denial latched during the parent's turn
+        #: must not silently kill the tools of a child still running after it.
+        #: Same reason ``variables`` is held here: ``_build_tool_context`` is
+        #: rebuilt every turn, so anything set only on the construction-time
+        #: context reaches the createIf check and never the executor.
+        job_id: str | None = None,
+        #: The parent↔child messaging surface (``harness.comms.SubagentComms``).
+        #: A top-level session mints its own; a CHILD is handed its parent's,
+        #: which is what makes ``hub`` inside a subagent talk to the agent that
+        #: delegated to it. Held here for the ``_build_tool_context`` reason
+        #: above: a rebuilt context must keep pointing at the same instance.
+        subagent_comms: Any | None = None,
         conversation_name: ConversationName | None = None,
         system_blocks_provider: Callable[[], list[str]] | Callable[[], Awaitable[list[str]]],
     ) -> None:
@@ -265,6 +294,9 @@ class Session:
         # The goal rides the prompt's volatile tail; the holder is shared with
         # the system-blocks provider so an edit applies from the next turn.
         self._goal_state = goal_state if goal_state is not None else GoalState()
+        self._variables = variables
+        self._job_id = job_id
+        self._subagent_comms = subagent_comms
         # The conversation's title. A holder rather than a plain string for
         # the same reason the goal is one: the title arrives on a DETACHED
         # naming task after the host already built its status chrome, and
@@ -380,7 +412,7 @@ class Session:
 
             capability = create_tools(
                 self._build_tool_context(),
-                enabled=("task", "wait", "jobs", "wake"),
+                enabled=("task", "wait", "jobs", "wake", "hub"),
             )
         except Exception:  # tooling must never break session construction
             return
@@ -426,6 +458,19 @@ class Session:
     @property
     def agent_id(self) -> str:
         return self._agent_id
+
+    @property
+    def subagent_comms(self) -> Any:
+        """This session's channel to the subagents it launches.
+
+        Minted on first use rather than in ``__init__`` so a child — handed
+        its PARENT's instance at construction — never creates a second one
+        that nobody is listening to, and so a session that never delegates
+        pays nothing for the capability.
+        """
+        if self._subagent_comms is None:
+            self._subagent_comms = SubagentComms(self)
+        return self._subagent_comms
 
     @property
     def is_streaming(self) -> bool:
@@ -555,13 +600,21 @@ class Session:
         batches at the next boundary)."""
         self._steering_queue.put_nowait(Message.user(text))
 
-    def set_approval_handler(self, handler: Callable[[str, str], Awaitable[bool]] | None) -> None:
+    def set_approval_handler(self, handler: "ApprovalGate | None") -> None:
         """Install the host's tool-approval gate (see SessionProtocol).
 
         Read when the per-turn tool context is built rather than captured once,
         so a front end that installs its own gate after the session is already
         constructed (the TUI resolves its session in a worker, well after the
         factory ran) governs every tool call from the next one onward.
+
+        ``ApprovalGate`` is a UNION of the two accepted shapes —
+        ``(tool_name, description)`` and the same plus ``job_id`` — so a host
+        that wants to know WHICH background job is asking can say so without
+        every existing host having to change. Narrowing this back to the
+        two-argument callable is what would silently drop the provenance at the
+        last hop: the gate is installed here, so this annotation is what a host
+        type-checks its own handler against.
         """
         self._request_approval = handler
 
@@ -912,6 +965,9 @@ class Session:
             browser=self._browser,
             subagent_launcher=self._launch_subagent,
             jobs=self.jobs,
+            subagent_comms=self.subagent_comms,
+            variables=self._variables,
+            job_id=self._job_id,
         )
 
     def _launch_subagent(self, label: str, prompt: str) -> str:
@@ -1233,6 +1289,129 @@ class Session:
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
         return "".join(parts)
+
+    async def complete_aside(
+        self,
+        turns: Sequence[AgentMessage],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Usage], None] | None = None,
+    ) -> str:
+        """Answer a side question against the live context WITHOUT joining it.
+
+        This is ``complete_once``'s opposite number. ``complete_once`` is for
+        errands that need the provider but not the conversation (auto-naming);
+        this is for questions that need the CONVERSATION — "why did you pick
+        that", "are the subagents stuck" — and must not become part of it.
+
+        So it READS everything a real turn reads (the live system blocks, so
+        the goal's volatile tail matches what the agent is actually running
+        under, and the live message list) and WRITES nothing: no transcript
+        entry, no append to ``_context.messages``, no event fan-out. The
+        caller's ``turns`` are appended for this request only. That is what
+        makes the TUI's ``/btw`` overlay an aside rather than a hidden prompt —
+        pressing Esc has to leave the conversation exactly as it was found.
+
+        Nothing to do with the loop's ``Aside`` message channel a few hundred
+        lines up (``queue_aside``/``_drain_asides``), which injects messages
+        INTO a running turn. This is the opposite: one request that reads the
+        turn and adds nothing to it.
+
+        It does spend real tokens, and nothing here records that. The request
+        carries the whole conversation, so an aside is not free; the host is
+        what owns cost accounting, so ``on_usage`` hands the provider's own
+        figures back rather than this method guessing at them.
+
+        No tools, and ``tool_choice="none"``: an aside that could edit a file
+        would be a turn wearing a popup, and the answer is meant to come from
+        context the agent already has.
+
+        Safe to call mid-turn, and the pairing below is what makes that true —
+        see :meth:`_wire_legal_snapshot`.
+        """
+        blocks = self._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        request = ChatRequest(
+            model=self._model,
+            system_blocks=list(blocks),
+            messages=self._convert_to_llm([*self._wire_legal_snapshot(), *turns]),
+            tools=[],
+            tool_choice="none",
+        )
+        parts: list[str] = []
+        async for event in self._stream_fn(request, None):
+            if isinstance(event, StreamTextDelta):
+                parts.append(event.delta)
+                if on_delta is not None:
+                    on_delta(event.delta)
+            elif isinstance(event, StreamUsageEvent) and on_usage is not None:
+                on_usage(event.usage)
+        return "".join(parts)
+
+    def _wire_legal_snapshot(self) -> list[AgentMessage]:
+        """A copy of the live message list that a provider will actually accept.
+
+        The live list is NOT always legal. ``AgentLoop`` appends the assistant
+        message the moment the model turn ends (``loop._run`` → ``context
+        .messages.append(assistant)``) and appends the tool results only once
+        ``_execute_tool_calls`` returns — so for the whole duration of every
+        tool batch, which is the longest part of a turn, the list ends in an
+        assistant message whose ``tool_calls`` have no answers. Sending that
+        is a 400 on both wires ("must be followed by tool messages responding
+        to each tool_call_id"; ``tool_use`` without ``tool_result``), and
+        mid-batch is exactly when someone asks "what are you doing?".
+
+        So the dangling calls are paired HERE, in a request-scoped copy, the
+        same way the loop pairs them on its abort path. The placeholder text
+        is also the honest answer to the question being asked.
+        """
+        snapshot = list(self._context.messages)
+        tail = snapshot[-1] if snapshot else None
+        if isinstance(tail, Message) and tail.role == "assistant" and tail.tool_calls:
+            snapshot.extend(
+                Message(
+                    role="tool",
+                    content=[TextContent(text="(still running)")],
+                    tool_call_id=call.id,
+                    tool_name=call.name,
+                )
+                for call in tail.tool_calls
+            )
+        return snapshot
+
+    async def adopt_aside(self, messages: Sequence[Message]) -> None:
+        """Promote an off-the-record aside exchange into the conversation.
+
+        The one door out of :meth:`complete_aside`'s no-trace contract, and it
+        is the USER's to open: an aside the user decides was worth keeping is
+        appended as ordinary user/assistant turns, to the live context and the
+        transcript both, so the next real turn sees it and a resume replays it.
+
+        Refused while a turn is running, and not as caution. The loop owns
+        ``_context.messages`` for the duration and pairs every tool call with
+        its result; splicing a user message between an assistant tool-call
+        message and the results it is waiting for produces a message list no
+        provider will accept.
+
+        The turn LOCK is consulted as well as the streaming flag, for the
+        reason :meth:`prompt` spells out: ``_is_streaming`` covers only
+        ``_run_turn`` itself, while the lock is held across the whole pipeline
+        including a post-compaction auto-continuation. A fork landing in that
+        gap would be swept into a continuation the user never saw.
+        """
+        if self._is_streaming or self._turn_lock.locked():
+            raise RuntimeError("cannot adopt an aside while a turn is running")
+        # Persist first, then adopt — the order ``seed_history`` uses, and for
+        # the same reason: a failed transcript write must not leave the live
+        # context carrying messages a resume will not replay.
+        for message in messages:
+            await self._transcript.append_message(message)
+        # One synchronous extend, not an append per await. ``_deliver_wake``
+        # spawns a turn precisely when nothing is streaming, so an await
+        # between the pair's two messages is a window for a wake's turn to
+        # splice its own messages through the middle of them.
+        self._context.messages.extend(messages)
 
     # -- wakes -------------------------------------------------------------------
 

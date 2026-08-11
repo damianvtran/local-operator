@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -453,6 +454,8 @@ class FakeSession:
         self.model_label = model_label
         self.conversation_name = ""
         self._handlers: list[Any] = []
+        self.asides: list[list[Any]] = []
+        self.adopted: list[list[Any]] = []
 
     @property
     def session_id(self) -> str:
@@ -517,6 +520,22 @@ class FakeSession:
 
     async def dispose(self) -> None:
         self.disposed = True
+
+    async def complete_aside(
+        self,
+        turns: list[Any],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> str:
+        # Recorded, not answered: the aside's no-trace contract is proven
+        # against the real Session in tests/unit/session/test_aside.py. Here
+        # the only thing that must hold is that the app can call it.
+        self.asides.append(list(turns))
+        return ""
+
+    async def adopt_aside(self, messages: list[Any]) -> None:
+        self.adopted.append(list(messages))
 
 
 class FakeProviders:
@@ -1257,3 +1276,35 @@ async def test_a_fresh_view_opens_on_the_first_tip_and_only_then_varies(
     # still drawn, and never zero, so the first tick always turns the row over.
     assert len(resumes) > 1, "the ring resumes at a fixed point, so the pool is unreachable"
     assert 0 not in resumes
+
+
+def test_the_splash_names_the_model_the_way_the_band_does() -> None:
+    """D10, restated for display names.
+
+    The splash and the status band six rows below it must answer "which model" with
+    the same string. They have already disagreed once — the splash printed
+    `openrouter/deepseek/deepseek-…` while the band printed `deepseek-chat-v3.1` —
+    and giving the band a display name while leaving the splash on the raw selector
+    would be that defect again with a nicer-looking half.
+    """
+    from local_operator.tui.widgets.status_line import format_model_label
+
+    info = WelcomeInfo(
+        version="0.15.10",
+        model_label="anthropic/claude-opus-5",
+        model_name="Claude Opus 5",
+        cwd="/Users/damian/local-operator",
+    )
+    rows = plain(build_welcome_lines(info, ROOMY_W, ROOMY_H))
+    band_text = format_model_label(info.model_label, short=False, name=info.model_name)
+    assert band_text == "Claude Opus 5"
+    assert band_text in rows, rows
+    assert info.model_label not in rows, rows
+
+
+def test_the_splash_falls_back_to_the_selector_when_nothing_names_the_model() -> None:
+    """A local Ollama tag has no name anywhere, and the string the operator typed
+    beats an invented abbreviation of it — the same fallback the band takes."""
+    info = WelcomeInfo(version="0.15.10", model_label="ollama/qwen3:32b", cwd="/tmp")
+    rows = plain(build_welcome_lines(info, ROOMY_W, ROOMY_H))
+    assert "ollama/qwen3:32b" in rows, rows

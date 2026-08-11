@@ -20,6 +20,7 @@ import pytest
 
 from local_operator import resume as resume_mod
 from local_operator import session_factory
+from local_operator.harness.types import TextContent
 from local_operator.session.session import Session
 from local_operator.session_factory import (
     _transcript_dir_and_agent_id,
@@ -1036,3 +1037,67 @@ class TestWarmSessionImports:
             factory, "_WARM_IMPORTS", ("local_operator.no_such_module_at_all", "json")
         )
         factory.warm_session_imports()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_configured_variables_reach_a_real_tool_call(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store must reach the context tools EXECUTE against, not just the one
+    that decides they exist.
+
+    ``_prepare`` built a ToolContext carrying a ``VariableStore`` and handed it
+    to ``create_tools``, which is a createIf check — it only decides whether
+    ``list_variables``/``read_variable`` are advertised. The context a tool
+    actually runs against is rebuilt by ``Session._build_tool_context`` on every
+    turn, and it carried no store, so both tools advertised themselves and then
+    read a bare process-environment store. A user's configured variables were
+    unreachable in every session while sitting right there in the factory.
+
+    Asserted through a real ``execute`` rather than by reading the field, because
+    the field being set is not the claim — the claim is that the tool can see
+    the value.
+    """
+    import yaml
+
+    (tmp_config_dir / "config.yml").write_text(
+        yaml.safe_dump(
+            {
+                "version": "0.16.1",
+                "values": {
+                    "hosting": "anthropic",
+                    "model_name": "claude-opus-5",
+                    "variables": {"MY_CONFIG_VAR": "hello"},
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_MCP", "1")
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.session_factory import create_session
+
+    session = await create_session(
+        args=argparse.Namespace(),
+        config_manager=ConfigManager(config_dir=tmp_config_dir),
+        credential_manager=CredentialManager(config_dir=tmp_config_dir),
+        agent_registry=AgentRegistry(config_dir=tmp_config_dir),
+        has_ui=True,
+    )
+    # create_session is typed to the protocol; this test is about the
+    # concrete Session's turn-time wiring, so narrow to it explicitly.
+    assert isinstance(session, Session)
+    try:
+        context = session._build_tool_context()
+        assert context.variables is not None, "the turn-time context has no store"
+        tool = next(t for t in session._tools if t.name == "list_variables")
+        result = await tool.execute("call-1", {}, None, lambda _update: None, context)
+        # A tool result is a union of text and image blocks. isinstance says
+        # which arm this assertion is about; the old getattr guard read the
+        # same rows but left the type a union.
+        text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+        assert "MY_CONFIG_VAR" in text, text
+    finally:
+        await session.dispose()

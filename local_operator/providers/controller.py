@@ -26,6 +26,7 @@ from local_operator.model.configure import (  # noqa: F401  (used by callers)
     build_model_spec,
 )
 from local_operator.model.discovery import available_models
+from local_operator.model.naming import model_label
 from local_operator.model.registry import static_models
 from local_operator.providers.registry import (
     AGGREGATOR_PROVIDERS,
@@ -389,7 +390,7 @@ class ProviderController:
                     CatalogueEntry(
                         provider=definition.id,
                         model_id=model_id,
-                        label=info.name or model_id,
+                        label=model_label(definition.id, model_id, info.name or "").full,
                         context_window=max(0, info.context_window or 0),
                         input_price=_price(info.input_price, definition),
                         output_price=_price(info.output_price, definition),
@@ -442,7 +443,7 @@ class ProviderController:
                     CatalogueEntry(
                         provider=definition.id,
                         model_id=model.id,
-                        label=model.name or model.id,
+                        label=model_label(definition.id, model.id, model.name or "").full,
                         context_window=max(0, model.context_window),
                         input_price=_price(model.input_price, definition),
                         output_price=_price(model.output_price, definition),

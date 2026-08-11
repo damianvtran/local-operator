@@ -18,7 +18,9 @@ Key interception happens in :meth:`_on_key`, which runs BEFORE TextArea's
 document-insert path, so a handled key never reaches the buffer. Unhandled
 keys fall through to the stock editor behavior.
 
-The caret is SOLID and never blinks; see ``cursor_blink`` in :meth:`__init__`.
+The caret is SOLID and never blinks, and on an EMPTY composer it gets a cell of
+its own to the left of the placeholder rather than inverting the placeholder's
+first letter; see ``cursor_blink`` in :meth:`__init__` and :meth:`render_line`.
 
 The editor OWNS its :class:`CommandPicker` (built in ``__init__``, mounted by
 the app as a sibling below the input row, since the picker must draw outside
@@ -39,7 +41,10 @@ from __future__ import annotations
 from typing import Callable
 
 from textual import events
+from textual.content import Content
 from textual.message import Message
+from textual.strip import Strip
+from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult
 
@@ -116,6 +121,30 @@ class ProviderQueryOpened(Message):
         self.command = command
 
 
+#: The composer's resting prose. Named rather than inlined because the app
+#: swaps it for :data:`READ_ONLY_PLACEHOLDER` while the full-page subagent
+#: view is open and has to be able to put this one back.
+DEFAULT_PLACEHOLDER = "Message Local Operator…"
+
+#: What the composer says while it refuses input. It names the state AND the
+#: consequence, because the only useful thing to tell someone whose keys are
+#: being ignored is how to get a composer that accepts them.
+READ_ONLY_PLACEHOLDER = "Read-only — press esc to reply"
+
+#: What the composer says while the `/btw` aside card owns it — what the FIELD
+#: does, in ``DEFAULT_PLACEHOLDER``'s shape, and nothing about how to leave.
+#:
+#: It used to read "Aside — esc returns to the chat". That was right while the
+#: card floated 88 cells wide four rows away; once the two share a column and
+#: sit one row apart, the card's own pinned footer already says `esc back to
+#: the chat` two rows above, and two nearly consecutive rows both opening with
+#: `esc`, in two different verbs, read as repetition in a unit whose whole
+#: argument is that it is one thing. The card keeps the exit — its footer is
+#: chrome and `esc` is never shed from it — and this says what typing here
+#: will do. Half the cells, so it also survives a narrow terminal.
+ASIDE_PLACEHOLDER = "Ask the aside…"
+
+
 class Editor(TextArea):
     """Multiline prompt editor with submit-on-Enter, history, slash-completion."""
 
@@ -145,7 +174,7 @@ class Editor(TextArea):
 
     def __init__(
         self,
-        placeholder: str = "Message Local Operator…",
+        placeholder: str = DEFAULT_PLACEHOLDER,
         commands: list[SlashCommand] | None = None,
     ) -> None:
         # Built BEFORE super().__init__: TextArea's constructor loads its
@@ -163,43 +192,29 @@ class Editor(TextArea):
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
         super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
-        # The caret is SOLID, never blinking, and is NOT DRAWN AT ALL while the
-        # buffer is empty. Two rules, one root cause: Textual has nowhere to put
-        # a caret in a cell grid except ON a character, so with no text the
-        # placeholder branch of `TextArea.render_line` inverts cell 0 of
-        # `Message Local Operator…` whenever `_draw_cursor` is true.
+        # The caret is SOLID and never blinks. Blinking made the caret cell flip
+        # twice a second, and on the boot splash — where nothing else repaints —
+        # that 2 Hz invert beside a static logo WAS the startup animation users
+        # called obnoxious. Blink-off pays a second time: stock blink runs
+        # `refresh_lines` every 500 ms for the life of the app, so a completely
+        # idle session was writing a row down the ssh pipe twice a second for a
+        # caret that had not moved.
         #
-        # Blinking made that cell flip twice a second, and on the boot splash —
-        # where nothing else repaints — that 2 Hz invert beside a static logo
-        # WAS the startup animation users called obnoxious. Turning blink off
-        # alone only froze it: measured on the boot frame, the inverted cell
-        # sits at 13.76:1 against the panel, roughly 2.6x the mark's 3.71-5.35:1,
-        # so the loudest thing on the identity screen became a white block
-        # covering a letter, and the copy read `▉essage Local Operator…` (D-05).
-        # A caret that eats a word is a worse bug than a caret that flickers.
+        # Blink-off is NOT the same lever as whether a caret is drawn at all.
+        # An earlier pass suppressed the caret on an empty buffer, because
+        # Textual has nowhere to put one in a cell grid except ON a character:
+        # the placeholder branch of `TextArea.render_line` inverts cell 0 of
+        # `Message Local Operator…`, so the copy read `▉essage Local Operator…`
+        # with the block measuring 13.76:1 against the panel — the loudest thing
+        # on the identity screen, sitting on a word (D-05).
         #
-        # So: no caret while there is nothing to point at. The placeholder is
-        # PROSE and has to survive as words, and the composer still announces
-        # itself — `#input-dock:focus-within #prompt-chevron` turns the chevron
-        # accent on focus, which is a product affordance rather than a raster
-        # artefact sitting on top of one. The instant the buffer holds anything,
-        # the caret appears and stays put: that is where a caret earns its keep,
-        # marking an insertion point among characters, and a first-time user
-        # meets it on their first keystroke.
-        #
-        # This is NOT the "off while the buffer is empty" that an earlier pass
-        # rejected. That variant was about BLINK — solid while empty, blinking
-        # once you type — which keeps the 500 ms repaint for the whole session
-        # and changes the caret's behaviour mid-typing for a reason the user
-        # cannot see. Here blink is off unconditionally and what is conditional
-        # is whether a caret is DRAWN, in the one state where drawing it
-        # destroys a word. Neither state animates, which is also what keeps the
-        # splash reproducible for the SVG snapshot harness.
-        #
-        # Blink-off pays a second time: stock blink runs `refresh_lines` every
-        # 500 ms for the life of the app, so a completely idle session was
-        # writing a row down the ssh pipe twice a second for a caret that had
-        # not moved.
+        # Suppressing it was the wrong half to give up. It left the composer
+        # with NO focus affordance in the state a first-time user meets it in:
+        # clicking the empty field changed nothing on the frame, so there was no
+        # way to tell whether the next keystroke would land in it. The caret is
+        # back, and the collision is resolved where it actually is — the cell
+        # grid — by giving the caret its OWN cell and starting the placeholder
+        # at column 1 while it is drawn. See :meth:`render_line`.
         self.cursor_blink = False
         self._history: list[str] = []
         self._history_index: int | None = None  # None = not navigating
@@ -207,25 +222,45 @@ class Editor(TextArea):
         self._on_model_chosen: Callable[[ModelRow], None] | None = None
         self.set_commands(commands or [])
 
-    @property
-    def _draw_cursor(self) -> bool:
-        """Suppress the caret while the placeholder is the only thing on the row.
+    def render_line(self, y: int) -> Strip:
+        """Draw the empty composer's caret in a cell of its OWN.
 
-        The hook is Textual's, and it is the ONLY one that reaches the
-        placeholder: ``render_line`` consults it before inverting cell 0 of the
-        placeholder, and ``_render_line`` consults it for a real document row.
-        With an empty buffer and a placeholder set, the first path is the only
-        one that runs, so gating on emptiness here removes the block from the
-        placeholder and touches nothing else. See :meth:`__init__` for why the
-        caret is unwelcome on prose.
+        Textual's placeholder branch inverts cell 0 of the placeholder when the
+        caret is drawn, which paints the block on top of the ``M`` of
+        ``Message Local Operator…`` — the caret and the copy competing for one
+        cell. Nothing in a cell grid can hold both, so the placeholder moves one
+        cell right while the caret is on screen and the caret takes the column
+        the first typed character will occupy. Both survive: a solid block at
+        the head of the field, and the invitation still readable as words.
 
-        ``document.end`` rather than ``self.text``: this is called once per
-        rendered line, and ``text`` joins the whole buffer to answer a question
-        about its first cell.
+        The shift is conditional on the caret being drawn rather than permanent
+        so the resting (blurred) composer keeps its copy aligned with the column
+        typed text starts in; the one-cell move IS the focus transition, and it
+        happens on the same frame as the chevron going accent.
+
+        This mirrors ``TextArea.render_line``'s own placeholder branch — padding
+        is the only difference — because that branch runs BEFORE any hook a
+        subclass could reach and owns the wrap. Every other row (a real document
+        line) is the base class's, untouched.
         """
-        if self.document.end == (0, 0):
-            return False
-        return bool(super()._draw_cursor)
+        if not self.text and self.placeholder:
+            theme = self._theme
+            cursor_style = theme.cursor_style if theme else None
+            # ONE condition for both the reserved cell and the block painted in
+            # it. Computing them separately would indent the copy by a cell
+            # with nothing in it on any frame where the caret cannot be drawn.
+            caret = bool(self._draw_cursor) and cursor_style is not None
+            placeholder = Content.from_text(self.placeholder)
+            if caret:
+                placeholder = placeholder.pad_left(1)
+            lines = placeholder.wrap(self.content_size.width)
+            if y < len(lines):
+                content = lines[y].stylize(self.get_visual_style("text-area--placeholder"))
+                if caret and y == 0:
+                    assert cursor_style is not None  # narrowed by `caret`
+                    content = content.stylize(ContentStyle.from_rich_style(cursor_style), 0, 1)
+                return Strip(content.render_segments(self.visual_style), content.cell_length)
+        return super().render_line(y)
 
     # -- public API ---------------------------------------------------------
     @property

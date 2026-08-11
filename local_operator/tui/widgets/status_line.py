@@ -38,6 +38,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.widgets import Static
 
+from local_operator.model.naming import model_label as model_label_forms
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import format_duration, truncate_cells
 
@@ -474,21 +475,77 @@ def format_cwd(cwd: str, *, short: bool) -> str:
         return str(path)
 
 
-def format_model_label(label: str, *, short: bool) -> str:
-    """``provider/model``, or just the model id when ``short``.
+def format_model_label(label: str, *, short: bool, name: str = "") -> str:
+    """A model's human name, or its selector when no name can be trusted.
 
-    The provider is the droppable half: an operator who has switched
-    providers knows which one they are on, but two providers' model ids are
-    rarely confusable, so ``openrouter/moonshotai/kimi-k2`` degrades to
-    ``kimi-k2`` rather than disappearing. Only the LAST path segment is kept
-    — vendor-scoped ids carry two prefixes, and dropping one of them would
-    leave a label that is still too long to help.
+    ``label`` is the selector the rest of the app identifies a model by
+    (``anthropic/claude-opus-5``); ``name`` is the resolved ``ModelInfo.name``
+    when the caller has one, and is what lets an aggregator id no registry row
+    covers still read as ``MoonshotAI: Kimi K2``. Callers without it still get
+    the curated name, which is every direct provider.
+
+    Both the choice of name and the ``short`` narrowing are
+    ``model/naming.py``'s: it refuses a name that two models answer to, so the
+    23 cells of ``anthropic/claude-opus-5`` become the 13 of ``Claude Opus 5``
+    without the band ever printing a string that fails to say which model is
+    replying. Where it refuses, the selector comes back and ``short`` keeps only
+    the last path segment — the behaviour this segment has always had, now
+    reached only when a name would have been a guess.
     """
     if not label:
         return ""
-    if not short:
-        return label
-    return label.rpartition("/")[2] or label
+    provider, _, model_id = label.partition("/")
+    forms = model_label_forms(provider, model_id, name)
+    return forms.compact if short else forms.full
+
+
+@dataclass(frozen=True)
+class SubagentBand:
+    """The CHILD's readings, shown in place of the session's own.
+
+    While the full-page subagent view is up, the band four rows under it was
+    still describing the PARENT — its model, its context, its spend — over a
+    frame whose entire subject is a different session. A child frequently runs
+    a different model than its parent (``run_subagent`` takes a ``model_spec``
+    override), so that was not merely redundant, it was wrong.
+
+    An OVERLAY rather than a save-and-restore of the band's own fields,
+    because the parent does not stop while the page is open: its turn keeps
+    ending, and every ``on_turn_ended`` writes a fresh cost and context into
+    those fields. Saving them on the way in would hand back a snapshot that
+    went stale in the reader's hand. Shadowed, the parent's numbers stay live
+    underneath and are revealed intact the moment the overlay is dropped.
+
+    Every field is OMITTABLE and empty means omitted, never zero: a child that
+    has reported no usage has no context reading and no spend, and the band's
+    own segments already disappear on exactly those emptiness tests. Printing
+    the parent's figure in a child's frame is the one thing this class exists
+    to prevent, so there is no field here that can fall back to it.
+    """
+
+    #: Never empty in practice: a child with no recorded model of its own is
+    #: running the parent's, so the caller resolves that before constructing
+    #: this. The band never drops the model segment, and "which model is
+    #: replying" has an answer here even when nothing else does.
+    model_label: str = ""
+    #: The child's own name, which REPLACES the parent's running-agent counter
+    #: while the overlay is up. Without it the band interleaves three owners
+    #: with no mark — the model, context, cost and duration are the child's,
+    #: the cwd and MCP are shared, and the parent's `◍ 2 agents` sat between
+    #: them. Naming the child at the head of the right-hand group makes
+    #: everything after it belong to one session, and the count it displaces
+    #: is redundant to a reader who is already inside one of those agents and
+    #: has the whole list four rows below.
+    label: str = ""
+    context_tokens: int = 0
+    context_window: int = 0
+    #: Already formatted, because the vocabulary for "billed but unpriceable"
+    #: (``$—``) belongs to the caller that knows the difference between a
+    #: child that spent nothing and one nobody can price.
+    cost: str = ""
+    #: The child's own age. ``None`` leaves the segment off rather than
+    #: reporting the parent's cumulative active time under a child's title.
+    duration: float | None = None
 
 
 class StatusLine:
@@ -514,6 +571,12 @@ class StatusLine:
         # is worse than no duration.
         self._clock = clock
         self._model_label: str = ""
+        # The resolved ``ModelInfo.name`` for the selector above, "" when the
+        # host could not supply one. Kept beside the selector rather than
+        # replacing it because the selector is still what the segment falls back
+        # to, and because a caller that knows neither (the boot frame, before a
+        # session exists) must not have to invent one.
+        self._model_name: str = ""
         self._effort: str = ""
         self._cwd: str = ""
         self._context_tokens: int = 0
@@ -530,6 +593,10 @@ class StatusLine:
         self._cost: str = ""
         self._conversation_name: str = ""
         self._mcp: McpStatus = McpStatus()
+        # Which segments the drop ladder shed on the LAST render. Every segment
+        # is dropped until something has been rendered, which is the honest
+        # starting state: nothing has been shown yet.
+        self._dropped: frozenset[str] = frozenset(_DROP_LADDER)
         # True once the user has answered a tool-approval prompt with "allow
         # all": a session-wide mode with no persistent indicator is how a
         # disarmed gate gets forgotten about.
@@ -542,6 +609,9 @@ class StatusLine:
         self._turn_started_at: float | None = None
         self._spinner_index: int = 0
         self._spinner_timer = None
+        #: The child's readings, shadowing the session's own while the
+        #: full-page subagent view is up. ``None`` is the ordinary band.
+        self._subagent: SubagentBand | None = None
 
     @property
     def context_tokens(self) -> int:
@@ -557,11 +627,23 @@ class StatusLine:
         """Whether :attr:`context_tokens` is a local estimate, not the wire."""
         return self._context_is_estimate
 
+    def set_subagent(self, band: SubagentBand | None) -> None:
+        """Describe a CHILD session instead of this one, or stop (``None``).
+
+        Idempotent and cheap enough to call from the 1 Hz refresh that keeps
+        the open page live: an unchanged overlay repaints nothing.
+        """
+        if band == self._subagent:
+            return
+        self._subagent = band
+        self.refresh()
+
     # -- segment setters ----------------------------------------------------
     def update(
         self,
         *,
         model_label: str | None = None,
+        model_name: str | None = None,
         effort: str | None = None,
         cwd: str | None = None,
         context_tokens: int | None = None,
@@ -578,6 +660,8 @@ class StatusLine:
         """Update any subset of segments and repaint the band."""
         if model_label is not None:
             self._model_label = model_label
+        if model_name is not None:
+            self._model_name = model_name
         if effort is not None:
             self._effort = effort
         if cwd is not None:
@@ -611,6 +695,17 @@ class StatusLine:
         width = max(self._dock.size.width, 10)
         self._dock.update(self._render(width))
 
+    def is_showing(self, segment: str) -> bool:
+        """Whether ``segment`` survived the drop ladder on the last render.
+
+        Exists because "the band said it" is not the same claim as "the band was
+        told it": at ordinary widths the ladder sheds segments, and a caller that
+        treats the band as its only receipt has to know when the band could not
+        deliver one. Reads the last render rather than re-measuring, so the
+        answer is about the row the user is looking at.
+        """
+        return segment not in self._dropped
+
     def dispose(self) -> None:
         """Stop the spinner timer (idempotent)."""
         self._stop_spinner()
@@ -631,10 +726,78 @@ class StatusLine:
 
     def _elapsed(self) -> float:
         """Banked active time plus the turn in flight, so the segment ticks
-        live off the spinner's repaint rather than needing its own timer."""
+        live off the spinner's repaint rather than needing its own timer.
+
+        Under a subagent overlay this is the CHILD's age instead — wall clock
+        since it was launched, which is the only duration a child has. The
+        parent's banked active time is not a fact about the child and would be
+        a bigger number than its whole life on a frame titled with its name.
+        """
+        if self._subagent is not None:
+            return self._subagent.duration or 0.0
         if self._turn_started_at is None:
             return self._active_seconds
         return self._active_seconds + (self._clock() - self._turn_started_at)
+
+    # -- overlay ---------------------------------------------------------------
+    # Four segments answer from the overlay when one is set, and the rest are
+    # left alone deliberately: cwd, MCP, effort and the approval alarm describe
+    # the HOST, which the child shares — it runs in the same directory, on the
+    # parent's live MCP surface, under the same approval policy. Re-pointing
+    # those would say something changed when nothing did. The counters (agents,
+    # jobs) are the parent's ledger, and that ledger is what the page is a
+    # window onto.
+    def _shown_model_label(self) -> str:
+        if self._subagent is not None:
+            return self._subagent.model_label
+        return self._model_label
+
+    def _shown_model_name(self) -> str:
+        """The resolved name for whichever model the segment is describing.
+
+        Inherited under an overlay ONLY when the overlay names the same model.
+        Returning nothing unconditionally looked like the safe reading of the
+        overlay's rule and was not: ``job_stats`` documents an inherited spec as
+        the NORMAL path and ``harness/subagent.py`` sets the child's label from a
+        child built on the parent's spec, so the common case is a child on the
+        parent's own model — and then the same model was spelled two ways seconds
+        apart, ``MoonshotAI: Kimi K2`` with the page closed and
+        ``openrouter/moonshotai/kimi-k2`` with it open, because the fallback
+        lookup only reaches curated rows. A user reads that as a model switch.
+        That is D10, the defect this app has already shipped once between its
+        splash and its band.
+
+        A DIFFERENT selector still gets nothing, which is the rule that actually
+        matters: the parent's name must never be attributed to another model. The
+        child then falls back to its curated name, exactly as any caller with no
+        resolved metadata does.
+        """
+        if self._subagent is not None:
+            if self._subagent.model_label == self._model_label:
+                return self._model_name
+            return ""
+        return self._model_name
+
+    def _shown_context(self) -> tuple[int, int]:
+        """``(tokens, window)`` for the context segment."""
+        if self._subagent is not None:
+            return self._subagent.context_tokens, self._subagent.context_window
+        return self._context_tokens, self._context_window
+
+    def _shown_cost(self) -> str:
+        if self._subagent is not None:
+            return self._subagent.cost
+        return self._cost
+
+    def _shown_context_is_estimate(self) -> bool:
+        """A child's reading is always the provider's own, never an estimate.
+
+        Which matters beyond a tone: the drop ladder fights harder to keep an
+        ESTIMATED reading on screen, and inheriting the parent's estimate flag
+        would have the band making that trade on behalf of a number that has
+        nothing to do with it.
+        """
+        return self._subagent is None and self._context_is_estimate
 
     # -- rendering ----------------------------------------------------------
     def _render(self, width: int) -> Text:
@@ -654,7 +817,7 @@ class StatusLine:
         # independently and getting the separator arithmetic subtly wrong.
         for step in (
             None,
-            *drop_ladder(self._mcp, context_estimated=self._context_is_estimate),
+            *drop_ladder(self._mcp, context_estimated=self._shown_context_is_estimate()),
         ):
             if step is not None:
                 target = step.partition("shorten-")[2]
@@ -675,6 +838,13 @@ class StatusLine:
             # label at a width where the row it reflowed to was no narrower.
             gap = _MIN_GROUP_GAP if right.plain else 0
             if cell_len(left.plain) + cell_len(right.plain) + gap <= width:
+                # Recorded so a caller can ask whether the band actually SAID
+                # what it was asked to show. The effort segment needs it: it is
+                # the one segment a keystroke changes, so when the ladder has
+                # shed it the app owes the user a receipt somewhere else (see
+                # ``OperatorApp.action_cycle_effort``). Set on the fitting pass
+                # only — the intermediate rungs are attempts, not what shipped.
+                self._dropped = frozenset(dropped)
                 return self._compose(left, right, width, dim)
 
         # Even the irreducible row overflows. Truncate the model label rather
@@ -698,7 +868,12 @@ class StatusLine:
             if shimmer_enabled():
                 tail.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
                 tail.append(" ", style=dim)
-        label = format_model_label(self._model_label, short=True) if self._model_label else ""
+        model_label = self._shown_model_label()
+        label = (
+            format_model_label(model_label, short=True, name=self._shown_model_name())
+            if model_label
+            else ""
+        )
         if label:
             tail.append(f"{ICON_MODEL} ", style=dim)
             tail.append(
@@ -734,11 +909,16 @@ class StatusLine:
         # every segment whose glyph is pure framing, and set only where the
         # glyph itself is the signal.
         parts: list[tuple[str, str, Style, Style | None]] = []
-        if self._model_label and "model" not in dropped:
+        model_label = self._shown_model_label()
+        if model_label and "model" not in dropped:
             parts.append(
                 (
                     ICON_MODEL,
-                    format_model_label(self._model_label, short="model" in short),
+                    format_model_label(
+                        model_label,
+                        short="model" in short,
+                        name=self._shown_model_name(),
+                    ),
                     Style(color=theme_mod.semantic_color("fg")),
                     None,
                 )
@@ -800,7 +980,18 @@ class StatusLine:
         at all — it belongs to the running indicator.
         """
         parts: list[tuple[str, str, Style]] = []
-        if "subagents" not in dropped:
+        if self._subagent is not None and self._subagent.label:
+            # Never dropped: it is what says whose numbers follow it, and a
+            # band that sheds the owner while keeping the figures is worse
+            # than one that sheds a figure.
+            parts.append(
+                (
+                    ICON_AGENTS,
+                    truncate_cells(self._subagent.label, 24),
+                    Style(color=theme_mod.semantic_color("label")),
+                )
+            )
+        elif "subagents" not in dropped:
             agents = format_agents(self._subagents)
             if agents:
                 parts.append((ICON_AGENTS, agents, Style(color=theme_mod.semantic_color("label"))))
@@ -809,11 +1000,12 @@ class StatusLine:
             if jobs:
                 parts.append((ICON_JOBS, jobs, Style(color=theme_mod.semantic_color("label"))))
         if "context" not in dropped:
-            usage = format_context_usage(self._context_tokens, self._context_window)
+            usage = format_context_usage(*self._shown_context())
             if usage:
                 parts.append((ICON_CONTEXT, usage, Style(color=theme_mod.semantic_color("signal"))))
-        if self._cost and "cost" not in dropped:
-            parts.append((ICON_COST, self._cost, Style(color=theme_mod.semantic_color("warning"))))
+        cost = self._shown_cost()
+        if cost and "cost" not in dropped:
+            parts.append((ICON_COST, cost, Style(color=theme_mod.semantic_color("warning"))))
         if "duration" not in dropped:
             elapsed = self._elapsed()
             # Zero means "nothing has run yet" — an idle band should not claim a

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -18,8 +19,10 @@ import pytest
 
 from local_operator.harness.types import NoticeEvent, TextContent
 from local_operator.session.mcp_status import McpStartupOutcome
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_LAYOUT_CLASS,
+    COMPOSER_FOCUSED_CLASS,
     PERSIST_HINT,
     SLASH_COMMANDS,
     OperatorApp,
@@ -27,12 +30,13 @@ from local_operator.tui.app import (
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.events import TurnEnded
 from local_operator.tui.widgets.assistant import AssistantBlock
-from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.editor import ASIDE_PLACEHOLDER, Editor
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from local_operator.tui.widgets.welcome import WelcomeView
+from tests.unit.tui.conftest import caret_cells, chevron_colour, composer_cells
 
 
 class FakeSession:
@@ -42,6 +46,8 @@ class FakeSession:
         self.prompts: list[str] = []
         self.aborts: list[str] = []
         self.completions: list[tuple[str, str]] = []
+        self.asides: list[list[Any]] = []
+        self.adopted: list[list[Any]] = []
         self.disposed = False
         self._handlers: list[Any] = []
         self._history: list[Any] = []
@@ -120,6 +126,23 @@ class FakeSession:
 
     async def dispose(self) -> None:
         self.disposed = True
+
+    async def complete_aside(
+        self,
+        turns: list[Any],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> str:
+        # Recorded, not answered. The aside's own suites drive the real
+        # Session; here the only contract that matters is that the app can
+        # call it, so a fake that returned prose would invite pilot tests to
+        # assert on words no model produced.
+        self.asides.append(list(turns))
+        return ""
+
+    async def adopt_aside(self, messages: list[Any]) -> None:
+        self.adopted.append(list(messages))
 
     def history(self) -> list[Any]:
         return getattr(self, "_history", [])
@@ -1376,7 +1399,8 @@ async def test_a_failed_fetch_is_reported_inside_the_panel() -> None:
     assert "r refresh" in text
 
 
-def test_all_three_usage_surfaces_agree_for_an_api_key_only_install(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_all_three_usage_surfaces_agree_for_an_api_key_only_install(monkeypatch) -> None:
     """`/provider`'s "report quota" list, bare `/usage`'s targets and
     `/usage <provider>`'s up-front warning are three surfaces answering one
     question, and they used to give three answers: with only `ANTHROPIC_API_KEY`
@@ -1401,9 +1425,24 @@ def test_all_three_usage_surfaces_agree_for_an_api_key_only_install(monkeypatch)
     # Surface 2: the bare `/usage` target list is the same list.
     assert controller.usage_reportable_providers() == []
     # Surface 3: `/usage anthropic` refuses up front, with the actionable reason.
-    notices: list[tuple[str, str]] = []
-    app._cmd_usage("anthropic", lambda body, kind="info": notices.append((body, kind)))
+    #
+    # Run under `run_test` rather than with an injected notice callback: the
+    # REFUSING branches go through `_system_notice`, so they keep the boot
+    # composition a rejected command never earned the right to collapse (see
+    # `_cmd_usage`), and that method writes to the transcript rather than to the
+    # `notice` parameter.
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._cmd_usage("anthropic", app._notice)
+        await pilot.pause()
+        notices = [
+            (block._text, block._token)
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+        welcome_kept = app.query_one(WelcomeView).display
     assert notices == [("anthropic reports usage only after /login anthropic", "warning")]
+    assert welcome_kept is True
 
 
 @pytest.mark.asyncio
@@ -1814,8 +1853,18 @@ async def test_mcp_command_puts_the_status_in_a_column() -> None:
         with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
             block = app._mcp_block()
         assert block is not None
-        rows = [row for row in _renderable_plain(block.renderable).split("\n") if row.strip()]
+        # Branch rows only: the listing now leads with a dim caption naming what
+        # it lists (the block is its own receipt, so it has to say what it is),
+        # and this test is about the SERVER rows' column alignment.
+        rows = [
+            row
+            for row in _renderable_plain(block.renderable).split("\n")
+            if row.lstrip().startswith(("├─", "└─"))
+        ]
         assert len(rows) == 2
+        # The caption is what makes the block its own receipt now that `/mcp`
+        # no longer echoes; the filter above discards it, so it is pinned here.
+        assert _renderable_plain(block.renderable).splitlines()[0] == "MCP servers"
         # `connected` is a substring of `disconnected`, so each row is located by
         # its own status word and the two start columns compared directly. Before
         # the fix the SHORTER name pushed the LONGER status four cells left.
@@ -2568,9 +2617,18 @@ async def test_rejected_model_commands_keep_the_boot_composition() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_entered_rejected_model_command_dismisses_the_boot_splash() -> None:
-    """The real submit path echoes the command into the transcript, so the
-    splash must yield even when the command handler rejects the model."""
+async def test_an_entered_rejected_model_command_keeps_the_boot_composition() -> None:
+    """The SAME rule as the direct-call test above, now that the submit path
+    agrees with it.
+
+    This test used to assert the opposite — that entering the command dismissed
+    the splash — because the submit handler echoed every slash command and
+    retired the splash on its own. Two paths into one command answering "has the
+    session started?" differently was the bug underneath: the echo, not the
+    command, was deciding. With the echo on the registry (`SlashCommand.echo`)
+    and the empty-state edge back on `_append_block`, a rejected selector is a
+    rejected selector however it was typed.
+    """
     session = _SwitchableSession()
     ctrl = _AccessController()
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
@@ -2585,9 +2643,11 @@ async def test_an_entered_rejected_model_command_dismisses_the_boot_splash() -> 
         welcome_display = app.query_one(WelcomeView).display
         boot = app.screen.has_class("boot")
 
-    assert "/model missing-slash" in painted, painted
-    assert welcome_display is False
-    assert not boot
+    # The rejection is still ON SCREEN, under the surviving splash: keeping the
+    # boot composition must not cost the user the answer to what went wrong.
+    assert "usage: /model <provider>/<model-id>" in painted, painted
+    assert welcome_display is True
+    assert boot
 
 
 def test_help_uses_one_column_wider_than_every_command_name() -> None:
@@ -3253,3 +3313,176 @@ async def test_new_without_a_capable_launcher_says_so() -> None:
             for b in app.query_one(TranscriptView).blocks()
         )
     assert "unavailable" in text
+
+
+# --- "am I focused?", both sides of it ----------------------------------------
+#
+# The composer answered neither side. It drew no caret at all while the buffer
+# was empty, so clicking into it changed nothing on the frame; and its chevron
+# accent — the affordance meant to carry focus (D23) — was driven by
+# `#input-dock:focus-within`, which Textual never re-applied on blur, so once
+# lit it stayed lit for the life of the process. Both directions are pinned
+# here, off a real composed frame rather than off widget state: what the user
+# was missing is what the terminal was SENT.
+
+
+@pytest.mark.asyncio
+async def test_the_focused_composer_shows_a_caret_and_the_blurred_one_shows_none() -> None:
+    """The reported case exactly: an EMPTY composer, clicked into.
+
+    A caret on an empty field has nowhere to go but the placeholder's first
+    cell, so the placeholder starts one column later while the caret is drawn
+    and both survive — the block is on a blank cell, and the copy is unbroken.
+    Blurring takes the caret away again, which is the half that makes the
+    presence of one mean anything.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        assert editor.text == "", "premise: the reported state is an EMPTY composer"
+        focused = composer_cells(app)
+        assert caret_cells(focused) == [" "], "the focused composer drew no caret"
+        placeholder = [text for text, _, _ in focused if "Message Local Operator" in text]
+        assert placeholder, f"the caret broke the placeholder up: {focused}"
+
+        app.set_focus(None)
+        await pilot.pause()
+        assert not caret_cells(composer_cells(app)), "the caret survived the blur"
+
+        editor.focus()
+        await pilot.pause()
+        assert caret_cells(composer_cells(app)) == [" "], "the caret did not come back"
+
+
+@pytest.mark.asyncio
+async def test_the_caret_holds_still_across_consecutive_frames() -> None:
+    """A caret that is absent from half the frames is not a focus signal.
+
+    Sampled across four stock blink periods (500 ms each), empty and with text:
+    the empty state is new, and it is the one where a reintroduced blink would
+    strobe against a static splash.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        assert editor.cursor_blink is False
+
+        for text in ("", "hello"):
+            editor.load_text(text)
+            await pilot.pause()
+            samples = set()
+            for _ in range(8):
+                await asyncio.sleep(0.25)
+                await pilot.pause()
+                samples.add(tuple(composer_cells(app)))
+            assert len(samples) == 1, f"the composer row changed between frames: {text!r}"
+            assert caret_cells(next(iter(samples))), f"no caret at all with text={text!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_chevron_accent_turns_off_when_focus_leaves() -> None:
+    """The second affordance, in both directions — it used to only go on.
+
+    The class is asserted alongside the painted colour because the class is the
+    mechanism the stylesheet reads: a green chevron with the class off would be
+    a stale frame, and the class on with a neutral chevron would be a broken
+    rule. The blur is a tool card taking focus — a real product surface, the
+    one a user reaches by clicking or tabbing to a tool row, and it leaves the
+    composer on screen, which is exactly when "are my keys still going to the
+    composer?" is a live question.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        dock = app.query_one("#input-dock")
+        accent = theme_mod.semantic_color("accent").lower()
+        dim = theme_mod.semantic_color("dim").lower()
+
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        assert dock.has_class(COMPOSER_FOCUSED_CLASS)
+        assert chevron_colour(composer_cells(app)) == accent
+
+        card = ToolCard("t1", "bash", {"command": "ls"})
+        app._append_block(card)
+        await pilot.pause()
+        card.focus()
+        await pilot.pause()
+        assert not dock.has_class(COMPOSER_FOCUSED_CLASS)
+        assert chevron_colour(composer_cells(app)) == dim, "the chevron stayed green"
+
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        assert dock.has_class(COMPOSER_FOCUSED_CLASS)
+        assert chevron_colour(composer_cells(app)) == accent
+
+
+@pytest.mark.asyncio
+async def test_the_read_only_composer_shows_neither_caret_nor_accent() -> None:
+    """The subagent page's composer refuses every key, and looks it.
+
+    Today this holds because `_set_composer_read_only` drops `can_focus` and
+    pushes focus off the widget, so `TextArea._draw_cursor`'s read-only branch
+    (`show_cursor and has_focus`, a DIFFERENT expression from the one every
+    other state takes) resolves False. That is a chain of three decisions in
+    two files, and restoring focusability at either end would put a caret in a
+    field that ignores it — the most misleading thing this mode could paint.
+    Pinned on the frame so it goes red there rather than in a bug report.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        assert caret_cells(composer_cells(app)) == [" "], "premise: it starts focused"
+
+        app._set_composer_read_only(True)
+        await pilot.pause()
+        assert editor.read_only is True
+        cells = composer_cells(app)
+        assert not caret_cells(cells), "a caret is pointing into a field that refuses keys"
+        assert chevron_colour(cells) == theme_mod.semantic_color("dim").lower()
+
+        app._set_composer_read_only(False)
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        assert caret_cells(composer_cells(app)) == [" "], "the composer never came back"
+
+
+@pytest.mark.asyncio
+async def test_the_aside_keeps_the_caret_because_it_keeps_the_composer() -> None:
+    """`/btw` opens a card the composer types INTO, so focus never moves.
+
+    It is the one mode where the two affordances have to stay ON while the
+    conversation's own surface has visibly stepped aside, and the placeholder
+    is a sentence about the mode rather than an invitation — so this is also
+    the proof that the caret's cell is taken from the field, not from the copy,
+    whatever the copy happens to say.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+
+        assert app._open_aside() is not None
+        await pilot.pause()
+        assert app.query_one(Editor).placeholder == ASIDE_PLACEHOLDER
+        cells = composer_cells(app)
+        assert caret_cells(cells) == [" "], "the aside took the caret with it"
+        assert chevron_colour(cells) == theme_mod.semantic_color("accent").lower()
+        # The CONSTANT, not a copy literal: the claim is that the caret takes
+        # its cell from the field rather than out of the placeholder, which is
+        # true whatever the placeholder says. Spelling the sentence out here
+        # made this test fail on a wording change that did not touch the caret.
+        assert [
+            text for text, _, _ in cells if ASIDE_PLACEHOLDER in text
+        ], f"the caret broke the aside's own placeholder up: {cells}"

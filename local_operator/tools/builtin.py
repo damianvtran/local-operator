@@ -57,6 +57,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from local_operator.harness.approval import ask_approval
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -895,11 +896,16 @@ async def _check_approval(context: ToolContext | None, tier: str, description: s
     No approval hook installed -> auto-approved (CLI --yolo and headless tests
     rely on this). A hook returning False denies the action without error
     state beyond a plain refusal message.
+
+    Routed through ``ask_approval`` for the same reason the loop's tier gate
+    is: the two paths must put the question to the host the SAME way, or a
+    self-gating tool's ask arrives without the provenance a tier-gated one
+    carries and a host scoping its answer sees half the picture.
     """
     request_approval = getattr(context, "request_approval", None) if context else None
     if request_approval is None:
         return True
-    return bool(await request_approval(tier, description))
+    return await ask_approval(request_approval, tier, description, getattr(context, "job_id", None))
 
 
 async def _run_with_abort(
@@ -3841,4 +3847,305 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
         concurrency="shared",
         interruptible=False,
         execute=execute_jobs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# hub — parent↔subagent messaging and control
+# ---------------------------------------------------------------------------
+# One tool, two shapes, chosen by who is being built for (see
+# ``build_hub_tool``). ONE tool rather than five (send/ask/steer/cancel/resume)
+# because they share a target and a body and differ only in intent — five
+# entries would spend five tool-schema slots and five descriptions on one
+# concept, and the model would still have to learn which of them means "and
+# wait for the answer". Named ``hub`` after the surface the same ops have in
+# omp, whose shape this follows deliberately: ``to`` addresses one peer or
+# ``"all"``, delivery returns per-recipient receipts, and asking is a send
+# that waits.
+#
+# The two shapes are not cosmetic. A parent may address, redirect, stop and
+# resume its children; a child has exactly one peer (its parent) and no
+# children of its own, so it gets a tool with no ``op`` and no ``to`` at all.
+# Advertising the parent schema to a child would spend the child's context on
+# four ops it cannot use and invite it to try them.
+
+
+class HubParams(BaseModel):
+    """Parent-side hub arguments."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["send", "ask", "steer", "cancel", "resume"] = Field(
+        description=(
+            "send: a note, no reply waited for. ask: a question, blocks for the "
+            "subagent's answer. steer: change what it is doing (becomes part of its "
+            "instructions). cancel: stop it. resume: relaunch a stopped subagent "
+            "against its own transcript so it continues where it left off."
+        )
+    )
+    # A plain array, NOT ``str | list[str]``: pydantic renders a union as
+    # ``anyOf``, and this module's schemas reach Gemini verbatim as
+    # ``function_declarations`` (providers/clients.py builds the body with
+    # ``tool.parameters`` untouched). A construct one provider rejects would
+    # fail every request in the session, not just the hub call — no builtin
+    # here uses a non-nullable anyOf, and this is not the tool to be first.
+    to: list[str] = Field(
+        min_length=1,
+        description=(
+            "Who to address: job ids from 'task'/'jobs', subagent labels, or "
+            '["all"] for every running subagent. Several ids address several '
+            "subagents. 'ask' and 'resume' take exactly one."
+        ),
+    )
+    message: str | None = Field(
+        default=None,
+        description=(
+            "The body. Required for send/ask/steer, and for resume (what to do next); "
+            "ignored by cancel."
+        ),
+    )
+    timeout_ms: int = Field(
+        default=120_000,
+        gt=0,
+        le=600_000,
+        description="op='ask' only: how long to wait for the answer.",
+    )
+
+
+class HubChildParams(BaseModel):
+    """Child-side hub arguments: one peer, one direction, no ops."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(
+        description="What to tell the parent agent. Answers its question when it asked one."
+    )
+
+
+def _describe_hub_approval(args: dict[str, Any], cwd: str) -> str:
+    """``<op> <target>: <body>`` — the act, who it hits, and what it says.
+
+    All three matter to the decision and none of them is the parameter shape:
+    stopping a subagent and asking it a question are different answers, and
+    "all" versus one id is the difference between a note and a broadcast. The
+    body is truncated because an approval row is read at a glance.
+    """
+    op = str(args.get("op") or "send")
+    target = args.get("to")
+    if isinstance(target, list):
+        target = ", ".join(str(item) for item in target)
+    target = " ".join(str(target or "").split())
+    body = " ".join(str(args.get("message") or "").split())
+    if len(body) > 60:
+        body = body[:57] + "..."
+    head = f"{op} {target}".strip()
+    return f"{head}: {body}" if body else head
+
+
+def _hub_targets(comms: Any, raw: Any) -> tuple[list[str], list[str]]:
+    """Resolve the ``to`` argument to ``(job ids, errors)``, order preserved
+    and duplicates dropped (``["all", "<id>"]`` must not message one child
+    twice)."""
+    requested = raw if isinstance(raw, list) else [raw]
+    ids: list[str] = []
+    errors: list[str] = []
+    for item in requested:
+        resolved, error = comms.resolve(str(item))
+        if error is not None:
+            errors.append(error)
+        for job_id in resolved:
+            if job_id not in ids:
+                ids.append(job_id)
+    return ids, errors
+
+
+def _hub_receipt_lines(deliveries: list[Any]) -> list[str]:
+    return [
+        (
+            f"- {delivery.label} ({delivery.job_id}): {delivery.outcome}"
+            + (f" — {delivery.error}" if delivery.error else "")
+        )
+        for delivery in deliveries
+    ]
+
+
+@_guard("hub")
+async def execute_hub(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Message, steer, stop or resume subagents (parent), or answer the parent
+    (child)."""
+    comms = context.subagent_comms if context else None
+    if comms is None:
+        return _error(
+            tool_call_id,
+            "hub",
+            "agent messaging is not available in this session (no subagent engine).",
+        )
+    if comms.is_child(context.job_id if context else None):
+        return await _execute_hub_child(tool_call_id, args, comms, context)
+    return await _execute_hub_parent(tool_call_id, args, comms)
+
+
+async def _execute_hub_child(
+    tool_call_id: str,
+    args: dict[str, Any],
+    comms: Any,
+    context: ToolContext | None,
+) -> ToolResult:
+    try:
+        params = HubChildParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "hub", exc)
+    job_id = context.job_id if context else None
+    if job_id is None:  # unreachable: is_child() already required one
+        return _error(tool_call_id, "hub", "this subagent has no job id to reply from.")
+    outcome = comms.reply_to_parent(job_id, params.message)
+    return _text(tool_call_id, "hub", outcome, details={"direction": "to_parent"})
+
+
+async def _execute_hub_parent(
+    tool_call_id: str,
+    args: dict[str, Any],
+    comms: Any,
+) -> ToolResult:
+    try:
+        params = HubParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "hub", exc)
+
+    if params.op != "cancel" and not (params.message or "").strip():
+        return _error(tool_call_id, "hub", f"op='{params.op}' needs a message.")
+
+    ids, errors = _hub_targets(comms, params.to)
+    if not ids:
+        return _error(
+            tool_call_id,
+            "hub",
+            "; ".join(errors) or "no subagent matched; use 'jobs' to list them.",
+        )
+    # A question and a resume both have exactly one answer, so they refuse a
+    # fan-out rather than silently acting on the first match.
+    if params.op in ("ask", "resume") and len(ids) > 1:
+        return _error(
+            tool_call_id,
+            "hub",
+            f"op='{params.op}' addresses one subagent at a time; got {len(ids)}.",
+        )
+
+    message = params.message or ""
+    if params.op == "ask":
+        reply = await comms.ask(ids[0], message, params.timeout_ms)
+        if reply.error is not None:
+            return _error(tool_call_id, "hub", f"{reply.label} ({reply.job_id}): {reply.error}")
+        if reply.timed_out:
+            return _text(
+                tool_call_id,
+                "hub",
+                f"{reply.label} ({reply.job_id}) did not answer within {params.timeout_ms}ms; "
+                "it is still running and the question is in its context.",
+                details={"op": "ask", "job_id": reply.job_id, "timed_out": True},
+            )
+        return _text(
+            tool_call_id,
+            "hub",
+            f"{reply.label} ({reply.job_id}) replied:\n{reply.text}",
+            details={"op": "ask", "job_id": reply.job_id, "reply": reply.text},
+        )
+
+    if params.op == "resume":
+        new_job_id, error = comms.resume(ids[0], message)
+        if error is not None:
+            return _error(tool_call_id, "hub", error)
+        return _text(
+            tool_call_id,
+            "hub",
+            f"resumed {comms.label_of(ids[0])} as job {new_job_id}; it replays its own "
+            "transcript before reading this instruction. Await it with 'wait'.",
+            details={"op": "resume", "job_id": new_job_id, "resumed_from": ids[0]},
+        )
+
+    deliveries = []
+    for job_id in ids:
+        if params.op == "send":
+            deliveries.append(comms.send(job_id, message))
+        elif params.op == "steer":
+            deliveries.append(comms.steer(job_id, message))
+        else:
+            deliveries.append(await comms.cancel(job_id))
+
+    acted = [delivery for delivery in deliveries if delivery.outcome != "failed"]
+    header = (
+        f"{params.op}: {len(acted)}/{len(deliveries)} subagent(s)"
+        if deliveries
+        else f"{params.op}: nothing to do"
+    )
+    lines = [header, *_hub_receipt_lines(deliveries), *(f"- {error}" for error in errors)]
+    return _text(
+        tool_call_id,
+        "hub",
+        "\n".join(lines),
+        details={
+            "op": params.op,
+            "job_ids": ids,
+            "acted": len(acted),
+            # Mirrored into details as well as the flag: every other useless
+            # site in this module carries the key, and compaction's pruning
+            # pass reads it from there.
+            "useless": not acted,
+        },
+        # Nothing was reached: a receipt list of pure failures is not an
+        # observation the model should act on as if it had been heard.
+        useless=not acted,
+    )
+
+
+def build_hub_tool(context: ToolContext) -> AgentTool | None:
+    if context.subagent_comms is None:
+        return None
+    if context.subagent_comms.is_child(context.job_id):
+        return AgentTool(
+            name="hub",
+            label="Message parent",
+            description=(
+                "Send a message to the parent agent that delegated this task. Use it to "
+                "answer a question it asked you, or to report unprompted that you are "
+                "blocked, that the task is wrong, or that you found something it needs "
+                "to know now rather than at the end."
+            ),
+            parameters=HubChildParams.model_json_schema(),
+            # A child talking to its own parent starts nothing and touches
+            # nothing; gating it would also mean a background child stalling
+            # on an approval prompt nobody is watching.
+            approval_tier="read",
+            concurrency="shared",
+            interruptible=False,
+            execute=execute_hub,
+        )
+    return AgentTool(
+        name="hub",
+        label="Subagent hub",
+        describe_approval=_describe_hub_approval,
+        description=(
+            "Talk to the subagents you launched with 'task': send a note, ask one a "
+            "question and get its answer (use this to find out whether a quiet child is "
+            "stuck), steer one onto a different course, cancel one, or resume a stopped "
+            "one against its own transcript. Address them by job id, by label, or "
+            '"all".'
+        ),
+        parameters=HubParams.model_json_schema(),
+        # Write, like 'task' and 'wake': these ops redirect, kill and restart
+        # autonomous work. The gate is per TOOL, not per op, so the tier is
+        # the highest any op needs — 'resume' starts a child session, which is
+        # exactly what 'task' asks the user to approve.
+        approval_tier="write",
+        # 'ask' blocks the turn on another agent's answer; running it beside
+        # other tools would hold a shared slot for the whole timeout.
+        concurrency="exclusive",
+        interruptible=True,
+        execute=execute_hub,
     )

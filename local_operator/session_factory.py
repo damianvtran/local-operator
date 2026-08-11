@@ -799,16 +799,24 @@ async def _prepare(
 
     request_approval = _make_request_approval(yolo)
     effective_cwd = cwd if cwd is not None else os.getcwd()
+    # The variables surface behind list_variables/read_variable: config
+    # overrides ride above the project file and process environment, and
+    # values stay out of the system prompt (read on demand, not baked).
+    #
+    # Built once and handed to BOTH contexts. The factory context below is what
+    # `create_tools` inspects to decide which tools exist; the context a tool
+    # actually executes against is rebuilt by `Session._build_tool_context` on
+    # every turn, so a store installed only here reached the createIf check and
+    # nothing else — `list_variables` advertised itself and then read a bare
+    # process-env store, in every session.
+    variable_store = _build_variable_store(effective_cwd, config_manager)
     tool_context = ToolContext(
         cwd=effective_cwd,
         session_id=transcript_dir.name,
         agent_id=agent_id,
         has_ui=has_ui,
         request_approval=request_approval,
-        # The variables surface behind list_variables/read_variable: config
-        # overrides ride above the project file and process environment, and
-        # values stay out of the system prompt (read on demand, not baked).
-        variables=_build_variable_store(effective_cwd, config_manager),
+        variables=variable_store,
     )
     tools = create_tools(tool_context)
 
@@ -842,6 +850,7 @@ async def _prepare(
         skill_resolver=_make_knowledge_resolver(hooks),
         request_approval=request_approval,
         goal_state=goal_state,
+        variables=variable_store,
     )
     return _SessionPlan(
         session_kwargs=session_kwargs,

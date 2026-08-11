@@ -333,6 +333,14 @@ class WelcomeInfo:
 
     version: str = ""
     model_label: str = ""
+    #: The resolved ``ModelInfo.name`` for the label above, "" when unknown.
+    #: Carried so this frame names the model the way the band six rows below it
+    #: does. The two are REQUIRED to agree: D10 records the defect where the
+    #: splash printed `openrouter/deepseek/deepseek-…` while the band printed
+    #: `deepseek-chat-v3.1`, so one app answered "which model" with opposite
+    #: halves of one string. Showing a display name in one place and a selector
+    #: in the other is the same defect in a new costume.
+    model_name: str = ""
     cwd: str = ""
     #: Provider id with no stored credential, or ``None``. Populated only when
     #: the answer is *known* to be "no credential" — see
@@ -372,11 +380,16 @@ def session_welcome_info(session: Any | None, providers: Any | None) -> WelcomeI
     are logged out is worse than staying quiet.
     """
     label = ""
+    name = ""
     if session is not None:
         try:
             label = session.model_label or ""
+            # Same defended read and the same `getattr`-tolerated spec shape the
+            # band uses: an embedding host's session may expose neither.
+            name = str(getattr(getattr(session, "model", None), "display_name", "") or "")
         except Exception:
             label = ""
+            name = ""
     # The provider is the first segment of the model label, the same convention
     # /model uses to detect a provider switch.
     provider = label.partition("/")[0]
@@ -390,6 +403,7 @@ def session_welcome_info(session: Any | None, providers: Any | None) -> WelcomeI
     return WelcomeInfo(
         version=app_version(),
         model_label=label,
+        model_name=name,
         cwd=os.getcwd(),
         missing_credential=missing,
     )
@@ -521,15 +535,26 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     # Always drawn, placeholder and all: a row that appears the instant the
     # session boots would shift the whole block a line while the user reads it.
     #
-    # When the full label does not fit, reduce it the way the STATUS BAND does
-    # (keep the bare model id, drop the provider) rather than letting the final
-    # truncation pass keep the head. The two disagreed: the splash printed
+    # Reduced the way the STATUS BAND reduces it, at BOTH steps — the display
+    # name first, its compact form when that does not fit — rather than letting
+    # the final truncation pass keep the head. The two disagreeing is a shipped
+    # defect this app has already had once: the splash printed
     # `openrouter/deepseek/deepseek-…` while the band six rows below printed
     # `deepseek-chat-v3.1`, so one app answered "which model" with opposite
-    # halves of the same string (D10).
-    label = info.model_label or MODEL_PENDING
-    if cell_len(label) > width:
-        label = format_model_label(label, short=True)
+    # halves of the same string (D10). A display name in the band beside a raw
+    # selector here would be that defect again.
+    label = (
+        format_model_label(info.model_label, short=False, name=info.model_name)
+        if info.model_label
+        else MODEL_PENDING
+    )
+    # Guarded on `info.model_label`, not on the width alone: with no session yet
+    # `label` is the `MODEL_PENDING` sentinel while `info.model_label` is "", and
+    # shortening "" returns "" — so below 11 columns (`cell_len("connecting…")`)
+    # the row was REPLACED by an empty string instead of reduced. A very narrow
+    # terminal is exactly where the splash's one-word model row earns its place.
+    if info.model_label and cell_len(label) > width:
+        label = format_model_label(info.model_label, short=True, name=info.model_name)
     rows.append((_PRIORITY_MODEL, Text(label, style=muted, no_wrap=True)))
     if info.cwd:
         shown = _fit_tail(_shorten_home(info.cwd), width)

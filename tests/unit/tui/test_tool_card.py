@@ -324,13 +324,17 @@ def test_click_expands_then_collapses_back_to_one_row() -> None:
 
     assert card.toggle_expanded() is True
     assert card.expanded is True
-    # One summary row plus one row per output line — no reflow, no wrapping.
-    assert card._row_count == 4
+    # One summary row, then the CALL, then one row per output line — no reflow,
+    # no wrapping. The call comes first: it is the question the card was opened
+    # to answer, and an expansion that showed only the output left no state of
+    # the card able to say what had run.
+    assert card._row_count == 5
     assert card.spans_multiple_rows() is True
-    assert card.settled_rows() == 4
+    assert card.settled_rows() == 5
     body = card._build_content(80).plain.splitlines()
-    assert body[1].strip() == "total 8"
-    assert body[3].strip() == "-rw-r--r--  b"
+    assert body[1].strip() == "command: ls -la"
+    assert body[2].strip() == "total 8"
+    assert body[4].strip() == "-rw-r--r--  b"
 
     assert card.toggle_expanded() is False
     assert card.expanded is False
@@ -888,7 +892,9 @@ def test_expanded_output_is_capped_and_says_how_much_is_hidden() -> None:
     card.toggle_expanded()
 
     rows = card._build_content(80).plain.splitlines()
-    assert len(rows) == 1 + EXPAND_MAX_LINES + 1  # summary + window + marker
+    # summary + the one-row call + window + marker
+    assert len(rows) == 1 + 1 + EXPAND_MAX_LINES + 1
+    assert rows[1].strip() == "path: big.txt"
     assert rows[-1].strip() == "… 20 more lines"
     assert card._row_count == len(rows)
 
@@ -952,9 +958,21 @@ def test_summary_falls_back_to_the_tool_name_when_no_scalars_exist() -> None:
     assert "todo" in card._build_row(80).plain
 
 
-def test_explicit_intent_wins_over_argument_derived_summaries() -> None:
+def test_the_row_keeps_the_arguments_when_the_model_supplied_an_intent() -> None:
+    """The receipt records the FACT; the claim goes on the transient working line.
+
+    This used to be the other way round. An intent is the model's assertion
+    about what it is doing and the arguments are what it actually ran, and a
+    user reads the ledger back precisely when those two might disagree — a row
+    captioned with the claim hides the disagreement. It also put the same
+    sentence on the card and on the working line pinned directly beneath it.
+    """
     card = ToolCard("t", "write", {"path": "notes.md"}, intent="Recording the decision")
-    assert "Recording the decision" in card._build_row(80).plain
+    row = card._build_row(80).plain
+    assert "notes.md" in row
+    assert "Recording the decision" not in row
+    # Carried, though — the working line reads it from here.
+    assert card.intent == "recording the decision"
 
 
 def test_compact_path_shrinks_against_cwd_then_home(monkeypatch) -> None:
@@ -1088,7 +1106,7 @@ async def test_a_focused_row_expands_and_collapses_on_enter_and_space() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert card.expanded is True
-        assert card.size.height == 4
+        assert card.size.height == 5  # summary + the call + three output rows
         assert COLLAPSE_HINT in _card_text(card).plain
 
         await pilot.press("space")
@@ -1303,6 +1321,30 @@ def test_control_sequences_in_args_and_partials_are_stripped() -> None:
     assert "\x1b" not in card._build_row(80).plain
     card.set_partial_detail("progress \x1b[32m50%\x1b[0m")
     assert "\x1b" not in card._build_row(80).plain
+
+
+def test_a_streaming_partial_never_destroys_the_row_s_identity() -> None:
+    """Reported from the field: four settled bash rows reading
+
+        >_bash    --- stdout --- (empty) --- stderr --- (empty)    ✓ 1.0s
+
+    and not one of them able to say which command it had run. ``set_partial_detail``
+    was writing over ``_summary`` and nothing restored it, so the row's own
+    progress permanently replaced the only record of what it did. Progress is
+    transient; identity is not.
+    """
+    card = ToolCard("t", "bash", {"command": "pytest -q tests/unit/tui"})
+    card.set_partial_detail("--- stdout --- (empty)")
+    # WHILE running the fragment is what a watcher wants: it is the only thing
+    # on the row that is moving.
+    running = card._build_row(120).plain
+    assert "--- stdout --- (empty)" in running
+
+    card.set_partial_detail("--- stderr --- (empty)")
+    card.mark_done("")
+    settled = card._build_row(120).plain
+    assert "pytest -q tests/unit/tui" in settled
+    assert "stderr" not in settled
 
 
 def test_width_accounting_is_correct_once_escapes_are_gone() -> None:

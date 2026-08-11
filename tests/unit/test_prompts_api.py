@@ -58,6 +58,13 @@ class _FakeJobsForBlocks:
         return False
 
 
+class _FakeCommsForBlocks:
+    """Minimal comms so create_tools includes hub for ordering checks."""
+
+    def is_child(self, job_id: str | None) -> bool:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # render_string / render_template engine
 # ---------------------------------------------------------------------------
@@ -242,6 +249,7 @@ def test_inventory_block_matches_default_tool_order() -> None:
             wake_scheduler=_FakeSchedulerForBlocks(),
             subagent_launcher=lambda label, prompt: "job-x",
             jobs=_FakeJobsForBlocks(),
+            subagent_comms=_FakeCommsForBlocks(),
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)

@@ -31,6 +31,14 @@ from typing import Any
 from pydantic import TypeAdapter, ValidationError
 
 from local_operator.ansi import sanitize_prompt_line
+from local_operator.harness.approval import ask_approval
+from local_operator.harness.intent import (
+    INTENT_FIELD,
+    INTENT_SCAN_LIMIT,
+    intent_is_injected,
+    sanitize_intent,
+    scan_streaming_intent,
+)
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -125,12 +133,20 @@ class LoopContext:
 
 @dataclass
 class _PlannedCall:
-    """One resolved tool call: either ready to run or pre-failed."""
+    """One resolved tool call: either ready to run or pre-failed.
+
+    ``args`` is what the tool actually receives; ``intent`` is the model's
+    narration lifted out of it. They are separate fields because they are
+    separate claims — the card shows the command, the working line shows what
+    the model said it was doing, and when those disagree the transcript has
+    to show the disagreement rather than hide it behind one string.
+    """
 
     call: ToolCall
     tool: AgentTool | None = None
     args: dict[str, Any] = field(default_factory=dict)
     failure: ToolResult | None = None  # resolution/validation/approval failure
+    intent: str | None = None
 
 
 def _batches_shared(item: _PlannedCall) -> bool:
@@ -395,6 +411,11 @@ class AgentLoop:
                             "announced": 0.0,
                             "key": "",
                             "reported": -1,
+                            # Bounded copy of the head of the argument stream,
+                            # kept only until the intent scrape resolves. `None`
+                            # means scanning is over — see below.
+                            "head": "",
+                            "intent": None,
                         },
                     )
                     if event.id:
@@ -404,6 +425,22 @@ class AgentLoop:
                     if event.argument_delta:
                         state["arg_parts"].append(event.argument_delta)
                         state["bytes"] += len(event.argument_delta)
+                        if state["head"] is not None:
+                            state["head"] += event.argument_delta
+                            state["intent"] = scan_streaming_intent(state["head"])
+                            # Scanning stops for good once the intent has
+                            # closed or the window is spent. `i` is injected as
+                            # the FIRST schema property, so a leading intent
+                            # resolves within a few tokens; re-matching an
+                            # ever-growing buffer on every delta of a 14 KB
+                            # `write` would burn the stream's own budget for
+                            # nothing. Dropping the buffer also caps what this
+                            # holds per in-flight call at the scan window.
+                            if (
+                                state["intent"] is not None
+                                or len(state["head"]) >= INTENT_SCAN_LIMIT
+                            ):
+                                state["head"] = None
                     # Tell the UI a call is being COMPOSED. Without this the
                     # screen holds still for as long as the model takes to
                     # dictate the arguments — minutes for a file — with no tool
@@ -429,6 +466,7 @@ class AgentLoop:
                                 tool_call_id=state["key"],
                                 tool_name=state["name"],
                                 argument_bytes=state["bytes"],
+                                intent=state["intent"],
                             )
                 elif isinstance(event, StreamUsageEvent):
                     usage = event.usage
@@ -446,6 +484,7 @@ class AgentLoop:
                                 tool_call_id=state["key"] or "compose:0",
                                 tool_name=state["name"],
                                 argument_bytes=state["bytes"],
+                                intent=state["intent"],
                             )
                     stop_reason = event.stop_reason
                     if event.usage is not None:
@@ -588,14 +627,34 @@ class AgentLoop:
                 failure=self._synthetic_result(call, f"Tool not found: {call.name}"),
             )
 
-        errors = validate_tool_arguments(tool, call.arguments, call.raw_arguments)
+        # Lift the intent off BEFORE validation, and before anything else sees
+        # the arguments. Both halves of that order are load-bearing:
+        #
+        # * Validating first would let narration cancel work. A model that
+        #   streamed `"i": 3` fails `validate_tool_arguments` (it type-checks
+        #   every declared property), and a planning failure parks a synthetic
+        #   result WITHOUT ever emitting `tool_execution_start` — so a
+        #   cosmetic field would silently swallow the call the user asked for.
+        #   A malformed intent costs the narration and nothing else.
+        # * Leaving it in `args` would break the call at the other end: every
+        #   builtin params model is pydantic with `extra="forbid"`.
+        #
+        # `intent_is_injected` is what keeps this from stealing a real
+        # argument: an MCP server that declares its own `i` never had ours
+        # injected, so its value is left in `args` and forwarded.
+        args = dict(call.arguments)
+        intent: str | None = None
+        if INTENT_FIELD in args and intent_is_injected(tool.parameters):
+            intent = sanitize_intent(args.pop(INTENT_FIELD))
+
+        errors = validate_tool_arguments(tool, args, call.raw_arguments)
         if errors:
             return _PlannedCall(
                 call=call,
                 tool=tool,
                 failure=self._synthetic_result(call, "Invalid arguments: " + "; ".join(errors)),
             )
-        return _PlannedCall(call=call, tool=tool, args=dict(call.arguments))
+        return _PlannedCall(call=call, tool=tool, args=args, intent=intent)
 
     async def _runner_result(
         self,
@@ -623,8 +682,11 @@ class AgentLoop:
         ):
             summary = self._approval_summary(tool, call, tool_context.cwd)
             try:
-                approved = await tool_context.request_approval(
-                    sanitize_prompt_line(call.name, limit=120), summary
+                approved = await ask_approval(
+                    tool_context.request_approval,
+                    sanitize_prompt_line(call.name, limit=120),
+                    summary,
+                    tool_context.job_id,
                 )
             except asyncio.CancelledError:
                 raise
@@ -702,8 +764,17 @@ class AgentLoop:
         async def runner(slot: int, item: _PlannedCall) -> None:
             tool_name = item.tool.name if item.tool is not None else item.call.name
             await queue.put(
+                # `item.args`, not `item.call.arguments`: the event must show
+                # what the tool is actually being run with, and those two now
+                # differ by the lifted `i`. Leaking it here would caption the
+                # tool row with the intent — the TUI's argument summary scans
+                # values for a row identity — reinstating on the card the
+                # duplication that splitting fact from claim removes.
                 ToolExecutionStartEvent(
-                    tool_call_id=item.call.id, tool_name=tool_name, args=item.call.arguments
+                    tool_call_id=item.call.id,
+                    tool_name=tool_name,
+                    args=item.args,
+                    intent=item.intent,
                 )
             )
             try:
@@ -720,7 +791,10 @@ class AgentLoop:
             tool_name = item.tool.name if item.tool is not None else item.call.name
             await queue.put(
                 ToolExecutionStartEvent(
-                    tool_call_id=item.call.id, tool_name=tool_name, args=item.call.arguments
+                    tool_call_id=item.call.id,
+                    tool_name=tool_name,
+                    args=item.args,
+                    intent=item.intent,
                 )
             )
             tool_task = asyncio.ensure_future(self._runner_result(item, context, signal, queue))

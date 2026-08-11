@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,7 @@ from local_operator.tui.widgets.welcome import (
     WORDMARK_SPACED,
     WelcomeView,
 )
+from tests.unit.tui.conftest import caret_cells, composer_cells
 
 TCSS = Path(__file__).parent.parent.parent.parent / "local_operator" / "tui" / "local_operator.tcss"
 
@@ -71,6 +73,8 @@ class FakeSession:
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.asides: list[list[Any]] = []
+        self.adopted: list[list[Any]] = []
 
     @property
     def session_id(self) -> str:
@@ -137,6 +141,22 @@ class FakeSession:
 
     async def dispose(self) -> None:
         pass
+
+    async def complete_aside(
+        self,
+        turns: list[Any],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> str:
+        # Recorded, not answered: the aside's no-trace contract is proven
+        # against the real Session in tests/unit/session/test_aside.py. Here
+        # the only thing that must hold is that the app can call it.
+        self.asides.append(list(turns))
+        return ""
+
+    async def adopt_aside(self, messages: list[Any]) -> None:
+        self.adopted.append(list(messages))
 
 
 async def _factory(session: FakeSession) -> FakeSession:
@@ -825,48 +845,23 @@ async def test_clear_puts_the_composition_back_in_a_single_frame(
 # --- what MOVES on the boot frame ---------------------------------------------
 
 
-def _composer_cells(app: OperatorApp) -> list[tuple[str, str | None, str | None]]:
-    """(text, fg hex, bg hex) for every segment of the composer's row.
-
-    The composer is found by its content rather than by widget geometry, because
-    what is under test is what the terminal is SENT: a caret is not an object on
-    that row, it is a cell whose colours have been swapped.
-    """
-    for strip in app.screen._compositor.render_strips():
-        if PLACEHOLDER_HEAD not in strip.text and "hello" not in strip.text:
-            continue
-        cells = []
-        for segment in strip._segments:
-            style = segment.style
-            fg = style.color.get_truecolor().hex.lower() if style and style.color else None
-            bg = style.bgcolor.get_truecolor().hex.lower() if style and style.bgcolor else None
-            cells.append((segment.text, fg, bg))
-        return cells
-    raise AssertionError("the composer row is not on the frame at all")
-
-
-def _caret_cells(cells: list[tuple[str, str | None, str | None]]) -> list[str]:
-    """Cells drawn with the caret's inverted ground (`text-area--cursor`)."""
-    caret_ground = theme_mod.semantic_color("fg").lower()
-    return [text for text, _, bg in cells if bg == caret_ground]
-
-
 @pytest.mark.asyncio
-async def test_the_boot_composer_draws_no_caret_over_the_placeholder() -> None:
-    """The placeholder stays PROSE: no cell of it is inverted or covered.
+async def test_the_boot_composer_draws_its_caret_beside_the_placeholder() -> None:
+    """The caret is on the frame AND the placeholder stays PROSE.
 
-    This deliberately REPLACES an earlier contract in this file, which asserted
-    the opposite — that the placeholder's first cell must stay inverted, "so it
-    was not merely hidden". That was the wrong contract. Textual has nowhere to
-    put a caret except on a character, so a drawn caret here does not sit beside
-    `Message Local Operator…`, it EATS the `M`: the row rendered as
-    `▉essage Local Operator…` with the block measuring 13.76:1 against the
-    panel, roughly 2.6x the mark's own 3.71-5.35:1. Killing the blink froze that
-    artefact instead of removing it, and the loudest thing on the identity
-    screen stayed a white square on a word (D-05).
+    Two earlier contracts in this file each gave up one of those. The first
+    demanded the placeholder's leading cell stay inverted, which rendered
+    `▉essage Local Operator…` — a block measuring 13.76:1 against the panel,
+    roughly 2.6x the mark's own 3.71-5.35:1, parked on a word (D-05). The
+    second dropped the caret entirely while the buffer was empty, which is the
+    state a first-time user meets the app in: clicking the field changed
+    nothing on the frame, so there was no way to tell that the next keystroke
+    would land in it.
 
-    Focus is still announced — the chevron carries the accent — so the composer
-    reads as live rather than dead; it just does not shout over its own copy.
+    Neither trade was necessary. The collision is a CELL collision, so the
+    caret takes a cell of its own and the copy starts one column later: a
+    solid block at the head of the field with `Message Local Operator…`
+    unbroken beside it.
 
     Sampled across four stock blink periods, so the no-strobe half of the
     contract still fails loudly if blinking ever comes back.
@@ -879,15 +874,17 @@ async def test_the_boot_composer_draws_no_caret_over_the_placeholder() -> None:
         await pilot.pause()
         assert app.query_one(Editor).cursor_blink is False
 
-        samples = {tuple(_composer_cells(app))}
+        samples = {tuple(composer_cells(app))}
         for _ in range(8):
             await asyncio.sleep(0.25)
             await pilot.pause()
-            samples.add(tuple(_composer_cells(app)))
+            samples.add(tuple(composer_cells(app)))
         assert len(samples) == 1, f"the composer row changed between frames: {samples}"
 
-        cells = _composer_cells(app)
-        assert not _caret_cells(cells), "a caret block is sitting on the placeholder"
+        cells = composer_cells(app)
+        # One caret, and it is on a BLANK cell — a caret carrying a letter is
+        # the caret sitting on the copy again.
+        assert caret_cells(cells) == [" "], "the empty composer is not showing a caret"
 
         # The copy survives as words, in ONE colour: a partially restyled run
         # would mean something is still painting over a character.
@@ -895,8 +892,8 @@ async def test_the_boot_composer_draws_no_caret_over_the_placeholder() -> None:
         assert placeholder, f"the placeholder is broken into pieces: {cells}"
         assert placeholder[0][1] == theme_mod.semantic_color("dim").lower()
 
-        # ...and the field still looks focused, via the affordance that is meant
-        # to carry that (D23: focus moves the accent onto the chevron only).
+        # ...and the second affordance is on too (D23: focus moves the accent
+        # onto the chevron only).
         chevron = [fg for text, fg, _ in cells if "❯" in text]
         assert chevron == [theme_mod.semantic_color("accent").lower()]
 
@@ -920,18 +917,18 @@ async def test_the_caret_appears_solid_as_soon_as_the_buffer_has_content() -> No
 
         await pilot.press("h", "e", "l", "l", "o")
         await pilot.pause()
-        assert _caret_cells(_composer_cells(app)) == [" "], "no caret at the insertion point"
+        assert caret_cells(composer_cells(app)) == [" "], "no caret at the insertion point"
 
         await pilot.press("left")
         await pilot.pause()
-        assert _caret_cells(_composer_cells(app)) == ["o"], "no caret inside the text"
+        assert caret_cells(composer_cells(app)) == ["o"], "no caret inside the text"
 
         # Solid, not blinking: four stock blink periods, one rendering.
         samples = set()
         for _ in range(8):
             await asyncio.sleep(0.25)
             await pilot.pause()
-            samples.add(tuple(_composer_cells(app)))
+            samples.add(tuple(composer_cells(app)))
         assert len(samples) == 1, "the caret blinked once there was text"
 
 

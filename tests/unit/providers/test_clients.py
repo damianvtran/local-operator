@@ -873,3 +873,102 @@ def test_anthropic_oauth_identity_keeps_the_cached_prefix_byte_stable() -> None:
 
     first, second = system_for("turn one"), system_for("turn two different length")
     assert first == second, "the system prefix must not vary with the conversation"
+
+
+# ---------------------------------------------------------------------------
+# Reasoning effort — one setting, one key per family
+# ---------------------------------------------------------------------------
+#
+# Specs come from `build_model_spec` rather than the bare `_spec` helper above,
+# on purpose: the point of these is that a level chosen in the UI survives the
+# whole path — derivation, spec, request, body — and a hand-built spec would
+# test the last hop only. An effort the user selects that never reaches the
+# provider is worse than no control at all, because the band then asserts a
+# depth of thought that is not in force.
+
+from local_operator.model.configure import build_model_spec  # noqa: E402
+
+
+def _effort_spec(provider: str, model_id: str, level: str | None) -> ModelSpec:
+    return build_model_spec(provider, model_id).model_copy(update={"reasoning_effort": level})
+
+
+def test_anthropic_sends_effort_as_output_config() -> None:
+    """Anthropic's own key. `output_config.effort` covers ALL response tokens —
+    text, tool calls and thinking — where a `thinking` budget bounds only the
+    thinking block and needs it enabled first."""
+    request = ChatRequest(
+        model=_effort_spec("anthropic", "claude-opus-5", "xhigh"),
+        messages=[Message.user("hi")],
+    )
+    body = AnthropicClient()._build_body(request)
+    assert body["output_config"] == {"effort": "xhigh"}
+
+
+def test_anthropic_boots_carrying_its_documented_default() -> None:
+    """No `/effort` typed: the level on the wire is the one the band shows from
+    the first frame, which is only truthful because Anthropic documents `high`
+    as identical to omitting the parameter."""
+    request = ChatRequest(
+        model=build_model_spec("anthropic", "claude-opus-5"), messages=[Message.user("hi")]
+    )
+    assert AnthropicClient()._build_body(request)["output_config"] == {"effort": "high"}
+
+
+def test_openai_chat_completions_sends_effort_flat() -> None:
+    request = ChatRequest(
+        model=_effort_spec("openai", "gpt-5.4", "medium"), messages=[Message.user("hi")]
+    )
+    body = OpenAICompatClient("https://api.openai.com/v1")._build_body(request)
+    assert body["reasoning_effort"] == "medium"
+
+
+def test_openai_responses_nests_the_same_value() -> None:
+    """The ChatGPT-OAuth route speaks Responses, where the same level lives
+    under `reasoning.effort`. Same setting, two spellings — which is exactly
+    why the spec carries the level and not the key."""
+    request = ChatRequest(
+        model=_effort_spec("openai", "gpt-5.4", "xhigh"), messages=[Message.user("hi")]
+    )
+    body = OpenAICompatClient("https://api.openai.com/v1")._build_responses_body(request)
+    assert body["reasoning"] == {"effort": "xhigh"}
+
+
+@pytest.mark.parametrize("model_id", ["gpt-4.1", "gpt-4o"])
+def test_a_model_without_a_ladder_gets_no_key_at_all(model_id: str) -> None:
+    """Omitted, never sent empty or null: a provider that rejects the key
+    rejects it just as hard with a null value — the same rule
+    `supports_sampling_params` follows for temperature."""
+    spec = _effort_spec("openai", model_id, "high")  # a level nothing could honour
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    assert "reasoning_effort" not in client._build_body(request)
+    assert "reasoning" not in client._build_responses_body(request)
+
+
+def test_a_level_outside_the_models_ladder_is_dropped_rather_than_sent() -> None:
+    """The spec is mutable at runtime — `/effort`, `shift+tab` and failover all
+    write it — so the body builder re-checks rather than trusting. Dropping
+    costs one turn's depth; sending costs the turn."""
+    spec = build_model_spec("anthropic", "claude-opus-4-5-20251101").model_copy(
+        update={"reasoning_effort": "xhigh"}  # only 4.7+ accepts xhigh
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+    assert "output_config" not in AnthropicClient()._build_body(request)
+
+
+def test_google_sends_no_effort_key() -> None:
+    """Deliberate: this client speaks `generateContent`, whose thinking control
+    on the shipped models is a token budget rather than the named tiers the
+    Interactions API exposes. No Gemini model is given a ladder for that reason,
+    so nothing here can put an unmappable level on the wire."""
+    spec = build_model_spec("google", "gemini-2.5-pro").model_copy(
+        update={"reasoning_effort": "high"}
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+    body = GoogleClient()._build_body(request)
+    # Scanned inside `generationConfig`, where this client writes every
+    # generation setting: a top-level scan cannot fail, because no plausible
+    # edit would put the key there.
+    assert "thinkingConfig" not in body["generationConfig"]
+    assert not any("effort" in key.lower() for key in body["generationConfig"])

@@ -6,6 +6,7 @@ and a stub app that records posted messages (no Textual run needed).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -80,6 +81,8 @@ class FakeSession:
 
     def __init__(self) -> None:
         self._handlers: list[Any] = []
+        self.asides: list[list[Any]] = []
+        self.adopted: list[list[Any]] = []
 
     @property
     def session_id(self) -> str:
@@ -150,6 +153,26 @@ class FakeSession:
 
     async def complete_once(self, system: str, prompt: str) -> str:
         return ""
+
+    async def complete_aside(
+        self,
+        turns: list[Any],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> str:
+        # Signature matched to ``SessionProtocol.complete_aside`` keyword for
+        # keyword, including ``on_usage``: a fake that drifts from the protocol
+        # is how a suite stops testing the thing it names.
+        #
+        # Recorded, not answered. The aside's no-trace contract is proven
+        # against the real ``Session`` in tests/unit/session/test_aside.py;
+        # here the only thing that must hold is that the app can call it.
+        self.asides.append(list(turns))
+        return ""
+
+    async def adopt_aside(self, messages: list[Any]) -> None:
+        self.adopted.append(list(messages))
 
     async def dispose(self) -> None:
         pass

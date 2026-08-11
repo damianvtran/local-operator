@@ -16,6 +16,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
 )
+from local_operator.model.configure import build_model_spec
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
     AuthRetryKeyState,
@@ -26,6 +27,7 @@ from local_operator.providers.failover import (
     is_direct_credential_rotation_error,
     resolve_chain,
     resolve_next_key,
+    spec_for_selector,
     stream_with_failover,
 )
 
@@ -585,9 +587,15 @@ class TestChainsAreNormalizedAtTheBoundary:
         assert expand_fallback_candidates("anthropic/claude-opus-5", chain) == ["openai/gpt-5.4"]
 
     def test_an_unsupported_key_is_reported_rather_than_swallowed(self, caplog) -> None:
-        """``effort`` has nowhere to go — ``ModelSpec`` has no such field. A
-        chain that quietly drops half of what the user wrote is the next bug
-        report, so it is named in the log."""
+        """``effort`` on a chain entry is still not honoured, now for a reason
+        rather than for a missing field: ``ModelSpec`` HAS a
+        ``reasoning_effort``, but a chain is a flat list of selectors deduped by
+        selector and expanded from wildcards that name no model until failure
+        time, so a level here could be neither validated nor attached to one
+        attempt. A chain that quietly drops half of what the user wrote is the
+        next bug report, so it is named in the log — see
+        ``_normalize_chain_entry`` for the full argument, and
+        ``spec_for_selector`` for what DOES carry across a hop."""
         with caplog.at_level("WARNING"):
             RetrySettings.from_settings(
                 {
@@ -632,3 +640,40 @@ class TestChainsAreNormalizedAtTheBoundary:
         assert chain is None  # dropped entirely rather than half-formed
         for entries in settings.fallback_chains.values():
             assert all(isinstance(entry, str) for entry in entries)
+
+
+class TestEffortDoesNotOutliveItsModelAcrossAHop:
+    """A fallback swaps the model; the level chosen for the old one may not fit.
+
+    ``spec_for_selector`` carries every other knob over unchanged, which is
+    right for context windows and cache flags and wrong for exactly this one:
+    the valid values are a property of the MODEL, so a carried-over level is
+    either rejected outright or discarded while the band goes on claiming it.
+    """
+
+    def test_a_level_both_models_accept_survives_the_hop(self) -> None:
+        """A user who dropped to `low` for cost still gets cheap thinking on
+        whichever model answers."""
+        base = build_model_spec("anthropic", "claude-opus-5").model_copy(
+            update={"reasoning_effort": "low"}
+        )
+        swapped = spec_for_selector(base, "openai/gpt-5.4")
+        assert swapped.reasoning_effort == "low"
+        assert swapped.reasoning_efforts == ("none", "low", "medium", "high", "xhigh")
+
+    def test_a_level_the_fallback_lacks_becomes_that_models_default(self) -> None:
+        """`xhigh` reaching a 4.5-generation model is a 400 on the request that
+        was supposed to rescue the turn."""
+        base = build_model_spec("anthropic", "claude-opus-5").model_copy(
+            update={"reasoning_effort": "xhigh"}
+        )
+        swapped = spec_for_selector(base, "anthropic/claude-opus-4-5-20251101")
+        assert swapped.reasoning_effort == "high"
+
+    def test_falling_back_to_a_model_without_the_knob_drops_it(self) -> None:
+        base = build_model_spec("anthropic", "claude-opus-5").model_copy(
+            update={"reasoning_effort": "max"}
+        )
+        swapped = spec_for_selector(base, "openai/gpt-4.1")
+        assert swapped.reasoning_effort is None
+        assert swapped.reasoning_efforts == ()
