@@ -218,6 +218,9 @@ class Editor(TextArea):
         self.cursor_blink = False
         self._history: list[str] = []
         self._history_index: int | None = None  # None = not navigating
+        # See :meth:`set_records_history`. On by default; the aside turns it
+        # off for as long as it owns the composer.
+        self._records_history = True
         self._draft: str = ""  # buffer text saved when history nav starts
         self._on_model_chosen: Callable[[ModelRow], None] | None = None
         self.set_commands(commands or [])
@@ -305,6 +308,46 @@ class Editor(TextArea):
         reaches for the base class's own edit history.
         """
         return list(self._history)
+
+    def set_records_history(self, records: bool) -> None:
+        """Whether a submitted line joins the recallable prompt history.
+
+        Off while the `/btw` aside owns the composer, and that is a CONTRACT
+        rather than a preference: the card prints "off the record — nothing
+        here joins the chat, esc discards it", and a question still sitting in
+        the UP history after Esc falsifies it — one press recalls it and the
+        next Enter sends it to the agent as a real turn. It also stops the
+        aside burying the last thing the user actually said to the agent, which
+        is what UP is for.
+
+        Borrowed and returned the same way the placeholder, the draft and the
+        command list are (``OperatorApp._open_aside`` / ``_close_aside``).
+        Suppressed at the RECORD, not unwound afterwards: ``_submit`` records
+        before it posts, so anything that unwinds has to guess how many entries
+        to remove and gets it wrong the moment two asides repeat a question.
+        """
+        self._records_history = records
+
+    def forget_last_prompt(self, text: str) -> None:
+        """Retract the entry ``text`` just recorded, if it is still the newest.
+
+        The one case :meth:`set_records_history` cannot cover: the line that
+        OPENS the aside (``/btw <question>``) is submitted while the aside is
+        still closed, so ``_submit`` has already recorded it by the time the
+        handler runs — and it carries the question verbatim, which the card
+        then promises to discard.
+
+        Exact rather than a blind pop: the caller passes the line it is
+        retracting and nothing happens unless that is still the newest entry,
+        so a race that recorded something else in between cannot silently eat
+        a real prompt. Note ``_record_history`` drops a consecutive duplicate,
+        so re-asking the same question twice leaves nothing to retract the
+        second time and the guard is what makes that a no-op instead of a bug.
+        """
+        stripped = text.strip()
+        if stripped and self._history and self._history[-1] == stripped:
+            self._history.pop()
+        self._history_index = None
 
     def set_commands(self, commands: list[SlashCommand]) -> None:
         """Slash commands offered to the picker (sync, no I/O)."""
@@ -516,7 +559,10 @@ class Editor(TextArea):
     # -- submit -------------------------------------------------------------
     def _submit(self) -> None:
         text = self.text
-        if text.strip():
+        # Checked HERE, before the post, because that is the only place the
+        # entry can be prevented rather than removed afterwards — see
+        # :meth:`set_records_history`.
+        if text.strip() and self._records_history:
             self._record_history(text)
         self._picker.close()
         self.post_message(EditorSubmitted(text))

@@ -347,6 +347,98 @@ async def test_the_card_rests_on_the_end_of_the_chat_not_on_top_of_it() -> None:
         assert transcript.styles.padding.bottom == 0
 
 
+@pytest.mark.asyncio
+async def test_an_aside_question_never_enters_the_prompt_history() -> None:
+    """"esc discards it" has to be true of UP as well as of the transcript.
+
+    ``Editor._submit`` records history BEFORE it posts, so the aside had to
+    borrow the recording off rather than unwind it afterwards. Reproduced
+    before the fix: after Esc the question was in history, UP recalled it, and
+    the next Enter sent it to the agent as a real turn — on a card whose title
+    says the opposite. It also buried the last thing the user really said.
+    """
+    session = AsideSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        editor = app.query_one(Editor)
+        await pilot.pause()
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("h", "i", "enter")
+        await pilot.pause()
+        assert editor.prompt_history() == ["hi"]
+
+        await _open_with_question(pilot, app, "are the subagents stuck?")
+        editor.load_text("and the first one?")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # Neither question is recallable, and UP still returns the last REAL
+        # prompt rather than an aside the user was told had been discarded.
+        assert editor.prompt_history() == ["hi"]
+        # And the composer records again the moment the aside gives it back.
+        editor.load_text("carry on")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.prompt_history() == ["hi", "carry on"]
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_dismisses_the_aside_so_its_own_warning_is_readable() -> None:
+    """The exit hint is the only warning before a second press quits the app.
+
+    Appended behind a card that floats one elevation step over the transcript,
+    it is drawn where it cannot be read — the same failure the fork refusals
+    were moved onto the card to avoid. Ctrl+C keeps its meaning; it stops doing
+    it invisibly.
+    """
+    session = AsideSession()
+    session.streaming = True
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _open_with_question(pilot, app, "what are you doing?")
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert not app.query_one(AsidePanel).is_open
+        assert session.aborts == ["interrupted"]
+        assert app._transcript_view().styles.padding.bottom == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("act", ["clear", "approval"])
+async def test_the_aside_yields_to_anything_that_acts_on_the_conversation(act) -> None:  # noqa: ANN001
+    """A floating card must not outlive the conversation it is a question about.
+
+    ``ctrl+l`` wipes the ledger the aside is asking about; a tool approval is a
+    transcript block that would mount behind the card while taking focus off
+    the composer the card is pointed at. Both are the general form of the
+    ctrl+c case, and both already yield the full-page subagent view.
+    """
+    session = AsideSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _open_with_question(pilot, app, "why?")
+        assert app.query_one(AsidePanel).is_open
+
+        if act == "clear":
+            app.action_clear_transcript()
+        else:
+            app.run_worker(app.request_tool_approval("bash", "rm -rf"), thread=False)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert not app.query_one(AsidePanel).is_open
+        assert app.query_one(Editor).placeholder == DEFAULT_PLACEHOLDER
+        assert app._transcript_view().styles.padding.bottom == 0
+
+
 # -- leaving ---------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_escape_restores_the_main_chat_and_its_half_typed_prompt() -> None:
