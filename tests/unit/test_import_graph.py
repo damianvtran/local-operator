@@ -91,11 +91,14 @@ def test_cli_import_does_not_load_asyncio(cli_modules: set[str]) -> None:
 
 def test_cli_import_does_not_load_pillow(cli_modules: set[str]) -> None:
     # Pillow + pillow-heif cost 23.4 ms and +7.6 MB RSS (+75 modules) and exist
-    # solely to convert HEIC/HEIF attachments. cli.py imports helpers.py for
+    # solely to decode image inputs — HEIC/HEIF attachments, and files the
+    # `read` tool returns as image blocks. cli.py imports helpers.py for
     # setup_cross_platform_environment; helpers.py used to probe these two at
     # module scope, so every run paid for an input almost no run has. They now
-    # load inside helpers._heif_image_module().
-    _assert_absent(cli_modules, "PIL", "23.4 ms / 7.6 MB; only HEIC conversion needs it")
+    # load inside helpers.pillow_image_module() / helpers.heif_image_module(),
+    # and read's magic-byte sniff decides whether to call them at all so a text
+    # read never pays either.
+    _assert_absent(cli_modules, "PIL", "23.4 ms / 7.6 MB; only image decoding needs it")
     _assert_absent(cli_modules, "pillow_heif", "part of the same 23.4 ms / 7.6 MB probe")
 
 

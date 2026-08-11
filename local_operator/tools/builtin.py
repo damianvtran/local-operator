@@ -40,10 +40,13 @@ attached a scheduler to the ``ToolContext``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import difflib
 import fnmatch
+import io
 import json
+import mimetypes
 import os
 import re
 import signal as signal_module
@@ -65,6 +68,7 @@ from local_operator.harness.types import (
     ApprovalDescribeFn,
     BrowserSurface,
     BrowserSurfaceProtocol,
+    ImageContent,
     TextContent,
     ToolContext,
     ToolResult,
@@ -76,6 +80,9 @@ from local_operator.harness.wake import (
     build_wake_schedule,
     format_duration,
 )
+from local_operator.helpers import heif_image_module, pillow_image_module
+from local_operator.media import ImageInfo, sniff_image_file
+from local_operator.optional import missing_extra_error
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -123,9 +130,56 @@ BASH_MAX_TIMEOUT_SECONDS = 3600.0
 #: Number of trailing traceback characters kept in an error result.
 TRACEBACK_TAIL_CHARS = 2000
 
-#: Files larger than this are refused by read (serve 2MB+ blobs through bash
-#: with head/tail instead); the cap serves the per-tool output budget.
+#: Files larger than this are refused by read as TEXT (serve 2MB+ blobs
+#: through bash with head/tail instead); the cap serves the per-tool output
+#: budget. Images are governed by :data:`READ_IMAGE_LIMIT_BYTES` instead.
 READ_FILE_LIMIT_BYTES = 2 * 1024 * 1024
+#: Byte ceiling for a file read as an IMAGE, 8x the text ceiling. The text cap
+#: exists because bytes become context; an image's context cost is its PIXELS
+#: (~w*h/750 tokens on Anthropic and OpenAI alike) and is bounded downstream by
+#: :data:`READ_IMAGE_MAX_EDGE` no matter how large the source file is. Applying
+#: the text cap to images refused ordinary inputs for no benefit and offered
+#: nonsense advice while doing it: two of seven real PNG screenshots sampled on
+#: this machine were 2.0-2.1 MB, and "use bash (head/tail)" is not a way to
+#: look at a screenshot. What this cap actually limits is DECODE cost, so it is
+#: paired with :data:`READ_IMAGE_MAX_PIXELS` — compressed bytes bound neither
+#: the pixel count nor the RAM to hold it.
+READ_IMAGE_LIMIT_BYTES = 16 * 1024 * 1024
+#: Refuse to decode above this pixel count (~200 MB of RGBA at 4 bytes/pixel).
+#: Checked against the header dimensions BEFORE the decode allocates, because
+#: a decompression bomb is small on disk by construction: the byte cap above
+#: cannot see it coming. 50M pixels is ~7000x7000, comfortably above any
+#: camera or display this reads from and comfortably below Pillow's own 89M
+#: bomb threshold, so the refusal is ours and is an error rather than a warning.
+READ_IMAGE_MAX_PIXELS = 50_000_000
+#: Long-edge ceiling in pixels for an image handed to the model. Anthropic
+#: downsizes anything above 1568 server-side and bills the resized token count
+#: either way, so pixels past this line are pure upload with zero fidelity
+#: reaching the model; omp uses the same number and this repo's snapcompact
+#: already renders its frames at 1568. Measured on real files: a 2560x1600 UI
+#: screenshot costs 5,461 image tokens untouched and 2,049 at 1568 (2.7x), and
+#: a 4032x3024 phone photo — 1.5 MB as JPEG, so it passes the byte cap easily
+#: — costs 16,257 tokens untouched against 2,459 resized (6.6x).
+READ_IMAGE_MAX_EDGE = 1568
+#: Encoded-byte threshold for the image block, before base64 inflates it by
+#: 4/3. Two jobs. It decides when a small in-bounds image is forwarded
+#: VERBATIM (cheapest and lossless — no re-encode can improve an image the
+#: model will see at its original size), and it decides when the resized PNG
+#: is too fat to keep, which is the only reason lossy JPEG is ever reached.
+#:
+#: A TRIGGER, not a guarantee: the ladder stops after JPEG rather than
+#: chasing quality down, so pathological input still lands above it (uniform
+#: noise at 1568x1176 measured 1.19 MiB of quality-85 JPEG). The guarantee is
+#: the wall this is set against — Anthropic rejects images over 5 MB of
+#: base64, and the long-edge cap means even that pathological case encodes to
+#: 1.59 MiB, 32% of the wall. 1 MiB was picked to leave 3.7x headroom on the
+#: ordinary path, and the fat cases are real: a photographic 1568x1176 frame
+#: re-encodes to a 3.3 MiB PNG (4.46 MiB base64, inside 5 MB by only 12%) and
+#: to a 804 KiB JPEG.
+READ_IMAGE_MAX_BYTES = 1024 * 1024
+#: JPEG quality used for that fallback. 85 is the standard visually-lossless
+#: point; on the sampled files it turned 1.9 MB of re-encoded PNG into 271 KB.
+READ_IMAGE_JPEG_QUALITY = 85
 #: Maximum lines read renders; larger files show the head plus a footer
 #: telling the model to continue with a line range.
 READ_LINE_CAP = 2000
@@ -830,6 +884,37 @@ def _text(
     )
 
 
+def _image(
+    tool_call_id: str,
+    tool_name: str,
+    caption: str,
+    payload: bytes,
+    mime_type: str,
+    *,
+    details: dict[str, Any] | None = None,
+) -> ToolResult:
+    """Build an image result: a one-line caption FOLLOWED BY the image block.
+
+    The caption is not decoration. An image block arrives in the transcript
+    with no filename, no format and no dimensions attached — a bare one leaves
+    the model unable to say what it is looking at, whether the read it asked
+    for is the thing it got, or even that the call succeeded rather than
+    silently returning nothing. It leads for the same reason: every text-only
+    consumer in the stack (``ToolResult.text``, compaction's truncation, the
+    TUI transcript row) sees the caption and nothing else, so the caption is
+    the entire result for all of them.
+    """
+    return ToolResult(
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        content=[
+            TextContent(text=caption),
+            ImageContent(data=base64.b64encode(payload).decode("ascii"), mime_type=mime_type),
+        ],
+        details=details,
+    )
+
+
 def _validation_error(tool_call_id: str, tool_name: str, exc: ValidationError) -> ToolResult:
     """One ``invalid arguments:`` line per field — no traceback. The model can
     correct its call from the message; the stack trace could not."""
@@ -1293,6 +1378,161 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     )
 
 
+def _forward_image_undecoded(data: bytes, info: ImageInfo) -> tuple[bytes, str, str]:
+    """Ship image bytes VERBATIM on a host with no usable Pillow.
+
+    Pillow reaches a default install as a pillow-heif dependency rather than a
+    direct one, and pillow-heif is the most platform-fragile wheel this
+    project pulls. When it is missing or broken there is no decoder, so there
+    is also no resize and no validation beyond the header — the two things
+    :func:`_encode_image_for_model` normally provides. Refusing every image on
+    such a host would be the worse trade: a screenshot the model can look at
+    beats a paragraph explaining why it cannot, and the format is one the
+    provider clients already serialize.
+
+    What remains enforceable from the header alone is the BYTE cap, so that is
+    the line. Above it the answer is an error, because forwarding an unbounded
+    blob is how a session ends up wedged behind a provider that refuses it.
+    """
+    if not info.sendable:
+        # Not a degrade: no provider accepts HEIC, so forwarding it verbatim
+        # would GUARANTEE the refusal rather than risk it. Transcoding is the
+        # only way to send one, and transcoding is what is unavailable.
+        raise ValueError(missing_extra_error("images", "HEIC/HEIF decoding"))
+    if len(data) > READ_IMAGE_MAX_BYTES:
+        raise ValueError(
+            f"it is {len(data)} bytes, over the {READ_IMAGE_MAX_BYTES}-byte cap for an "
+            f"unresized image, and {missing_extra_error('images', 'resizing it')}"
+        )
+    summary = f"{info.mime_type}, {info.dimensions or 'dimensions unknown'}, {len(data)} bytes"
+    if info.width and info.height and max(info.width, info.height) > READ_IMAGE_MAX_EDGE:
+        # Worth saying rather than swallowing: this is the case the resize
+        # exists for, and the model is about to be billed several times the
+        # tokens for it. Naming it is also the only hint anyone gets that the
+        # host is missing the extra.
+        summary += ", too large to send efficiently and no decoder to resize it"
+    else:
+        summary += ", forwarded without resizing"
+    return data, info.mime_type, summary
+
+
+def _guard_pixel_budget(width: int, height: int) -> None:
+    """Refuse an image whose pixel count would dominate the process.
+
+    A decompression bomb is small on disk by construction, so the byte cap
+    cannot see it coming and only the dimensions can.
+    """
+    if width * height > READ_IMAGE_MAX_PIXELS:
+        raise ValueError(
+            f"it is {width}x{height} ({width * height:,} pixels) and the decode limit is "
+            f"{READ_IMAGE_MAX_PIXELS:,} pixels"
+        )
+
+
+def _encode_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str]:
+    """Decode, bound and re-encode image bytes for a provider.
+
+    Returns ``(payload, wire_mime, summary)``; raises ``ValueError`` with a
+    model-readable message when the bytes will not decode. The raise is
+    load-bearing: a corrupt or truncated image forwarded as an image block
+    earns a ``Could not process image`` 400 from Anthropic. The session layer
+    now recovers from that, but a backstop is not a licence — the bad block is
+    still a wasted round trip and a degraded session, and decoding here is
+    where it is cheap to avoid. So the decode is never skipped, not even on
+    the verbatim path.
+
+    The ladder, cheapest first:
+
+    1. Verbatim, when the image is already inside both bounds and in a format
+       the clients serialize. No re-encode can improve an image the model sees
+       at its original size, and PNG round-tripping routinely makes files
+       BIGGER (a 2560x1600 UI screenshot measured 550 KB on disk against
+       335 KB re-encoded only because the resize came with it).
+    2. Resize to :data:`READ_IMAGE_MAX_EDGE` and re-encode as PNG. Lossless,
+       which is what a screenshot of 9-pixel text needs.
+    3. JPEG when that PNG blows :data:`READ_IMAGE_MAX_BYTES`, and only when it
+       actually comes out smaller. PNG is a bad photographic codec and that is
+       the usual case here — the sampled 1672x941 photographic PNG re-encoded
+       to 1.9 MB of PNG against 271 KB of quality-85 JPEG — but it is not the
+       only one, so the choice is measured rather than assumed.
+
+    With no decoder available the whole ladder collapses to
+    :func:`_forward_image_undecoded`.
+    """
+    image_module = pillow_image_module() if info.sendable else heif_image_module()
+    if image_module is None:
+        return _forward_image_undecoded(data, info)
+
+    # The pixel cap wants to fire BEFORE the decode allocates, and for every
+    # format except HEIF the header already answers it. HEIF keeps its size in
+    # a meta-nested ispe box that media.sniff_image deliberately does not walk,
+    # so those are capped below on the decoded size instead — later than ideal,
+    # but the only point at which the number exists.
+    if info.width and info.height:
+        _guard_pixel_budget(info.width, info.height)
+
+    try:
+        image = image_module.open(io.BytesIO(data))
+        width, height = image.size
+        _guard_pixel_budget(width, height)
+        # Multi-frame sources never pass through: providers read frame 0 and
+        # ignore the rest, so an animation's other frames are bytes uploaded
+        # to be discarded.
+        frames = getattr(image, "n_frames", 1)
+        image.load()
+
+        long_edge = max(width, height)
+        if (
+            info.sendable
+            and frames == 1
+            and long_edge <= READ_IMAGE_MAX_EDGE
+            and len(data) <= READ_IMAGE_MAX_BYTES
+        ):
+            return data, info.mime_type, f"{info.mime_type}, {width}x{height}, {len(data)} bytes"
+
+        if long_edge > READ_IMAGE_MAX_EDGE:
+            scale = READ_IMAGE_MAX_EDGE / long_edge
+            size = (max(1, round(width * scale)), max(1, round(height * scale)))
+            image = image.resize(size, image_module.LANCZOS)
+
+        # Palette and high-bit-depth modes are legal PNG but not legal JPEG,
+        # and rung 3 must not be the first place a mode problem shows up.
+        image = image.convert("RGBA" if image.mode in ("RGBA", "LA", "PA", "P") else "RGB")
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        payload, wire_mime = buffer.getvalue(), "image/png"
+
+        if len(payload) > READ_IMAGE_MAX_BYTES:
+            if image.mode == "RGBA":
+                # JPEG has no alpha channel. Compositing onto white rather
+                # than dropping the channel keeps a transparent-background
+                # diagram legible instead of rendering it onto black.
+                flat = image_module.new("RGB", image.size, (255, 255, 255))
+                flat.paste(image, mask=image.getchannel("A"))
+                image = flat
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=READ_IMAGE_JPEG_QUALITY)
+            jpeg = buffer.getvalue()
+            # Take the smaller of the two, so the lossy rung can never make the
+            # result WORSE on both axes at once. PNG beats JPEG on flat
+            # synthetic images, and one of those clearing the budget is
+            # possible even though nothing sampled here did it.
+            if len(jpeg) < len(payload):
+                payload, wire_mime = jpeg, "image/jpeg"
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — Pillow raises OSError, SyntaxError and its own
+        raise ValueError(f"could not decode the image data ({type(exc).__name__}: {exc})") from exc
+
+    summary = f"{wire_mime}, {image.width}x{image.height}, {len(payload)} bytes"
+    if image.size != (width, height) or wire_mime != info.mime_type:
+        # State the source whenever what the model sees is not what is on
+        # disk. Otherwise a model comparing this against `ls -l` output, or
+        # against a later re-read, has no way to reconcile the two.
+        summary += f"; source {width}x{height} {info.mime_type}"
+    return payload, wire_mime, summary
+
+
 def _capped_list_body(
     full: str, shown: str, tool_name: str, context: ToolContext | None
 ) -> tuple[str, dict[str, Any] | None]:
@@ -1515,20 +1755,64 @@ async def execute_read(
             details={"path": str(path)},
         )
 
-    # Stat BEFORE reading: refuse oversized files instead of loading them,
-    # then read only up to the line cap's worth of bytes.
+    # Stat and SNIFF before reading the body: an oversized file is refused
+    # instead of loaded, and the applicable ceiling depends on what the file
+    # is. Classification is by CONTENT, never by extension — a `.png` holding
+    # an HTML error page must not reach a provider as an image, and a
+    # screenshot saved with no extension at all is still a screenshot.
+    # `sniff_image_file` reads at most 64 KB and never imports a decoder, so a
+    # text read pays a short header read to learn it is a text read.
     size = path.stat().st_size
-    if size > READ_FILE_LIMIT_BYTES:
+    info = sniff_image_file(str(path))
+    limit = READ_IMAGE_LIMIT_BYTES if info else READ_FILE_LIMIT_BYTES
+    if size > limit:
+        advice = (
+            "Resize it first (bash + sips/magick)."
+            if info
+            else "Use bash (head/tail) or a 'range' on a smaller file."
+        )
         return _error(
             tool_call_id,
             "read",
-            f"File too large to read ({size} bytes; limit "
-            f"{READ_FILE_LIMIT_BYTES} bytes): {path}. Use bash (head/tail) "
-            "or a 'range' on a smaller file.",
+            f"File too large to read ({size} bytes; limit {limit} bytes): {path}. {advice}",
         )
 
     data = path.read_bytes()
+
+    if info:
+        try:
+            payload, wire_mime, summary = _encode_image_for_model(data, info)
+        except ValueError as exc:
+            # A text error, never an image block. Forwarding undecodable bytes
+            # gets a 400 from the provider that no retry clears, because the
+            # bad block is already in the transcript.
+            return _error(tool_call_id, "read", f"Cannot read {path} as an image: {exc}")
+        caption = f"Image {path} ({summary})"
+        if params.range:
+            # Silently dropping it would leave the model believing it read a
+            # slice of something.
+            caption += " — 'range' does not apply to an image and was ignored"
+        return _image(
+            tool_call_id,
+            "read",
+            caption,
+            payload,
+            wire_mime,
+            details={"path": str(path), "mime_type": wire_mime},
+        )
+
     if b"\x00" in data[:8000]:
+        guessed = mimetypes.guess_type(path.name)[0] or ""
+        if guessed.startswith("image/"):
+            # The extension is the only evidence left, and it says image. Name
+            # the format instead of reporting a generic binary: "not readable
+            # as text" reads as a bug in read when the caller can see a .bmp.
+            return _error(
+                tool_call_id,
+                "read",
+                f"Unsupported image format ({guessed}): {path}. read returns PNG, JPEG, "
+                "GIF, WebP and HEIC; convert it first (bash + sips/magick).",
+            )
         return _error(tool_call_id, "read", f"Binary file not readable as text: {path}")
 
     try:
@@ -1583,7 +1867,10 @@ def build_read_tool() -> AgentTool:
     return AgentTool(
         name="read",
         label="Read",
-        description="Read a file, line range, or internal URL (skill://, guide://, mcp://).",
+        description=(
+            "Read a file, line range, or internal URL (skill://, guide://, mcp://). "
+            "PNG/JPEG/GIF/WebP/HEIC files come back as a viewable image."
+        ),
         parameters=ReadParams.model_json_schema(),
         approval_tier="read",
         # read model: parallel reads are the common batch shape.
