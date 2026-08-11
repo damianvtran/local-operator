@@ -794,3 +794,100 @@ class TestWindowsProcessTarget:
         # The BatBadBut-escaped /c payload survives byte-for-byte.
         assert target.startswith('"cmd.exe" /d /e:ON /v:OFF /c ""C:\\work\\%%cd:~,%')
         assert 'a""b' in target
+
+
+class TestChildOutputContainment:
+    """A stdio child's own output belongs in the log, never on the terminal."""
+
+    @pytest.mark.asyncio
+    async def test_quiet_env_reaches_the_child_and_config_env_still_wins(self) -> None:
+        """``CHILD_QUIET_ENV`` is delivered, and is a DEFAULT rather than a law.
+
+        The child echoes the variables back on stderr, which is also the only
+        proof that the stderr pump is wired: a broken pump means an empty tail
+        here rather than a passing assertion on nothing.
+        """
+        import sys
+
+        from local_operator.mcp.config import MCPStdioServerConfig
+        from local_operator.mcp.manager import (
+            CHILD_QUIET_ENV,
+            McpServerStderr,
+            _stdio_transport,
+        )
+
+        script = (
+            "import os, sys\n"
+            "for key in ('NO_COLOR', 'TERM', 'FORCE_COLOR', 'PY_COLORS'):\n"
+            "    sys.stderr.write(f'{key}={os.environ.get(key, \"<unset>\")}\\n')\n"
+            "sys.stderr.flush()\n"
+        )
+        cfg = MCPStdioServerConfig(
+            command=sys.executable,
+            args=["-c", script],
+            # The config's own env is merged LAST: a server that needs colour,
+            # or a real TERM, must be able to say so.
+            env={"TERM": "xterm-256color"},
+        )
+        stderr_log = McpServerStderr("echo")
+        async with _stdio_transport(cfg, lambda: None, stderr_log):
+            for _ in range(100):
+                if "PY_COLORS" in stderr_log.tail_text():
+                    break
+                await asyncio.sleep(0.05)
+
+        lines = stderr_log.tail_text().splitlines()
+        assert f"NO_COLOR={CHILD_QUIET_ENV['NO_COLOR']}" in lines
+        assert f"FORCE_COLOR={CHILD_QUIET_ENV['FORCE_COLOR']}" in lines
+        assert f"PY_COLORS={CHILD_QUIET_ENV['PY_COLORS']}" in lines
+        assert "TERM=xterm-256color" in lines
+
+    def test_tail_is_bounded_stripped_and_truncated(self) -> None:
+        """A chatty or hostile server cannot pin memory or smuggle escapes."""
+        from local_operator.mcp.manager import (
+            STDERR_LINE_LIMIT,
+            STDERR_TAIL_LINES,
+            McpServerStderr,
+        )
+
+        stderr_log = McpServerStderr("noisy")
+        for index in range(STDERR_TAIL_LINES * 3):
+            stderr_log.feed(f"line {index}")
+        lines = stderr_log.tail_text().splitlines()
+        assert len(lines) == STDERR_TAIL_LINES
+        assert lines[0] == f"line {STDERR_TAIL_LINES * 2}"  # oldest dropped, newest kept
+
+        stderr_log.feed("\x1b[2J\x1b[1;31mwiped your screen\x1b[0m")
+        assert stderr_log.tail_text().endswith("wiped your screen")
+        assert "\x1b" not in stderr_log.tail_text()
+
+        stderr_log.feed("x" * (STDERR_LINE_LIMIT * 2))
+        assert stderr_log.tail_text().endswith("…[truncated]")
+        assert len(stderr_log.tail_text().splitlines()[-1]) < STDERR_LINE_LIMIT + 40
+
+    def test_explain_leaves_a_silent_server_alone(self) -> None:
+        """No stderr, no invention: the original error propagates untouched.
+
+        A server that fails without saying anything (``command not found`` never
+        reaches a pipe) must not gain a colon and an empty quote.
+        """
+        from local_operator.mcp.manager import (
+            STDERR_QUOTED_CHARS,
+            McpConnectionError,
+            McpServerStderr,
+        )
+
+        original = McpConnectionError("Connection closed")
+        stderr_log = McpServerStderr("silent")
+        assert stderr_log.explain(original) is original
+
+        stderr_log.feed("fatal: no credentials")
+        explained = stderr_log.explain(original)
+        assert explained is not original
+        assert str(explained) == "Connection closed: fatal: no credentials"
+
+        # A server whose last words are a wall of text becomes a bounded
+        # reason: this message is rendered whole in the transcript notice.
+        stderr_log.feed("x" * 1000)
+        assert len(stderr_log.quoted_tail()) <= STDERR_QUOTED_CHARS + 1
+        assert stderr_log.quoted_tail().endswith("…")

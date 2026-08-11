@@ -9,6 +9,7 @@ through the real SQLite store.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -852,3 +853,77 @@ class TestStoredTokenExpiry:
         provider = build_oauth_provider(self.URL, cfg, store=store)
         await provider._initialize()
         assert provider.context.is_token_valid() is True
+
+
+class TestBrowserLaunchContainment:
+    """A login flow spawns a browser, and browsers print.
+
+    ``webbrowser.open`` hands the browser fd 1 and fd 2 UNCHANGED — the
+    stdlib's ``GenericBrowser``/``BackgroundBrowser`` pass neither ``stdout``
+    nor ``stderr`` to ``Popen`` — so under the TUI a ``Gtk-Message:`` line or
+    an ``xdg-open: no method available`` lands on the composed frame. Same
+    defect as an MCP server's startup banner, reached through OAuth instead.
+
+    ``BROWSER`` is the env var ``webbrowser`` honours for a custom command, so
+    these drive a real launch of a real script rather than a patched function.
+    """
+
+    @staticmethod
+    def _noisy_browser(tmp_path: Path) -> Path:
+        script = tmp_path / "browser.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            'echo "Gtk-Message: Failed to load module for $1" >&2\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return script
+
+    @pytest.mark.asyncio
+    async def test_silenced_console_keeps_the_browser_off_the_terminal(
+        self, monkeypatch, tmp_path: Path, terminal_output: Path
+    ) -> None:
+        """With the TUI on screen the browser's chatter goes to the log."""
+        import logging
+
+        from local_operator.mcp.auth import open_browser_quietly
+
+        monkeypatch.setenv("BROWSER", f"{self._noisy_browser(tmp_path)} %s")
+        monkeypatch.setattr("local_operator.logger.console_is_silenced", lambda: True)
+
+        records: list[str] = []
+        handler = logging.Handler()
+        handler.emit = lambda record: records.append(record.getMessage())  # type: ignore[method-assign]
+        launcher = logging.getLogger("local_operator.mcp.auth")
+        launcher.addHandler(handler)
+        launcher.setLevel(logging.INFO)
+        try:
+            opened = await open_browser_quietly("https://provider.test/authorize")
+        finally:
+            launcher.removeHandler(handler)
+
+        assert opened is True
+        assert terminal_output.read_bytes() == b""
+        # Not discarded: a browser that could not start is a real login failure,
+        # and this line is the only place the reason survives.
+        assert any("Gtk-Message: Failed to load module" in message for message in records)
+
+    @pytest.mark.asyncio
+    async def test_owning_the_terminal_keeps_the_in_process_call(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Headless ``mcp login`` must not pay for, or hide, the containment.
+
+        With the terminal ours the browser's complaint is exactly what the user
+        should see, so the plain ``webbrowser.open`` call stays — asserted by
+        patching it, which the launcher subprocess would bypass entirely.
+        """
+        from local_operator.mcp.auth import open_browser_quietly
+
+        monkeypatch.setattr("local_operator.logger.console_is_silenced", lambda: False)
+        calls: list[str] = []
+        monkeypatch.setattr("webbrowser.open", lambda url: calls.append(url) or True)
+
+        assert await open_browser_quietly("https://provider.test/authorize") is True
+        assert calls == ["https://provider.test/authorize"]

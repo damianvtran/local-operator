@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, urlparse
 
 from pydantic import AnyUrl
 
+from local_operator.ansi import strip_control_sequences
 from local_operator.mcp.callback_page import callback_response
 
 if TYPE_CHECKING:
@@ -69,6 +70,85 @@ TOKENS_OBTAINED_AT_KEY = "tokens_obtained_at"
 def mcp_oauth_credential_id(server_url: str) -> str:
     """Stable logical credential id for one MCP server's OAuth grant."""
     return f"{MCP_OAUTH_CREDENTIAL_PREFIX}{server_url}"
+
+
+#: How long to wait for the browser launcher before assuming the page opened.
+#: The stdlib's ``GenericBrowser`` WAITS on a foreground browser, so a launcher
+#: still running after this is the normal case for one, not a failure.
+BROWSER_OPEN_TIMEOUT_S = 5.0
+
+#: What the launcher child runs. ``webbrowser.open``'s own return value is the
+#: exit status, so the parent still learns whether a browser was found.
+_BROWSER_OPEN_SNIPPET = "import sys, webbrowser; sys.exit(0 if webbrowser.open(sys.argv[1]) else 1)"
+
+
+async def open_browser_quietly(url: str) -> bool:
+    """Open ``url`` in a browser without letting it print over the frame.
+
+    ``webbrowser.open`` spawns the browser with fd 1 and fd 2 INHERITED — the
+    stdlib's ``GenericBrowser`` and ``BackgroundBrowser`` pass neither
+    ``stdout`` nor ``stderr`` to ``Popen`` (verified in CPython 3.13's
+    ``webbrowser``) — so ``xdg-open: no method available`` or a browser's
+    ``Gtk-Message:`` chatter lands straight on the Textual frame. Same defect
+    as an MCP server's startup banner, arriving through the login flow.
+
+    Redirecting our OWN descriptors is not available as a fix: Textual is
+    writing to fd 1 from this very process, so replacing it even briefly
+    corrupts the display we are trying to protect. Instead the call is
+    delegated to a short-lived Python child whose stdout and stderr are pipes
+    this process owns and logs.
+
+    Only while the console is silenced. With the terminal ours — ``local-
+    operator mcp login`` — a browser's complaint on stderr is exactly what the
+    user should see, and paying for an interpreter start to hide it would be
+    backwards.
+    """
+    from local_operator.logger import console_is_silenced
+
+    if not console_is_silenced():
+        import webbrowser
+
+        try:
+            return webbrowser.open(url)
+        except Exception:  # noqa: BLE001 — headless: the paste fallback carries it
+            logger.debug("webbrowser.open failed", exc_info=True)
+            return False
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            _BROWSER_OPEN_SNIPPET,
+            url,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            # Merged: the two streams are one diagnostic here, and a single
+            # pipe cannot deadlock against itself the way two unread ones can.
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception:  # noqa: BLE001 — no browser is a degraded login, not a crash
+        logger.debug("browser launcher failed to start", exc_info=True)
+        return False
+
+    async def _drain(prefix: str) -> str:
+        assert process.stdout is not None
+        raw = await process.stdout.read()
+        text = strip_control_sequences(raw.decode("utf-8", "replace")).strip()
+        if text:
+            logger.info("%s%s", prefix, text)
+        return text
+
+    drain = asyncio.ensure_future(_drain("browser launcher: "))
+    try:
+        await asyncio.wait_for(asyncio.shield(drain), timeout=BROWSER_OPEN_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        # A foreground browser keeps the launcher alive for as long as its
+        # window is open. Let the drain task run on so the pipe never fills and
+        # blocks that browser; the page IS open, which is what the caller asks.
+        return True
+    await process.wait()
+    return process.returncode == 0
 
 
 @runtime_checkable
@@ -441,13 +521,8 @@ class LoopbackAuthFlow:
             "\nMCP OAuth authorization required. Open this URL in a browser:",
             f"  <{authorization_url}>",
         ]
-        try:
-            import webbrowser
-
-            if webbrowser.open(authorization_url):
-                lines.append("(opened in your default browser)")
-        except Exception:
-            pass  # headless: the listener or the paste fallback carries it
+        if await open_browser_quietly(authorization_url):
+            lines.append("(opened in your default browser)")
         if self._server is not None:
             lines.append(f"Waiting for the redirect to {self.redirect_uri} …")
         self._notify(*lines)
