@@ -664,6 +664,15 @@ class ToolCard(TranscriptBlock):
         self._diff: list[str] | None = None
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
+        #: ``_row_count`` as of the last content APPLIED to the widget, or -1
+        #: when nothing has been applied yet. ``_refresh_row`` compares the two
+        #: to decide whether the update needs a layout pass; the sentinel makes
+        #: the first application always lay out.
+        self._applied_rows = -1
+        #: The width the applied content was folded to, or -1 when nothing has
+        #: been applied. ``on_resize`` compares against it so a height-only
+        #: resize does not rebuild a row that would come out identical.
+        self._built_width = -1
         self._refresh_row()
 
     # -- lifecycle ----------------------------------------------------------
@@ -1353,6 +1362,19 @@ class ToolCard(TranscriptBlock):
 
     # -- resize (TUI-017: rebuild the row when the width changes) -----------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Re-fit the row at the new width.
+
+        Guarded on the WIDTH, because the card's content is a pure function of
+        its state and the width it is folded to — a resize that only changed
+        the HEIGHT reproduces the rows byte for byte. That is not a rare case:
+        an expanded card's own content sets its height, so every expansion
+        raises a Resize that landed straight back here. Measured on a session
+        replay, this handler was a third of the ``_refresh_row`` calls: 645
+        builds for 215 cards, ~366 ms.
+        """
+        size = getattr(event, "size", None)
+        if size is not None and size.width == self._built_width:
+            return
         self._refresh_row()
 
     # -- text selection (TUI-021) -------------------------------------------
@@ -1411,6 +1433,15 @@ class ToolCard(TranscriptBlock):
         Finalization is bypassed deliberately: a resize or an expand must be
         able to re-fit a settled card, and the content it produces is a pure
         function of the card's state, never new history.
+
+        The LAYOUT pass is asked for only when the row count moved. Textual's
+        ``Static.update`` reflows by default and a reflow re-arranges the whole
+        transcript — 7.8 ms across 173 widgets on a 161-block screen — but a
+        card's footprint is its row count and nothing else: collapsed, the
+        sheet pins it to ``height: 1`` and the row cannot reflow anything at
+        all. Without this guard the 1 Hz clock on every running card, and every
+        pointer crossing a card's edge, each reflowed the entire screen to
+        repaint one row.
         """
         container = getattr(self, "container_size", None)
         width = self.size.width or (container.width if container else 0)
@@ -1425,10 +1456,13 @@ class ToolCard(TranscriptBlock):
         self._row_count = max(1, len(content.plain.splitlines()))
         if detached:
             return
+        self._built_width = width
+        moved = self._row_count != self._applied_rows
+        self._applied_rows = self._row_count
         was_finalized = self._finalized
         self._finalized = False
         try:
-            self.set_content(content)
+            self.set_content(content, layout=moved)
         finally:
             self._finalized = was_finalized
 

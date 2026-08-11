@@ -312,6 +312,15 @@ class AssistantBlock(TranscriptBlock):
         self._in_fence: bool = False
         self._fence_marker: str = ""
         self._covered: set[int] = set()
+        #: The row count last written to ``styles.height``. ``_apply_rows``
+        #: compares against it to decide whether the content update needs a
+        #: LAYOUT pass or only a repaint; -1 means nothing is pinned yet, so
+        #: the first apply always lays out.
+        self._pinned_rows: int = -1
+        #: The width the applied rows were flattened at. ``on_resize`` compares
+        #: against it so a height-only resize — which every height pin raises
+        #: — does not re-flatten a message to reproduce identical rows.
+        self._built_width: int = -1
 
     def update_text(self, text: str) -> None:
         """Apply ``text`` as the accumulated message content.
@@ -377,9 +386,24 @@ class AssistantBlock(TranscriptBlock):
         now only the pre-first-content default) a message built at
         :data:`FALLBACK_WIDTH` and then laid out narrower reserves the inflated
         count forever and paints a hole under itself.
+
+        The height pin is also what makes the LAYOUT pass skippable. Textual's
+        ``Static.update`` reflows by default, and a reflow re-arranges every
+        widget in the transcript — measured at 7.8 ms across 173 widgets on a
+        161-block screen. A pinned block's footprint is exactly its pin, so a
+        delta that lands inside the same number of rows changes nothing the
+        container has to re-place and needs a repaint only. Deltas arrive at
+        30 Hz and most of them add a few characters to a line that already
+        exists, so this is the common case, not the rare one: it took the cost
+        of a streaming delta from 4.54 ms to 1.98 ms at the median and from
+        56.4 ms to 11.4 ms at the worst.
         """
-        self.styles.height = text.plain.count("\n") + 1
-        self.set_content(text)
+        self._built_width = self._flat_width()
+        rows = text.plain.count("\n") + 1
+        moved = rows != self._pinned_rows
+        self._pinned_rows = rows
+        self.styles.height = rows
+        self.set_content(text, layout=moved)
 
     def _flat_rows(self, width: int) -> Text:
         """The block's rows at ``width``, from the state the last update left.
@@ -420,8 +444,18 @@ class AssistantBlock(TranscriptBlock):
         new width they are a different set of rows whatever this does; the
         alternative is a settled message that keeps a stale fold and either
         clips or leaves a hole.
+
+        Guarded on the WIDTH, because a resize is not evidence that the rows
+        moved. The rows are a pure function of the text and the width, and
+        ``_apply_rows`` pins the height — so every height pin raises a Resize
+        of its own and this handler re-ran the whole flatten to reproduce the
+        rows it had just been given. Measured on a session replay: 122 rebuilds
+        for 75 blocks, ~175 ms, all of the excess for a width that never
+        changed.
         """
         if not self._full_text:
+            return
+        if self._flat_width() == self._built_width:
             return
         was_finalized = self._finalized
         self._finalized = False

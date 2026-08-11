@@ -386,9 +386,22 @@ class _Dock:
     def __init__(self, width: int = 120) -> None:
         self.size = Size(width, 1)
         self.content: Any = ""
+        #: The ``layout`` flag of the last paint. Recorded because the band
+        #: asking for a layout pass is a real regression — see
+        #: ``StatusLine.refresh`` — and a stub that dropped the argument could
+        #: not say so.
+        self.layout: bool = True
 
-    def update(self, renderable: Any) -> None:
-        self.content = renderable
+    def update(self, content: Any = "", *, layout: bool = True) -> None:
+        """Mirrors ``Static.update``, parameter for parameter.
+
+        Deliberately NOT ``**kwargs``: a double that accepts anything is how
+        this one drifted from the real signature in the first place, and the
+        drift only surfaced when production started passing ``layout``. Spelled
+        out, a future argument fails here loudly instead of being swallowed.
+        """
+        self.content = content
+        self.layout = layout
 
 
 def _band(width: int = 120) -> StatusLine:
@@ -961,3 +974,42 @@ async def test_a_swept_child_is_dropped_from_the_stats_cache() -> None:
         panel.sync(session)
         assert len(panel._rows) == 1
         assert set(panel._stats) == {"j0"}
+
+
+
+@pytest.mark.asyncio
+async def test_a_spinning_row_repaints_without_a_layout_pass() -> None:
+    """The sheet fixes a row at ``height: 1`` and the row is built no-wrap to
+    the measured width, so its content can never move the box.
+
+    Textual's ``Static.update`` reflows the WHOLE screen by default, and this
+    runs 12.5 times a second per running child for as long as the child lives.
+    Measured with three running rows behind a 161-block transcript: 5.2% of a
+    core with the default against 2.1% without it.
+    """
+    session = FakeSession()
+    session.jobs = _fake_jobs(Job("j1", "docs sweep", status="running"))
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(SubagentPanel)
+        panel.sync(session)
+        panel._tick()
+        await pilot.pause()
+
+        row = panel._rows["j1"]
+        seen: list[bool] = []
+        original = row.update
+
+        def update(content: Any, *, layout: bool = True) -> Any:
+            seen.append(layout)
+            return original(content, layout=layout)
+
+        row.update = update  # type: ignore[method-assign]
+        # Force a real repaint: the fingerprint guard would otherwise swallow
+        # a tick that changed nothing, and then the test would assert on an
+        # empty list and pass for the wrong reason.
+        row._fingerprint = None
+        panel._tick()
+
+        assert seen == [False]

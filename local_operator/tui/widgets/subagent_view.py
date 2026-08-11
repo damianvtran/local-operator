@@ -1029,8 +1029,16 @@ class SubagentView(Vertical):
         if self._hint_width != width:
             self._hint_width = width
             self._hint_text = self._hint_row(width)
-        self._title.update(self._title_text)
-        self._rule.update(self._rule_text)
+        # ``layout=False`` on both: the sheet fixes each at ``height: 1``
+        # (``.subagent-view-title``, ``.subagent-view-rule``) and both are
+        # built ``no_wrap`` to the measured width, so neither can move the
+        # box. Textual's default reflows the screen, and the memo above
+        # carries the spinner, so this runs 12.5 times a second for as long as
+        # the child is alive. A/B in one process, 161 blocks behind the page,
+        # three-second idle windows, two rounds: 4.4%/4.2% of a core with the
+        # default against 3.5%/3.6% with this.
+        self._title.update(self._title_text, layout=False)
+        self._rule.update(self._rule_text, layout=False)
 
     def _title_row(self, width: int, spinner: str, tools: int) -> Text:
         """``Subagent · <label>  <glyph> <status> · <elapsed> · <n> tools``.

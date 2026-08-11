@@ -711,6 +711,13 @@ class SubagentRow(Static):
         if fingerprint == self._fingerprint:
             return facts.running
         self._fingerprint = fingerprint
+        # ``layout=False``: the sheet fixes a row at ``height: 1`` and the row
+        # is built ``no_wrap``/``ellipsis`` to that width, so its content can
+        # never move the box. Textual's default would reflow the whole screen
+        # — 7.8 ms across 173 widgets on a 161-block transcript — and this
+        # runs 12.5 times a second per running child for as long as the child
+        # is alive. Measured with three running rows and 161 blocks: 5.2% of a
+        # core with the default, 2.1% with this.
         self.update(
             compose_row(
                 facts=facts,
@@ -720,7 +727,8 @@ class SubagentRow(Static):
                 rung=rung,
                 column=column,
                 clock=clock,
-            )
+            ),
+            layout=False,
         )
         return facts.running
 

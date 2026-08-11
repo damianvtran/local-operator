@@ -480,9 +480,17 @@ class _Dock:
     def __init__(self, width: int = 120) -> None:
         self.size = Size(width, 1)
         self.content: Any = ""
+        #: The ``layout`` flag of the last paint — see ``StatusLine.refresh``.
+        self.layout: bool = True
 
-    def update(self, renderable: Any) -> None:
-        self.content = renderable
+    def update(self, content: Any = "", *, layout: bool = True) -> None:
+        """Mirrors ``Static.update`` parameter for parameter.
+
+        Not ``**kwargs``: a double that swallows anything stops standing for
+        the thing it is named after, which is how this one missed ``layout``.
+        """
+        self.content = content
+        self.layout = layout
 
 
 def _overlay_band() -> Any:

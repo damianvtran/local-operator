@@ -57,14 +57,24 @@ class FakeDock:
     def __init__(self, width: int = 80) -> None:
         self.width = width
         self.painted = None
+        #: The ``layout`` flag of the last paint. The band must never ask for
+        #: a layout pass — its box is fixed by the sheet and the default would
+        #: reflow the whole screen on every spinner frame.
+        self.layout: bool = True
         self.intervals: list[tuple[float, object]] = []
 
     @property
     def size(self):  # noqa: ANN201 - mirrors textual's geometry duck type
         return type("Size", (), {"width": self.width})()
 
-    def update(self, renderable) -> None:  # noqa: ANN001
-        self.painted = renderable
+    def update(self, content=None, *, layout: bool = True) -> None:  # noqa: ANN001
+        """Mirrors ``Static.update`` parameter for parameter.
+
+        Not ``**kwargs``: a double that swallows anything stops standing for
+        the thing it is named after, which is how this one missed ``layout``.
+        """
+        self.painted = content
+        self.layout = layout
 
     def set_interval(self, interval: float, callback):  # noqa: ANN001, ANN201
         self.intervals.append((interval, callback))
@@ -921,3 +931,42 @@ def test_an_armed_alarm_outlives_a_path_that_would_not_have_fitted() -> None:
     # paints nothing, so the path still gets the width.
     status.update(approvals_auto=False)
     assert ICON_CWD in status.render_text(50).plain
+
+
+# -- repaint vs reflow -------------------------------------------------------
+
+
+def test_the_band_never_asks_for_a_layout_pass() -> None:
+    """The band's box is fixed by the sheet (``#status-band { height: 2 }``)
+    and docked, so nothing it paints can move anything.
+
+    Textual's ``Static.update`` reflows the WHOLE screen by default, and this
+    runs on the 12.5 Hz spinner for the length of every turn. Measured A/B on a
+    161-block transcript: 9.6% of a core with the default against 7.2% without
+    it — about a quarter of the turn's idle burn, spent to animate one glyph.
+    """
+    dock = FakeDock(80)
+    status = StatusLine(cast(Static, dock))
+
+    status.update(model_label="openrouter/moonshotai/kimi-k2-thinking", cwd="/tmp")
+    assert dock.layout is False
+
+    # And on every later repaint, including the spinner's own.
+    dock.layout = True
+    status.update(streaming=True)
+    assert dock.layout is False
+    dock.layout = True
+    status._advance_spinner()
+    assert dock.layout is False
+
+
+def test_the_band_still_paints_what_it_was_told() -> None:
+    """The guard above is only safe while the content still lands: a repaint
+    that skips the layout must not also skip the paint."""
+    dock = FakeDock(200)
+    status = StatusLine(cast(Static, dock))
+
+    status.update(cost="$12.40")
+
+    assert dock.painted is not None
+    assert "$12.40" in dock.painted.plain

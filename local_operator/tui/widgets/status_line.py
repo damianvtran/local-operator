@@ -769,9 +769,19 @@ class StatusLine:
         self.refresh()
 
     def refresh(self) -> None:
-        """Rebuild the band content, truncated to the dock's inner width."""
+        """Rebuild the band content, truncated to the dock's inner width.
+
+        ``layout=False`` because the band's box is fixed by the sheet
+        (``#status-band { height: 2 }``) and docked, so its content can never
+        move anything: whatever the ladder sheds, the row count is two. The
+        default reflows the WHOLE screen, and this runs on the 12.5 Hz spinner
+        for the whole of every turn. A/B in one process, 161-block transcript,
+        turn running, three-second idle windows: 9.6% of a core with the
+        default against 7.2% with this, and 7.4% against 5.2% on a second run
+        — about a quarter of the turn's idle burn, to animate one glyph.
+        """
         width = max(self._dock.size.width, 10)
-        self._dock.update(self._render(width))
+        self._dock.update(self._render(width), layout=False)
 
     def is_showing(self, segment: str) -> bool:
         """Whether ``segment`` survived the drop ladder on the last render.

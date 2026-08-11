@@ -1744,3 +1744,99 @@ def test_no_control_codepoint_ever_survives() -> None:
             continue
         out = _strip_control_sequences(f"a{chr(code)}b")
         assert chr(code) not in out, f"U+{code:04X} survived: {out!r}"
+
+
+# --- repaint vs reflow -----------------------------------------------------
+#
+# A collapsed card is pinned to `height: 1` by the sheet and an expanded one is
+# exactly its row count, so a repaint that did not move the row count cannot
+# move anything the container places. Textual's `Static.update` reflows by
+# default, and a reflow re-arranges the WHOLE transcript — 7.8 ms across 173
+# widgets on a 161-block screen. That was being paid by the 1 Hz clock on every
+# running card and by every pointer crossing a row's edge.
+
+
+def _layout_flags(card: ToolCard) -> list[bool]:
+    """Record the ``layout`` argument of every content update on ``card``."""
+    seen: list[bool] = []
+    original = type(card).set_content
+
+    def recording(self, renderable, *, layout: bool = True) -> None:
+        seen.append(layout)
+        original(self, renderable, layout=layout)
+
+    card.set_content = recording.__get__(card)  # type: ignore[assignment]
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_repaint_that_kept_the_row_count_asks_for_no_layout_pass() -> None:
+    """The running card's clock repaints once a second to move the duration.
+    The row is still one row, so nothing needs re-placing.
+
+    Mounted, because a detached card measures its content and applies none of
+    it — the branch under test is the one that only runs with a real width.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(90, 14)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("t", "bash", {"command": "sleep 30"})
+        view.append_block(card)
+        await pilot.pause()
+        flags = _layout_flags(card)
+
+        card._refresh_row()
+
+        assert card._row_count == 1, "precondition: a collapsed card is one row"
+        assert flags == [False]
+
+
+@pytest.mark.asyncio
+async def test_expanding_a_card_does_ask_for_the_layout_pass() -> None:
+    """The other half: expansion is the case where the footprint really moves,
+    and skipping the reflow there would paint the body into reserved-for-one."""
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(90, 14)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("t", "bash", {"command": "ls"})
+        view.append_block(card)
+        card.mark_done("line one\nline two\nline three")
+        await pilot.pause()
+        flags = _layout_flags(card)
+
+        assert card.toggle_expanded() is True
+
+        assert card._row_count > 1, "precondition: the expansion added rows"
+        assert flags and flags[-1] is True
+
+
+def test_a_resize_that_did_not_change_the_width_rebuilds_nothing() -> None:
+    """An expanded card's own content sets its height, so every expansion
+    raises a Resize straight back into ``on_resize``. Unguarded, that rebuilt
+    the row to reproduce it byte for byte — measured at half of all rebuilds."""
+    card = ToolCard("t", "bash", {"command": "ls"})
+    width = card._built_width
+    builds = {"n": 0}
+    original = ToolCard._refresh_row
+    card._refresh_row = (  # type: ignore[assignment]
+        lambda: (builds.__setitem__("n", builds["n"] + 1), original(card))[1]
+    )
+
+    card.on_resize(SimpleNamespace(size=SimpleNamespace(width=width)))
+
+    assert builds["n"] == 0
+
+
+def test_a_resize_to_a_new_width_does_rebuild() -> None:
+    """The guard must still let a real width change through: the row is folded
+    to a width, and a stale fold either clips or leaves a hole."""
+    card = ToolCard("t", "bash", {"command": "ls"})
+    builds = {"n": 0}
+    original = ToolCard._refresh_row
+    card._refresh_row = (  # type: ignore[assignment]
+        lambda: (builds.__setitem__("n", builds["n"] + 1), original(card))[1]
+    )
+
+    card.on_resize(SimpleNamespace(size=SimpleNamespace(width=card._built_width - 20)))
+
+    assert builds["n"] == 1
