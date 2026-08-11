@@ -168,6 +168,50 @@ async def test_a_prompt_typed_during_a_pass_is_held_and_then_sent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_reload_during_a_pass_does_not_brick_the_app() -> None:
+    """``/reload`` mid-compaction must not leave the hold armed forever.
+
+    ``_compacting`` was cleared in exactly one place, ``on_compaction_ended``
+    — which can never run after a reload, because ``_reload_session`` disposes
+    the controller first, by design, so the dying session's terminal events are
+    dropped. Slash commands are not gated on ``_compacting`` and a manual pass
+    is minutes long, so this is an ordinary thing to do. Left set, the flag
+    stuck True for the life of the app: every later prompt was swallowed into
+    the hold and answered "queued", and nothing ever sent it. A fully booted
+    session could no longer reach the model at all.
+    """
+    session = SlowCompaction()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._cmd_compact()
+        for _ in range(30):
+            await pilot.pause()
+            if app._compacting:
+                break
+        assert app._compacting, "the pass never started, so this proves nothing"
+
+        # The dying session never emits its end event: disposal drops it.
+        replacement = SlowCompaction()
+        app._session_factory = lambda: _factory(replacement)  # type: ignore[assignment]
+        await app._reload_session()
+        for _ in range(30):
+            await pilot.pause()
+
+        assert not app._compacting, "the hold outlived the session that armed it"
+        assert app._prompt_held_for_compaction == "", "the held prompt survived"
+
+        # The real proof: the app can still talk to the model.
+        await _submit(pilot, app, "hello again")
+        for _ in range(60):
+            await pilot.pause()
+            if replacement.prompts:
+                break
+
+    assert replacement.prompts == ["hello again"], "the prompt was swallowed"
+
+
+@pytest.mark.asyncio
 async def test_the_automatic_pass_gets_the_same_receipt_and_band_update() -> None:
     """The property the whole design claims: the two triggers differ only in what
     starts them. An automatic pass emits the same events, so it gets the same

@@ -1132,6 +1132,24 @@ class OperatorApp(App[None]):
         # set, the NEW session's first write/exec approval queued behind a
         # question that is no longer on screen and nothing could answer it.
         self._approval = None
+        # Same argument, and a sharper failure. `_compacting` and the prompt it
+        # holds belong to the session that just died, and their ONLY other
+        # writer is `on_compaction_ended` — which can never run after this
+        # point, because the controller is disposed above precisely so the
+        # dying session's terminal events are dropped. Left set, `_compacting`
+        # stays True for the life of the app: every later prompt falls into the
+        # hold, is answered "queued — sends when compaction finishes", and is
+        # never sent, so a fully booted session can no longer reach the model
+        # at all. A manual pass is documented as minutes on a long
+        # conversation and slash commands are not gated on it, so `/reload`
+        # during one is an ordinary thing for a user to do.
+        #
+        # The held prompt is DISCARDED rather than carried: it was typed into
+        # the conversation that is being thrown away, and replaying it into the
+        # replacement would send the new session text its user never addressed
+        # to it.
+        self._compacting = False
+        self._prompt_held_for_compaction = ""
         # Unconditional, and this is the whole discipline: the ledger is only
         # ever as old as the session on screen. Clearing after controller
         # detachment keeps old-session events out of the replacement
