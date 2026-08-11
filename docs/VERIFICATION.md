@@ -1425,3 +1425,101 @@ subagent panel, one figure per row, as above.
 Frames captured by driving the real `OperatorApp` against a real Anthropic
 session through Textual's Pilot — the production app, band and event pipeline,
 not a stub.
+
+## The seam between the conversation and the composer (2026-08-11)
+
+Reported from the owner's own frame: the last two rows of a turn (`✕ name
+'CompactionOutcome' is not defined` / `✕ interrupted`) sitting directly on the
+composer's fill, so the ledger and the input read as one slab. "There needs to
+be one line of space between the thinking/tool calls/message text and the top
+of the composer."
+
+### Diagnosis: nothing ever reserved it
+
+Not a regression. `TranscriptView` declared `padding: 1 0 0 1` — the bottom was
+the one edge of the transcript that had never been spent, so the seam was
+whatever slack the frame happened to have left, and zero as soon as the
+conversation filled it. Measured on the composed frame at `b992792`, blank rows
+between the last transcript row and `#input-shell`:
+
+| Last block | 120x40 | 60x40 |
+|---|---|---|
+| assistant prose | 0 | 0 |
+| tool card (failed) | 0 | 0 |
+| notice | 0 | 0 |
+| user prompt | 0 | 0 |
+| working line | 0 | 0 |
+
+The aside work is adjacent but innocent: `_reserve_ground_for_aside` drives that
+same padding while the card is up, and the flush card-on-composer seam was its
+own measured decision. The one thing it did own is the close path, which wrote a
+hardcoded `0` back — invisible while the sheet said `0` too, and an eaten row
+the moment it said `1`. It now clears the inline rule and lets the cascade
+answer, which is also what keeps the boot layout at `0`.
+
+### Whose row it is
+
+The transcript's, as a trailing reservation, not the dock's as top padding:
+
+- one owner for one seam — the aside's reservation REPLACES this row rather than
+  stacking with it, which is what keeps its flush seam a single number
+- every floating card is placed off the docked panel's `region.y`
+  (`overlay.rows_above_dock`), so a padding row on `#input-dock` lifts the card
+  off the composer. Measured at 120x40: the aside's footer at row 32, a blank
+  row 33, the panel at 34 — the one join in the stack deliberately chosen flush,
+  broken by the alternative
+- same semantics as the transcript's top row: the conversation's own first and
+  last row of ground, inside the scrollable region, so `scroll_end` lands on it
+
+### Frames (60x40, conversation scrolled to its end)
+
+```
+BEFORE                             AFTER
+32                                 32   ! interrupted
+33   ! interrupted                 33
+34 ❯   Message Local Operator…     34
+                                   35 ❯   Message Local Operator…
+```
+
+```
+BEFORE                             AFTER
+32                                 32 ▌ now do the other one
+33 ▌ now do the other one          33
+34 ❯   Message Local Operator…     34
+                                   35 ❯   Message Local Operator…
+```
+
+### The row does not flicker
+
+40 consecutive appends, one notice per frame, reading the seam off every frame.
+Before, the slack decays 7…1 and then collapses to `0` at the frame that first
+overflows (n=31 at 60x40) and stays there. After, it decays to `1` and holds at
+`1` through the exact-fit frame and every scrolling frame after it:
+
+```
+before  … 3 2 1 0 0 0 0 0 0 0 0 0
+after   … 3 2 1 1 1 1 1 1 1 1 1 1
+```
+
+### States that had to stay right
+
+| State | Before | After |
+|---|---|---|
+| `/btw` aside open | flush (0) | flush (0) |
+| aside closed with Esc | 0 | 1 |
+| boot splash, 60x20 / 80x24 / 60x40 / 120x40 | 1 | 1, frame identical row for row |
+| dock band up (todos) | 1 above the band, 0 above the composer | 1 and 1 |
+
+The band needed the second half of the change. Its slot carried a padding row
+ABOVE itself, which stacked with the transcript's new trailing row into a
+two-row interval — the widest on screen, the same "both halves pushed a padding
+row into the join" failure the aside card's missing bottom row was fixed for.
+`.band-slot` now owns the ground BELOW itself, so every join in the dock column
+is one row from exactly one owner.
+
+Evidence: `tests/unit/tui/test_composer_seam.py` (22 tests — every last-block
+kind at both widths, the growth sequence, the aside open and closed, the boot
+splash at four sizes, the band). 16 of the 22 fail at `b992792`; the 6 that pass
+both ways are the invariants the fix had to preserve (aside flush, boot). Frames
+captured from the real `OperatorApp` through Textual's Pilot, rendered from
+`Screen._compositor.render_strips()` under `TERM=xterm-256color`.

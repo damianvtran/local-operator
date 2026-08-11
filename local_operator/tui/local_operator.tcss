@@ -36,7 +36,9 @@
  *     take one away: an accent spent everywhere is an accent spent nowhere.
  *
  * Edge spacing: one cell at the left, right, and bottom screen edges; NONE
- * along the top while scrolling (content meets the top edge).
+ * along the top while scrolling (content meets the top edge). The transcript
+ * also ends in one row of ground, so the conversation never touches the
+ * composer — see `TranscriptView` for why that row is the transcript's.
  */
 
 Screen {
@@ -80,8 +82,33 @@ TranscriptView {
      * below already supplies the right-hand cell, so `1` there made every
      * background-filled tool card one cell wider on the left than the right —
      * visible as an off-centre slab on the one element whose whole job is to
-     * look deliberately borderless. */
-    padding: 1 0 0 1;
+     * look deliberately borderless.
+     *
+     * The BOTTOM row is the conversation's last row of ground, and it was the
+     * one edge of the transcript nobody had spent. Measured at 60x40 with a
+     * conversation tall enough to reach the dock: 0 rows between the last
+     * transcript row and the composer's fill, so `▌ now do the other one`,
+     * `! interrupted` and a failed tool card's tinted slab each sat directly
+     * on the panel — the conversation and the input read as one slab.
+     *
+     * The row belongs to the TRANSCRIPT rather than to `#input-dock`, and that
+     * is load-bearing rather than cosmetic:
+     *   - the aside already reserves this same padding for its card's rows
+     *     (`OperatorApp._reserve_ground_for_aside`), so one owner keeps the
+     *     flush card-on-composer seam a single number: the reservation
+     *     REPLACES this row instead of stacking with it;
+     *   - every floating card is placed off the docked panel's `region.y`
+     *     (`widgets/overlay.rows_above_dock`), so a padding row on the DOCK
+     *     lifts the aside and `/usage` cards a row off the composer. Measured
+     *     at 120x40: it put a blank row into the aside's seam, the one join
+     *     that was deliberately chosen flush;
+     *   - it is the same semantics as the top row above — the conversation's
+     *     own first and last row of ground, scrolling with the content rather
+     *     than a permanent inset on the frame. It survives `scroll_end`
+     *     because a container's padding is inside its scrollable region.
+     * The boot layout takes it back (`Screen.boot TranscriptView`), where the
+     * column is bottom-aligned and the row could only ever be slack. */
+    padding: 1 0 1 1;
     scrollbar-size-vertical: 1;
     scrollbar-gutter: stable;
     scrollbar-background: $lo-bg;
@@ -706,10 +733,10 @@ ApprovalBlock:focus {
  * costs the layout nothing. The two panels each manage their own `display`
  * (hidden when their ledger/store is empty), and each holds ONE filled body
  * (`$lo-surface`, the tool card's elevation) on the ground — the same
- * "elevation is a background step, never a line" rule as everything else. The
- * slot's top padding row is the ONE margin the sheet permits: it separates the
- * band from the transcript, and it is padding on the slot, never a margin, so
- * the element that owns the vertical rhythm is the container. */
+ * "elevation is a background step, never a line" rule as everything else. Each
+ * slot owns the row of ground BELOW itself (see `.band-slot`), and it is
+ * padding on the slot, never a margin, so the element that owns the vertical
+ * rhythm is the container. */
 /* The band is a normal-flow child INSIDE the docked input-dock (D-15-01).
  * `width: auto` (content-sized) so it does NOT consume the dock's full width
  * and defeat the shell's centering below it — a full-width sibling was the
@@ -722,10 +749,21 @@ ApprovalBlock:focus {
     height: auto;
 }
 
+/* One row of ground UNDER each slot, not over it, and the direction is the
+ * whole point: the transcript now ends in a row of its own ground
+ * (`TranscriptView`'s bottom padding), so a top padding row here stacked with
+ * it — measured at 120x40 with a todo list up, 2 blank rows between the
+ * conversation's last row and the band's slab against 1 everywhere else in the
+ * stack, which is the widest interval on screen and reads as the band having
+ * come loose. Downward, every join in the column is one row from exactly one
+ * owner: the transcript's trailing row above the band, this row between two
+ * visible panels, and this row again above the composer — which used to be no
+ * row at all, two same-fill slabs touching and reading as one panel with a
+ * todo list inside it. */
 .band-slot {
     width: 1fr;
     height: auto;
-    padding: 1 0 0 0;
+    padding: 0 0 1 0;
 }
 
 .band-body {

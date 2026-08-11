@@ -330,13 +330,20 @@ async def test_the_card_rests_on_the_end_of_the_chat_not_on_top_of_it() -> None:
     at a short terminal what it hid was the last thing the user asked. The
     transcript gives up the card's rows instead, so the card rests on the end
     of the chat, and takes them back on esc.
+
+    "Takes them back" is asserted as the absence of the INLINE rule rather than
+    as a number. The sheet's own bottom padding is the conversation's trailing
+    row of ground and it differs per layout (1 in the conversation, 0 under the
+    boot splash — see `TranscriptView` in the tcss), so a constant here would
+    pin the wrong layout's answer and, before that row existed, silently passed
+    while the close path wrote a hardcoded 0 over the sheet.
     """
     session = AsideSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 24)) as pilot:
         await pilot.pause()
         transcript = app._transcript_view()
-        assert transcript.styles.padding.bottom == 0
+        assert not transcript.styles.inline.has_rule("padding")
 
         await _open_with_question(pilot, app, "are the subagents stuck?")
         card = app.query_one(AsidePanel)
@@ -344,7 +351,7 @@ async def test_the_card_rests_on_the_end_of_the_chat_not_on_top_of_it() -> None:
 
         await pilot.press("escape")
         await pilot.pause()
-        assert transcript.styles.padding.bottom == 0
+        assert not transcript.styles.inline.has_rule("padding")
 
 
 @pytest.mark.asyncio
@@ -407,7 +414,9 @@ async def test_ctrl_c_dismisses_the_aside_so_its_own_warning_is_readable() -> No
 
         assert not app.query_one(AsidePanel).is_open
         assert session.aborts == ["interrupted"]
-        assert app._transcript_view().styles.padding.bottom == 0
+        # No inline reservation left: the sheet owns the resting row again (see
+        # `test_the_card_rests_on_the_end_of_the_chat_not_on_top_of_it`).
+        assert not app._transcript_view().styles.inline.has_rule("padding")
 
 
 @pytest.mark.asyncio
@@ -438,7 +447,7 @@ async def test_the_aside_yields_to_anything_that_acts_on_the_conversation(
 
         assert not app.query_one(AsidePanel).is_open
         assert app.query_one(Editor).placeholder == DEFAULT_PLACEHOLDER
-        assert app._transcript_view().styles.padding.bottom == 0
+        assert not app._transcript_view().styles.inline.has_rule("padding")
 
 
 # -- leaving ---------------------------------------------------------------

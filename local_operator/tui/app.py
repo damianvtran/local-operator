@@ -3854,10 +3854,18 @@ class OperatorApp(App[None]):
         panel._on_height = None
         # Give the transcript its own last rows back, and land the reader at
         # the end of the conversation they came back to.
+        #
+        # DROP the inline rule rather than write a number back. The sheet's own
+        # bottom padding is the conversation's trailing row of ground (1 in the
+        # conversation layout, 0 in the boot layout, `TranscriptView` and
+        # `Screen.boot TranscriptView`), so any constant here is wrong in one of
+        # the two: 0 ate the row this seam exists for, and 1 would leave a row
+        # of slack under the splash after a `/btw` opened and closed on the boot
+        # screen. Clearing the rule hands the question back to the cascade,
+        # which is the only place that knows which layout is up.
         transcript = self._transcript_view()
         if transcript is not None:
-            padding = transcript.styles.padding
-            transcript.styles.padding = (padding.top, padding.right, 0, padding.left)
+            transcript.styles.clear_rule("padding")
             transcript.call_after_refresh(transcript.scroll_end, animate=False)
         draft = self._aside_draft
         self._aside_draft = None
