@@ -15,7 +15,7 @@ Regenerate after intentional visual changes with::
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import pytest
@@ -38,6 +38,7 @@ pytestmark = pytest.mark.skipif(
 from local_operator.harness.types import (  # noqa: E402
     AgentEndEvent,
     AgentStartEvent,
+    ImageContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -114,10 +115,10 @@ class FakeSession:
     async def seed_history(self, messages: list[Any]) -> None:
         pass
 
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
     def set_approval_handler(self, handler: object | None) -> None:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sequence
 from typing import Any, Callable
 
 import pytest
@@ -26,6 +27,7 @@ from local_operator.harness.types import (
     AsideResult,
     ChatRequest,
     CustomMessage,
+    ImageContent,
     Message,
     MessageEndEvent,
     ModelSpec,
@@ -100,7 +102,7 @@ class FakeChild:
     def queue_aside(self, thunk: Callable[[], AsideResult]) -> None:
         self.asides.append(thunk)
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.steers.append(text)
 
     def subscribe(self, handler: Callable[[AgentEvent], Any]) -> Callable[[], None]:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.harness.types import NoticeEvent, TextContent
+from local_operator.harness.types import ImageContent, NoticeEvent, TextContent
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
@@ -97,10 +97,10 @@ class FakeSession:
     async def seed_history(self, messages: list[Any]) -> None:
         pass
 
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
     def set_approval_handler(self, handler: object | None) -> None:
@@ -1557,7 +1557,7 @@ class GoalSession(FakeSession):
         self._goal = (text or "").strip()
         return self._goal
 
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         if self.fail_on_prompt:
             raise RuntimeError("boom")
         self.prompts.append(text)
@@ -2259,7 +2259,7 @@ async def test_a_failing_turn_shows_the_providers_own_error() -> None:
     the provider's own words tell the user what to change."""
     session = FakeSession()
 
-    async def prompt(text, attachments=None):
+    async def prompt(text, images=None):
         raise RuntimeError("HTTP 400: `temperature` is deprecated for this model.")
 
     session.prompt = prompt  # type: ignore[assignment]

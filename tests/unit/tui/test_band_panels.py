@@ -10,11 +10,12 @@ isolated widget calls that can pass while the wiring is dead.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import pytest
 
+from local_operator.harness.types import ImageContent
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
@@ -68,10 +69,10 @@ class FakeSession:
     async def seed_history(self, messages: list[Any]) -> None:
         pass
 
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
     def set_approval_handler(self, handler: Any | None) -> None:

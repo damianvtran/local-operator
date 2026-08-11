@@ -6,7 +6,7 @@ and a stub app that records posted messages (no Textual run needed).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import pytest
@@ -14,6 +14,7 @@ import pytest
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentStartEvent,
+    ImageContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -115,7 +116,7 @@ class FakeSession:
         self._goal = (text or "").strip()
         return self._goal
 
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
     async def seed_history(self, messages: list[Any]) -> None:
@@ -124,7 +125,7 @@ class FakeSession:
     def history(self) -> list[Any]:
         return getattr(self, "_history", [])
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
     def set_approval_handler(self, handler: object | None) -> None:

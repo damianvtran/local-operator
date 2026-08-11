@@ -13,7 +13,7 @@ import argparse
 import asyncio
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -27,6 +27,7 @@ from local_operator.harness.types import (
     AgentEvent,
     AgentMessage,
     AgentStartEvent,
+    ImageContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -103,7 +104,7 @@ class FakeSession:
         pass
 
     # driving turns
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
         events = (
             self.scripts[self._script_index]
@@ -117,7 +118,7 @@ class FakeSession:
                 if asyncio.iscoroutine(result):
                     await result
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
     def set_approval_handler(self, handler: object | None) -> None:
@@ -350,7 +351,7 @@ def test_run_exec_prompt_raising_exits_one(fake_factory, capsys) -> None:
     stderr — never the interactive red banner."""
 
     class RaisingSession(FakeSession):
-        async def prompt(self, text: str, attachments=None) -> None:
+        async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
             raise RuntimeError("turn blew up")
 
     fake_factory(RaisingSession([]))
@@ -599,7 +600,7 @@ def test_exec_worker_sigterm_yields_130(tmp_path: Path) -> None:
         "        return lambda: None\n"
         "    def abort(self, reason):\n"
         "        self._abort.set()\n"
-        "    async def prompt(self, text, attachments=None):\n"
+        "    async def prompt(self, text, images=None):\n"
         # READY is printed from inside the turn, which is the only point where
         # the signal handler is provably installed AND the turn has started.
         # A fixed sleep here raced under full-suite load: the child took SIGTERM

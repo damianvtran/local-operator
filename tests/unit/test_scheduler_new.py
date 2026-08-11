@@ -15,7 +15,7 @@ import inspect
 import json
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -29,7 +29,12 @@ from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
-from local_operator.harness.types import AgentEndEvent, EventHandler, Message
+from local_operator.harness.types import (
+    AgentEndEvent,
+    EventHandler,
+    ImageContent,
+    Message,
+)
 from local_operator.jobs import JobManager, JobStatus
 from local_operator.scheduler_service import SchedulerService
 from local_operator.types import OperatorType, Schedule, ScheduleUnit
@@ -67,7 +72,7 @@ class FakeSession:
 
         return _unsubscribe
 
-    async def prompt(self, text: str) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
         if self._fail is not None:
             raise self._fail

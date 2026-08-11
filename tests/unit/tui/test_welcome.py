@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.color import Color
 
-from local_operator.harness.types import AgentMessage
+from local_operator.harness.types import AgentMessage, ImageContent
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import SLASH_COMMANDS, OperatorApp
@@ -501,10 +501,10 @@ class FakeSession:
     def history(self) -> list[AgentMessage]:
         return []
 
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
     def set_approval_handler(self, handler: object | None) -> None:

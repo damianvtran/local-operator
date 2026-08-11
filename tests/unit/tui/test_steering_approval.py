@@ -18,7 +18,7 @@ routes messages internally.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -27,6 +27,7 @@ from rich.cells import cell_len
 from textual.binding import Binding
 
 from local_operator.harness.types import (
+    ImageContent,
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -77,7 +78,7 @@ class SteerableSession(FakeSession):
     def is_streaming(self) -> bool:
         return self.streaming
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.steers.append(text)
 
     def set_approval_handler(self, handler: object | None) -> None:
