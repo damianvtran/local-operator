@@ -1509,17 +1509,38 @@ after   … 3 2 1 1 1 1 1 1 1 1 1 1
 | aside closed with Esc | 0 | 1 |
 | boot splash, 60x20 / 80x24 / 60x40 / 120x40 | 1 | 1, frame identical row for row |
 | dock band up (todos) | 1 above the band, 0 above the composer | 1 and 1 |
+| both band slots up (subagent + todos) | — | 1 / 1 / 1 down the whole column |
+| subagent page (full-page child view) | 0 — the exit hint fused with the read-only composer | 1 |
+| `/btw` aside open WITH a band up | 1 row under the card | flush on the band, deliberately |
+| dock grown taller (4-line composer, picker open) | content-dependent — 0 at 120x40 with the picker up | 1 |
 
 The band needed the second half of the change. Its slot carried a padding row
 ABOVE itself, which stacked with the transcript's new trailing row into a
 two-row interval — the widest on screen, the same "both halves pushed a padding
 row into the join" failure the aside card's missing bottom row was fixed for.
-`.band-slot` now owns the ground BELOW itself, so every join in the dock column
-is one row from exactly one owner.
+`.band-slot` now owns the ground BELOW itself, so every join between the
+column's own stacked children is one row from exactly one owner.
 
-Evidence: `tests/unit/tui/test_composer_seam.py` (22 tests — every last-block
-kind at both widths, the growth sequence, the aside open and closed, the boot
-splash at four sizes, the band). 16 of the 22 fail at `b992792`; the 6 that pass
-both ways are the invariants the fix had to preserve (aside flush, boot). Frames
-captured from the real `OperatorApp` through Textual's Pilot, rendered from
+The last row of that table is the review's one finding (S1), and it is the flip
+working rather than failing. The aside is placed on the dock (`stack_on_dock`,
+gap 0), so it rests on whatever the dock puts at its top: the composer with no
+band, the band's slab with one. Before the flip the card had a stray ground row
+under it in that one state, so the same card read as seated on the composer and
+loose above the band. Flush is legible here because the card is `$lo-overlay`
+over the band's `$lo-surface` — one elevation step, which is this kit's
+separator — where the band's own join with the composer was two identical fills
+touching and needed the row. Pinned deliberately, fills asserted, so the next
+reader does not "fix" it.
+
+Evidence: `tests/unit/tui/test_composer_seam.py` (26 tests — every last-block
+kind at both widths, the growth sequence, the aside open, closed and over a
+band, the boot splash at four sizes, the band, the subagent page). 16 of the
+first 22 fail at `b992792`; the ones that pass both ways are the invariants the
+fix had to preserve (aside flush, boot). Frames captured from the real
+`OperatorApp` through Textual's Pilot, rendered from
 `Screen._compositor.render_strips()` under `TERM=xterm-256color`.
+
+Reviewed by `Round11Reviewer` over the two commits: approve, no blocker, no
+major, two nits. S1 above; S2 was that a suite count taken in the shared
+worktree measures eleven agents' uncommitted work as well as this change, so the
+reproducible figure is the one from a detached worktree at the commit.

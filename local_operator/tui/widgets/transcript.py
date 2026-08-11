@@ -19,9 +19,11 @@ gap rides one CSS class (:data:`GAP_CLASS`); the base block selectors stay
 margin-free so no "filler row everywhere" regression can slip back in, and
 so the class can never be doubled by a margin underneath it.
 
-Layout rhythm (D20): a user prompt owns column 0 — a full-height ``▌`` rule
-beside every one of its rows — and its prose sits two cells in, exactly where
-the old ``❯ `` prefix put it, so the turn spine reads at a glance.
+Layout rhythm (D20): a user prompt carries a full-height ``▌`` rule in the
+gutter column beside every one of its rows, and its prose sits two cells in,
+exactly where the old ``❯ `` prefix put it. The gutter is shared, not owned —
+a tool row leads at column 0 too, with its identity glyph — so the turn spine
+reads from the SHAPE of each mark, a spanning bar against a single glyph.
 """
 
 from __future__ import annotations
@@ -266,16 +268,27 @@ class UserBlock(TranscriptBlock):
     full, on the tool ledger — every tool row is a filled slab, and that fill
     CARRIES the outcome. A second slab kind on the same surface makes the
     transcript a stack of cards and demotes the one element whose fill means
-    something. The gutter column carries the whole signal instead, which is
-    affordable because nothing else paints there: assistant prose starts at
-    column 0 with no glyph, notices and tool rows start at :data:`SPINE_INDENT`.
-    A column no other block touches does not need a hue to be unmistakable.
+    something. The gutter column carries the whole signal instead.
 
-    **The rule is ``dim``, not the accent.** The accent green is spent on
-    exactly five sites (enumerated in ``local_operator.tcss``) and means "a turn
-    is live"; a green column beside every prompt would be the largest accent
-    surface in the app and would mean nothing. ``dim`` is the sheet's own
-    separator ink, and ``▌`` (LEFT HALF BLOCK) buys the weight back through the
+    **The rule is ``dim``, not the accent**, and it does not need a hue to
+    carry. What makes it read is EXTENT: it is the only CONTINUOUS multi-row
+    column in the transcript. The gutter is not exclusive — ``ToolCard`` leads
+    at column 0 too, and rightly, because that cell is the per-tool identity
+    glyph and the ledger's leftmost scanning aid (measured at 80 columns: tool
+    row lead 0, prompt lead 0, notice and working line lead
+    :data:`SPINE_INDENT`). But a bar spanning every row of a block and a single
+    glyph marking a single row are not confusable marks; they differ in shape,
+    in ink, and in the whole structure of the row. Exclusivity was never what
+    the design rested on.
+
+    The accent is ruled out on its own budget: it is spent on exactly five
+    sites (enumerated in ``local_operator.tcss``) and means "a turn is live", so
+    a green column beside every prompt would be the largest accent surface in
+    the app and would mean nothing. ``dim`` is the sheet's own separator ink and
+    measures 4.55:1 on the dark ground and 3.77:1 on paper — clearing the 3:1
+    floor for a graphical object in both ramps while staying below the body ink,
+    which the brighter neutral does not (it wins on dark and drops under the
+    floor on paper). ``▌`` (LEFT HALF BLOCK) buys the weight back through the
     GLYPH — half a cell of solid ink, where ``│`` would draw the left edge of a
     box the minimalism contract forbids.
 

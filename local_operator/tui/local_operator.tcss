@@ -755,11 +755,22 @@ ApprovalBlock:focus {
  * it — measured at 120x40 with a todo list up, 2 blank rows between the
  * conversation's last row and the band's slab against 1 everywhere else in the
  * stack, which is the widest interval on screen and reads as the band having
- * come loose. Downward, every join in the column is one row from exactly one
- * owner: the transcript's trailing row above the band, this row between two
- * visible panels, and this row again above the composer — which used to be no
- * row at all, two same-fill slabs touching and reading as one panel with a
- * todo list inside it. */
+ * come loose. Downward, every join between the column's own STACKED children is
+ * one row from exactly one owner: the transcript's trailing row above the band,
+ * this row between two visible panels, and this row again above the composer —
+ * which used to be no row at all, two same-fill slabs touching and reading as
+ * one panel with a todo list inside it.
+ *
+ * A FLOATING card is the deliberate exception, and the flip made it consistent
+ * rather than breaking it. The aside rests on whatever the dock puts at its top
+ * (`overlay.stack_on_dock`, gap 0), so with a band up the card's footer now
+ * touches the band's slab — measured at 120x40, card footer at row 29 and
+ * `Todos · 1/2` at 30. That is the same flush seam the card has on the composer
+ * when no band is up, and it is legible for the same reason: the card is
+ * `$lo-overlay` over the band's `$lo-surface`, one elevation step, which is
+ * this kit's separator. Before the flip the card had a stray ground row under
+ * it in this state only, so the one card looked seated on the composer and
+ * loose above the band. */
 .band-slot {
     width: 1fr;
     height: auto;

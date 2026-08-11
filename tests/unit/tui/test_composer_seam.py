@@ -363,3 +363,46 @@ async def test_the_subagent_page_ends_in_ground_too(size: tuple[int, int]) -> No
         assert view.is_mounted
         assert _seam(app) == 1, _frame(app)[-8:]
         assert "esc" in _last_painted_row(app), _frame(app)[-8:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+async def test_the_aside_rests_on_whatever_the_dock_puts_first(size: tuple[int, int]) -> None:
+    """With a band up the card's flush seam is against the BAND, on purpose.
+
+    The card is placed on the dock (``overlay.stack_on_dock``, gap 0), so what
+    it rests on is whatever the dock puts at its top — the composer when the
+    band is empty, the band's slab when it is not. Pinned as a deliberate 0
+    because it LOOKS like the two-row-join bug this suite is otherwise about,
+    and it is the opposite: before the band's padding row moved below its slot,
+    this was the one state where the card had a stray row under it, so the same
+    card read as seated on the composer and loose above the band.
+
+    What makes 0 legible here is the elevation step rather than a gap — the card
+    is one background step off the band, which is this kit's separator — so the
+    fills are asserted too. Flush against the SAME fill would be the real
+    failure (that is why the band's own join with the composer is a row).
+    """
+    from local_operator.tools import builtin
+
+    app, session = _app(AsideSession())
+    async with app.run_test(size=size) as pilot:
+        await _fill(pilot, app, turns=6)
+        builtin.TODO_STORE[session.session_id] = [{"text": "wire the band", "status": "pending"}]
+        app._refresh_band()
+        await _settle(pilot, 6)
+        app.query_one(Editor).load_text("/btw why is the loop slow?")
+        await pilot.press("enter")
+        await _settle(pilot, 8)
+
+        try:
+            card = app.query_one(AsidePanel)
+            assert card.is_open
+            assert app.query_one("#todo-panel").display
+            # The card rests ON the band, and the band still ends in its own row.
+            assert _blank_rows_above(app, "#todo-panel") == 0, _frame(app)[-12:]
+            assert _seam(app) == 1, _frame(app)[-12:]
+            # And the seam is readable because the fills differ by a step.
+            assert card.styles.background != app.query_one("#todo-body").styles.background
+        finally:
+            builtin.TODO_STORE.pop(session.session_id, None)
