@@ -298,19 +298,47 @@ def stdio_start_new_session() -> bool:
 #:
 #: Kept for that, and because the next third-party server will differ — one
 #: that renders unconditionally is exactly the case the stream redirect
-#: handles and the environment does not, and vice versa. They are the
-#: conventional opt-outs: ``NO_COLOR`` (https://no-color.org), ``TERM=dumb``,
-#: Rich and click's ``FORCE_COLOR``/``CLICOLOR``/``CLICOLOR_FORCE``, and
-#: ``PY_COLORS``. A server that wants any of them back sets it in its config
-#: ``env``, which is merged last and wins.
+#: handles and the environment does not, and vice versa.
+#:
+#: EVERY ENTRY HERE TURNS COLOUR OFF BY ITS OWN CONVENTION, and that is a
+#: harder rule than it looks. ``FORCE_COLOR`` and ``CLICOLOR_FORCE`` were in
+#: this dict set to ``"0"``, which reads like an opt-out and is not one:
+#: force-color.org senses PRESENCE, so Rich takes ``FORCE_COLOR=0`` as "yes, I
+#: am a terminal" (``rich/console.py``: ``if force_color is not None: return
+#: force_color != ""``). MEASURED on a pipe — where the child had already
+#: given up on colour — adding ``FORCE_COLOR=0`` to the rest of this dict
+#: turned ``b'LOGO\n'`` back into ``b'\x1b[1mLOGO\x1b[0m\n'`` for a server
+#: whose config restores ``TERM``; ``test_the_quiet_env_actually_silences_rich``
+#: keeps that measurement running. ``CLICOLOR_FORCE=0`` is inert in Rich by the
+#: same measurement and by bixense's spec (force only when non-zero), but it is
+#: presence-sensed elsewhere and buys nothing here, so it goes with it.
+#: Both are gone, and leaving them UNSET is the whole of the fix: this dict is
+#: not merged into the operator's own environment but into
+#: ``get_default_environment()``, which copies an allowlist
+#: (``DEFAULT_INHERITED_ENV_VARS``: ``HOME``, ``LOGNAME``, ``PATH``, ``SHELL``,
+#: ``TERM``, ``USER``) and nothing else, so a ``FORCE_COLOR`` in the shell that
+#: launched us cannot reach a server either. What is left here is only opt-OUT
+#: switches: ``NO_COLOR`` (https://no-color.org, presence disables),
+#: ``TERM=dumb``, ``CLICOLOR=0`` (bixense.com/clicolors), and ``PY_COLORS=0``.
+#: Before adding another, check that its documented sense is "off" and not
+#: "force" — and that its off value is a VALUE and not an absence.
+#:
+#: A server that wants any of them back sets it in its config ``env``, which is
+#: merged last and wins.
 CHILD_QUIET_ENV: dict[str, str] = {
     "NO_COLOR": "1",
     "TERM": "dumb",
-    "FORCE_COLOR": "0",
     "CLICOLOR": "0",
-    "CLICOLOR_FORCE": "0",
     "PY_COLORS": "0",
 }
+
+#: How long teardown waits for the stderr pump after the child has exited. The
+#: pipe is normally at EOF already and this returns instantly; the bound only
+#: bites when a surviving descendant still holds the write end, and there is
+#: nothing more of the SERVER's own output to wait for in that case. Short
+#: because ``disconnect_all`` tears connections down one at a time, so this is
+#: paid per server on quit.
+STDERR_DRAIN_GRACE_S = 0.25
 
 #: Stderr lines retained per stdio server for the failure report. A Python
 #: traceback plus the banner that preceded it fits inside this; a chatty server
@@ -586,6 +614,20 @@ async def _stdio_transport(
             try:
                 yield read_stream, write_stream
             finally:
+                # Sampled BEFORE `_stop` closes stdin, because closing stdin is
+                # how we ASK the server to leave: an exit status observed after
+                # that is a response to the request, not a fault. Reading it
+                # afterwards manufactured a failure on every clean quit — a
+                # server that treats stdin EOF as an error exits non-zero on
+                # being asked politely, and on Windows `Popen.terminate` is
+                # `TerminateProcess(handle, 1)` so EVERY kill reports status 1
+                # (found in review, reproduced).
+                #
+                # Non-zero rather than positive: a status we did not cause is
+                # worth reporting whichever sign it has. A child SIGKILLed by
+                # the OOM killer arrives as -9 and is exactly the death whose
+                # last stderr lines someone will come looking for.
+                died_unbidden = process.returncode
                 with suppress(Exception):
                     await _stop()
                 # Let the stderr pump finish before the cancel below kills it.
@@ -598,16 +640,16 @@ async def _stdio_transport(
                 # Bounded because EOF is not guaranteed: the write end is held
                 # by every process that inherited it, so a server that spawned
                 # a grandchild (`uvx` doing the real work in a subprocess, for
-                # one) keeps the pipe open past its own death. On the ordinary
-                # path the child is the only holder and this returns at once.
-                with anyio.move_on_after(0.5):
+                # one) keeps the pipe open past its own death, and MEASURED in
+                # review that teardown then runs to the full bound (0.101 s
+                # plain child vs 0.602 s with a surviving grandchild). Kept
+                # short for that reason: by this point the direct child has
+                # exited, so anything still holding the pipe is a descendant
+                # whose output was never the server's own.
+                with anyio.move_on_after(STDERR_DRAIN_GRACE_S):
                     await stderr_drained.wait()
-                # A positive exit status is the child's own doing (a signal we
-                # sent shows up negative), so this is where an unexpected death
-                # gets its tail reported at ERROR rather than only at INFO.
-                returncode = process.returncode
-                if returncode is not None and returncode > 0:
-                    stderr_log.report_failure(f"exited with status {returncode}")
+                if died_unbidden is not None and died_unbidden != 0:
+                    stderr_log.report_failure(f"exited with status {died_unbidden}")
                 tg.cancel_scope.cancel()
     finally:
         _fire_close()

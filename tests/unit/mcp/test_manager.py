@@ -806,6 +806,11 @@ class TestChildOutputContainment:
         The child echoes the variables back on stderr, which is also the only
         proof that the stderr pump is wired: a broken pump means an empty tail
         here rather than a passing assertion on nothing.
+
+        An ABSENCE is delivery too. ``FORCE_COLOR`` and ``CLICOLOR_FORCE`` are
+        sensed by presence, so the only way to hand a child "off" for them is
+        to hand it neither — ``FORCE_COLOR=0`` reads as colour ON. The child
+        echoes them so the dict cannot regrow one without this failing.
         """
         import sys
 
@@ -816,9 +821,11 @@ class TestChildOutputContainment:
             _stdio_transport,
         )
 
+        forcing = ("FORCE_COLOR", "CLICOLOR_FORCE")
+        echoed = (*CHILD_QUIET_ENV, *forcing)
         script = (
             "import os, sys\n"
-            "for key in ('NO_COLOR', 'TERM', 'FORCE_COLOR', 'PY_COLORS'):\n"
+            f"for key in {echoed!r}:\n"
             "    sys.stderr.write(f'{key}={os.environ.get(key, \"<unset>\")}\\n')\n"
             "sys.stderr.flush()\n"
         )
@@ -832,15 +839,59 @@ class TestChildOutputContainment:
         stderr_log = McpServerStderr("echo")
         async with _stdio_transport(cfg, lambda: None, stderr_log):
             for _ in range(100):
-                if "PY_COLORS" in stderr_log.tail_text():
+                if f"{echoed[-1]}=" in stderr_log.tail_text():
                     break
                 await asyncio.sleep(0.05)
 
         lines = stderr_log.tail_text().splitlines()
-        assert f"NO_COLOR={CHILD_QUIET_ENV['NO_COLOR']}" in lines
-        assert f"FORCE_COLOR={CHILD_QUIET_ENV['FORCE_COLOR']}" in lines
-        assert f"PY_COLORS={CHILD_QUIET_ENV['PY_COLORS']}" in lines
+        for key, value in CHILD_QUIET_ENV.items():
+            if key == "TERM":
+                continue  # overridden by the config's own env, asserted next
+            assert f"{key}={value}" in lines
         assert "TERM=xterm-256color" in lines
+        for key in forcing:
+            assert f"{key}=<unset>" in lines
+
+    def test_the_quiet_env_actually_silences_rich(self) -> None:
+        """The dict is judged on output, not on reading like an opt-out.
+
+        ``FORCE_COLOR=0`` sat in ``CHILD_QUIET_ENV`` looking like one and doing
+        the opposite. Rich is the renderer the reported server (``workspace-
+        mcp``) draws its logo with and is a first-party dependency here, so the
+        claim is measured against it rather than argued. The forced case is the
+        control: without it a child that never colours anything would pass the
+        first two assertions just as well.
+        """
+        import subprocess
+        import sys
+
+        from mcp.client.stdio import get_default_environment
+
+        from local_operator.mcp.manager import CHILD_QUIET_ENV
+
+        script = (
+            "import sys\nfrom rich.console import Console\n"
+            "Console(file=sys.stdout).print('[bold red]LOGO[/]')\n"
+        )
+
+        def render(**overrides: str) -> bytes:
+            env = get_default_environment() | CHILD_QUIET_ENV | overrides
+            done = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                env=env,
+                timeout=60,
+                check=False,
+            )
+            assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
+            return done.stdout
+
+        assert render() == b"LOGO\n"
+        # A server whose config restores a real TERM is still not a terminal:
+        # stdout is our pipe, and we have not claimed otherwise.
+        assert render(TERM="xterm-256color") == b"LOGO\n"
+        # And the regression this dict used to carry: presence, any value.
+        assert b"\x1b[" in render(TERM="xterm-256color", FORCE_COLOR="0")
 
     def test_tail_is_bounded_stripped_and_truncated(self) -> None:
         """A chatty or hostile server cannot pin memory or smuggle escapes."""
