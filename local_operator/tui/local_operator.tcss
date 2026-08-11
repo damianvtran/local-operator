@@ -400,6 +400,29 @@ Editor .text-area--suggestion {
     color: $lo-dim;
 }
 
+/* An attachment marker — `[Image #1, 1568x200]` — is an OBJECT the composer
+ * put in the buffer, not text the user typed, and it used to render in the
+ * prose colour on the prose ground with nothing to say so.
+ *
+ * A chip, not coloured text: syntax-highlighting the token would still read as
+ * text, where a ground behind it reads as something embedded. The ink is
+ * `signal`, the ramp's file/reference hue, which is also the one colour the
+ * composer has not already spent — the chevron one column left is accent
+ * green, and `edge` behind selected prose is the warm side.
+ *
+ * Not a focus ring and not a selection: the chip is iso-luminant with `edge`
+ * (1.04:1) so it never outranks a real selection sitting beside it, and the
+ * SELECTED chip is a further 1.61:1 up, so clicking one always brightens. */
+Editor .text-area--image-marker {
+    color: $lo-signal;
+    background: $lo-tint-attach;
+}
+
+Editor .text-area--image-marker-selected {
+    color: $lo-fg;
+    background: $lo-tint-attach-hi;
+}
+
 /* ── startup toast ───────────────────────────────────────────────────────
  *
  * Top-right transient overlay. The host HUGS its card (`width: auto`) and both

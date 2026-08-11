@@ -47,17 +47,23 @@ from __future__ import annotations
 import base64
 import re
 import shlex
+from bisect import bisect_right
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable
 
+from rich.cells import cell_len
+from rich.segment import Segment
+from rich.style import Style as RichStyle
 from textual import events
 from textual.content import Content
+from textual.expand_tabs import expand_tabs_inline
+from textual.geometry import Offset
 from textual.message import Message
 from textual.strip import Strip
 from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
-from textual.widgets.text_area import Edit, EditResult
+from textual.widgets.text_area import Edit, EditResult, Selection
 
 from local_operator.harness.types import ImageContent
 from local_operator.media import sniff_image_file
@@ -91,6 +97,36 @@ _PATH_SEGMENT = re.compile(r"^(?:~|\.{0,2}/|/)")
 #: rather than a bracket, because a half-eaten ``[Image #2, 1568x20`` is neither
 #: text the user meant nor a reference anything can resolve.
 IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n]*)?\]")
+
+
+def _marker_runs(
+    start: int,
+    end: int,
+    selected: tuple[int, int],
+    caret: int | None,
+) -> list[tuple[int, int, bool]]:
+    """``[start, end)`` split into painted runs of one style each.
+
+    Three things want a say over the same cells — the chip, the selection over
+    part of it, and the caret standing in it — and they interleave in any
+    order, so this walks the columns rather than trying to do interval algebra
+    on three overlapping ranges. A marker is at most a few dozen characters and
+    a composer at most eight rows, so the walk costs nothing worth optimising
+    and is checkable by reading it.
+
+    ``caret`` is DROPPED rather than given a style: ``TextArea`` has already
+    painted that one cell inverted, and the chip must not paint over it.
+    """
+    runs: list[tuple[int, int, bool]] = []
+    for column in range(start, end):
+        if column == caret:
+            continue
+        is_selected = selected[0] <= column < selected[1]
+        if runs and runs[-1][1] == column and runs[-1][2] is is_selected:
+            runs[-1] = (runs[-1][0], column + 1, is_selected)
+        else:
+            runs.append((column, column + 1, is_selected))
+    return runs
 
 
 def _pasted_paths(pasted: str) -> list[str]:
@@ -240,6 +276,15 @@ class Editor(TextArea):
     #: rest: see :meth:`_picker_choice_is_unambiguous` and :meth:`_apply_command`.
     DESTRUCTIVE_COMMANDS = ("logout",)
 
+    #: The attachment chip's two grounds, on top of everything ``TextArea``
+    #: already declares. Component classes rather than hexes in Python so the
+    #: colours sit in the stylesheet beside every other composer colour and
+    #: follow the theme's ``$lo-*`` variables through a theme switch.
+    COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
+        "text-area--image-marker",
+        "text-area--image-marker-selected",
+    }
+
     def __init__(
         self,
         placeholder: str = DEFAULT_PLACEHOLDER,
@@ -310,6 +355,12 @@ class Editor(TextArea):
         #: deleted #2 leaves a gap rather than renaming #3 to #2 — the visible
         #: text stays still while the user is editing it.
         self._next_marker = 1
+        #: The marker a mouse press landed inside, as ``(row, start, end)``,
+        #: held until the button comes back up. The press alone cannot decide:
+        #: the same press also arms ``TextArea``'s drag-selection, and a drag
+        #: that begins inside a marker has to stay a drag. See
+        #: :meth:`_on_mouse_up`.
+        self._pressed_marker: tuple[int, int, int] | None = None
         self.set_commands(commands or [])
 
     def render_line(self, y: int) -> Strip:
@@ -330,8 +381,9 @@ class Editor(TextArea):
 
         This mirrors ``TextArea.render_line``'s own placeholder branch — padding
         is the only difference — because that branch runs BEFORE any hook a
-        subclass could reach and owns the wrap. Every other row (a real document
-        line) is the base class's, untouched.
+        subclass could reach and owns the wrap. Every other row is the base
+        class's, then post-processed by :meth:`_paint_markers` so an attachment
+        marker reads as an object rather than as text the user typed.
         """
         if not self.text and self.placeholder:
             theme = self._theme
@@ -350,7 +402,7 @@ class Editor(TextArea):
                     assert cursor_style is not None  # narrowed by `caret`
                     content = content.stylize(ContentStyle.from_rich_style(cursor_style), 0, 1)
                 return Strip(content.render_segments(self.visual_style), content.cell_length)
-        return super().render_line(y)
+        return self._paint_markers(super().render_line(y), y)
 
     # -- public API ---------------------------------------------------------
     @property
@@ -801,6 +853,164 @@ class Editor(TextArea):
         # leaves the same broken fragment backspace used to.
         if not self._delete_marker(before=True):
             super().action_delete_word_left()
+
+    # -- attachment markers as painted objects --------------------------------
+    def _marker_cells(self, y: int) -> list[tuple[int, int, bool]]:
+        """``(x_start, x_end, selected)`` for marker cells drawn on screen row ``y``.
+
+        SCREEN row, not document line. The composer soft-wraps, so one document
+        line is one-or-more rows and a marker can straddle a break — the wrap
+        lands on the space inside ``[Image #1, 1568x200]`` often enough that
+        assuming row == line would leave half a chip unpainted at 60 columns.
+        ``wrapped_document`` is the only thing that knows where a document
+        column ended up once wrapping moved it.
+
+        Cells are reported per SELECTION state rather than per marker, so a
+        drag that covers half a marker paints half of it. That is deliberate:
+        :meth:`_delete_marker` refuses to widen a real selection, so a
+        half-covered marker really does delete by halves, and painting it whole
+        would promise an atomicity the next keystroke does not honour.
+
+        The caret's own cell is left out entirely. The chip is opaque, so the
+        first version swallowed the caret whole: parking it inside
+        ``[Image #1, 1568x200]`` painted all twenty cells one flat navy and the
+        composer stopped saying where the next keystroke would land.
+        """
+        wrapped = self.wrapped_document
+        absolute_y = self.scroll_offset.y + y
+        if absolute_y >= wrapped.height:
+            return []
+        # x=0 resolves to the first document column drawn on this row, which is
+        # also the wrap offset that opened its section.
+        line_index, section_start = wrapped.offset_to_location(Offset(0, absolute_y))
+        line = self.document.get_line(line_index)
+        if "[" not in line:
+            # The hot path — render_line runs on every frame of every keystroke
+            # and most composer lines are prose. A marker always opens with a
+            # bracket, so this rejects without re-deriving the grammar.
+            return []
+        offsets = wrapped.get_offsets(line_index)
+        section_index = bisect_right(offsets, section_start)
+        wraps_on = section_index < len(offsets)
+        section_end = offsets[section_index] if wraps_on else len(line)
+
+        selection_start, selection_end = self._selected_columns(line_index, len(line))
+        theme = self._theme
+        caret_row, caret_column = self.selection.end
+        caret = (
+            caret_column
+            if self._draw_cursor
+            and caret_row == line_index
+            and theme is not None
+            and theme.cursor_style is not None
+            else None
+        )
+        gutter = self.gutter_width
+        cells: list[tuple[int, int, bool]] = []
+        for match in IMAGE_MARKER.finditer(line):
+            start = max(match.start(), section_start)
+            end = min(match.end(), section_end)
+            if start >= end:
+                continue  # this marker lives entirely on another row
+            runs = _marker_runs(start, end, (selection_start, selection_end), caret)
+            for run_start, run_end, selected in runs:
+                x_start = wrapped.location_to_offset((line_index, run_start)).x
+                if wraps_on and run_end >= section_end:
+                    # `run_end` IS the wrap offset, and location_to_offset reads
+                    # that as column 0 of the NEXT row. The chip runs to the end
+                    # of this row's text instead.
+                    x_end = cell_len(
+                        expand_tabs_inline(line[section_start:section_end], self.indent_width)
+                    )
+                else:
+                    x_end = wrapped.location_to_offset((line_index, run_end)).x
+                cells.append((x_start + gutter, x_end + gutter, selected))
+        return cells
+
+    def _selected_columns(self, row: int, line_length: int) -> tuple[int, int]:
+        """The columns of document line ``row`` the selection covers.
+
+        An empty range (``(0, 0)`` when the caret is a point, or when the
+        selection is on other lines entirely) means "nothing on this line".
+        """
+        top, bottom = sorted(self.selection)
+        if top == bottom or not top[0] <= row <= bottom[0]:
+            return 0, 0
+        return (
+            top[1] if row == top[0] else 0,
+            bottom[1] if row == bottom[0] else line_length,
+        )
+
+    def _paint_markers(self, strip: Strip, y: int) -> Strip:
+        """Repaint the marker cells of an already-rendered row.
+
+        Post-processing rather than a hook into ``TextArea._render_line``: that
+        method owns wrapping, tab expansion, the caret and the selection, and
+        the only seam a subclass gets is the finished :class:`Strip`.
+
+        The styles go on as ``post_style``. ``Strip.apply_style`` applies its
+        argument as the BASE, and every segment ``TextArea`` hands back already
+        carries an explicit fg and bg from the theme, so a base style is
+        discarded on arrival and the chip would never appear.
+        """
+        cells = self._marker_cells(y)
+        if not cells:
+            return strip
+        width = strip.cell_length
+        edges = sorted({0, width} | {x for start, end, _ in cells for x in (start, end)})
+        styles = {
+            False: self.get_component_rich_style("text-area--image-marker"),
+            True: self.get_component_rich_style("text-area--image-marker-selected"),
+        }
+        pieces: list[Strip] = []
+        for left, piece in zip(edges, strip.divide(edges[1:])):
+            selected = next((state for start, end, state in cells if start <= left < end), None)
+            if selected is None:
+                pieces.append(piece)
+                continue
+            pieces.append(self._overlay(piece, styles[selected]))
+        return Strip.join(pieces)
+
+    @staticmethod
+    def _overlay(strip: Strip, style: RichStyle) -> Strip:
+        """``strip`` with ``style`` laid ON TOP of each segment's own style."""
+        return Strip(Segment.apply_style(strip, post_style=style), strip.cell_length)
+
+    async def _on_mouse_down(self, event: events.MouseDown) -> None:
+        """Note a press that landed inside a marker; the release decides.
+
+        Neither ``super()`` nor ``prevent_default``: Textual invokes EVERY
+        ``_on_mouse_down`` up the MRO, so ``TextArea``'s still places the caret
+        and arms its drag-selection. This only records.
+        """
+        row, column = self.get_target_document_location(event)
+        # `before=False` reads as "at the start of, or inside", which is exactly
+        # the marker's own cells — clicking the cell one past the closing
+        # bracket is a click on the next character, not on the marker.
+        span = self._marker_span(row, column, before=False)
+        self._pressed_marker = None if span is None else (row, *span)
+
+    async def _on_mouse_up(self, event: events.MouseUp) -> None:
+        """A press and release inside one marker selects the whole marker.
+
+        Selecting it is what makes it removable by the obvious gesture: the
+        selection is a real one, so :meth:`_delete_marker` stands aside and
+        backspace deletes exactly the span — click, backspace, gone.
+
+        Runs BEFORE ``TextArea._on_mouse_up`` (Editor is first on the MRO), so
+        the base class still finalises ``_selecting`` and releases the mouse
+        afterwards; it never touches the selection, so nothing overwrites this.
+        """
+        pressed = self._pressed_marker
+        self._pressed_marker = None
+        if pressed is None:
+            return
+        if self.selection.start != self.selection.end:
+            # The press became a drag — ``_on_mouse_move`` has been extending a
+            # range the whole time, and that range is the user's, not ours.
+            return
+        row, start, end = pressed
+        self.selection = Selection((row, start), (row, end))
 
     # -- paste ----------------------------------------------------------------
     async def _on_paste(self, event: events.Paste) -> None:
