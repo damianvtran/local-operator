@@ -1284,16 +1284,41 @@ now passes a defensively-copied `compaction_settings` from the parent.
 
 ### Subagent task efficiency (live, OpenRouter deepseek-v4-flash)
 
-The multi-round delegated-review test confirms the tokens are spent *passing
-the task*, not re-explaining it, and that a capable cheap model does
-round-trip review work:
+A parent session (`3e32375b1356`) fixed a deliberately broken shipping
+calculator, then launched and awaited two independent review children
+(`b00da8f30f22`, `1168fcc8a788`). Round 1 found one real contract bug
+(non-string destinations raised `AttributeError`, not the specified
+`ValueError`); the parent remediated it; round 2 independently passed all
+checks. The parent made exactly **2 `task` + 2 `wait` calls**. Each child used
+its own eight-turn context rather than receiving the parent's transcript:
 
-| Mechanism | omp-style guarantee | local-operator, verified live |
+- parent: 18 model calls, max context **10,950**, 129,330 prompt tokens of
+  which 110,559 were cache reads (**85.5%**);
+- review 1: 8 calls, max context **7,430**, 48,334 prompt / 43,264 cached
+  (**89.5%**);
+- review 2: 8 calls, max context **9,541**, 56,559 prompt / 47,011 cached
+  (**83.1%**);
+- combined: **234,223** prompt tokens, **200,834** cache reads, only
+  **33,389 fresh tokens** (**85.7% cache hit**). Parent→child task payloads
+  were 2,391 and 2,598 characters; child→parent final handoffs were 1,746
+  and 1,842 characters. Context transfer is therefore explicit and bounded,
+  not a clone of the parent's growing transcript.
+
+`wait` now also sends verbose child reports through the ordinary 8 KiB
+spill path. A 56,320-character synthetic review handoff occupied **8,372
+characters** in parent context (**85.1% reduction**) while the complete report
+remained recoverable through its `spill://` handle. Regression:
+`test_wait_spills_large_subagent_handoff_without_losing_it`.
+
+### Long-context mechanisms: engagement evidence
+
+| Mechanism | omp-style guarantee | local-operator evidence |
 |---|---|---|
-| Compaction + snapcompact | fires before the provider's ceiling | now bounded by `max_threshold_tokens`; engages at `min(0.8w, cap)` |
-| Cache-stable system prefix | stable prefix hits provider cache | stable session + tool-merged prefix; ~99.0% aggregate cache rate on the stuck session |
-| Semantic skill freeze | frozen skill text stays cached | one-shot child clones the parent's context; no per-call skill re-derivation |
-| Token-estimate LRU | bounded tool payloads | range-coverage supersede blanks fully-covered read ranges on load (78,272 tokens reclaimed on the stuck session; 1 prune journaled) |
+| Compaction + snapcompact | fires before the configured ceiling and preserves tool state | Live session `c164d8114ddb` crossed an 8k threshold at **13,623** tokens, journaled one compaction with `preserve_data.snapcompact`, and resumed at **7,854** context tokens. |
+| Cache-stable system prefix | stable prefix reaches provider caching | The delegated-review run measured **85.7%** aggregate provider cache reads; the 173-turn stuck session measured ~**99.0%**. |
+| Semantic skill freeze | no per-turn re-embedding or system-tail churn | `_select_knowledge_block` returns its first frozen block before consulting the index or MCP catalogue again; `test_knowledge_selection_freezes_after_the_first_session_query` proves one selection across two different turn queries. |
+| Token-estimate LRU | process memory cannot grow with lifetime message count | `_ESTIMATE_CACHE` is capped at **4,096** entries and evicts the least-recent entry; `test_estimate_cache_evicts_least_recent_entry_at_its_hard_bound` inserts 4,097 and verifies the bound. |
+| Supersede pruning | fully covered historical reads stop consuming replay context | Range-coverage supersede reclaimed **78,272 tokens** on the stuck session during load (one prune journaled). |
 
 Resume recovery measured live on the real stuck session: reloaded (394
 messages, cap 250k), first turn completed in **5.12s**; supersede pruning

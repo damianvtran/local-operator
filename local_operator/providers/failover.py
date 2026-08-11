@@ -20,6 +20,7 @@ import asyncio
 import dataclasses
 import inspect
 import random
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -248,6 +249,21 @@ async def resolve_next_key(
 # ---------------------------------------------------------------------------
 
 DEFAULT_CHAIN_KEY = "default"
+SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+
+
+@dataclasses.dataclass(frozen=True)
+class FallbackTarget:
+    """One resolved cascade entry.
+
+    ``selector`` keeps routing compatible with the existing
+    ``provider/model`` chain format. ``effort`` is optional because many
+    providers either do not expose reasoning levels or should use their model
+    default.
+    """
+
+    selector: str
+    effort: str | None = None
 
 
 def _chain_specificity(key: str, selector: str) -> int | None:
@@ -261,7 +277,7 @@ def _chain_specificity(key: str, selector: str) -> int | None:
     return None
 
 
-def resolve_chain(selector: str, chains: Mapping[str, Sequence[str]]) -> list[str] | None:
+def resolve_chain(selector: str, chains: Mapping[str, Sequence[Any]]) -> list[Any] | None:
     """Pick the fallback chain for ``selector`` by specificity:
     exact ``provider/model`` → longest matching wildcard prefix → ``default``.
     """
@@ -281,24 +297,55 @@ def resolve_chain(selector: str, chains: Mapping[str, Sequence[str]]) -> list[st
     return list(chains[best_key])
 
 
-def expand_fallback_candidates(selector: str, chain: Sequence[str]) -> list[str]:
-    """Materialize chain entries into concrete selectors.
+def _fallback_target(entry: Any) -> FallbackTarget | None:
+    """Normalize a legacy selector string or a provider/model/effort mapping."""
+    effort: str | None = None
+    if isinstance(entry, str):
+        selector = entry.strip()
+    elif isinstance(entry, Mapping):
+        provider = str(entry.get("provider") or "").strip()
+        model = str(entry.get("model") or entry.get("model_id") or "").strip()
+        selector = str(entry.get("selector") or "").strip()
+        if not selector and provider and model:
+            selector = f"{provider}/{model}"
+        raw_effort = entry.get("effort")
+        if raw_effort is not None:
+            effort = str(raw_effort).strip().lower()
+            if effort not in SUPPORTED_EFFORTS:
+                return None
+    else:
+        return None
+    provider, model_id = parse_selector(selector)
+    if not provider or not model_id:
+        return None
+    return FallbackTarget(selector=selector, effort=effort)
 
-    - Plain entries are kept as-is.
-    - ``provider/*`` keeps the failing model id and swaps the provider.
-    - Id-prefixed wildcards (``openrouter/google/*``) re-prefix the bare id.
-    The current selector is never emitted as its own fallback.
+
+def expand_fallback_targets(selector: str, chain: Sequence[Any]) -> list[FallbackTarget]:
+    """Materialize configured entries into unique provider/model/effort targets.
+
+    ``provider/*`` keeps the failing model id. A mapping may explicitly repeat
+    the current selector with a different effort; that is a real fallback
+    route, while an unchanged legacy string is still suppressed.
     """
     _, _, bare_id = selector.partition("/")
-    candidates: list[str] = []
+    targets: list[FallbackTarget] = []
     for entry in chain:
-        if entry.endswith("/*"):
-            candidate = f"{entry[:-1]}{bare_id}"
-        else:
-            candidate = entry
-        if candidate and candidate != selector and candidate not in candidates:
-            candidates.append(candidate)
-    return candidates
+        target = _fallback_target(entry)
+        if target is None:
+            continue
+        if target.selector.endswith("/*"):
+            target = dataclasses.replace(target, selector=f"{target.selector[:-1]}{bare_id}")
+        if target.selector == selector and target.effort is None:
+            continue
+        if target not in targets:
+            targets.append(target)
+    return targets
+
+
+def expand_fallback_candidates(selector: str, chain: Sequence[Any]) -> list[str]:
+    """Backward-compatible selector-only view of :func:`expand_fallback_targets`."""
+    return [target.selector for target in expand_fallback_targets(selector, chain)]
 
 
 # ---------------------------------------------------------------------------
@@ -339,13 +386,15 @@ def _same_credential_retry_allowed(
 
 @dataclasses.dataclass(frozen=True)
 class RetrySettings:
-    """The ``values.retry.*`` config surface (defaults from the established harness)."""
+    """The ``values.retry.*`` config surface."""
 
     enabled: bool = True
     max_retries: int = 10
     base_delay_ms: int = 500
     model_fallback: bool = True
-    fallback_chains: Mapping[str, Sequence[str]] = dataclasses.field(default_factory=dict)
+    usage_aware_fallback: bool = False
+    usage_reserve_percent: float = 10.0
+    fallback_chains: Mapping[str, Sequence[Any]] = dataclasses.field(default_factory=dict)
 
     @staticmethod
     def from_settings(settings: Mapping[str, Any] | None) -> "RetrySettings":
@@ -355,13 +404,80 @@ class RetrySettings:
         chains = retry.get("fallbackChains", retry.get("fallback_chains", {}))
         if not isinstance(chains, Mapping):
             chains = {}
+        reserve = retry.get("usageReservePercent", retry.get("usage_reserve_percent", 10.0))
+        try:
+            reserve_percent = min(100.0, max(0.0, float(reserve)))
+        except (TypeError, ValueError):
+            reserve_percent = 10.0
         return RetrySettings(
             enabled=bool(retry.get("enabled", True)),
             max_retries=int(retry.get("maxRetries", retry.get("max_retries", 10))),
             base_delay_ms=int(retry.get("baseDelayMs", retry.get("base_delay_ms", 500))),
             model_fallback=bool(retry.get("modelFallback", retry.get("model_fallback", True))),
+            usage_aware_fallback=bool(
+                retry.get("usageAwareFallback", retry.get("usage_aware_fallback", False))
+            ),
+            usage_reserve_percent=reserve_percent,
             fallback_chains=chains,
         )
+
+
+RouteChangeHandler = Callable[[FallbackTarget, str], Awaitable[None] | None]
+
+
+@dataclasses.dataclass
+class FailoverRouteState:
+    """Session-sticky fallback route with a primary-probe cooldown.
+
+    A successful fallback stays active for later model calls in the same user
+    message. At later message boundaries, quota-aware preflight may return to
+    the primary only after ``primary_retry_at_ms``. Without that suppression a
+    healthy quota endpoint would make a transport-broken primary consume the
+    full prompt once per user message before failing over again.
+    """
+
+    active: FallbackTarget | None = None
+    on_change: RouteChangeHandler | None = None
+    primary_retry_at_ms: int = 0
+
+    async def activate(
+        self,
+        target: FallbackTarget,
+        reason: str,
+        *,
+        cooldown_ms: int = 0,
+    ) -> None:
+        if self.active == target:
+            # Already on this route: nothing changed, so nothing is re-armed.
+            # The cooldown MUST NOT be bumped here. `stream_with_failover`
+            # calls `activate` on every request that enters the sticky
+            # fallback route, so bumping before this return turned a fixed
+            # post-failure cooldown into a sliding window: a user sending
+            # messages more often than the cooldown never reached
+            # `primary_retry_due()`, and stayed pinned to the fallback for the
+            # whole session even after the primary recovered. The docstring
+            # above promises a retry "only after primary_retry_at_ms", which
+            # is a deadline set when the route CHANGES, not on every use.
+            return
+        if cooldown_ms > 0:
+            self.primary_retry_at_ms = max(
+                self.primary_retry_at_ms,
+                int(time.time() * 1000) + cooldown_ms,
+            )
+        self.active = target
+        if self.on_change is None:
+            return
+        result = self.on_change(target, reason)
+        if inspect.isawaitable(result):
+            await result
+
+    def primary_retry_due(self, now_ms: int | None = None) -> bool:
+        now = int(time.time() * 1000) if now_ms is None else now_ms
+        return now >= self.primary_retry_at_ms
+
+    def clear(self) -> None:
+        self.active = None
+        self.primary_retry_at_ms = 0
 
 
 def parse_selector(selector: str) -> tuple[str, str]:
@@ -369,10 +485,29 @@ def parse_selector(selector: str) -> tuple[str, str]:
     return provider, model_id
 
 
+def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
+    """Build the fallback model's OWN spec, then carry only sampling choices.
+
+    Cloning the primary spec kept its base URL, context window and capabilities;
+    a cross-provider fallback could therefore send an OpenAI model to the
+    Anthropic endpoint. Model metadata and transport identity belong to the
+    target, while temperature/top-p remain session preferences.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    target_spec = build_model_spec(*parse_selector(target.selector))
+    return target_spec.model_copy(
+        update={
+            "temperature": base.temperature,
+            "top_p": base.top_p,
+            "reasoning_effort": target.effort,
+        }
+    )
+
+
 def spec_for_selector(base: ModelSpec, selector: str) -> ModelSpec:
-    """Clone ``base`` with the provider/model swapped in (knobs carry over)."""
-    provider, model_id = parse_selector(selector)
-    return base.model_copy(update={"provider": provider, "model_id": model_id})
+    """Backward-compatible selector-only wrapper."""
+    return spec_for_target(base, FallbackTarget(selector))
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +588,7 @@ async def stream_with_failover(
     *,
     session_id: str | None = None,
     signal: AbortSignal | None = None,
+    route_state: FailoverRouteState | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """Stream one provider call with tier-1 + tier-2 failover.
 
@@ -473,36 +609,45 @@ async def stream_with_failover(
     """
     retry = RetrySettings.from_settings(settings)
     primary_selector = _selector_for_request(request)
+    primary_target = FallbackTarget(primary_selector, request.model.reasoning_effort)
 
-    selectors = [primary_selector]
+    targets = [primary_target]
     if retry.enabled and retry.model_fallback:
         chain = resolve_chain(primary_selector, retry.fallback_chains)
         if chain:
-            selectors.extend(expand_fallback_candidates(primary_selector, chain))
+            for candidate in expand_fallback_targets(primary_selector, chain):
+                if candidate not in targets:
+                    targets.append(candidate)
+    if route_state is not None and route_state.active in targets:
+        targets = targets[targets.index(route_state.active) :]
 
     last_error: ProviderError | None = None
-    clients: dict[str, "WireClient"] = {}
+    clients: dict[tuple[str, str | None], "WireClient"] = {}
     rng = random.Random()
 
-    for selector in selectors:
+    for target in targets:
+        selector = target.selector
         if signal is not None and signal.aborted:
             raise ProviderError(None, signal.reason or "aborted", retryable=False)
 
         provider, _model_id = parse_selector(selector)
-        spec = (
-            request.model
-            if selector == primary_selector
-            else spec_for_selector(request.model, selector)
-        )
-        client = clients.get(selector)
+        spec = request.model if target == primary_target else spec_for_target(request.model, target)
+        route_key = (selector, target.effort)
+        client = clients.get(route_key)
         if client is None:
             built = client_for(spec)
             client = await built if inspect.isawaitable(built) else built
-            clients[selector] = client
+            clients[route_key] = client
         current_request = (
-            request if selector == primary_selector else request.model_copy(update={"model": spec})
+            request if target == primary_target else request.model_copy(update={"model": spec})
         )
-
+        if route_state is not None and target != primary_target:
+            cooldown_ms = max(60_000, last_error.retry_after_ms or 0) if last_error else 60_000
+            await route_state.activate(
+                target,
+                "provider failure",
+                cooldown_ms=cooldown_ms,
+            )
         state = AuthRetryKeyState()
         error: BaseException | None = None
         access: "OAuthAccess | None" = None  # credential record for this attempt
@@ -537,6 +682,8 @@ async def stream_with_failover(
                 async for event in client.stream(current_request, key, oauth_access=access):
                     forwarded_any = True
                     yield event
+                if route_state is not None and target == primary_target:
+                    route_state.clear()
                 return  # clean completion
             except asyncio.CancelledError:
                 raise

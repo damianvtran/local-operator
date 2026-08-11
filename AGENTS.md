@@ -35,6 +35,34 @@ edits are live. After a pull that changes dependencies:
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
 
+## Releasing the stable `lop` runtime
+
+Development and the global launcher deliberately use different installations:
+
+- `uv run local-operator` and `.venv/bin/local-operator` execute the current
+  checkout. Use them while developing and validating source changes.
+- `lop` executes the non-editable uv tool installation under
+  `~/.local/share/uv/tools/local-operator`. It must remain independent of the
+  checkout so branch switches and uncommitted work cannot break the global TUI.
+
+After a change is tested and committed to `main`, make it live with:
+
+```sh
+lop-update
+```
+
+`lop-update` archives the committed `main` ref, builds and installs that
+snapshot, and records the exact source revision in
+`~/.local/share/uv/tools/local-operator/.lop-source`. It never packages the
+currently checked-out branch or uncommitted files. A specific committed ref can
+be installed deliberately with `lop-update <git-ref>`.
+
+Every agent asked to "update local-operator" or make a change available through
+`lop` must treat runtime publication as a separate final step: merge the tested
+change to `main`, run `lop-update`, verify the `.lop-source` marker, then smoke
+test `lop` from outside the repository. Never repoint `lop` at the editable
+`.venv`; doing so couples the stable command back to in-progress work.
+
 ## Visual validation: how to actually look at a UI change
 
 This is a terminal UI. **A passing test is not evidence that a visual change

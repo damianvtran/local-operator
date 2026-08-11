@@ -493,8 +493,8 @@ def _responses_sse() -> bytes:
     return _sse(events)
 
 
-async def test_openai_oauth_routes_to_responses_with_account_header() -> None:
-    """ChatGPT OAuth: /responses endpoint + chatgpt-account-id header."""
+async def test_openai_oauth_routes_to_codex_responses_with_required_headers() -> None:
+    """ChatGPT OAuth uses the Codex endpoint rather than the public API."""
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -519,10 +519,14 @@ async def test_openai_oauth_routes_to_responses_with_account_header() -> None:
             oauth_access=access,
         )
     )
-    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert captured["url"] == "https://chatgpt.com/backend-api/codex/responses"
     assert captured["headers"]["chatgpt-account-id"] == "acct-42"
     assert captured["headers"]["authorization"] == "Bearer chatgpt-token"
+    assert captured["headers"]["openai-beta"] == "responses=experimental"
+    assert captured["headers"]["originator"] == "local-operator"
+    assert captured["body"]["store"] is False
     assert "input" in captured["body"] and "messages" not in captured["body"]
+    assert "max_output_tokens" not in captured["body"]
     texts = [e.delta for e in events if isinstance(e, StreamTextDelta)]
     assert texts == ["Hello", " ChatGPT"]
     usage = events[-1].usage
@@ -739,6 +743,33 @@ def test_openai_compat_markers_gate_on_cache_support():
         ChatRequest(model=spec_nocache, messages=[Message.user("a"), Message.user("b")])
     )
     assert "cache_control" not in str(plain["messages"])
+
+
+def test_reasoning_effort_reaches_openai_and_anthropic_wires() -> None:
+    openai_spec = ModelSpec(
+        provider="openai",
+        model_id="gpt-5.3-codex",
+        reasoning=True,
+        reasoning_effort="high",
+        supports_sampling_params=False,
+    )
+    request = ChatRequest(model=openai_spec, messages=[Message.user("hi")])
+    openai = OpenAICompatClient("https://api.openai.com/v1")
+    assert openai._build_body(request)["reasoning_effort"] == "high"
+    assert openai._build_responses_body(request)["reasoning"] == {"effort": "high"}
+
+    anthropic_spec = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        reasoning=True,
+        reasoning_effort="max",
+        supports_sampling_params=False,
+    )
+    anthropic = AnthropicClient()
+    body = anthropic._build_body(ChatRequest(model=anthropic_spec, messages=[Message.user("hi")]))
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {"effort": "max"}
+    assert "effort-2025-11-24" in anthropic._headers("key", effort="max")["anthropic-beta"]
 
 
 # ---------------------------------------------------------------------------

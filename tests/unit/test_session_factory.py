@@ -399,6 +399,33 @@ async def test_knowledge_backend_failure_falls_back_to_local_routing(
     assert any("using local routing" in warning for warning in warnings)
 
 
+@pytest.mark.asyncio
+async def test_knowledge_selection_freezes_after_the_first_session_query() -> None:
+    """Later turns must not re-embed skills or churn the cacheable system tail."""
+
+    class CountingIndex:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def select(self, query: str):
+            self.queries.append(query)
+            return []
+
+    index = CountingIndex()
+    catalogue = ["first catalogue"]
+    hooks = session_factory._KnowledgeHooks(
+        index=index,  # type: ignore[arg-type]
+        mcp_catalogue=lambda: catalogue[0],
+    )
+
+    first = await session_factory._select_knowledge_block(hooks, "first task")
+    catalogue[0] = "changed catalogue"
+    second = await session_factory._select_knowledge_block(hooks, "unrelated later task")
+
+    assert first == second == "first catalogue"
+    assert index.queries == ["first task"]
+
+
 # --- MCP merge + dispose folding ------------------------------------------------------
 
 

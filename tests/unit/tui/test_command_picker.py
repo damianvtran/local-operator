@@ -548,7 +548,7 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
     [
         ("u", ["usage"]),
         ("g", ["goal"]),
-        ("s", ["skills"]),
+        ("s", ["search", "skills"]),
         ("c", ["clear", "compact"]),
         ("lo", ["loop", "login", "logout"]),
         ("mo", ["model"]),
