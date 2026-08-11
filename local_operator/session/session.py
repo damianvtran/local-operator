@@ -686,8 +686,12 @@ class Session:
         return self._wake
 
     # -- driving turns --------------------------------------------------------
-    async def prompt(self, text: str) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         """Run one user turn to completion (awaitable) or raise.
+
+        ``images`` are attachments the user pasted into their prompt; they
+        ride the same message as the text so the model sees them as one
+        turn rather than as a separate observation.
 
         Reentrancy: ``_turn_lock`` is consulted FIRST — if a live turn (user
         prompt or wake delivery) holds it, a concurrent ``prompt`` is
@@ -714,7 +718,7 @@ class Session:
             self._abort_requested = False
             if self._is_streaming:
                 raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
-            await self._run_turn_pipeline([Message.user(text)])
+            await self._run_turn_pipeline([Message.user(text, images)])
         finally:
             self._turn_lock.release()
 
@@ -740,10 +744,14 @@ class Session:
             await self._transcript.append_message(message)
             self._context.messages.append(message)
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         """Inject a steering message into the running turn (interrupts tool
-        batches at the next boundary)."""
-        self._steering_queue.put_nowait(Message.user(text))
+        batches at the next boundary).
+
+        Attachments ride along for the same reason they do on ``prompt``:
+        steering mid-turn with a screenshot is the case where the picture
+        IS the correction."""
+        self._steering_queue.put_nowait(Message.user(text, images))
 
     def set_approval_handler(self, handler: "ApprovalGate | None") -> None:
         """Install the host's tool-approval gate (see SessionProtocol).

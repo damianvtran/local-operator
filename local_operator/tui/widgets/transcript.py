@@ -513,10 +513,14 @@ class UserBlock(TranscriptBlock):
     #: is most crowded and the reader needs it most.
     MIN_BODY = 8
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, attachments: int = 0) -> None:
         super().__init__()
         self.add_class("user-block")
         self._text = text
+        #: How many images went WITH this prompt. Counted, not held: the block
+        #: renders a receipt, and keeping the base64 alive per row would hold
+        #: the whole conversation's screenshots in the widget tree.
+        self._attachments = attachments
         self.set_content(self._build())
         self.finalize()
 
@@ -599,6 +603,15 @@ class UserBlock(TranscriptBlock):
             rows.pop(0)
         while len(rows) > 1 and not rows[-1]:
             rows.pop()
+        if self._attachments:
+            # A RECEIPT, not a repeat of the marker. `[Image #1, 1568x200]` is
+            # already in the text above — the user pasted it — but that is just
+            # characters they could equally have typed. This row is the app
+            # saying the bytes were actually attached and sent, which is the one
+            # thing the marker cannot tell them and the whole reason a paste
+            # that silently attached nothing went unnoticed for so long.
+            plural = "s" if self._attachments != 1 else ""
+            rows.append(f"↑ {self._attachments} image{plural} attached")
         return rows
 
     def _build(self) -> RenderableType:

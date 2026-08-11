@@ -53,7 +53,7 @@ from local_operator.harness.intent import (
 # module level, so this adds no work to the boot path the lazy-import
 # discipline protects. The aside builds the request-scoped turns it hands to
 # `complete_aside` out of these two.
-from local_operator.harness.types import AgentMessage, Message
+from local_operator.harness.types import AgentMessage, ImageContent, Message
 from local_operator.logger import current_log_file
 
 # A leaf table (`re` and `dataclasses` only), so importing it here costs the
@@ -652,6 +652,11 @@ class OperatorApp(App[None]):
         self._compaction_owns_working_block: bool = False
         #: A prompt typed DURING a pass, sent when the pass ends.
         self._prompt_held_for_compaction: str = ""
+        #: Its attachments, held in parallel. Separate so the line above keeps
+        #: `""` as its sentinel — that field's emptiness is load-bearing and
+        #: mutation-tested (round 13), and widening it to a tuple would move
+        #: the check every one of those tests makes.
+        self._images_held_for_compaction: list[ImageContent] = []
         #: This session's OWN spend, accumulated per turn. The number the band
         #: shows is this plus every child's — see :meth:`_spend_total`.
         self._total_cost: float = 0.0
@@ -1291,12 +1296,17 @@ class OperatorApp(App[None]):
         # hold took it.
         self._compacting = False
         held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
+        held_images, self._images_held_for_compaction = self._images_held_for_compaction, []
         if held:
             editor = self._editor()
             # Never clobber something typed since: the draft in the box is
             # newer than the prompt we are handing back.
             if not editor.text.strip():
                 editor.load_text(held)
+                # The markers in that text refer to these, so they come back
+                # together or the handed-back prompt cites attachments the
+                # composer no longer holds.
+                editor.adopt_attachments(held_images)
         # Build the replacement BEFORE tearing the ledger down, and paint the
         # substitution in ONE frame. The clear used to happen here, ahead of
         # `await self._boot_session()`, and the factory is the slow half of a
@@ -1975,6 +1985,10 @@ class OperatorApp(App[None]):
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         """Slash commands run synchronously BEFORE any prompt is sent."""
         text = message.text.strip()
+        images = message.images
+        # Only `text` is checked: an attachment cannot exist without its
+        # `[Image #N]` marker standing in the buffer, and a marker is text. A
+        # screenshot pasted with no words still submits, carrying its marker.
         if not text:
             return
         # The aside owns the composer while it is up. EVERYTHING goes to it,
@@ -2002,7 +2016,7 @@ class OperatorApp(App[None]):
             # ``/usage`` panel over a screen with no splash and no ledger.
             self._run_slash_command(text)
             return
-        self._submit_prompt(text)
+        self._submit_prompt(text, images)
 
     def on_editor_quit(self, message: EditorQuit) -> None:
         self.exit()
@@ -2703,8 +2717,9 @@ class OperatorApp(App[None]):
         if self._session is not None:
             await self._session.dispose()
 
-    def _submit_prompt(self, text: str) -> None:
-        self._append_block(UserBlock(text))
+    def _submit_prompt(self, text: str, images: list[ImageContent] | None = None) -> None:
+        images = images or []
+        self._append_block(UserBlock(text, len(images)))
         if self._session is None:
             self._append_block(NoticeBlock("session is still starting…", "warning"))
             return
@@ -2717,7 +2732,7 @@ class OperatorApp(App[None]):
         # mid-turn channel — the engine drains the queue at its next tool/message
         # boundary, which is exactly "send it after the current step finishes".
         if session.is_streaming:
-            session.steer(text)
+            session.steer(text, images)
             # "boundary" is engine vocabulary the UI never defines, and this is
             # the line answering "did my text just get thrown away?" — so it says
             # when it will be sent, in the tense it will be sent in, at the
@@ -2739,17 +2754,25 @@ class OperatorApp(App[None]):
         # and sent by `on_compaction_ended`, in the same "it will be sent"
         # language, because a pass is minutes on a long conversation.
         if self._compacting:
+            # Held ALONGSIDE the text rather than folded into it, so
+            # `_prompt_held_for_compaction` stays a plain `str` with `""` as its
+            # "nothing held" sentinel — review round 12 found a stuck hold here
+            # and round 13 pinned that sentinel with mutation-verified tests.
+            # The attachments are part of the same prompt: a pass that ran for
+            # minutes and then sent the words without the screenshot would be
+            # worse than not queueing at all.
             self._prompt_held_for_compaction = text
+            self._images_held_for_compaction = images
             self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
             self._maybe_name_conversation(text)
             return
-        self._start_turn(text)
+        self._start_turn(text, images)
         # Detached, and deliberately AFTER the turn is dispatched: the title
         # is decoration, and decoration must never sit in front of the user's
         # first reply.
         self._maybe_name_conversation(text)
 
-    def _start_turn(self, text: str) -> None:
+    def _start_turn(self, text: str, images: list[ImageContent] | None = None) -> None:
         """Run one user prompt as a turn, reporting a failure as a notice.
 
         Extracted from :meth:`_submit_prompt` so a prompt HELD through a
@@ -2764,7 +2787,7 @@ class OperatorApp(App[None]):
 
         async def run_prompt() -> None:
             try:
-                await session.prompt(text)
+                await session.prompt(text, images)
             except Exception as error:  # surface, never crash the app
                 self._append_block(NoticeBlock(str(error), "error"))
             finally:
@@ -5752,8 +5775,9 @@ class OperatorApp(App[None]):
         # A prompt typed DURING the pass was held rather than sent into a
         # history being rewritten; now the history is settled, it goes.
         held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
-        if held:
-            self._start_turn(held)
+        held_images, self._images_held_for_compaction = self._images_held_for_compaction, []
+        if held or held_images:
+            self._start_turn(held, held_images)
 
     def on_retry_started(self, message: RetryStarted) -> None:
         body = f"retry {message.attempt}: {message.error}"

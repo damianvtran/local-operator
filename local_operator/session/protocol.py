@@ -14,6 +14,7 @@ superseded — UIs must handle that (see docs/REWRITE.md, stream D).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Callable, Protocol, runtime_checkable
 
@@ -21,6 +22,7 @@ from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.types import (
     AgentMessage,
     EventHandler,
+    ImageContent,
     Message,
     ModelSpec,
     Usage,
@@ -196,8 +198,12 @@ class SessionProtocol(Protocol):
         ...
 
     # --- driving turns ----------------------------------------------------
-    async def prompt(self, text: str) -> None:
-        """Run one user turn to completion (awaitable) or raise."""
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
+        """Run one user turn to completion (awaitable) or raise.
+
+        ``images`` are attachments pasted into the prompt; they ride the same
+        message as the text so the model reads them as one turn.
+        """
         ...
 
     async def seed_history(self, messages: list[Message]) -> None:
@@ -211,7 +217,7 @@ class SessionProtocol(Protocol):
         """
         ...
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         """Inject a steering message into the running turn (interrupts tool
         batches at the next boundary)."""
         ...

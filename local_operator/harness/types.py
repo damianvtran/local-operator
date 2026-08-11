@@ -186,8 +186,18 @@ class Message(BaseModel):
         return "".join(block.text for block in self.content if isinstance(block, TextContent))
 
     @staticmethod
-    def user(text: str, **extra: Any) -> "Message":
-        return Message(role="user", content=[TextContent(text=text)], **extra)
+    def user(text: str, images: "Sequence[ImageContent] | None" = None, **extra: Any) -> "Message":
+        """A user turn, optionally carrying attachments.
+
+        Images follow the text rather than leading it: the prompt says what to
+        do with them, and a model reading the instruction first knows what it
+        is looking for. Empty text still yields a text block, so a message that
+        is nothing but a pasted screenshot keeps the shape every provider
+        serializer expects.
+        """
+        content: list[Content] = [TextContent(text=text)]
+        content.extend(images or ())
+        return Message(role="user", content=content, **extra)
 
     @staticmethod
     def assistant(text: str = "", **extra: Any) -> "Message":

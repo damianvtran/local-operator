@@ -44,6 +44,11 @@ never sees the difference.
 
 from __future__ import annotations
 
+import base64
+import re
+import shlex
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Callable
 
 from textual import events
@@ -54,6 +59,8 @@ from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult
 
+from local_operator.harness.types import ImageContent
+from local_operator.media import sniff_image_file
 from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 from local_operator.tui.widgets.command_picker import (
     CommandPicker,
@@ -63,13 +70,76 @@ from local_operator.tui.widgets.command_picker import (
 )
 from local_operator.tui.widgets.model_picker import ModelPicker, ModelRow
 
+#: Refused above this, as a plain text paste. Providers cap an image at 5 MB of
+#: base64, which is 3.75 MB of bytes; 4 MB of source is comfortably inside that
+#: after the 4/3 inflation and still holds any screenshot. The point is that
+#: the refusal happens HERE, where it is one visible path in the composer the
+#: user can act on, rather than as a provider 400 mid-turn.
+MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
+
+#: A paste is treated as paths only if EVERY segment looks like one. Requiring
+#: a separator is what keeps prose out: "see screenshot.png" splits into two
+#: segments, one of which has no `/`, so the whole paste stays text.
+_PATH_SEGMENT = re.compile(r"^(?:~|\.{0,2}/|/)")
+
+
+#: One attachment marker. The number is the key into ``Editor._attachments``;
+#: the tail (``, 1568x200``) is a label for the user and is matched loosely so
+#: changing it later cannot orphan every marker already in a draft.
+#:
+#: Also the ATOMIC unit for editing: backspace and delete take the whole marker
+#: rather than a bracket, because a half-eaten ``[Image #2, 1568x20`` is neither
+#: text the user meant nor a reference anything can resolve.
+IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n]*)?\]")
+
+
+def _pasted_paths(pasted: str) -> list[str]:
+    """The paste read as a list of filesystem paths, or ``[]``.
+
+    Terminals deliver a dropped or copied file as its path, shell-quoted:
+    Ghostty writes a clipboard image to a temp file and pastes that name, and a
+    Finder drag arrives with spaces backslash-escaped. ``shlex`` is exactly the
+    grammar they are quoting for, so it is what unpicks it — hand-rolled
+    unescaping is how a path with a space becomes two paths that do not exist.
+
+    Newlines separate multi-file drops on some terminals and are inside a
+    filename on none of them, so they split first.
+    """
+    text = pasted.strip()
+    if not text or len(text) > 4096:
+        # A real path list is short. This bound is what stops a pasted essay
+        # being shlex-parsed on the keystroke that pasted it.
+        return []
+    segments: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = shlex.split(line)
+        except ValueError:
+            # Unbalanced quotes: prose, not a path list.
+            return []
+        if not parsed:
+            return []
+        segments.extend(parsed)
+    if not segments:
+        return []
+    if not all(_PATH_SEGMENT.match(segment) for segment in segments):
+        return []
+    return [str(Path(segment).expanduser()) for segment in segments]
+
 
 class EditorSubmitted(Message):
     """Posted when the user submits the editor (Enter without Shift)."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, images: list[ImageContent] | None = None) -> None:
         super().__init__()
         self.text = text
+        #: Attachments pasted into this prompt, in marker order. Defaulted so
+        #: every existing construction site (and every test) keeps working
+        #: unchanged — a submit with nothing attached is still the common case.
+        self.images = images or []
 
 
 class InterruptRequested(Message):
@@ -229,6 +299,17 @@ class Editor(TextArea):
         self._records_history = True
         self._draft: str = ""  # buffer text saved when history nav starts
         self._on_model_chosen: Callable[[ModelRow], None] | None = None
+        #: Attachments pasted into the current draft, keyed by the number in
+        #: their ``[Image #N, WxH]`` marker. A DICT rather than a list because
+        #: the marker in the text is the authority on what gets sent: deleting
+        #: it deletes the attachment, so the two cannot be kept in step by
+        #: position. Keys are never reused within a draft, so a marker that
+        #: survives keeps its number and nothing renumbers under the cursor.
+        self._attachments: dict[int, ImageContent] = {}
+        #: Next marker number to hand out. Monotonic within a draft, so a
+        #: deleted #2 leaves a gap rather than renaming #3 to #2 — the visible
+        #: text stays still while the user is editing it.
+        self._next_marker = 1
         self.set_commands(commands or [])
 
     def render_line(self, y: int) -> Strip:
@@ -395,6 +476,13 @@ class Editor(TextArea):
         """Empty the buffer and leave history navigation."""
         self.text = ""
         self._history_index = None
+        # Attachments belong to the text that referenced them. A draft cleared
+        # without dropping them would send the previous prompt's screenshots
+        # along with the next unrelated question. The counter resets too, so
+        # each prompt numbers from #1 rather than carrying a running total the
+        # user never sees the start of.
+        self._attachments.clear()
+        self._next_marker = 1
 
     def begin_model_query(self) -> None:
         """Put the buffer into the state that shows the model list.
@@ -603,8 +691,199 @@ class Editor(TextArea):
         if text.strip() and self._records_history:
             self._record_history(text)
         self._picker.close()
-        self.post_message(EditorSubmitted(text))
+        # Only the attachments the text STILL REFERS TO. The marker is the
+        # authority: pasting three screenshots and deleting two must send one,
+        # because the deleted markers are the user saying they changed their
+        # mind, and silently sending all three is both surprising and expensive.
+        self.post_message(EditorSubmitted(text, self.referenced_images()))
         self.clear_content()
+
+    def referenced_images(self) -> list[ImageContent]:
+        """The attachments the buffer still cites, in the order it cites them.
+
+        Reading the TEXT rather than a parallel list is what makes deleting a
+        marker delete the attachment, with no bookkeeping on every keystroke to
+        keep the two in step. Order comes from the text too, so moving a marker
+        moves its image with it.
+
+        A marker the user retyped or duplicated by hand resolves to the same
+        image; one whose number was never issued resolves to nothing. Both are
+        the same rule — the number names an attachment, and text that names
+        nothing sends nothing.
+        """
+        seen: set[int] = set()
+        images: list[ImageContent] = []
+        for match in IMAGE_MARKER.finditer(self.text):
+            index = int(match.group(1))
+            image = self._attachments.get(index)
+            if image is None or index in seen:
+                continue
+            seen.add(index)
+            images.append(image)
+        return images
+
+    def adopt_attachments(self, images: Sequence[ImageContent]) -> None:
+        """Re-key ``images`` onto the markers already in the buffer.
+
+        For handing a prompt BACK — a draft held through a compaction, or one
+        restored after a reload. The text arrives with its markers intact and
+        the images arrive in the order the text cited them, so walking the
+        markers in order re-establishes exactly the mapping that produced them.
+        Without this the restored text would cite attachments the composer no
+        longer holds, and pressing Enter would send the words alone.
+        """
+        self._attachments.clear()
+        indices: list[int] = []
+        for match in IMAGE_MARKER.finditer(self.text):
+            index = int(match.group(1))
+            if index not in indices:
+                indices.append(index)
+        for index, image in zip(indices, images):
+            self._attachments[index] = image
+        # Never hand out a number already standing in the text.
+        self._next_marker = max(indices, default=0) + 1
+
+    # -- attachment markers as atomic tokens ----------------------------------
+    def _marker_span(self, row: int, column: int, *, before: bool) -> tuple[int, int] | None:
+        """The marker the caret is about to eat, as ``(start, end)`` columns.
+
+        ``before`` asks about backspace (the marker ending at the caret, or the
+        one the caret is standing inside); otherwise about delete (the marker
+        starting at the caret, or the one it is inside).
+
+        Standing INSIDE counts for both. A caret in the middle of
+        ``[Image #2, 15|68x200]`` is not editing text the user typed — there is
+        nothing meaningful to change one character of — so either key takes the
+        whole token. That is the reported bug: backspace there removed the
+        closing bracket and left ``[Image #2, 1568x20`` hanging, which is
+        neither prose nor a resolvable reference.
+        """
+        line = self.document.get_line(row)
+        for match in IMAGE_MARKER.finditer(line):
+            start, end = match.span()
+            if start < column < end:
+                return start, end
+            if before and column == end:
+                return start, end
+            if not before and column == start:
+                return start, end
+        return None
+
+    def _delete_marker(self, *, before: bool) -> bool:
+        """Delete the marker at the caret, if there is one. Reports whether."""
+        if self.selection.start != self.selection.end:
+            # A real selection is the user's own range; never widen it.
+            return False
+        row, column = self.selection.end
+        span = self._marker_span(row, column, before=before)
+        if span is None:
+            return False
+        start, end = span
+        # The attachment goes with its marker. This is the whole contract:
+        # what the text no longer cites is no longer sent, so removing the
+        # reference has to remove the payload rather than orphan it.
+        match = IMAGE_MARKER.match(self.document.get_line(row)[start:end])
+        if match is not None:
+            self._attachments.pop(int(match.group(1)), None)
+        self.delete((row, start), (row, end), maintain_selection_offset=False)
+        return True
+
+    def action_delete_left(self) -> None:
+        if not self._delete_marker(before=True):
+            super().action_delete_left()
+
+    def action_delete_right(self) -> None:
+        if not self._delete_marker(before=False):
+            super().action_delete_right()
+
+    def action_delete_word_left(self) -> None:
+        # A marker is ONE word for this purpose too: ctrl+w stopping inside it
+        # leaves the same broken fragment backspace used to.
+        if not self._delete_marker(before=True):
+            super().action_delete_word_left()
+
+    # -- paste ----------------------------------------------------------------
+    async def _on_paste(self, event: events.Paste) -> None:
+        """Attach pasted images instead of pasting the path to them.
+
+        Textual's ``Paste`` carries TEXT only — there is no binary channel at
+        the terminal, so an image never arrives as bytes here. What arrives on
+        the owner's setup is a PATH: Ghostty writes a clipboard image to
+        ``$TMPDIR/clipboard-<stamp>-<hash>.png`` and bracketed-pastes the
+        filename. Finder's Cmd+C and a drag-and-drop both land the same way.
+        That is the hot path, and it is why this hooks paste rather than
+        binding a key to read the system clipboard.
+
+        Anything that is not a readable image path is left alone: this returns
+        without touching the event, and ``TextArea._on_paste`` inserts it as
+        usual.
+
+        NOTE the dispatch rule, which is not obvious and cost a real bug here.
+        Textual calls EVERY ``_on_paste`` up the MRO, so the base handler runs
+        on its own — ``await super()._on_paste(event)`` does not delegate to
+        it, it runs it a second time, and an ordinary text paste came out
+        duplicated. Suppressing the base is ``prevent_default``; letting it run
+        is doing nothing.
+        """
+        attached = self._attach_pasted_images(event.text)
+        if attached is None:
+            return
+        event.prevent_default()
+        event.stop()
+        self.insert(attached)
+
+    def _attach_pasted_images(self, pasted: str) -> str | None:
+        """Load every path in ``pasted`` as an attachment; return the markers.
+
+        ``None`` means "this was not an image paste" — the caller then lets
+        Textual insert the text verbatim. That is the common case and it must
+        stay cheap and lossless.
+
+        ALL-or-nothing across the paste. A multi-file drag where one file is a
+        PDF becomes a plain text paste of every path, rather than silently
+        attaching two of three and leaving the user to notice which. Mixed
+        results are the shape a user cannot see and cannot correct.
+        """
+        candidates = _pasted_paths(pasted)
+        if not candidates:
+            return None
+
+        loaded: list[tuple[ImageContent, str]] = []
+        for path in candidates:
+            info = sniff_image_file(path)
+            # `sendable` and not merely "recognised": HEIC sniffs fine and no
+            # provider will take it, so attaching it would trade a readable
+            # path in the prompt for a 400 later in the turn.
+            if info is None or not info.sendable:
+                return None
+            try:
+                data = Path(path).read_bytes()
+            except OSError:
+                return None
+            if len(data) > MAX_ATTACHMENT_BYTES:
+                return None
+            loaded.append(
+                (
+                    ImageContent(
+                        data=base64.b64encode(data).decode("ascii"),
+                        mime_type=info.mime_type,
+                    ),
+                    info.dimensions,
+                )
+            )
+
+        markers = []
+        for image, dimensions in loaded:
+            index = self._next_marker
+            self._next_marker += 1
+            self._attachments[index] = image
+            # The dimensions are for the USER, not the model — the model gets
+            # the pixels. They are what makes the marker checkable at a glance:
+            # "1568x200" is recognisably the screenshot just taken, where a
+            # bare "[Image #3]" could be anything. Omitted rather than faked
+            # when the header did not carry them.
+            markers.append(f"[Image #{index}, {dimensions}]" if dimensions else f"[Image #{index}]")
+        return " ".join(markers) + " "
 
     # -- command completion -------------------------------------------------
     def edit(self, edit: Edit) -> EditResult:
