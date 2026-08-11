@@ -170,26 +170,47 @@ _DROP_LADDER: tuple[str, ...] = (
 )
 
 
+#: Rungs whose painted width is not knowable from the ladder. ``cwd`` is as wide
+#: as the user's path — a basename alone runs from 3 cells to 30 — so it can
+#: never be relied on as the thing that still fits at the narrowest width.
+_UNBOUNDED_RUNGS = frozenset({"cwd"})
+
+
 def _narrowest_survivor_last(rungs: list[str]) -> list[str]:
-    """Re-seat ``approvals`` so it is never the last rung standing.
+    """Re-seat ``approvals`` so it is not the last rung standing — usually.
 
     Every ``_x_before_cwd`` helper below promotes one rung, and promoting a rung
     leaves whatever FOLLOWED it at the end of the ladder. In this ladder that is
     reliably ``approvals`` — the 14-cell segment the authored order sheds FIRST,
     precisely because dropping it buys the most width. Left last it outlives the
-    narrow segments it was supposed to make room for, inverting the ladder's
-    whole argument.
+    narrow segments it was supposed to make room for, inverting the argument.
 
     Factored out rather than repeated: it was written inline for the mcp move,
-    and the next promotion (context) silently did not re-apply it and shipped
-    a ladder ending ``… → cwd → approvals``. One rule, applied by construction,
-    is what stops the third promotion doing it again.
+    and the next promotion (context) silently did not re-apply it.
+
+    **The exception is load-bearing, not a let-out.** The repair is refused when
+    it would strand an UNBOUNDED rung last, because the render walk is monotone:
+    it sheds down the ladder until the row fits and can never add a segment
+    back. Ending on ``cwd`` therefore means the band sheds the armed
+    ``! auto-approve`` alarm to make room for a path that then does not fit
+    either, and paints neither. Measured on the quiet estimate ladder with a
+    24-character basename, at 34-46 cells: ``◆ kimi-k2-thinking`` and up to 29
+    blank cells, where keeping the alarm last paints
+    ``◆ kimi-k2-thinking      ! auto-approve``. A 14-cell alarm that always
+    fits beats an unbounded path that may not, and the alarm is the only place
+    the band admits the approval gate is disarmed.
+
+    So the rule is really "the last survivor must be BOUNDED, and should be the
+    narrowest such rung". Those agree everywhere except the quiet estimate
+    ladder, where the only other candidate is the path.
     """
     if rungs[-1] != "approvals":
         return rungs
-    rungs = [step for step in rungs if step != "approvals"]
-    rungs.insert(len(rungs) - 1, "approvals")
-    return rungs
+    repaired = [step for step in rungs if step != "approvals"]
+    repaired.insert(len(repaired) - 1, "approvals")
+    if repaired[-1] in _UNBOUNDED_RUNGS:
+        return rungs
+    return repaired
 
 
 def _mcp_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:

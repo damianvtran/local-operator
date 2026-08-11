@@ -28,6 +28,7 @@ from local_operator.tui.widgets.status_line import (
     _DROP_LADDER_QUIET_ESTIMATE,
     _MIN_GROUP_GAP,
     _SPINNER_FRAMES,
+    _UNBOUNDED_RUNGS,
     ICON_CWD,
     ICON_MCP,
     ICON_MODEL,
@@ -781,20 +782,25 @@ def test_a_narrow_band_keeps_the_cwd_over_a_pre_turn_estimate(monkeypatch) -> No
         assert "49.6%" not in rendered, f"width {width} kept the estimate over the cwd"
 
 
-def test_no_ladder_variant_strands_the_widest_alarm_last() -> None:
-    """The invariant every rung promotion has to preserve, checked on all four.
+def test_the_last_surviving_rung_is_always_bounded() -> None:
+    """What the tail rule actually protects, checked on all four variants.
 
-    ``approvals`` is the widest segment in the band (14 cells against the
-    context number's ~9 and a basename's ~7), which is exactly why the authored
-    order sheds it FIRST. Promoting any rung out of last place leaves whatever
-    followed it at the end, and in this ladder that is reliably ``approvals`` —
-    stranded there it outlives the narrow segments the promotion was meant to
-    protect, inverting the ladder's whole argument.
+    The render walk is monotone: it sheds down the ladder until the row fits
+    and can never put a segment back. So whatever sits last has to be something
+    that RELIABLY fits — and ``cwd`` does not, because it is as wide as the
+    user's path.
 
-    It was written inline for the mcp promotion and then silently not
-    re-applied when the context promotion was added, which shipped a quiet
-    estimate ladder ending ``… -> cwd -> approvals``. Asserted across every
-    variant so the next promotion cannot reintroduce it either.
+    Ending on ``cwd`` is not merely suboptimal, it is self-defeating: the band
+    sheds the armed ``! auto-approve`` alarm to make room for a path that then
+    does not fit either, and paints neither. Measured on the quiet estimate
+    ladder with a 24-character basename, that cost the alarm across 34-46 cells
+    and paid for it with up to 29 blank ones.
+
+    ``approvals`` is normally kept off the end for the opposite reason — at 14
+    cells it is the widest rung, which is why the authored order sheds it first
+    — but "widest" only outranks "reliably fits" while a bounded alternative
+    exists. On the quiet estimate ladder it does not, so the alarm goes last
+    there and nowhere else.
     """
     variants = {
         "full": _DROP_LADDER,
@@ -803,15 +809,42 @@ def test_no_ladder_variant_strands_the_widest_alarm_last() -> None:
         "quiet+estimate": _DROP_LADDER_QUIET_ESTIMATE,
     }
     for name, ladder in variants.items():
-        assert ladder[-1] != "approvals", f"{name} strands the widest alarm last"
+        assert ladder[-1] not in _UNBOUNDED_RUNGS, f"{name} ends on an unbounded rung"
         # A promotion reorders; it never adds or loses a rung.
         assert sorted(ladder) == sorted(_DROP_LADDER), f"{name} changed the rung set"
 
-    # And the specific tails, so a reorder that happens to dodge the assertion
-    # above still has to be argued for.
+    # The widest alarm is kept off the end wherever a bounded rung can take it.
     assert _DROP_LADDER[-1] == "mcp"
     assert _DROP_LADDER_QUIET[-1] == "context"
     assert _DROP_LADDER_ESTIMATE[-1] == "mcp"
-    # The quiet band with a pre-turn estimate: the working directory is the last
-    # thing standing, which is D21's argument carried to its conclusion.
-    assert _DROP_LADDER_QUIET_ESTIMATE[-1] == "cwd"
+    # The one exception, and the only ladder where the alternative is the path.
+    assert _DROP_LADDER_QUIET_ESTIMATE[-1] == "approvals"
+    assert _DROP_LADDER_QUIET_ESTIMATE.index("context") < _DROP_LADDER_QUIET_ESTIMATE.index(
+        "cwd"
+    ), "D21: a pre-turn estimate still sheds before the working directory"
+
+
+def test_an_armed_alarm_outlives_a_path_that_would_not_have_fitted() -> None:
+    """The rendered consequence of the rule above, at the widths it cost.
+
+    Before: the walk shed ``approvals`` to keep an unbounded ``cwd`` that then
+    failed to fit, so a session with the approval gate DISARMED painted no
+    indication of it — a regression against main, where the same terminal keeps
+    the alarm because a band with no estimate uses the quiet ladder.
+    """
+    status, _clock = _full_band()
+    status.update(
+        cwd="/Users/tester/work/customer-identity-service",
+        context_is_estimate=True,
+        approvals_auto=True,
+        mcp=McpStatus(configured=2, connected=2),
+    )
+    armed = [w for w in range(36, 52) if "auto-approve" in status.render_text(w).plain]
+    assert armed, "the disarmed-gate alarm vanished at every narrow width"
+    for width in armed:
+        assert ICON_CWD not in status.render_text(width).plain
+
+    # And it costs nothing in the common case: with the gate armed the rung
+    # paints nothing, so the path still gets the width.
+    status.update(approvals_auto=False)
+    assert ICON_CWD in status.render_text(50).plain

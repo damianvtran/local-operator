@@ -282,6 +282,12 @@ class TestApproxTextTokens:
     def test_it_tracks_the_exact_count_closely_enough_for_a_percentage(self) -> None:
         """The claim is narrow on purpose: this payload, this direction.
 
+        Skipped without the ``tokenizer`` extra, which is NOT paranoia: with
+        tiktoken absent, ``count_text_tokens`` degrades to the identical
+        ``len(text) // 4`` expression, so both assertions below would hold by
+        identity and this test would measure nothing at all while looking
+        green. CI installs the extra, so the calibration is real there.
+
         The bound is 20% because the payload below measures +17.3% — not
         because 20% is a general property of ``chars // 4``. On other content
         the same function is off by -66% (CJK) to +40% (English prose), which
@@ -293,6 +299,7 @@ class TestApproxTextTokens:
         is, so the failure mode is compacting slightly early rather than
         promising room that does not exist.
         """
+        pytest.importorskip("tiktoken")
         text = (
             "You are a careful assistant. Read the repository before editing. "
             '{"type":"object","properties":{"path":{"type":"string"}}}'
