@@ -103,9 +103,7 @@ NOISY_SERVER = (
 #: A stdio MCP server that fails the way a misconfigured one really does: one
 #: line saying what is missing, then a non-zero exit before the handshake.
 FAILING_SERVER = (
-    "import sys\n"
-    "sys.stderr.write('fatal: USER_GOOGLE_EMAIL is not set\\n')\n"
-    "sys.exit(3)\n"
+    "import sys\n" "sys.stderr.write('fatal: USER_GOOGLE_EMAIL is not set\\n')\n" "sys.exit(3)\n"
 )
 
 

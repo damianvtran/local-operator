@@ -589,13 +589,17 @@ async def _stdio_transport(
                 with suppress(Exception):
                     await _stop()
                 # Let the stderr pump finish before the cancel below kills it.
-                # The child has exited by now, so its pipe is at EOF and this
-                # returns at once; the bound is only there so a kill that did
-                # not take cannot park teardown forever. Without the wait a
-                # server that died DURING the handshake loses the last lines of
-                # its own stderr — exactly the ones saying why — because
-                # `_stop` returns up to one poll interval before the pump has
-                # drained them.
+                # Without this wait a server that died DURING the handshake
+                # loses the last lines of its own stderr — exactly the ones
+                # saying why — because `_stop` returns up to one 0.1 s poll
+                # before the pump has drained them, and `_connect_server`
+                # quotes that tail into the error the user is shown.
+                #
+                # Bounded because EOF is not guaranteed: the write end is held
+                # by every process that inherited it, so a server that spawned
+                # a grandchild (`uvx` doing the real work in a subprocess, for
+                # one) keeps the pipe open past its own death. On the ordinary
+                # path the child is the only holder and this returns at once.
                 with anyio.move_on_after(0.5):
                     await stderr_drained.wait()
                 # A positive exit status is the child's own doing (a signal we

@@ -872,9 +872,7 @@ class TestBrowserLaunchContainment:
     def _noisy_browser(tmp_path: Path) -> Path:
         script = tmp_path / "browser.sh"
         script.write_text(
-            "#!/bin/sh\n"
-            'echo "Gtk-Message: Failed to load module for $1" >&2\n'
-            "exit 0\n",
+            "#!/bin/sh\n" 'echo "Gtk-Message: Failed to load module for $1" >&2\n' "exit 0\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
@@ -882,7 +880,7 @@ class TestBrowserLaunchContainment:
 
     @pytest.mark.asyncio
     async def test_silenced_console_keeps_the_browser_off_the_terminal(
-        self, monkeypatch, tmp_path: Path, terminal_output: Path
+        self, monkeypatch, tmp_path: Path, terminal_output: Path, caplog
     ) -> None:
         """With the TUI on screen the browser's chatter goes to the log."""
         import logging
@@ -892,22 +890,14 @@ class TestBrowserLaunchContainment:
         monkeypatch.setenv("BROWSER", f"{self._noisy_browser(tmp_path)} %s")
         monkeypatch.setattr("local_operator.logger.console_is_silenced", lambda: True)
 
-        records: list[str] = []
-        handler = logging.Handler()
-        handler.emit = lambda record: records.append(record.getMessage())  # type: ignore[method-assign]
-        launcher = logging.getLogger("local_operator.mcp.auth")
-        launcher.addHandler(handler)
-        launcher.setLevel(logging.INFO)
-        try:
+        with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
             opened = await open_browser_quietly("https://provider.test/authorize")
-        finally:
-            launcher.removeHandler(handler)
 
         assert opened is True
         assert terminal_output.read_bytes() == b""
         # Not discarded: a browser that could not start is a real login failure,
         # and this line is the only place the reason survives.
-        assert any("Gtk-Message: Failed to load module" in message for message in records)
+        assert "Gtk-Message: Failed to load module" in caplog.text
 
     @pytest.mark.asyncio
     async def test_owning_the_terminal_keeps_the_in_process_call(
