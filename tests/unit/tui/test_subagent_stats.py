@@ -494,7 +494,17 @@ async def test_opening_and_leaving_a_page_repoints_and_restores_the_live_band() 
         assert "test/model" in before
 
         app._open_subagent_view(job.id)
-        await pilot.pause()
+        # The band reads the panel's reading rather than deriving one, and that
+        # reading is taken off-thread — a repaint may not price a child. Pump
+        # until it lands, which is what a user experiences as the numbers
+        # appearing a frame or two after the page does.
+        panel = app.query_one(SubagentPanel)
+        panel.sync(session)
+        for _ in range(60):
+            await pilot.pause()
+            if panel.stats_for(job.id).cost is not None:
+                break
+        app._refresh_subagent_view()
         child = app._status.render_text(120).plain
         assert _model_shown(CHILD_MODEL) in child, child
         assert "test/model" not in child, child

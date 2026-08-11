@@ -182,8 +182,12 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
     the job, so falling back to it is the NORMAL path and not a guess — the
     engine writes ``AsyncJob.model_label`` only when it knows the child's own.
 
-    Context is the child's last point-in-time reading, falling back to the
-    prompt size of its last call: the same precedence the parent's band uses
+    Context is the child's last point-in-time reading (``Usage.context_tokens``
+    is REPLACED per turn by the engine, never summed, because window occupancy
+    is a level and not a total), falling back to ``input_tokens`` — which IS a
+    running sum across the child's turns and therefore only an approximation
+    of occupancy, used because a provider that reports no context size still
+    reports what it was billed for. Same precedence the parent's band uses
     (``tui/events.py``), so one number cannot mean two things four rows apart.
 
     Never raises, and the money is never computed here: :func:`costs.job_cost`
@@ -881,6 +885,20 @@ class SubagentPanel(Container):
         # kept the guess until something else moved.
         self._dirty = True
         self._start_spinner()
+
+    def stats_for(self, job_id: str) -> JobStats:
+        """This child's last completed reading, for a surface outside the panel.
+
+        The status band shows the same child's numbers while its page is open,
+        and it must not derive them for itself: :func:`job_stats` prices the
+        child, and pricing resolves the model, which for one the shipped
+        registry does not describe is a 10 s provider listing plus a 3 s
+        aggregator catalogue. The panel already takes that reading off-thread
+        on a bounded cadence, so the band reads the ANSWER rather than
+        repeating the question. Empty until the first reading lands, which is
+        the same "no number yet" the rows show.
+        """
+        return self._stats.get(job_id) or JobStats(model_label=self._model_label)
 
     def mark_current(self, job_id: str | None) -> None:
         """Tint the row the full-page view is showing (``None`` = no page).

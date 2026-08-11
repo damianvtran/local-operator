@@ -41,7 +41,11 @@ from textual.geometry import Size
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
-from local_operator.harness.intent import ACTIVITY_RESPONDING, batch_activity
+from local_operator.harness.intent import (
+    ACTIVITY_RESPONDING,
+    batch_activity,
+    tool_activity,
+)
 
 # Free at runtime: `session.protocol` below already imports `harness.types` at
 # module level, so this adds no work to the boot path the lazy-import
@@ -111,10 +115,10 @@ from local_operator.tui.widgets.status_line import (
     format_cost,
 )
 from local_operator.tui.widgets.subagent_panel import (
+    JobStats,
     SubagentPanel,
     job_elapsed,
     job_seconds,
-    job_stats,
 )
 from local_operator.tui.widgets.subagent_view import SubagentView, SubagentViewDismissed
 from local_operator.tui.widgets.toast import Toast, format_mcp_startup
@@ -1013,6 +1017,14 @@ class OperatorApp(App[None]):
         # (reporting `gone` for every job) with the composer still read-only.
         # Leaving the mode first is the only outcome that is not a lie.
         self._close_subagent_view()
+        # The aside goes too, and this is the general form of the interrupt
+        # case. It is a question ABOUT a conversation that is being replaced,
+        # answered from a context that is about to be torn down, and it is
+        # holding the composer's placeholder, its command list, its prompt
+        # history and the user's stashed draft. A card left standing across a
+        # session swap keeps every one of those pointed at a session that no
+        # longer exists.
+        self._close_aside()
         # Deny first: `dispose` AWAITS teardown, and a turn parked on an
         # unanswered on-screen approval never reaches it. Measured: `/reload`
         # with a parked question stalled for the whole 5s dispose budget while
@@ -1650,6 +1662,14 @@ class OperatorApp(App[None]):
         #
         # Replaced rather than repeated, so three interrupts leave one hint.
         self._close_subagent_view()
+        # The aside goes with it, for the reason the hint below exists at all.
+        # The card floats over the transcript at one elevation step, so a
+        # notice appended behind it is drawn where it cannot be read — and this
+        # particular notice is the ONLY warning before a second press quits the
+        # app. It is also the rule `action_stop` already states and honours:
+        # a key that acts on the conversation returns to the conversation
+        # first. Ctrl+C keeps its meaning; it just stops doing it invisibly.
+        self._close_aside()
         resumable = bool(self.resume_hint())
         text = "ctrl+c again to exit" + (" — the session can be resumed" if resumable else "")
         if self._exit_hint is not None:
@@ -1796,6 +1816,11 @@ class OperatorApp(App[None]):
         # turn parked on an answer the user could not see they owed. The app
         # needs an answer, so the mode yields.
         self._close_subagent_view()
+        # The aside yields for the identical reason, one layer up: the card
+        # floats OVER the transcript, so the question would be drawn behind it
+        # while still taking focus off the composer the card is pointed at —
+        # a turn parked on an answer the user can neither see nor reach.
+        self._close_aside()
         block = ApprovalBlock(tool_name, description, on_answer=self._latch_approval_answer)
         self._approval = block
         self._append_block(block)
@@ -1916,6 +1941,11 @@ class OperatorApp(App[None]):
         # wiping a transcript the user cannot currently see is the one outcome
         # that would read as the key having done nothing.
         self._close_subagent_view()
+        # Same rule for the aside card, and the same sentence: Ctrl+L acts on
+        # the CONVERSATION, and the aside is a floating question about it that
+        # is also holding the composer. Wiping the ledger under an open card
+        # leaves the user looking at a question whose subject is gone.
+        self._close_aside()
         self._clear_transcript()
 
     def _cmd_approvals(self, arg: str, notice: NoticeFn) -> None:
@@ -2332,18 +2362,39 @@ class OperatorApp(App[None]):
         """
         if self._status is None:
             return
-        session = self._session
-        parent_label = str(getattr(session, "model_label", "") or "") if session else ""
-        stats = job_stats(job, default_model_label=parent_label)
+        # Read from the PANEL rather than derived here. This runs on the 1 Hz
+        # poll, and deriving would price the child on the event loop — the
+        # resolve that costs 13 s for a model the shipped registry does not
+        # describe, which is exactly the child a `model_spec` override
+        # produces. The panel already takes that reading off-thread; two
+        # conventions for one call is one convention too many.
+        panel = self._subagent_panel
+        job_id = str(getattr(job, "id", "") or "")
+        stats = panel.stats_for(job_id) if panel is not None and job_id else JobStats()
+        if not stats.model_label:
+            # No reading has landed yet. The model is the one segment the band
+            # never drops, and naming it costs nothing: both halves are plain
+            # attribute reads — the child's own label if the engine recorded
+            # one, else the parent's, which is what an unrecorded child is
+            # running. The NUMBERS stay absent until the real reading arrives,
+            # because those are what cost 13 s to derive.
+            stats = JobStats(
+                model_label=str(
+                    getattr(job, "model_label", "")
+                    or getattr(self._session, "model_label", "")
+                    or ""
+                )
+            )
         # `job_cost` answers None both for "no price for this model" and for
         # "no usage recorded yet". The band distinguishes them: a child that
         # has billed tokens gets the `$—` this app already uses for
         # unpriceable spend (see `on_turn_ended`), and one that has reported
         # nothing at all gets no segment, because it has not spent anything we
-        # know of.
+        # know of. `billed` carries that distinction off the same reading, so
+        # the job is not probed a second time on a repeating timer.
         if stats.cost is not None:
             cost = format_cost(stats.cost)
-        elif getattr(job, "usage", None) is not None:
+        elif stats.billed:
             cost = "$—"
         else:
             cost = ""
@@ -2582,7 +2633,10 @@ class OperatorApp(App[None]):
         elif command == "/loop":
             self._cmd_loop(arg, notice)
         elif command == "/btw":
-            self._cmd_btw(arg)
+            # The RAW line, not just the argument: `/btw` is the one command
+            # that has to retract its own entry from the prompt history, and
+            # what was recorded is what the user typed.
+            self._cmd_btw(arg, text)
         elif command == "/compact":
             notice("compaction runs automatically when the context fills up.")
         elif command == "/approvals":
@@ -3588,7 +3642,7 @@ class OperatorApp(App[None]):
         panel = self._aside_panel()
         return panel is not None and panel.is_open
 
-    def _cmd_btw(self, arg: str) -> None:
+    def _cmd_btw(self, arg: str, typed: str = "") -> None:
         """``/btw [question]`` — open the aside, and ask if a question came with it.
 
         Bare ``/btw`` opens an empty card rather than printing a usage line.
@@ -3596,7 +3650,17 @@ class OperatorApp(App[None]):
         already at a composer that now points at it; refusing to open until the
         question is retyped on one line would make the two forms behave like
         different commands.
+
+        ``typed`` is the raw line, and retracting it is part of the contract.
+        Every other route into the aside is covered by the composer's recording
+        being off while the card is open, but THIS line is submitted while the
+        card is still closed — so ``Editor._submit`` has already filed
+        ``/btw are the subagents stuck?`` in the prompt history by the time
+        this runs, question and all, on a surface that then promises Esc
+        discards it. It is also the commonest way in.
         """
+        if typed:
+            self._editor().forget_last_prompt(typed)
         panel = self._open_aside()
         if panel is None:
             return
@@ -3640,6 +3704,13 @@ class OperatorApp(App[None]):
         # pulls the card's ceiling down and re-anchors it INTO the picker's
         # rows — the two surfaces drew through each other.
         editor.set_commands([])
+        # And the prompt HISTORY, which is the one borrowed affordance that is
+        # part of the contract rather than a convenience. `Editor._submit`
+        # records before it posts, so without this an aside question survived
+        # Esc: UP recalled it and the next Enter sent it to the agent as a real
+        # turn — on a card that prints "esc discards it". It also stops the
+        # aside burying the last thing the user actually said.
+        editor.set_records_history(False)
         # Focus stays where it is, which is the composer: the aside is a place
         # to keep typing, so taking focus to the card would be taking it away
         # from the only input either surface has.
@@ -3711,6 +3782,7 @@ class OperatorApp(App[None]):
         editor.placeholder = DEFAULT_PLACEHOLDER
         editor.load_text(draft or "")
         editor.set_commands(SLASH_COMMANDS)
+        editor.set_records_history(True)
         self.screen.remove_class(ASIDE_LAYOUT_CLASS)
         editor.focus()
         return True
@@ -4495,7 +4567,7 @@ class OperatorApp(App[None]):
         what a batch says.
         """
         return batch_activity(
-            [card.intent or f"running {display_name(card.tool_name)}" for card in cards]
+            [tool_activity(display_name(card.tool_name), card.intent) for card in cards]
         )
 
     def _cost_for(self, usage) -> float | None:
