@@ -37,12 +37,12 @@ class CompactionOutcome:
     carry WHY: a host that cannot tell a refusal from a no-op reproduces the
     bug where ``/compact`` silently changed nothing.
 
-    ``reason`` is the stable code (``turn_running``, ``disabled``,
-    ``nothing_to_compact``, ``cut_not_replayable``, ``below_threshold``,
-    ``unavailable``, ``failed``); ``detail`` is the one-sentence explanation a
-    front end can show verbatim, written HERE rather than in each host so the
-    TUI, exec mode and the server cannot each invent their own wording for the
-    same refusal.
+    ``reason`` is the stable code (``already_running``, ``turn_running``,
+    ``disabled``, ``nothing_to_compact``, ``cut_not_replayable``,
+    ``below_threshold``, ``unavailable``, ``failed``); ``detail`` is the
+    one-sentence explanation a front end can show verbatim, written HERE rather
+    than in each host so the TUI, exec mode and the server cannot each invent
+    their own wording for the same refusal.
 
     ``tokens_before``/``tokens_after`` are the conversation's size measured by
     the SAME local ruler on both sides of the pass (compaction's own

@@ -150,15 +150,30 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
                 "provider rejects that"
             )
 
-    # Summarizing zero or one message is not worth the cache rewrite — counted
-    # over REAL messages, because a previous compaction's marker is not history
-    # to summarize, it is a summary already. Identical to the old ``index <= 1``
-    # on a history with no marker (every message counts), and correct on one
-    # with: a manual ``/compact`` pressed straight after a pass would otherwise
-    # summarize the previous summary plus a single message, re-compressing what
-    # was already compressed for almost no headroom.
-    summarizable = sum(1 for m in messages[:index] if not _is_compaction_marker(m))
-    if summarizable <= 1:
+    # Summarizing zero or one message is not worth the cache rewrite. The
+    # ORIGINAL rule, unchanged and absolute: one message before the cut buys a
+    # provider call and a full prompt-cache rewrite for one message's worth of
+    # headroom.
+    if index <= 1:
+        return None
+
+    # Past that, count over REAL messages: a previous compaction's marker is
+    # not history to summarize, it is a summary already, so ``[marker, older,
+    # recent…]`` would otherwise re-compress what was just compressed.
+    #
+    # That exclusion is the only rule here STRICTER than ``index <= 1``, and it
+    # answers in messages a question that is really about TOKENS. ``[marker, X,
+    # …]`` cut at index 2 leaves one summarizable message and the old rule ran
+    # it; when X is a 50k tool result it is the whole reason the window is
+    # full, and refusing leaves the AUTOMATIC trigger nothing to do while the
+    # context keeps growing — a pass blocked forever by arithmetic meant to
+    # skip trivial ones. So a lone message still counts when it outweighs the
+    # entire recency budget the caller asked to protect: at that size it is not
+    # a trivial rewrite, it is the problem.
+    summarizable = [m for m in messages[:index] if not _is_compaction_marker(m)]
+    if not summarizable:
+        return None
+    if len(summarizable) == 1 and _message_tokens(summarizable[0]) < keep_recent_tokens:
         return None
     return index
 

@@ -286,9 +286,20 @@ class ProviderError(RenderedStreamError):
 def classify_provider_error(error: BaseException) -> ProviderErrorKind:
     """The failure kind for anything the harness can catch.
 
-    A raw exception is read best-effort from its class and text, which is enough
-    for the stdlib timeout family and honest about the rest: a bare
-    ``ValueError`` is a defect, not weather, and must NOT come back retryable.
+    A raw exception is read best-effort from its CLASS and, for the timeout
+    family, its text — which is enough for the stdlib timeout family and honest
+    about the rest: a bare ``ValueError`` is a defect, not weather, and must NOT
+    come back retryable.
+
+    Deliberately NOT through the usage markers. The text of a raw exception is
+    the harness's own words — a client's ``KeyError('usage')``, a parser's
+    ``ValueError('insufficient data in chunk')`` — and reading them as evidence
+    about the user's account is how the harness came to diagnose its own bugs as
+    ``rate limit or quota exceeded``. :func:`wrap_transport_error` states its
+    kind outright for exactly this reason; the same care belongs here, because
+    this is the entry point every caller holding an unwrapped exception uses.
+    A class name IS legitimate evidence of a timeout. Nothing in an exception's
+    text is evidence about anyone's quota.
 
     A caller holding a TRANSPORT exception — ``httpx.TransportError`` and
     friends — should pass it through :func:`wrap_transport_error` first. Only
@@ -300,8 +311,10 @@ def classify_provider_error(error: BaseException) -> ProviderErrorKind:
         return error.kind
     if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
         return "timeout"
-    haystack = f"{type(error).__name__}: {error}"
-    return _classify_fields(None, haystack, retryable=False, auth_error=False)
+    haystack = f"{type(error).__name__}: {error}".lower()
+    if any(marker in haystack for marker in _TIMEOUT_MARKERS):
+        return "timeout"
+    return "unknown"
 
 
 def is_auth_error(error: BaseException) -> bool:

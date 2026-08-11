@@ -77,6 +77,28 @@ class BrokenCompaction(FakeSession):
         raise RuntimeError("transcript is locked")
 
 
+class FailedCompaction(FakeSession):
+    """A pass that STARTED and blew up: end event, then ``reason="failed"``.
+
+    Distinct from :class:`BrokenCompaction`, where ``compact_now`` itself
+    raises. This is the real shape — ``Session._run_compaction`` catches, emits
+    ``CompactionEndEvent(success=False)`` and returns the outcome — and it is
+    the one that produced two notices for one event.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.compact_outcome = CompactionOutcome(
+            ran=False, reason="failed", detail="compaction failed: summarizer returned nothing"
+        )
+
+    async def compact_now(self) -> CompactionOutcome:
+        outcome = self._answer_compaction()
+        self.emit(CompactionStartEvent(reason="manual"))
+        self.emit(CompactionEndEvent(reason="manual", success=False))
+        return outcome
+
+
 class SlowCompaction(FakeSession):
     """Announces the pass, then waits — the multi-minute window a user types in."""
 
@@ -359,6 +381,51 @@ async def test_a_crashing_pass_is_reported_not_swallowed() -> None:
         notices = _notices(app)
 
     assert "compaction failed: transcript is locked" in notices
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pass_says_why_once_and_says_it_as_an_error() -> None:
+    """One event, one notice, at the severity the event deserves.
+
+    A ``reason="failed"`` outcome went through the same ``not outcome.ran``
+    branch as a refusal, so it printed ``warning`` — UNDER the end event's bare
+    ``compaction failed`` in ``error``. Two notices for one failure, the empty
+    one louder than the one carrying the reason, and both saying the same thing
+    with different urgency. ``failed`` is not a refusal: the pass ran.
+    """
+    session = FailedCompaction()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/compact")
+        for _ in range(20):
+            await pilot.pause()
+            if session.compactions:
+                break
+        await pilot.pause()
+        blocks = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock) and "compaction failed" in block._text
+        ]
+
+    assert [block._text for block in blocks] == ["compaction failed: summarizer returned nothing"]
+    assert blocks[0]._token == NoticeBlock._KIND_TOKENS["error"]
+
+
+@pytest.mark.asyncio
+async def test_an_automatic_failure_still_says_so() -> None:
+    """The manual case is narrated by the worker; the automatic one has nobody
+    else, so suppressing the end event's line for BOTH would have swallowed the
+    only report a background pass ever makes."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app.on_compaction_ended(CompactionEnded(reason="context-window", success=False))
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert "compaction failed" in notices
 
 
 @pytest.mark.asyncio

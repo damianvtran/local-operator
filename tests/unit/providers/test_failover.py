@@ -756,6 +756,31 @@ class TestProviderErrorKinds:
         assert classify_provider_error(ValueError("malformed payload")) == "unknown"
         assert is_transient_error(ValueError("malformed payload")) is False
 
+    def test_an_unwrapped_exception_never_reads_as_the_users_quota(self) -> None:
+        """The harness must not diagnose its OWN bugs as an exhausted account.
+
+        ``wrap_transport_error`` was taught to state its kind outright for this,
+        but ``classify_provider_error`` is the entry point every caller holding
+        an unwrapped exception uses, and it still ran the exception's text
+        through the quota markers: a client's ``KeyError('usage')`` came back
+        ``quota``, which renders as ``rate limit or quota exceeded`` and sends
+        the user to check a billing page over a defect in this repo.
+
+        A class name is legitimate evidence of a timeout, so that stays.
+        """
+        for exc in (
+            KeyError("usage"),
+            ValueError("insufficient data in chunk"),
+            RuntimeError("quota bookkeeping failed"),
+            AttributeError("'NoneType' object has no attribute 'rate limit'"),
+        ):
+            assert classify_provider_error(exc) == "unknown", exc
+            assert is_transient_error(exc) is False
+        # The class name still carries the one thing it honestly knows.
+        assert classify_provider_error(httpx.ReadTimeout("")) == "timeout"
+        # And a real ProviderError keeps the kind it was classified with.
+        assert classify_provider_error(ProviderError(429, "rate limited")) == "quota"
+
     def test_no_5xx_is_ever_read_as_a_quota_exhaustion(self) -> None:
         """Found by enumerating every ``HTTPStatus`` phrase against the quota
         markers: an empty-bodied 507 was classified ``quota``, because the

@@ -3064,6 +3064,14 @@ class OperatorApp(App[None]):
         rendered from the end event in :meth:`on_compaction_ended`. So this
         worker only reports what those events never cover: a refusal, and a
         crash. Both go through ``_system_notice`` because nothing changed.
+
+        ``failed`` is the one ``ran=False`` that is not a refusal — the pass
+        started and blew up — so it is styled ``error`` like every other
+        failure, not ``warning`` like the states a user can act their way out
+        of. It used to land as a ``warning`` UNDER the end event's bare
+        ``compaction failed`` error: two notices for one event, the empty one
+        louder than the one carrying the reason. :meth:`on_compaction_ended`
+        now leaves the manual case to this line.
         """
         try:
             outcome = await session.compact_now()
@@ -3072,7 +3080,8 @@ class OperatorApp(App[None]):
             self._system_notice(f"compaction failed: {exc}", "error")
             return
         if not outcome.ran:
-            self._system_notice(outcome.detail or "compaction did not run", "warning")
+            kind: NoticeKind = "error" if outcome.reason == "failed" else "warning"
+            self._system_notice(outcome.detail or "compaction did not run", kind)
         # A pass that RAN needs nothing further here: the band is settled from
         # the END EVENT, in `on_compaction_ended`, so the automatic trigger gets
         # the same treatment instead of leaving its own reading stale.
@@ -5419,7 +5428,12 @@ class OperatorApp(App[None]):
             # The event carries the figures, so this is the one place that can
             # serve both.
             self._settle_context_reading(message.tokens_before, message.tokens_after)
-        else:
+        elif message.reason != "manual":
+            # AUTOMATIC only. A manual pass is narrated by `_compact_worker`,
+            # which holds the outcome and therefore the reason it failed;
+            # printing this bare line in front of that one gave the user two
+            # notices for one event, with the empty one the louder of the two.
+            # The automatic trigger has no other narrator, so it keeps it.
             self._append_block(NoticeBlock("compaction failed", "error"))
         self._compacting = False
         if self._compaction_owns_working_block:
