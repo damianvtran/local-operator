@@ -221,11 +221,26 @@ async def test_the_row_is_stable_as_content_grows_into_it(size: tuple[int, int])
 async def test_the_aside_card_still_rests_flush_on_the_composer(size: tuple[int, int]) -> None:
     """The one join in the stack that is deliberately tight stays tight.
 
-    ``AsidePanel`` has no bottom padding row, and that was measured: with one,
-    the card-to-composer seam was the widest interval on screen. The card and
-    the composer are two halves of one unit, so the transcript's trailing row
-    must not reappear between them — which is why the aside's reservation
-    REPLACES that padding instead of adding to it.
+    This asserted a ZERO-blank seam and now asserts one, so it owes the
+    original decision an argument. The measurement behind the zero was real:
+    with a bottom padding row the hint-to-``❯`` interval is 2 rows, against 1
+    everywhere else in the stack. What it got wrong is where that interval
+    LIVES. The fill changes between those two rows — the card contributes its
+    row in ``$lo-overlay``, the composer contributes its own in ``$lo-surface``
+    — so neither SURFACE holds a 2-row interval, and a surface is the unit a
+    reader groups by. What the zero cost, measured at 120x40: the row telling
+    the user how to leave was the only row in the card with no air under it,
+    and the card's fill terminated on an inked line.
+
+    So "flush" is unchanged, and is now asserted where it is actually claimed —
+    on the REGIONS. The card's bottom edge is still the composer's top edge,
+    with none of the transcript between them; the blank row the frame shows is
+    therefore the card's own last row, not the transcript's returning one.
+
+    The elevation step is what makes that row affordable, which is why the
+    fills are asserted here and not only in the band test: flatten the card
+    onto the composer's fill and the two padding rows fall inside ONE fill and
+    become a real hole. This test is the guard on that coupling.
     """
     app, _session = _app(AsideSession())
     async with app.run_test(size=size) as pilot:
@@ -237,11 +252,14 @@ async def test_the_aside_card_still_rests_flush_on_the_composer(size: tuple[int,
         panel = app.query_one(AsidePanel)
         assert panel.is_open
         transcript = app.query_one(TranscriptView)
-        assert _seam(app) == 0, _frame(app)[-10:]
+        shell = app.query_one("#input-shell")
+        # Flush, on the regions: no transcript ground survives between them, so
+        # the single blank row below is interior to the card.
+        assert panel.region.bottom == shell.region.y, (panel.region, shell.region)
+        assert _seam(app) == 1, _frame(app)[-10:]
         assert "esc" in _last_painted_row(app), "the card's own footer is the row above the input"
-        # The card's rows are reserved out of the transcript, so the reservation
-        # is the card's height and not the sheet's one row.
-        assert transcript.styles.padding.bottom == panel.region.height
+        # The row is only affordable because the two surfaces differ.
+        assert panel.styles.background != shell.styles.background
 
 
 @pytest.mark.asyncio
@@ -372,16 +390,20 @@ async def test_the_aside_rests_on_whatever_the_dock_puts_first(size: tuple[int, 
 
     The card is placed on the dock (``overlay.stack_on_dock``, gap 0), so what
     it rests on is whatever the dock puts at its top — the composer when the
-    band is empty, the band's slab when it is not. Pinned as a deliberate 0
-    because it LOOKS like the two-row-join bug this suite is otherwise about,
-    and it is the opposite: before the band's padding row moved below its slot,
-    this was the one state where the card had a stray row under it, so the same
-    card read as seated on the composer and loose above the band.
+    band is empty, the band's slab when it is not. Asserted on the REGIONS,
+    which is where that claim lives; the frame's blank row is the card's own
+    bottom padding and is interior to it, exactly as it is over the composer.
 
-    What makes 0 legible here is the elevation step rather than a gap — the card
-    is one background step off the band, which is this kit's separator — so the
-    fills are asserted too. Flush against the SAME fill would be the real
-    failure (that is why the band's own join with the composer is a row).
+    This is also the state design finding D1 called a blocker, reading the card
+    as "floating five rows above the composer". The geometry was never the
+    fault: band, card and ``#input-shell`` all measure the same x and width,
+    and the card's bottom edge IS the band's top edge (measured at 120 and 60,
+    both pinned here). What floated was the FILL — ``#band`` inherited the
+    screen ground, so a trench of ``$lo-bg`` sat between the card above and the
+    composer below and read as the transcript showing through. ``Screen.aside
+    #band`` puts the band on the composer's fill, so band and composer are one
+    panel and the card is one elevated slab resting on it. Both halves are
+    pinned, because dropping either one brings the floating card back.
     """
     from local_operator.tools import builtin
 
@@ -398,11 +420,20 @@ async def test_the_aside_rests_on_whatever_the_dock_puts_first(size: tuple[int, 
         try:
             card = app.query_one(AsidePanel)
             assert card.is_open
-            assert app.query_one("#todo-panel").display
-            # The card rests ON the band, and the band still ends in its own row.
-            assert _blank_rows_above(app, "#todo-panel") == 0, _frame(app)[-12:]
+            todo = app.query_one("#todo-panel")
+            assert todo.display
+            # The card rests ON the band: no ground between the two regions, so
+            # the one blank row above the band is the card's own last row.
+            assert card.region.bottom == todo.region.y, (card.region, todo.region)
+            assert _blank_rows_above(app, "#todo-panel") == 1, _frame(app)[-12:]
+            # And the band still ends in its own row before the composer.
             assert _seam(app) == 1, _frame(app)[-12:]
-            # And the seam is readable because the fills differ by a step.
+            # The band is the composer's panel, not the transcript's ground …
+            assert (
+                app.query_one("#band").styles.background
+                == app.query_one("#input-shell").styles.background
+            )
+            # … and the card is one elevation step off it, which is the seam.
             assert card.styles.background != app.query_one("#todo-body").styles.background
         finally:
             builtin.TODO_STORE.pop(session.session_id, None)

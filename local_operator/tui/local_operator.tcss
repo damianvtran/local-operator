@@ -465,25 +465,38 @@ UsagePanel.-squeezed {
  * — the card lines up with the TRANSCRIPT's user block instead, which is
  * where `^f` forks the question to.)
  *
- * No bottom padding row. Measured at 120x40 with one, the seam between the
- * card and the composer was the widest interval on screen — 2 rows, against 1
- * everywhere else in the stack — because both halves of one unit pushed a
- * padding row into the join that should be tightest, and a reader groups by
- * spacing before fill. The composer's own top padding row is the single row
- * of breathing for both. It also settles a state inconsistency: `-squeezed`
- * already rendered a 1-row seam, so the join silently re-spaced on a drag.
+ * One padding row on every side. The seam between the hint row and the `❯`
+ * measures 2 rows, but the fill change falls BETWEEN them, so the card
+ * contributes one and the composer contributes one and neither surface holds
+ * a 2-row interval — the unit that has to stay on a 1-row rhythm is each
+ * SURFACE, not the cell column across a fill boundary. That is the refinement
+ * of an earlier measurement here which was right about the 2 rows and one
+ * level too coarse about what they meant.
+ *
+ * Measured at 120x40 without the bottom row, the hint row was simultaneously
+ * the last text row and the card's last row, so the fill terminated on an
+ * inked line while every other row had fill above and below it — and the row
+ * denied that air was the one telling the user how to leave. With the dock
+ * band populated the same hint row abutted the band's heading with zero rows
+ * between two different widgets.
  *
  * The widget mirrors both numbers in PANEL_PADDING_CELLS/ROWS because it sizes
  * itself (Textual is border-box), so a change here MUST change those.
  *
  * `$lo-overlay` over the composer's `$lo-surface` — one elevation step apart,
  * which is how this kit separates stacked surfaces. No border and no rule
- * between them: the step IS the seam, and the two read as one column with the
- * live half at the bottom. */
+ * between them: the step IS the seam. Dropping the card to the composer's
+ * fill and marking the boundary with a line was tried and measured: it puts
+ * the card/ground edge at 1.088:1, the exact figure this sheet already calls
+ * invisible where it chose `$lo-overlay` in the first place, and a rule on the
+ * card's LAST row is its bottom edge — it closes the shape rather than marking
+ * a margin, which is the line this file's own contract draws. The step is also
+ * what makes the bottom padding row affordable: without it the two rows fall
+ * inside ONE fill and become a real hole. */
 AsidePanel {
     width: auto;
     height: auto;
-    padding: 1 1 0 1;
+    padding: 1;
     background: $lo-overlay;
     color: $lo-fg;
 }
@@ -492,6 +505,25 @@ AsidePanel {
  * the docked prompt. Set from the same `_fit()` result that pins the height. */
 AsidePanel.-squeezed {
     padding: 0 1;
+}
+
+/* The dock band takes the composer's ground while the aside is open, and this
+ * is what makes the card rest on ANYTHING once a subagent or todo panel is
+ * docked. `#band` is transparent, so it inherits the screen ground: measured
+ * at 120x40 with three children, four rows of `$lo-bg` sat trapped between the
+ * card's `$lo-overlay` above and the composer's `$lo-surface` below — a dark
+ * trench between two lighter surfaces, which reads as the transcript showing
+ * through and the card floating detached. The card's geometry was never wrong
+ * (band, card and shell all measure the same x and width); the band's FILL was.
+ * With this the whole dock is one continuous live panel — band, composer,
+ * status band — and the card is one elevated slab resting on it.
+ *
+ * Scoped to `Screen.aside`, never unconditional: with no card open the band's
+ * dark ground is contiguous with the transcript above it and separates
+ * nothing, so a permanent fill would push a surface slab up into the
+ * transcript's column where none is wanted. */
+Screen.aside #band {
+    background: $lo-surface;
 }
 
 /* No `pointer: pointer`, and no click targets. Textual 8.2.8 supports the

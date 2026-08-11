@@ -79,17 +79,23 @@ PANEL_MIN_WIDTH = 24
 #: the card's ``▌`` spine in the same cell as the composer's ``❯`` at every
 #: width and in both layouts.
 #:
-#: ONE padding row, not two: the card has a top padding row and NO bottom one
-#: (``padding: 1 1 0 1``). Measured at 120x40 with a bottom row, the seam
-#: between the card and the composer was the widest interval in the whole
-#: stack — turn to turn 1 row, exchange to keys 1 row, keys to ``❯`` 2 rows —
-#: because both halves of one unit pushed a padding row into the one join that
-#: should be tightest. A reader groups by spacing before fill, so the frame
-#: said "one column" at the edges and "two panels" at the seam. The composer's
-#: own top padding row is now the single row of breathing for both.
+#: ONE padding row on every side (``padding: 1``). The card briefly had no
+#: bottom row, on a measurement that was right and a conclusion one level too
+#: coarse: the seam between the hint row and the ``❯`` does measure 2 rows,
+#: but the fill change falls BETWEEN them, so the card contributes one and the
+#: composer contributes one and neither surface contains a 2-row interval. The
+#: unit that has to stay on a 1-row rhythm is each SURFACE, not the cell column
+#: across a fill boundary.
+#:
+#: What the missing row actually cost, measured at 120x40: the hint row was
+#: simultaneously the last text row and the card's LAST row, so the fill
+#: terminated on an inked line while every other row in the card had fill above
+#: and below it — and the row denied that air was the one telling the user how
+#: to leave. With the dock band populated it was worse: the hint row abutted
+#: the band's own heading with zero rows between two different widgets.
 PANEL_HEIGHT_MARGIN = 2
 PANEL_PADDING_CELLS = 2
-PANEL_PADDING_ROWS = 1
+PANEL_PADDING_ROWS = 2
 
 #: Rows the pinned chrome costs: title, the rule under it, the blank above the
 #: footer, and the footer. Pinned rather than scrolled because the footer
@@ -98,9 +104,9 @@ PANEL_PADDING_ROWS = 1
 CHROME_ROWS = 4
 
 #: Rows above the dock at which the card can still afford its vertical gutter.
-#: Below it the gutter is spent rather than the prompt covered. One row lower
-#: than it used to be, which is the right consequence of the gutter costing one
-#: row less: the card can afford it on a shorter terminal.
+#: Below it the gutter is spent rather than the prompt covered — and
+#: ``-squeezed`` now drops BOTH padding rows symmetrically rather than the
+#: asymmetric 1/0 the missing bottom row used to produce.
 SQUEEZE_ROWS = PANEL_HEIGHT_MARGIN + CHROME_ROWS + PANEL_PADDING_ROWS + 2
 
 #: The prompt the side question is wrapped in. Three instructions, each earning
@@ -536,13 +542,17 @@ class AsidePanel(Static):
     def _title_row(self) -> Text:
         """The card's name AND its contract, because the contract is the feature.
 
-        Both halves of the contract, not the flattering half. "nothing here
-        joins the chat" is what the user wants to hear; "esc discards it" is
-        what costs them something, and a card that states only the first lets
-        someone get a good answer, dismiss it, and reach back for something
-        that is gone. ``^f`` in the footer is the exception to the first
-        clause, which is why the clause says "nothing HERE" — the fork is a
-        deliberate act, not something the card does on its own.
+        The title states WHAT the surface is; the footer states what the key
+        does. They used to overlap — the title ended "esc discards it" while
+        the footer two rows below said "esc back to the chat", so the card
+        named the same key twice in two verbs, and at 60 columns the title's
+        copy was the half that truncated mid-word. The discard moved into the
+        footer's own hint, where the key it qualifies already lives, and each
+        fact is now stated exactly once.
+
+        ``^f`` is the exception to "nothing here joins the chat", which is why
+        the clause says "nothing HERE" — the fork is a deliberate act, not
+        something the card does on its own.
 
         ``muted``, not ``dim``: this is the sentence the whole feature turns
         on, and it is the same rank the usage card gives its second title slot.
@@ -550,7 +560,7 @@ class AsidePanel(Static):
         row = Text()
         row.append("Aside", style=Style(color=theme_mod.semantic_color("fg")))
         row.append(
-            "  off the record — nothing here joins the chat, esc discards it",
+            "  off the record — nothing here joins the chat",
             style=Style(color=theme_mod.semantic_color("muted")),
         )
         row.truncate(max(1, self._content_width()), overflow="ellipsis")
@@ -578,12 +588,17 @@ class AsidePanel(Static):
         key_style = Style(color=theme_mod.semantic_color("fg"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         faint = Style(color=theme_mod.semantic_color("faint"))
-        # "back to the chat", not "close, keep the chat": the fork hint beside
-        # it also ends in "the chat" and means the opposite. This row is now the
-        # ONLY statement of the exit — the composer's placeholder used to repeat
-        # it, which read as repetition once the two surfaces became one column
-        # a row apart, so the field went back to saying what it does.
-        hints = [("esc", "back to the chat")]
+        # "discard, back to the chat" carries BOTH jobs of the key, which is
+        # why the title no longer mentions esc at all: the fact that dismissing
+        # throws the exchange away belongs on the key that does it, not in a
+        # sentence about what the surface is. It also stops the two rows naming
+        # the same key in two verbs, which at 60 columns truncated mid-word.
+        #
+        # Not "close, keep the chat": the fork hint beside it also ends in "the
+        # chat" and means the opposite. This row is likewise the ONLY statement
+        # of the exit — the composer's placeholder used to repeat it, which read
+        # as repetition once the two surfaces became one column a row apart.
+        hints = [("esc", "discard, back to the chat")]
         if self._can_fork:
             hints.append(("^f", "fork into the chat"))
         # "again" only once there IS a first time. On a card the user has just

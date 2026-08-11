@@ -58,6 +58,19 @@ def rows_above_dock(widget: Widget) -> int:
     quietly back to overlapping if the dock were renamed. A host with nothing
     docked (the widget-only test app) gets the whole content box, which is the
     same answer by the same rule.
+
+    This deliberately does NOT agree with :func:`composer_column` about which
+    element defines the column, and design finding D1 read that disagreement as
+    a bug. They answer different questions. ``composer_column`` asks "what
+    column is this card IN", whose answer is the visible composer,
+    ``#input-shell``. This asks "what may the card COVER", whose answer is
+    nothing docked — a ceiling at ``#input-shell`` would paint the card's lower
+    rows straight over a subagent or todo band, the one thing this function
+    exists to prevent. With a band up the card therefore rests ON the band,
+    flush and at the same x and width (measured at 120/100/80/60). D1's
+    symptom — a card looking five rows adrift of the composer — was ``#band``
+    inheriting the screen ground and opening a dark trench beneath the card,
+    and it is fixed in the sheet (``Screen.aside #band``) rather than here.
     """
     try:
         screen = widget.screen
