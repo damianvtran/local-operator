@@ -153,6 +153,34 @@ async def test_the_band_reading_drops_by_what_the_pass_saved() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_band_reading_never_falls_below_the_history_that_is_left() -> None:
+    """A live run made this necessary, twice: the band read 12.3k on a vision
+    session and ZERO on a text one.
+
+    Compaction's local ruler runs above a provider's own count, so the estimated
+    saving can exceed the provider figure it is subtracted from — and a band
+    claiming an empty context immediately after a compaction is a worse lie than
+    a stale one. The kept history is a floor the next request cannot go under.
+    """
+    session = RanCompaction()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        assert app._status is not None
+        # Smaller than the 106 500-token saving the pass reports.
+        app._status.update(context_tokens=33_000, context_is_estimate=False)
+        await _submit(pilot, app, "/compact")
+        for _ in range(20):
+            await pilot.pause()
+            if session.compactions:
+                break
+        await pilot.pause()
+        tokens = app._status.context_tokens
+
+    assert tokens == 21_900  # the pass's own tokens_after, not 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("reason", "detail"),
     [

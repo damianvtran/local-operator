@@ -58,7 +58,7 @@ from local_operator.logger import current_log_file
 # boot path nothing the lazy-import discipline above is protecting.
 from local_operator.model.effort import default_effort, next_effort
 from local_operator.session import naming
-from local_operator.session.protocol import SessionProtocol
+from local_operator.session.protocol import CompactionOutcome, SessionProtocol
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
 from local_operator.tui.costs import job_cost, turn_cost
@@ -2728,28 +2728,38 @@ class OperatorApp(App[None]):
         if not outcome.ran:
             self._system_notice(outcome.detail or "compaction did not run", "warning")
             return
-        self._discount_context_reading(outcome.tokens_before - outcome.tokens_after)
+        self._settle_context_reading(outcome)
 
-    def _discount_context_reading(self, saved_tokens: int) -> None:
-        """Take a compaction's saving off the band's context reading.
+    def _settle_context_reading(self, outcome: CompactionOutcome) -> None:
+        """Move the band's context reading to what the pass left behind.
 
         The band reports the size of the next REQUEST — system blocks, tool
         schemas and history — while a compaction's two figures measure the
-        HISTORY alone. The pass changes only the history, so the difference
-        transfers exactly, and subtracting it is the only way the band agrees
+        HISTORY alone. The pass changes only the history, so the saving
+        transfers exactly, and taking it off is the only way the band agrees
         with the receipt that just said the context shrank. Left alone, the
         reading stays at the pre-compaction size until the next turn's usage
         arrives, which is precisely the "it did nothing" frame this command
         exists to stop showing.
 
+        Floored at the post-pass history, which a live run made necessary: on a
+        200k-window vision session the band read 12.3k after the pass and on the
+        text model it read ZERO, because compaction's local ruler runs 7-17%
+        above a provider's own count (see ``Session.measure_preloaded_context``)
+        and the estimated saving can exceed the provider figure it is subtracted
+        from. A band claiming an empty context right after a compaction is a
+        worse lie than a stale one, and the kept history is a floor the next
+        request cannot go under.
+
         Demoted to an ESTIMATE even when the figure it was subtracted from was
-        the provider's own: the subtrahend comes from compaction's local
-        tokenizer, so the result is no longer a number the wire reported.
+        the provider's own: the arithmetic came from compaction's tokenizer, so
+        the result is no longer a number the wire reported.
         """
-        if self._status is None or saved_tokens <= 0:
+        saved = outcome.tokens_before - outcome.tokens_after
+        if self._status is None or saved <= 0:
             return
         self._status.update(
-            context_tokens=max(0, self._status.context_tokens - saved_tokens),
+            context_tokens=max(outcome.tokens_after, self._status.context_tokens - saved),
             context_is_estimate=True,
             context_window=_context_window(self._session),
         )
