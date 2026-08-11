@@ -557,25 +557,6 @@ AsidePanel.-squeezed {
     padding: 0 1;
 }
 
-/* The dock band takes the composer's ground while the aside is open, and this
- * is what makes the card rest on ANYTHING once a subagent or todo panel is
- * docked. `#band` is transparent, so it inherits the screen ground: measured
- * at 120x40 with three children, four rows of `$lo-bg` sat trapped between the
- * card's `$lo-overlay` above and the composer's `$lo-surface` below — a dark
- * trench between two lighter surfaces, which reads as the transcript showing
- * through and the card floating detached. The card's geometry was never wrong
- * (band, card and shell all measure the same x and width); the band's FILL was.
- * With this the whole dock is one continuous live panel — band, composer,
- * status band — and the card is one elevated slab resting on it.
- *
- * Scoped to `Screen.aside`, never unconditional: with no card open the band's
- * dark ground is contiguous with the transcript above it and separates
- * nothing, so a permanent fill would push a surface slab up into the
- * transcript's column where none is wanted. */
-Screen.aside #band {
-    background: $lo-surface;
-}
-
 /* No `pointer: pointer`, and no click targets. Textual 8.2.8 supports the
  * property, so this says NO deliberately rather than by omission. The card
  * owns no input by contract — the ONE composer is pointed at it — so a hit
@@ -810,15 +791,16 @@ ApprovalBlock:focus {
 
 /* ── dock band (subagent task list + todo list) ────────────────────────── *
  *
- * Sits between the transcript and the composer: a transparent POSITIONER that
- * reserves rows only when a panel inside it is visible, so an idle session
- * costs the layout nothing. The two panels each manage their own `display`
- * (hidden when their ledger/store is empty), and each holds ONE filled body
- * (`$lo-surface`, the tool card's elevation) on the ground — the same
- * "elevation is a background step, never a line" rule as everything else. Each
- * slot owns the row of ground BELOW itself (see `.band-slot`), and it is
- * padding on the slot, never a margin, so the element that owns the vertical
- * rhythm is the container. */
+ * Sits between the transcript and the composer: a POSITIONER that reserves
+ * rows only when a panel inside it is visible, so an idle session costs the
+ * layout nothing, and that carries the dock's fill so the rows it reserves
+ * belong to the input rather than to the conversation. The two panels each
+ * manage their own `display` (hidden when their ledger/store is empty), and
+ * each holds ONE filled body (`$lo-surface`, the tool card's elevation) — the
+ * same "elevation is a background step, never a line" rule as everything
+ * else. Each slot owns one blank row BELOW itself (see `.band-slot`), and it
+ * is padding on the slot, never a margin, so the element that owns the
+ * vertical rhythm is the container. */
 /* The band is a normal-flow child INSIDE the docked input-dock (D-15-01).
  * `width: auto` (content-sized) so it does NOT consume the dock's full width
  * and defeat the shell's centering below it — a full-width sibling was the
@@ -826,22 +808,60 @@ ApprovalBlock:focus {
  * input's width via `.band-slot { width: 1fr }`, which resolves against the
  * band's parent width when the band is content-sized. Zero rows when both
  * panels are hidden; the height of the todo/subagent rows otherwise (D-01). */
+/* THE FILL RULE, stated once so neither half has to be re-derived: GROUND
+ * SEPARATES THE CONVERSATION FROM THE DOCK, NOT THE DOCK'S PANELS FROM THE
+ * COMPOSER. The transcript's trailing row is ground and stays ground
+ * (`TranscriptView`'s bottom padding, pinned by
+ * tests/unit/tui/test_composer_seam.py). Everything from the band's first row
+ * down is the dock's own fill, including the rhythm row each `.band-slot`
+ * owns below itself — a docked panel is CHROME, and chrome with the
+ * transcript showing through it reads as having come loose from the input it
+ * belongs to.
+ *
+ * Measured at 120x40, five todos docked, before this rule: `#todo-body`
+ * painted `$lo-surface` on rows 27-32 over columns 1-119, row 33 came back
+ * `$lo-bg` over the FULL 0-120 — wider than either slab it sat between,
+ * because the slot's padding row is transparent the whole way down to the
+ * Screen — and `#input-shell` resumed `$lo-surface` on row 34. One dark row
+ * between two lighter ones is a trench, not a margin, and the same single row
+ * measured at 60 columns. The subagent slot was further gone: only its header
+ * carries `.band-body`, so its ROWS were `$lo-bg` too and the panel read as a
+ * lone surface strip floating over a dark list. One fill on the band settles
+ * both, and every slot the band is ever given.
+ *
+ * This lived at `Screen.aside #band` (round 11's D1: the aside card read as
+ * floating five rows up, because that same trench sat under it). It was
+ * scoped to the aside because `.band-slot` then padded ABOVE itself, so an
+ * unconditional fill would have pushed a surface row up against the
+ * transcript. The padding flip below moved that row BELOW each slot, so the
+ * band's first row is now a panel's own slab and the reason for the scope is
+ * gone. An empty band is zero rows and paints nothing, so the splash and
+ * every idle session are untouched. */
 #band {
     width: auto;
     height: auto;
+    background: $lo-surface;
 }
 
-/* One row of ground UNDER each slot, not over it, and the direction is the
- * whole point: the transcript now ends in a row of its own ground
- * (`TranscriptView`'s bottom padding), so a top padding row here stacked with
- * it — measured at 120x40 with a todo list up, 2 blank rows between the
- * conversation's last row and the band's slab against 1 everywhere else in the
- * stack, which is the widest interval on screen and reads as the band having
- * come loose. Downward, every join between the column's own STACKED children is
- * one row from exactly one owner: the transcript's trailing row above the band,
- * this row between two visible panels, and this row again above the composer —
- * which used to be no row at all, two same-fill slabs touching and reading as
- * one panel with a todo list inside it.
+/* One blank row UNDER each slot, not over it, and the direction is the whole
+ * point: the transcript ends in a row of its own ground (`TranscriptView`'s
+ * bottom padding), so a top padding row here stacked with it — measured at
+ * 120x40 with a todo list up, 2 blank rows between the conversation's last row
+ * and the band's slab against 1 everywhere else in the stack, which is the
+ * widest interval on screen and reads as the band having come loose. Downward,
+ * every join between the column's own STACKED children is one row from exactly
+ * one owner: the transcript's trailing row above the band, this row between two
+ * visible panels, and this row again above the composer.
+ *
+ * What that last row IS changed with the fill rule on `#band`; the geometry did
+ * not. It is the dock's own `$lo-surface` now, so band and composer read as one
+ * panel with a todo list inside it — which is what was asked for, and what an
+ * earlier round argued against while the row was still `$lo-bg`. That argument
+ * was right about the slabs and wrong about the remedy: two same-fill slabs
+ * touching with NO row between them read as one crowded panel, so the row
+ * stays. It is interior rhythm now, the same job the padding row inside the
+ * aside card does, and not a boundary. Deleting it crowds the dock; painting it
+ * `$lo-bg` again cuts the dock in half.
  *
  * A FLOATING card is the deliberate exception, and the flip made it consistent
  * rather than breaking it. The aside rests on whatever the dock puts at its top
@@ -859,6 +879,16 @@ ApprovalBlock:focus {
     padding: 0 0 1 0;
 }
 
+/* The BODY every docked panel is made of, and the reason there is a class
+ * rather than two id rules: the fill and the one-cell inset are what make a
+ * panel a panel, and a slot that renders its content anywhere else gets
+ * neither. `padding: 0 1` is the dock's rail — the same column as the
+ * composer's `❯`, the status band's leading glyph and the todo list's `- [ ]`.
+ * The subagent panel put this class on its header only, so its ROWS sat on
+ * bare ground one cell to the left of everything else in the column: a filled
+ * caption over a floating list, four rows above a todo panel that was one
+ * solid slab (design round 12, D1/D5). Anything mounted inside a `.band-slot`
+ * that is meant to be read as part of the panel wears this. */
 .band-body {
     width: 1fr;
     height: auto;
@@ -877,7 +907,9 @@ ApprovalBlock:focus {
  * transcript to a single row (D-01). ``height: auto`` ("as tall as my
  * children") keeps the band as tall as its rows — typically one — so the
  * transcript keeps the space above it. Rows themselves are already ``1``
- * tall; the container is what was overeager. */
+ * tall; the container is what was overeager. (It also carries `.band-body`,
+ * which is where its fill and its inset come from; this rule only overrides
+ * the height, which `.band-body` already declares the same way.) */
 #subagent-rows {
     height: auto;
 }

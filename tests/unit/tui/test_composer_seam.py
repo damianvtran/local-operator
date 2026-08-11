@@ -1,4 +1,4 @@
-"""The seam between the conversation and the composer.
+"""The seam between the conversation and the composer, and the dock's own fill.
 
 One row of ground, and it is the TRANSCRIPT's row: the sheet gives
 ``TranscriptView`` a bottom padding cell the way it already gives it a top one,
@@ -7,11 +7,21 @@ from the field with the last two rows of a turn (``✕ name 'CompactionOutcome'
 is not defined`` / ``✕ interrupted``) sitting directly on the composer, which
 made the ledger and the input read as one slab.
 
+The rule that row belongs to has two halves, and the second was reported from
+the field later ("there's a gap between the list and the composer, there should
+be a solid fill in between"): GROUND SEPARATES THE CONVERSATION FROM THE DOCK,
+NOT THE DOCK'S PANELS FROM THE COMPOSER. A docked panel is chrome; the blank
+row under it is the dock's ``$lo-surface``, not the screen's ``$lo-bg``. Both
+halves are pinned here, because a fix for either one alone is a regression of
+the other — fill everything and the conversation rests on the input; fill
+nothing and the dock is cut in three.
+
 These tests are about a ONE-ROW difference, so they measure the composed frame
 rather than a style value wherever they can: a padding declaration proves the
-rule was written, not that the row reached the terminal. Each one pins a state
-the app actually reaches, because the way this regresses is a fix that is right
-in one frame:
+rule was written, not that the row reached the terminal, and a blank row proves
+nothing at all about whose surface it is (see ``_fill_at``). Each one pins a
+state the app actually reaches, because the way this regresses is a fix that is
+right in one frame:
 
 - every last-block kind (prose, tool row, notice, prompt, working line), since
   they carry different ``SPACING_KIND``s and only the LAST one meets the dock
@@ -22,9 +32,11 @@ in one frame:
 - the ``/btw`` aside, whose card is deliberately FLUSH on the composer, and the
   frame after Esc, where the row has to come back
 - the boot splash, which owns its own vertical composition and must not gain a
-  stray row
+  stray row — and whose band is zero rows, which is what makes the dock fill
+  safe to declare unconditionally
 - the dock band up, where the transcript's row is the band's air too and the
-  join must not double
+  join must not double, with every slot the band can hold (todo, subagent,
+  both) driven through the fill rule so one cannot fuse while another floats
 """
 
 from __future__ import annotations
@@ -76,6 +88,39 @@ def _blank_rows_above(app: OperatorApp, selector: str) -> int:
 def _seam(app: OperatorApp) -> int:
     """Ground rows between the conversation and the composer panel."""
     return _blank_rows_above(app, "#input-shell")
+
+
+def _fill_at(app: OperatorApp, y: int, x: int) -> str:
+    """The background actually PAINTED at one cell, as ``#rrggbb``.
+
+    The counterpart to ``_blank_rows_above``: that one answers "is this row
+    empty", this one answers "whose surface is it". A blank row proves nothing
+    on its own — the whole dock seam bug was a row that was correctly blank and
+    wrongly dark — and a ``styles.background`` read proves the declaration, not
+    the pixel, so this walks the composed strip the way the terminal does.
+    """
+    strip = app.screen._compositor.render_strips()[y]
+    cursor = 0
+    for segment in strip:
+        cursor += len(segment.text)
+        if cursor > x:
+            style = segment.style
+            if style is None or style.bgcolor is None:
+                return "none"
+            return style.bgcolor.get_truecolor().hex.lower()
+    return "none"
+
+
+def _ink_column(app: OperatorApp, y: int) -> int:
+    """Column of the first painted glyph on row ``y``, or -1 if the row is blank.
+
+    The dock has ONE left rail and every glyph in it lands on that column; this
+    is how a row that missed it is caught, since a widget one cell out still
+    measures a plausible region and still fills correctly.
+    """
+    row = _frame(app)[y]
+    stripped = row.lstrip()
+    return len(row) - len(stripped) if stripped else -1
 
 
 def _last_painted_row(app: OperatorApp, above: str = "#input-shell") -> str:
@@ -430,5 +475,194 @@ async def test_the_aside_rests_on_whatever_the_dock_puts_first(size: tuple[int, 
             )
             # … and the card is one elevation step off it, which is the seam.
             assert card.styles.background != app.query_one("#todo-body").styles.background
+        finally:
+            builtin.TODO_STORE.pop(session.session_id, None)
+
+
+#: The docked compositions the fill rule has to hold across. A panel that fused
+#: with the composer while its sibling still floated would be worse than the
+#: uniform gap this replaced, so every slot the band can hold is driven here.
+DOCKED = {
+    "todo": (True, False),
+    "subagent": (False, True),
+    "both": (True, True),
+}
+
+
+async def _dock(pilot: Any, app: OperatorApp, session: Any, todos: bool, subagents: bool) -> None:
+    """Populate the band the way the app does, then let it settle and scroll."""
+    from local_operator.tools import builtin
+    from tests.unit.tui.test_band_panels import _fake_jobs, _Job
+
+    if todos:
+        builtin.TODO_STORE[session.session_id] = [
+            {"text": "wire the band", "status": "done"},
+            {"text": "capture frames", "status": "pending"},
+        ]
+    if subagents:
+        session.jobs = _fake_jobs(_Job("sub-1", "IngestAuditor"))
+    app._refresh_band()
+    await _settle(pilot, 6)
+    app.query_one(TranscriptView).scroll_end(animate=False)
+    await _settle(pilot, 6)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("docked", sorted(DOCKED))
+async def test_the_dock_is_one_fill_from_the_band_down_to_the_status_row(
+    size: tuple[int, int], docked: str
+) -> None:
+    """Ground separates the CONVERSATION from the dock, not the dock's panels
+    from the composer.
+
+    Reported from the field as "there's a gap between the list and the composer,
+    there should be a solid fill in between". Measured at 120x40 with five todos
+    up: the body painted ``$lo-surface`` over columns 1-119, the slot's own
+    padding row came back ``$lo-bg`` over the full 0-120 — wider than either
+    slab it sat between, because a transparent slot falls all the way through
+    ``#band`` to the Screen — and the composer resumed ``$lo-surface`` one row
+    later. A dark row between two lighter ones cut the dock in three.
+
+    Asserted as PAINT rather than as a style value, and against the composer's
+    own fill rather than a literal, so the rule survives a theme change: every
+    row from the band's first to the status band's last is the same surface the
+    input is, and the row above the band is not. That last clause is the other
+    half of the rule and the reason this cannot be satisfied by filling
+    everything — ``test_one_row_of_ground_under_every_kind_of_last_block``
+    pins the transcript's row from the other side.
+    """
+    from local_operator.tools import builtin
+
+    todos, subagents = DOCKED[docked]
+    app, session = _app()
+    async with app.run_test(size=size) as pilot:
+        await _fill(pilot, app, turns=6)
+        await _dock(pilot, app, session, todos, subagents)
+
+        try:
+            band = app.query_one("#band")
+            shell = app.query_one("#input-shell")
+            assert band.region.height > 0, "nothing docked — there is no seam to measure"
+            assert band.region.bottom == shell.region.y, (band.region, shell.region)
+            # One cell inside the dock's own column, which both the band and the
+            # shell are inset to; column 0 is the Screen's gutter in both.
+            x = shell.region.x + 1
+            composer = _fill_at(app, shell.region.y, x)
+            for y in range(band.region.y, shell.region.bottom):
+                assert _fill_at(app, y, x) == composer, (
+                    y,
+                    _fill_at(app, y, x),
+                    composer,
+                    _frame(app)[-14:],
+                )
+            # …and the conversation above it is NOT on that fill.
+            assert _fill_at(app, band.region.y - 1, x) != composer, _frame(app)[-14:]
+        finally:
+            builtin.TODO_STORE.pop(session.session_id, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("docked", sorted(DOCKED))
+async def test_the_row_under_each_panel_survives_as_the_dock_s_own_fill(
+    size: tuple[int, int], docked: str
+) -> None:
+    """The slot's blank row is kept and repainted, not deleted.
+
+    The two ways this regresses are opposite and both plausible: dropping
+    ``.band-slot``'s padding to butt the slabs together (which crowds the dock
+    — two same-fill slabs touching read as one crowded panel), or painting the
+    row ``$lo-bg`` again (which is the trench). So the row is pinned as BLANK
+    and as the composer's surface at the same time; either regression fails one
+    clause.
+    """
+    from local_operator.tools import builtin
+
+    todos, subagents = DOCKED[docked]
+    app, session = _app()
+    async with app.run_test(size=size) as pilot:
+        await _fill(pilot, app, turns=6)
+        await _dock(pilot, app, session, todos, subagents)
+
+        try:
+            shell = app.query_one("#input-shell")
+            x = shell.region.x + 1
+            seam = shell.region.y - 1  # the last slot's padding row
+            assert not _frame(app)[seam].strip(), _frame(app)[-14:]
+            assert _fill_at(app, seam, x) == _fill_at(app, shell.region.y, x), _frame(app)[-14:]
+            # The blank row is a row, not a hole: exactly one, as everywhere
+            # else in the column.
+            assert _seam(app) == 1, _frame(app)[-14:]
+        finally:
+            builtin.TODO_STORE.pop(session.session_id, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [*SIZES, (80, 24)])
+async def test_an_empty_band_paints_nothing_on_the_splash(size: tuple[int, int]) -> None:
+    """The fill is unconditional; the BAND is not.
+
+    An idle session and the boot splash have both panels hidden, so the band is
+    zero rows and there is nothing for its surface to reach. This is what makes
+    an unconditional fill safe where the earlier ``Screen.aside``-scoped one was
+    thought necessary — pinned because a later `height: 1` or a panel that
+    stopped hiding itself would put a bare surface strip into the splash's
+    composition with no content on it.
+    """
+    app, _session = _app()
+    async with app.run_test(size=size) as pilot:
+        await _settle(pilot, 6)
+
+        assert app.query_one(WelcomeView).display, "not on the splash"
+        band = app.query_one("#band")
+        assert band.region.height == 0, band.region
+        assert not app.query_one("#todo-panel").display
+        assert not app.query_one("#subagent-panel").display
+        assert _seam(app) == 1, _frame(app)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("docked", sorted(DOCKED))
+async def test_every_docked_panel_puts_its_content_on_the_dock_s_one_rail(
+    size: tuple[int, int], docked: str
+) -> None:
+    """A panel's rows ARE the panel: same fill, same inset, same column.
+
+    The other face of the fill rule, and the one that says where a panel's
+    content goes rather than what is behind it. The subagent panel wore
+    ``.band-body`` on its header only, so its rows sat on bare ground one cell
+    left of every other glyph in the column — a filled caption over a floating
+    list, four rows above a todo panel that was one solid slab (design round
+    12, D1/D5).
+
+    Asserted with the ASIDE CLOSED, deliberately: ``Screen.aside #band`` used
+    to fill the whole band, so with a ``/btw`` card open those rows were
+    already on a surface and the defect disappeared from exactly the frame most
+    likely to be inspected. The fill half of that is now unconditional and the
+    inset never came from the band at all.
+    """
+    from local_operator.tools import builtin
+
+    todos, subagents = DOCKED[docked]
+    app, session = _app()
+    async with app.run_test(size=size) as pilot:
+        await _fill(pilot, app, turns=6)
+        await _dock(pilot, app, session, todos, subagents)
+
+        try:
+            assert not app.query_one(AsidePanel).is_open, "the aside hides this defect"
+            band = app.query_one("#band")
+            shell = app.query_one("#input-shell")
+            rail = _ink_column(app, app.query_one("#prompt-chevron").region.y)
+            assert rail >= 0, _frame(app)[-14:]
+            columns = {
+                y: _ink_column(app, y)
+                for y in range(band.region.y, shell.region.bottom)
+                if _ink_column(app, y) >= 0
+            }
+            assert len(columns) >= 3, columns  # header, a row, the chevron
+            assert set(columns.values()) == {rail}, (columns, _frame(app)[-14:])
         finally:
             builtin.TODO_STORE.pop(session.session_id, None)

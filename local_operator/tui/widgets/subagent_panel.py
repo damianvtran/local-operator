@@ -785,7 +785,14 @@ class SubagentPanel(Container):
         super().__init__(id="subagent-panel", classes="band-slot")
         self._on_open = on_open
         self._header = Static(id="subagent-header", classes="band-body")
-        self._list = Vertical(id="subagent-rows")
+        # `.band-body`, the same class the header carries and the todo panel's
+        # single body carries: the panel's ROWS are the panel, so they take the
+        # dock's fill and the dock's one-cell inset rather than sitting on bare
+        # ground one cell to the left of every other glyph in the column. Without
+        # it this panel read as a filled caption over a floating list — and only
+        # while a `/btw` card happened to be open, since `Screen.aside #band`
+        # filled the band underneath them and hid it (design round 12, D1/D5).
+        self._list = Vertical(id="subagent-rows", classes="band-body")
         self._rows: dict[str, SubagentRow] = {}
         #: Last ledger read, keyed by job id. Refresh repopulates it; the
         #: spinner tick repaints from it between refreshes rather than
@@ -991,6 +998,14 @@ class SubagentPanel(Container):
         the very row it exists for. So the screen is the ceiling: it is exact
         when the panel has not over-grown, and it is the truth when it has.
 
+        Measured on ``self._list``, not on the panel: the rows live inside the
+        ``.band-body`` container, whose ``padding: 0 1`` is what puts their
+        bullets on the dock's rail with the header and the composer's chevron.
+        Textual is border-box, so that padding comes out of the row's cells and
+        the panel's own width is two too many — the ladder would keep a rung
+        that does not fit and hand the overflow to a hard ellipsis, which is the
+        exact failure the ceiling below exists to prevent.
+
         Before the first arrange nothing is measured and the ladder needs a
         number regardless. That fallback is deliberately WIDE — an
         over-generous guess degrades to Rich's own ellipsis at the row's real
@@ -1001,7 +1016,7 @@ class SubagentPanel(Container):
             ceiling = self.screen.size.width or 0
         except Exception:
             ceiling = 0  # not on a screen yet; the arrange that follows fixes it
-        own = self.size.width or 0
+        own = self._list.size.width or self.size.width or 0
         if own and ceiling:
             return min(own, ceiling)
         return own or ceiling or _DEFAULT_ROW_WIDTH
