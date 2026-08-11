@@ -447,13 +447,23 @@ class FailoverRouteState:
         *,
         cooldown_ms: int = 0,
     ) -> None:
+        if self.active == target:
+            # Already on this route: nothing changed, so nothing is re-armed.
+            # The cooldown MUST NOT be bumped here. `stream_with_failover`
+            # calls `activate` on every request that enters the sticky
+            # fallback route, so bumping before this return turned a fixed
+            # post-failure cooldown into a sliding window: a user sending
+            # messages more often than the cooldown never reached
+            # `primary_retry_due()`, and stayed pinned to the fallback for the
+            # whole session even after the primary recovered. The docstring
+            # above promises a retry "only after primary_retry_at_ms", which
+            # is a deadline set when the route CHANGES, not on every use.
+            return
         if cooldown_ms > 0:
             self.primary_retry_at_ms = max(
                 self.primary_retry_at_ms,
                 int(time.time() * 1000) + cooldown_ms,
             )
-        if self.active == target:
-            return
         self.active = target
         if self.on_change is None:
             return

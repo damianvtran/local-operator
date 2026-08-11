@@ -15,6 +15,7 @@ from local_operator.tools.registry import create_tools
 from local_operator.web_search.models import SearchResponse, SearchSource
 from local_operator.web_search.tool import (
     MODEL_CONTEXT_MAX_CHARS,
+    MODEL_URL_MAX_CHARS,
     WebSearchParams,
     _render_response,
     _search_or_abort,
@@ -69,12 +70,45 @@ def test_model_search_context_is_bounded_and_points_to_full_page_fetch() -> None
         ],
     )
 
-    rendered = _render_response(response)
+    rendered, omitted = _render_response(response)
 
     assert len(rendered) <= MODEL_CONTEXT_MAX_CHARS
     assert "https://example.com/result/0" in rendered
     assert "more results omitted" in rendered
     assert "call `browser` with its URL" in rendered
+    # The count is returned, not re-derived from the prose: `details`
+    # ["context_truncated"] used to be a `" omitted" in text` scan, which a
+    # result snippet containing the word would have flipped on a full response.
+    assert omitted > 0
+
+
+def test_a_single_omitted_source_is_not_reported_in_the_plural() -> None:
+    """One over-long URL is "1 result omitted", and no cause is claimed.
+
+    The all-omitted branch is reached by BOTH the context budget and the
+    per-URL cap, so naming either one would be wrong half the time. It
+    previously said "1 results omitted by the context limit" — plural, and
+    attributing a cause that this case does not have.
+    """
+    response = SearchResponse(
+        provider="duckduckgo",
+        auth_mode="credential-free",
+        answer="",
+        sources=[
+            SearchSource(
+                title="t",
+                url="https://example.com/" + "x" * MODEL_URL_MAX_CHARS,
+                snippet="s",
+            )
+        ],
+    )
+
+    rendered, omitted = _render_response(response)
+
+    assert omitted == 1
+    assert "1 result omitted" in rendered
+    assert "1 results" not in rendered
+    assert "context limit" not in rendered
 
 
 @pytest.mark.asyncio

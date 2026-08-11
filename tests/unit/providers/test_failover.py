@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
 )
+from local_operator.providers import failover as failover_module
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
     AuthRetryKeyState,
@@ -436,6 +438,53 @@ async def test_successful_fallback_stays_pinned_for_same_message() -> None:
         "anthropic/claude-opus-5",
     ]
     assert state.active == FallbackTarget("anthropic/claude-opus-5", "high")
+
+
+@pytest.mark.asyncio
+async def test_the_primary_cooldown_is_a_deadline_not_a_sliding_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-entering the SAME fallback route must not push the retry deadline out.
+
+    ``stream_with_failover`` calls ``activate`` on every request that lands on
+    the sticky fallback, so arming the cooldown before the "already on this
+    route" early return made it slide forward on each use. A user sending
+    messages more often than the cooldown never reached ``primary_retry_due``
+    and stayed pinned to the fallback for the whole session, even after the
+    primary recovered — the opposite of the fixed post-failure probe the class
+    docstring promises.
+
+    The clock MUST advance between calls or this test cannot discriminate:
+    the arming is ``max(existing, now + cooldown)``, so six re-entries inside
+    one millisecond compute the same deadline whether the bug is present or
+    not. Verified by mutation — with a frozen clock the buggy order passes.
+    """
+    now_ms = 1_000_000
+
+    def fake_time() -> float:
+        return now_ms / 1000
+
+    # `failover.py` does `import time` and calls `time.time()`, so the patch
+    # goes on the module's own `time` binding — swapping a stand-in rather
+    # than mutating the real `time` module, which every other test shares.
+    monkeypatch.setattr(failover_module, "time", SimpleNamespace(time=fake_time), raising=True)
+
+    target = FallbackTarget("anthropic/claude-opus-5", "high")
+    state = FailoverRouteState()
+
+    await state.activate(target, "quota", cooldown_ms=60_000)
+    armed = state.primary_retry_at_ms
+    assert armed == now_ms + 60_000, "the route CHANGED, so the cooldown must arm"
+
+    # Five more requests on the route that is already active, ten seconds
+    # apart — the real shape of a user who keeps typing.
+    for _ in range(5):
+        now_ms += 10_000
+        await state.activate(target, "quota", cooldown_ms=60_000)
+
+    assert state.primary_retry_at_ms == armed, "re-entry re-armed the cooldown"
+    # 50s of use later the deadline has arrived, so the primary gets probed.
+    assert state.primary_retry_due(now_ms=now_ms + 10_001)
 
 
 async def test_stream_exhaustion_raises_last_error() -> None:

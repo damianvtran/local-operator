@@ -81,8 +81,14 @@ def _hard_clip(text: str, limit: int) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-def _render_response(response: SearchResponse) -> str:
-    """Render bounded model context while preserving complete usable result blocks."""
+def _render_response(response: SearchResponse) -> tuple[str, int]:
+    """Bounded model context, and HOW MANY sources it left out.
+
+    The count is returned rather than re-derived by the caller: it is known
+    exactly here, and the only other way to recover it was scanning the
+    rendered text for the word "omitted" — which a result snippet containing
+    that word would have flipped on an untruncated response.
+    """
     sections = [f"Provider: {response.provider} ({response.auth_mode})"]
     if response.answer:
         sections.append(_clip(response.answer, MODEL_ANSWER_MAX_CHARS))
@@ -121,14 +127,19 @@ def _render_response(response: SearchResponse) -> str:
             sources += f"\n… {omitted} more result{'s' if omitted != 1 else ''} omitted"
         sections.append(sources)
     elif response.sources:
-        sections.append(f"… {len(response.sources)} results omitted by the context limit")
+        # Same plural guard as the sibling branch above. "by the context limit"
+        # is deliberately NOT claimed here: a source is also omitted when its
+        # URL exceeds MODEL_URL_MAX_CHARS, which reaches this branch too, so
+        # naming one of the two causes would be wrong half the time.
+        omitted = len(response.sources)
+        sections.append(f"… {omitted} result{'s' if omitted != 1 else ''} omitted")
     if failures:
         sections.append(failures)
     sections.append(_SOURCE_FOOTER)
     rendered = "\n\n".join(sections)
     # The source-block budget above should make this unreachable, but the cap is
     # an invariant at the model boundary even if future sections are added.
-    return _hard_clip(rendered, MODEL_CONTEXT_MAX_CHARS)
+    return _hard_clip(rendered, MODEL_CONTEXT_MAX_CHARS), omitted
 
 
 async def _search_or_abort(service_call, signal: AbortSignal | None):
@@ -296,11 +307,11 @@ async def execute_web_search(
     except Exception as error:
         return _result(tool_call_id, str(error), error=True)
 
-    text = _render_response(response)
+    text, omitted = _render_response(response)
     details = response.model_dump(mode="json")
     details["context_chars"] = len(text)
     details["context_max_chars"] = MODEL_CONTEXT_MAX_CHARS
-    details["context_truncated"] = " omitted" in text
+    details["context_truncated"] = omitted > 0
     return _result(tool_call_id, text, details=details)
 
 
