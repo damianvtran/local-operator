@@ -225,18 +225,29 @@ def test_a_settled_row_keeps_its_outcome_and_still_carries_its_numbers() -> None
     assert "root caused: the fixture leaks a global" in row
 
 
-def test_the_row_the_page_is_showing_drops_its_activity_but_not_its_numbers() -> None:
-    """The page IS that row's detail; the numbers are not repeated up there."""
+def test_the_row_the_page_is_showing_keeps_only_what_the_page_does_not_say() -> None:
+    """One fact, one surface, within the twenty-five rows a reader can see.
+
+    The page's title already states the child's state and age three rows
+    above this row, and its body states the outcome at length. What the title
+    does NOT carry is the spend and the window occupancy, so those are what
+    the row keeps — along with the name, which is the row's whole job in this
+    mode. Settled with the page's owner rather than each surface trimming
+    independently.
+    """
     job = Job(
         status="failed",
         settled=True,
         error_text="provider error: 429 rate limited",
         usage=Usage(input_tokens=3_100, output_tokens=200, context_tokens=3_100),
     )
-    assert "429 rate limited" in _plain(job, 120)
+    unmarked = _plain(job, 120)
+    assert "429 rate limited" in unmarked and "✗" in unmarked and "7m49s" in unmarked
     marked = _plain(job, 120, current=True)
-    assert "429 rate limited" not in marked
-    assert "$" in marked and "✗" in marked
+    assert "429 rate limited" not in marked  # the page's body says it, at length
+    assert "✗" not in marked and "7m49s" not in marked  # the page's title says both
+    assert "schema migration" in marked  # which subagent: the row's whole job
+    assert "$" in marked and "%" in marked  # the two facts the title lacks
 
 
 # -- the width ladder --------------------------------------------------------

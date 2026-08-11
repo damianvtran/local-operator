@@ -33,10 +33,8 @@ from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.costs import job_cost
 from local_operator.tui.widgets.status_line import (
-    format_context_tokens,
-    format_context_usage,
+    context_spelling,
     format_cost,
-    format_window,
 )
 from local_operator.tui.widgets.tool_card import (
     clean_intent,
@@ -260,6 +258,10 @@ class RowFacts:
     running: bool
     elapsed: str
     activity: str
+    #: Whether the full-page view is showing THIS child. The row then stops
+    #: restating what the page's title says three rows above it — see
+    #: :func:`compose_row`.
+    current: bool = False
 
 
 def row_facts(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
@@ -333,6 +335,7 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
         running=running,
         elapsed=job_elapsed(job),
         activity=activity,
+        current=current,
     )
 
 
@@ -444,41 +447,14 @@ def _lay_out(
     short-labelled row would be handed slack the padding is about to spend.
     """
     spelling, keep_cost, budget = _RUNGS[min(rung, len(_RUNGS) - 1)]
-    percent = 0.0
-    if stats.context_window > 0 and stats.context_tokens > 0:
-        percent = stats.context_tokens / stats.context_window * 100
-    if spelling == "full":
-        context = format_context_usage(stats.context_tokens, stats.context_window)
-        # `<0.1%` rather than the `0.0%` the shared formatter rounds to. The
-        # short spelling below already refuses a rounded zero over a non-zero
-        # reading; the full one has to refuse it for the same reason, and the
-        # guard lives here rather than in `format_context_usage` because the
-        # band reads that function too and has cells to spare for the digit.
-        if 0 < percent < 0.05:
-            context = f"<0.1%/{format_window(stats.context_window)}"
-    elif spelling == "nodec":
-        # Decimal gone, DENOMINATOR kept. Two cells cheaper than the full
-        # spelling and the rung a mixed-model fan-out needs: `24%` beside
-        # `31%` reads as similar loads when one child holds 48k of 200k and
-        # the other 311k of 1M, which is precisely the comparison this panel
-        # exists to make possible.
-        context = format_context_usage(stats.context_tokens, stats.context_window)
-        if percent:
-            context = f"{max(percent, 0.5):.0f}%/{format_window(stats.context_window)}"
-    elif spelling == "short":
-        # Only here does the denominator go, and it goes last: it is the half
-        # a reader can recover by opening the page. With no window there is no
-        # percentage to shorten TO, so the token count stands as its own short
-        # form — `12.4k` is already three cells narrower than `12.4k/—`.
-        if percent:
-            # `<1%` rather than a rounded `0%`. A child that has loaded three
-            # thousand tokens has not loaded none, and this row already
-            # refuses to print `$0.0000` over real spend for the same reason.
-            context = f"{percent:.0f}%" if percent >= 1 else "<1%"
-        else:
-            context = format_context_tokens(stats.context_tokens) if stats.context_tokens else ""
-    else:
-        context = ""
+    # The last rungs carry no reading at all; every other spelling is one the
+    # band names too (`status_line.CONTEXT_FORMS`), so the same child's
+    # occupancy cannot be written two ways four rows apart.
+    context = (
+        ""
+        if spelling == "none"
+        else context_spelling(stats.context_tokens, stats.context_window, form=spelling)
+    )
     if not keep_cost:
         cost = ""
     elif stats.cost is not None:
@@ -601,6 +577,18 @@ def compose_row(
     row.append(label, style=fg)
     row.append(" " * max(0, column - cell_len(label)), style=dim)
     row.append("  ", style=dim)
+    if facts.current:
+        # The page's own title says the state and the age, three rows above
+        # this. Repeating them here made one child's state four separate
+        # statements inside twenty-five rows, in three vocabularies; the row's
+        # job in this mode is WHICH subagent, and the numbers are the one
+        # thing the title does not carry. Non-current rows are unchanged.
+        for index, value in enumerate(part for part in (context, cost) if part):
+            if index:
+                row.append(STATS_SEAM, style=faint)
+            row.append(value, style=muted)
+        row.truncate(width, overflow="ellipsis")
+        return row
     # Shared with the full-page view's title so one job cannot read as two
     # different states on two surfaces. A running row's glyph advances on the
     # panel's timer, so a stopped timer means a frozen row — visible at once.

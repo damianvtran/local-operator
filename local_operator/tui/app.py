@@ -2594,7 +2594,12 @@ class OperatorApp(App[None]):
                 context_tokens=stats.context_tokens,
                 context_window=stats.context_window,
                 cost=cost,
-                duration=job_seconds(job) if job is not None else None,
+                # No duration. The page's title carries the child's age three
+                # rows above this, and the band's right group was otherwise
+                # reproducing the row beneath it cell for cell. The band keeps
+                # the two NUMBERS instead, which is what the dock cannot
+                # always spare the cells for.
+                duration=None,
             )
         )
 
