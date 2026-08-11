@@ -42,6 +42,7 @@ from textual.content import Content
 from textual.geometry import Size
 from textual.scrollbar import ScrollDown, ScrollTo, ScrollUp
 from textual.selection import Selection
+from textual.widget import Widget
 from textual.widgets import Static
 
 from local_operator.harness.intent import ACTIVITY_THINKING
@@ -253,7 +254,7 @@ class TranscriptBlock(Static):
     #: Memoized "taller than one row?" answer for the spacing decision.
     _multirow_cache: bool | None = None
 
-    def set_content(self, renderable: RenderableType) -> None:
+    def set_content(self, renderable: RenderableType, *, layout: bool = True) -> None:
         """Apply ``renderable`` as the block content (no-op once finalized).
 
         A ``Text`` is promoted to a ``Content`` HERE rather than left to
@@ -277,13 +278,24 @@ class TranscriptBlock(Static):
         cheaply, and what the :attr:`renderable` property promises. A ``str``
         still goes through Textual, whose ``Content.from_markup`` reading of it
         is the behaviour the callers that pass one already rely on.
+
+        ``layout=False`` says the block's HEIGHT did not move, so the update is
+        a repaint and not a reflow. `Static.update` defaults to laying out
+        because a Static is content-sized and new content usually is a new
+        height; the blocks here pin their own height in ``styles.height``, so a
+        subclass that has just re-pinned to the same number knows better.
+        Measured on a 161-block transcript, the default cost a full compositor
+        reflow — 173 widgets re-arranged, 7.8 ms — on every streaming delta and
+        every clock tick. Default TRUE: only a caller that has checked the pin
+        may claim otherwise.
         """
         if self._finalized:
             return
         self._content = renderable
         self.invalidate_row_measurements()
         self.update(
-            Content.from_rich_text(renderable) if isinstance(renderable, Text) else renderable
+            Content.from_rich_text(renderable) if isinstance(renderable, Text) else renderable,
+            layout=layout,
         )
 
     def invalidate_row_measurements(self) -> None:
@@ -944,7 +956,15 @@ class WorkingBlock(TranscriptBlock):
         else:
             line.append(label, style=dim)
         line.append(f"  {self._clock}", style=dim)
-        self.set_content(line)
+        # `layout=False`: this row is ONE row by construction (see above — the
+        # label is clipped, never wrapped), so its footprint cannot move and the
+        # update is a repaint. The default laid the whole screen out again on
+        # every shimmer frame: 25 full compositor reflows a second, each
+        # re-arranging every widget in the transcript, to animate a line that
+        # was never going to change height. Measured on a 161-block transcript,
+        # an idle app with a turn running burned 18.7% of a core; this one
+        # keyword takes it to 8.9%.
+        self.set_content(line, layout=False)
 
     def stop(self) -> None:
         """Stop the repaint timer and settle on the static frame."""
@@ -1053,6 +1073,18 @@ class TranscriptView(ScrollableContainer):
         #: Named for the TAIL to keep it clear of ``_anchor_before``, which is
         #: about spacing neighbours and has nothing to do with scrolling.
         self._tail_anchor = TailAnchor()
+        #: The empty-state view drawn above the blocks (the splash), resolved
+        #: lazily, plus the number of non-block children the resolution was
+        #: taken against. `_apply_gap` asks whether it is showing once per
+        #: spacing decision — 912 times across one 396-message replay — and the
+        #: question used to be answered by scanning every child in the
+        #: container, which is O(blocks) for a fact about one widget.
+        self._empty_state: Widget | None = None
+        self._empty_state_extras = -1
+        #: Blocks appended inside a `batch_append` block, waiting to be mounted
+        #: in one call. `None` outside one, which is how `append_block` tells
+        #: the two modes apart.
+        self._pending_mounts: list[TranscriptBlock] | None = None
 
     def set_on_clear(self, hook: Callable[[], None] | None) -> None:
         """Install the hook fired after every :meth:`clear_blocks`."""
@@ -1076,6 +1108,45 @@ class TranscriptView(ScrollableContainer):
         self.append_block(block)
         self._tail = block
 
+    @contextmanager
+    def batch_append(self) -> Iterator[None]:
+        """Mount everything appended inside this block in ONE call.
+
+        For the one caller that knows, up front, that it is about to append a
+        whole conversation: replaying a resumed session's history. Appending is
+        otherwise a per-event thing and mounting one widget at a time is the
+        honest shape for it, but 297 separate ``mount`` calls make Textual walk
+        its stylesheet, invalidate the container's layout and schedule a settle
+        callback 297 times over for a result that is only ever looked at once.
+
+        The per-block deferred work collapses with the mount: the gap settle
+        becomes one pass over the batch, and the empty state is re-measured
+        once at the end rather than once per block.
+
+        A pinned tail suspends the batching: mounting above the working line is
+        a POSITIONAL mount, and the widget it has to go before may still be
+        waiting in this batch with no place in the container yet. That case
+        flushes what is pending and carries on one at a time — correctness
+        first, and the replay never has a tail to begin with.
+        """
+        if self._pending_mounts is not None:  # already batching; one owner
+            yield
+            return
+        self._pending_mounts = []
+        try:
+            yield
+        finally:
+            pending, self._pending_mounts = self._pending_mounts or [], None
+            self._mount_batch(pending)
+
+    def _mount_batch(self, blocks: list[TranscriptBlock]) -> None:
+        """Mount a held batch, with ONE settle pass and ONE empty-state remeasure."""
+        if not blocks:
+            return
+        self.mount_all(blocks)
+        self.call_after_refresh(self._settle_gaps, blocks)
+        self._remeasure_empty_state()
+
     def append_block(self, block: TranscriptBlock) -> None:
         """Mount ``block`` at the bottom.
 
@@ -1092,7 +1163,17 @@ class TranscriptView(ScrollableContainer):
         self._apply_gap(self._anchor_before(index), block)
         self._blocks.insert(index, block)
         if hasattr(block, "tool_name"):
-            self._invalidate_name_col()
+            self._widen_name_col(block)
+        if self._pending_mounts is not None:
+            if tail is None:
+                # Held for the bulk mount at the end of the batch. The gap
+                # settle and the empty-state re-measure go with it.
+                self._pending_mounts.append(block)
+                return
+            # This one has to go BEFORE a specific widget, which may itself
+            # still be held. Flush, then mount positionally as usual.
+            pending, self._pending_mounts = self._pending_mounts, []
+            self._mount_batch(pending)
         # `before=None` is Textual's own "append" — one mount call either way.
         self.mount(block, before=tail if tail in self._blocks else None)
         # The gap above was decided while the block was still UNMOUNTED, where
@@ -1104,6 +1185,70 @@ class TranscriptView(ScrollableContainer):
         self.call_after_refresh(self._settle_gap, block)
         self._remeasure_empty_state()
 
+    def _widen_name_col(self, block: TranscriptBlock) -> None:
+        """Admit ONE new row to the shared name column.
+
+        An append can only ever make the column WIDER, and whether it does is a
+        question about the block being added. The general invalidation
+        re-derives the width from every row on screen, which turned a replay
+        into quadratic work: a 396-message conversation ran it 215 times over a
+        ledger growing to 215 rows, 24k ``display_name`` calls to answer a
+        question whose answer moved a handful of times (measured: 36 ms of a
+        815 ms switch at 891 rows, ~2 ms at 297 — the term is quadratic, so it
+        is the ledger's size that decides whether it matters). The two ways the
+        column can SHRINK keep the full re-derivation, because only a re-scan
+        can say how far: a rename, through :meth:`invalidate_name_col`, and a
+        removal, which drops the cache outright.
+        """
+        if self._name_col_cache is None:
+            return  # nothing cached to widen; `tool_name_col` will derive it
+        # The same two exclusions `tool_name_col` applies, and for the reasons
+        # argued there: a pending approval and a call the model is still
+        # dictating are not rows the spine is measured against.
+        if not getattr(block, "LEDGER_ROW", False):
+            return
+        if getattr(block, "contributes_name", True) is False:
+            return
+        name = getattr(block, "tool_name", "")
+        if not isinstance(name, str) or not name:
+            return
+        from local_operator.tui.glyphs import display_name
+
+        width = max(TOOL_NAME_COL, min(cell_len(display_name(name)), TOOL_NAME_COL_MAX))
+        if width <= self._name_col_cache:
+            return
+        self._name_col_cache = width
+        for existing in self._blocks:
+            repaint = getattr(existing, "refresh_row", None)
+            if callable(repaint):
+                repaint()
+
+    def _settle_gaps(self, blocks: list[TranscriptBlock]) -> None:
+        """Re-decide the gaps a batch changed, touching each boundary once.
+
+        :meth:`_settle_gap` per block cannot do that: it has to assume its
+        neighbours are settled already, so it re-applies the gap above AND
+        below every block and every boundary in the run is decided twice. A
+        batch knows the whole run moved, so one ordered walk from the first new
+        block to the end of the ledger reaches the same set of boundaries —
+        including the one under the batch — with half the class writes.
+        """
+        live = [block for block in blocks if block.parent is self]
+        if not live:
+            return
+        for block in live:
+            block.invalidate_row_measurements()
+        try:
+            start = self._blocks.index(live[0])
+        except ValueError:
+            return
+        previous = self._anchor_before(start)
+        for offset in range(start, len(self._blocks)):
+            block = self._blocks[offset]
+            self._apply_gap(previous, block)
+            if not block.SPACING_TRANSIENT:
+                previous = block
+
     def _remeasure_empty_state(self) -> None:
         """Re-measure the empty state after the block count in this region changed.
 
@@ -1114,11 +1259,11 @@ class TranscriptView(ScrollableContainer):
         without it the splash keeps the height it was measured at when it was
         alone in the region, and overdraws it by the new block's rows.
         """
-        for child in self.children:
-            if not isinstance(child, TranscriptBlock) and child.display:
-                # `layout=True`: a measured height is cached per container size, so
-                # a plain repaint would redraw the new block into the old count.
-                self.call_after_refresh(child.refresh, layout=True)
+        view = self._resolve_empty_state()
+        if view is not None and view.display:
+            # `layout=True`: a measured height is cached per container size, so
+            # a plain repaint would redraw the new block into the old count.
+            self.call_after_refresh(view.refresh, layout=True)
 
     def _settle_gap(self, block: TranscriptBlock) -> None:
         """Re-decide ``block``'s gap now that it has been laid out."""
@@ -1253,8 +1398,14 @@ class TranscriptView(ScrollableContainer):
         Transient blocks are invisible to spacing: the working line sits
         between a tool row and the next one for a second and must not change
         how they relate.
+
+        Indexed backwards rather than over ``reversed(self._blocks[:index])``:
+        the slice copies every block before ``index``, and this is called once
+        per append, so replaying a long conversation spent its time building
+        and throwing away 297 progressively longer lists to look at one element.
         """
-        for candidate in reversed(self._blocks[:index]):
+        for offset in range(index - 1, -1, -1):
+            candidate = self._blocks[offset]
             if not candidate.SPACING_TRANSIENT:
                 return candidate
         return None
@@ -1264,18 +1415,36 @@ class TranscriptView(ScrollableContainer):
             needs_gap_above(previous, block, splash_above=self._empty_state_visible()), GAP_CLASS
         )
 
-    def _empty_state_visible(self) -> bool:
-        """True when the empty-state view is showing above the blocks.
+    def _resolve_empty_state(self) -> Widget | None:
+        """The empty-state view above the blocks, or None. Cached.
 
         Identified by what it is NOT — every other child of this container is a
         transcript block — rather than by importing the view, which imports this
         module for its notice glyphs. It is also the more honest predicate: what
         spacing needs to know is whether something is drawn above the first block,
         not which widget that something happens to be.
+
+        The scan is O(children) and its callers are not: `_apply_gap` asks 912
+        times across one 396-message replay, which was a quarter of a million
+        `isinstance` checks to re-find one widget that never moves. So the
+        answer is kept, and re-taken only when the number of NON-block children
+        changes — which is the only event that can invalidate it, and is O(1) to
+        notice. A block removed but not yet pruned makes that count read high
+        for a frame and costs one redundant scan, never a wrong answer.
         """
-        return any(
-            child.display for child in self.children if not isinstance(child, TranscriptBlock)
-        )
+        extras = len(self.children) - len(self._blocks)
+        if extras != self._empty_state_extras:
+            self._empty_state_extras = extras
+            self._empty_state = next(
+                (child for child in self.children if not isinstance(child, TranscriptBlock)),
+                None,
+            )
+        return self._empty_state
+
+    def _empty_state_visible(self) -> bool:
+        """True when the empty-state view is showing above the blocks."""
+        view = self._resolve_empty_state()
+        return view is not None and view.display
 
     def remove_block(self, block: TranscriptBlock) -> None:
         """Remove one block (used to lift the boot hint, D9)."""

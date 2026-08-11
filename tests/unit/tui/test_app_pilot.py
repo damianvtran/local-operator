@@ -2487,6 +2487,154 @@ async def test_resume_replaces_the_visible_transcript(tmp_path, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_session_swap_never_shows_the_splash(tmp_path, monkeypatch) -> None:
+    """Conversation A goes straight to conversation B — no logo in between.
+
+    The splash is the transcript's EMPTY STATE, and a swap clears the ledger
+    before repopulating it, so for a while "the transcript has no content" was
+    true of a screen that was only mid-substitution. It was true for the whole
+    of the session factory too, because the clear used to happen BEFORE the
+    await: the user watched conversation A, then the centred logo, then
+    conversation B.
+
+    Asserted at every frame Textual paints rather than at the end, which is the
+    only way to catch a state that exists only in the middle: ``post_display_hook``
+    is Textual's own after-a-frame callback. The factory is made slow on purpose,
+    because a free one hides the very window this is about.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "swap01")
+
+    current = FakeSession()
+    current._history = [
+        SimpleNamespace(role="user", text="the conversation being left", tool_calls=None)
+    ]
+
+    async def slow_resume_factory(_resume_id: str | None):
+        await asyncio.sleep(0.05)  # a real factory is not free
+        resumed = FakeSession()
+        resumed._history = [
+            SimpleNamespace(role="user", text="the conversation arrived at", tool_calls=None)
+        ]
+        return resumed
+
+    app = OperatorApp(lambda: _factory(current), resume_factory=slow_resume_factory)
+    splash_frames: list[bool] = []
+    watching = False
+    original_hook = type(app).post_display_hook
+
+    def hook(self) -> None:
+        original_hook(self)
+        if watching:
+            splash_frames.append(self.query_one(WelcomeView).display)
+
+    monkeypatch.setattr(type(app), "post_display_hook", hook)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert app.query_one(TranscriptView).blocks(), "the session being left never rendered"
+        assert app.query_one(WelcomeView).display is False
+
+        watching = True
+        # Exactly what `_resume_session` does before running the worker.
+        app._session_factory = lambda: slow_resume_factory("swap01")  # type: ignore[assignment]
+        await app._reload_session()
+        for _ in range(6):
+            await pilot.pause()
+        watching = False
+
+        assert splash_frames, "no frame was painted across the swap"
+        assert not any(splash_frames), (
+            f"the splash was painted on {sum(splash_frames)} of "
+            f"{len(splash_frames)} frames across the swap"
+        )
+        assert "the conversation arrived at" in _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_a_swap_onto_an_empty_session_still_lands_on_the_splash(tmp_path) -> None:
+    """The suppression is about the TRANSITION, not about the destination.
+
+    ``/new`` swaps onto a conversation with no history, and that is a genuinely
+    empty app: the splash is right for it. A fix that simply stopped the swap
+    from ever showing the splash would leave the fresh session on a blank
+    screen with no boot card and no hints.
+    """
+    current = FakeSession()
+    current._history = [SimpleNamespace(role="user", text="something", tool_calls=None)]
+
+    async def new_factory(_resume_id: str | None):
+        return FakeSession()  # no history: this is what /new asks for
+
+    app = OperatorApp(lambda: _factory(current), resume_factory=new_factory)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert app.query_one(WelcomeView).display is False
+
+        app._session_factory = lambda: new_factory(None)  # type: ignore[assignment]
+        await app._reload_session()
+        await pilot.pause()
+
+        assert app.query_one(WelcomeView).display is True
+        assert app.screen.has_class(BOOT_LAYOUT_CLASS)
+        assert app.query_one(TranscriptView).blocks() == []
+
+
+@pytest.mark.asyncio
+async def test_a_swap_leaves_the_ledger_matching_the_new_sessions_history() -> None:
+    """The screen is a PROJECTION of the model's context, after the reorder too.
+
+    The swap now builds the replacement session BEFORE clearing the ledger, so
+    that the substitution paints in one frame. That reordering must not weaken
+    the rule it moved around: what is on screen at the end is the new session's
+    ``history()``, all of it and nothing else — including on the path where the
+    replacement fails to construct, which leaves no conversation at all rather
+    than the previous one under an error saying there is no session.
+    """
+    first = FakeSession()
+    first._history = [
+        SimpleNamespace(role="user", text="first-session prompt", tool_calls=None),
+        SimpleNamespace(role="assistant", text="first-session answer", tool_calls=[]),
+    ]
+    second = FakeSession()
+    second._history = [
+        SimpleNamespace(role="user", text="second-session prompt", tool_calls=None),
+        SimpleNamespace(role="assistant", text="second-session answer", tool_calls=[]),
+        SimpleNamespace(role="user", text="second-session follow-up", tool_calls=None),
+    ]
+
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert len(app.query_one(TranscriptView).blocks()) == 2
+
+        app._session_factory = lambda: _factory(second)  # type: ignore[assignment]
+        await app._reload_session()
+        await pilot.pause()
+
+        text = _transcript_text(app)
+        assert len(app.query_one(TranscriptView).blocks()) == 3
+        assert "first-session prompt" not in text, text
+        assert "first-session answer" not in text, text
+        for line in ("second-session prompt", "second-session answer", "second-session follow-up"):
+            assert line in text, text
+
+        # And the failure path clears too: a swap that lands on nothing must
+        # not leave the previous conversation standing under the error.
+        async def broken_factory():
+            raise RuntimeError("factory exploded")
+
+        app._session_factory = broken_factory  # type: ignore[assignment]
+        await app._reload_session()
+        await pilot.pause()
+
+        after = _transcript_text(app)
+        assert "second-session prompt" not in after, after
+        assert "factory exploded" in after, after
+        assert app.query_one(WelcomeView).display is True
+
+
+@pytest.mark.asyncio
 async def test_resume_long_history_opens_at_the_latest_turn(tmp_path, monkeypatch) -> None:
     """A replay batch settles with the resumed conversation's tail in view."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))

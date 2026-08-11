@@ -550,6 +550,25 @@ class OperatorApp(App[None]):
         # an update for a running tool land on a row that had not started.
         self._composing_cards: dict[str, ToolCard] = {}
         self._welcome: WelcomeView | None = None
+        #: The empty state as it is CURRENTLY APPLIED to the screen, or `None`
+        #: before the first resolution. Held so `_set_welcome_visible` can drop
+        #: the calls that ask for the state already on screen — a 396-message
+        #: replay asks for "hidden" once per block, and each one re-measured the
+        #: whole boot composition for a splash that went away at block one.
+        self._welcome_visible: bool | None = None
+        #: Set while a session SWAP is replacing the ledger, and read by
+        #: `_set_welcome_visible`. The splash is the transcript's empty state,
+        #: and mid-swap the transcript is empty only because the replacement's
+        #: blocks have not been mounted yet — which is not the same fact. Left
+        #: unguarded the user watched conversation A give way to the centred
+        #: logo and then to conversation B. Only the SHOW is deferred: hiding
+        #: the splash is never wrong, and a swap out of an empty session has to
+        #: hide it before the replacement's first block mounts under it.
+        self._swapping_session = False
+        #: A show `_set_welcome_visible` withheld during a swap. Applied by
+        #: `_reload_session` once the answer is settled, which is what still
+        #: puts the splash up for a swap onto a genuinely empty session.
+        self._welcome_pending = False
         # Whatever held focus when the usage panel opened, so closing it returns
         # the user to the composer they were typing in rather than to nothing.
         # The approval card follows the same discipline for the same reason.
@@ -818,18 +837,36 @@ class OperatorApp(App[None]):
 
         await asyncio.to_thread(warm_session_imports)
 
-    async def _boot_session(self) -> None:
-        """Await the session factory; on failure surface + offer /reload."""
-        try:
-            # Inside the guard, not ahead of it. `warm_session_imports` itself
-            # never raises, but the import that reaches it and the thread hop
-            # around it can, and anything that escapes this worker leaves the
-            # user with a splash and no explanation.
-            await self._warm_session_imports()
-            session = await self._session_factory()
-        except Exception as error:  # TUI-012: construction error path
-            self._on_boot_failed(error)
-            return
+    async def _construct_session(self) -> Any:
+        """Warm the factory's imports and await it. RAISES; adopts nothing.
+
+        Split from :meth:`_adopt_session` because the two halves want to happen
+        at different moments on the two paths through here. On a cold boot they
+        are one step. On a session SWAP the construction is the slow half —
+        hundreds of milliseconds of factory — and the screen must go on showing
+        the conversation being replaced for the whole of it, so the ledger is
+        not torn down until this has returned and the replacement can be
+        painted in the same breath.
+        """
+        # Inside the caller's guard, not ahead of it. `warm_session_imports`
+        # itself never raises, but the import that reaches it and the thread hop
+        # around it can, and anything that escapes the boot worker leaves the
+        # user with a splash and no explanation.
+        await self._warm_session_imports()
+        return await self._session_factory()
+
+    def _adopt_session(self, session: Any) -> None:
+        """Take ``session`` as the app's, and put its history on screen.
+
+        SYNCHRONOUS end to end, and that is load-bearing rather than incidental:
+        on the swap path the caller clears the old ledger immediately before
+        calling this, and the two are one frame only for as long as nothing here
+        yields to the event loop. An ``await`` added between the clear and
+        :meth:`_render_resumed_history` is an empty transcript the compositor
+        gets to paint, and an empty transcript is the boot splash's whole
+        precondition. Anything genuinely slow belongs in a worker, the way
+        :meth:`_measure_preloaded_context` already puts its measurement in one.
+        """
         self._session = session
         # Before the band is painted below: the freshly built spec carries the
         # MODEL's default effort, and a `/reload` or `/new` that dropped the
@@ -859,6 +896,15 @@ class OperatorApp(App[None]):
         self._report_mcp_startup(session)
         self._render_resumed_history(session)
         self._measure_preloaded_context(session)
+
+    async def _boot_session(self) -> None:
+        """Await the session factory; on failure surface + offer /reload."""
+        try:
+            session = await self._construct_session()
+        except Exception as error:  # TUI-012: construction error path
+            self._on_boot_failed(error)
+            return
+        self._adopt_session(session)
 
     def _measure_preloaded_context(self, session: Any) -> None:
         """Fill the context segment before the first turn, off the boot path.
@@ -963,45 +1009,52 @@ class OperatorApp(App[None]):
                     results[call_id] = message
 
         appended = False
-        for message in history:
-            role = getattr(message, "role", None)
-            if role == "tool":
-                continue  # already rendered beside the call that asked for it
-            text = getattr(message, "text", "") or ""
-            text = text.strip() if isinstance(text, str) else ""
-            if role == "user":
+        transcript = self._transcript_view()
+        # ONE mount for the whole conversation. Per-block mounting made Textual
+        # re-walk its stylesheet, invalidate the container and schedule a settle
+        # callback 297 times over on a 396-message session, for a layout that is
+        # only looked at once — see `TranscriptView.batch_append`.
+        with transcript.batch_append():
+            for message in history:
+                role = getattr(message, "role", None)
+                if role == "tool":
+                    continue  # already rendered beside the call that asked for it
+                text = getattr(message, "text", "") or ""
+                text = text.strip() if isinstance(text, str) else ""
+                if role == "user":
+                    if text:
+                        self._append_block(UserBlock(text))
+                        appended = True
+                    continue
+                if role != "assistant":
+                    continue
                 if text:
-                    self._append_block(UserBlock(text))
+                    block = AssistantBlock()
+                    block.update_text(text)
+                    block.finalize_text()
+                    self._append_block(block)
                     appended = True
-                continue
-            if role != "assistant":
-                continue
-            if text:
-                block = AssistantBlock()
-                block.update_text(text)
-                block.finalize_text()
-                self._append_block(block)
-                appended = True
-            tool_calls = getattr(message, "tool_calls", None) or []
-            for call in tool_calls:
-                self._replay_tool_call(call, results)
-                appended = True
-            if not text and not tool_calls:
-                # An assistant message with neither prose nor a call is a turn
-                # that FAILED. Skipping it is what left a resumed session
-                # showing a prompt and nothing after it, with no hint that the
-                # answer had errored rather than never been asked for.
-                if getattr(message, "stop_reason", None) in ("error", "aborted"):
-                    reason = "turn failed" if message.stop_reason == "error" else "interrupted"
-                    self._append_block(NoticeBlock(reason, "error"))
+                tool_calls = getattr(message, "tool_calls", None) or []
+                for call in tool_calls:
+                    self._replay_tool_call(call, results)
                     appended = True
+                if not text and not tool_calls:
+                    # An assistant message with neither prose nor a call is a
+                    # turn that FAILED. Skipping it is what left a resumed
+                    # session showing a prompt and nothing after it, with no
+                    # hint that the answer had errored rather than never been
+                    # asked for.
+                    if getattr(message, "stop_reason", None) in ("error", "aborted"):
+                        reason = "turn failed" if message.stop_reason == "error" else "interrupted"
+                        self._append_block(NoticeBlock(reason, "error"))
+                        appended = True
         if appended:
             # Replay is mounted as one synchronous batch, before Textual can
             # remeasure the growing container between blocks. Land the reader on
             # the latest turn and ARM the anchor there, so the first thing the
             # resumed session streams carries them with it rather than growing
             # off the bottom of a viewport pinned to the replay's last frame.
-            self._transcript_view().follow_tail()
+            transcript.follow_tail()
 
     def _replay_tool_call(self, call: Any, results: dict[str, Any]) -> None:
         """Mount one settled tool row for a call from a previous session.
@@ -1170,6 +1223,61 @@ class OperatorApp(App[None]):
             # newer than the prompt we are handing back.
             if not editor.text.strip():
                 editor.load_text(held)
+        # Build the replacement BEFORE tearing the ledger down, and paint the
+        # substitution in ONE frame. The clear used to happen here, ahead of
+        # `await self._boot_session()`, and the factory is the slow half of a
+        # swap — so the compositor spent the whole of it painting an empty
+        # transcript, which is the boot splash's entire precondition. What the
+        # user reported is exactly that: conversation A, the centred logo, then
+        # conversation B. `_construct_session` adopts nothing and `_adopt_session`
+        # never yields, so from here the old blocks stay up until the new ones
+        # can go up with them in the same refresh.
+        #
+        # `_swapping_session` closes the same hazard from the other side.
+        # `clear_blocks` still fires the empty-state hook a line below, and the
+        # flag is what stops that hook resolving a splash for a transcript that
+        # is empty only between two statements. The ordering removes the window;
+        # the flag removes the transition through the state. Both, because
+        # either alone leaves the bug reachable — an `await` added inside the
+        # adopt would bring the window back, and a reader who removes the flag
+        # gets a splash on any frame that manages to land in the gap.
+        self._swapping_session = True
+        try:
+            try:
+                session = await self._construct_session()
+            except Exception as error:  # TUI-012: construction error path
+                # The clear happens on the failure path too, and this is the
+                # discipline it protects: the ledger is only ever as old as the
+                # session on screen, so a swap that lands on nothing must not
+                # leave the previous conversation standing under an error that
+                # says there is no session at all.
+                carried_spend = self._reset_ledger_for_swap()
+                self._on_boot_failed(error)
+            else:
+                carried_spend = self._reset_ledger_for_swap()
+                self._adopt_session(session)
+        finally:
+            self._swapping_session = False
+            if self._welcome_pending:
+                # Nothing the replacement had to show retired it, so the swap
+                # really did land on an empty app — `/new`, or a boot that
+                # failed. One transition, at the end, instead of one through the
+                # middle.
+                self._set_welcome_visible(True)
+        self._reconcile_reload(previous_id, previous_len, carried_spend, keep_context=keep_context)
+
+    def _reset_ledger_for_swap(self) -> tuple[float, dict[str, float]]:
+        """Clear the transcript and the session-scoped band, for a swap.
+
+        Returns the spend totals it just zeroed, for `_reconcile_reload` to put
+        back if the reload turns out to have landed on the conversation that was
+        already open.
+
+        Split out of :meth:`_reload_session` so the success and failure paths
+        can share it and so the whole of it sits between `_construct_session`
+        and `_adopt_session` with no await in it — see the ordering argument at
+        the call site.
+        """
         # Unconditional, and this is the whole discipline: the ledger is only
         # ever as old as the session on screen. Clearing after controller
         # detachment keeps old-session events out of the replacement
@@ -1196,7 +1304,7 @@ class OperatorApp(App[None]):
         self._subagent_costs.clear()
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
-        # more. _boot_session repaints it from the new session's manager.
+        # more. `_adopt_session` repaints it from the new session's manager.
         #
         # The context reading goes with them, and for a sharper reason than
         # tidiness: an exact ``prompt_tokens`` left standing is what the
@@ -1221,8 +1329,7 @@ class OperatorApp(App[None]):
             # first turn ended.
             cost="",
         )
-        await self._boot_session()
-        self._reconcile_reload(previous_id, previous_len, carried_spend, keep_context=keep_context)
+        return carried_spend
 
     def _conversation_id(self) -> str:
         """Which conversation is open, or "" when none is."""
@@ -2418,7 +2525,30 @@ class OperatorApp(App[None]):
         size is known, and resolves nothing; the resize that follows it does the
         work, and still does it before the first arrange. On ``/clear`` the size
         is known and this call is the one that re-centres.
+
+        Two things this refuses to do, both measured on a real 396-message
+        session swap. It does not re-apply the state already on screen: the
+        replay asks for "hidden" once per mounted block, and 296 of those 297
+        calls re-resolved the whole boot composition — the card width, the dock
+        height, the splash's spare rows — for a splash that had been gone since
+        the first one. And it does not SHOW the splash while a swap is in flight
+        (`_swapping_session`), because between the clear and the replay "the
+        transcript has no content" is true of a screen that is mid-substitution,
+        not of an app with nothing to show — that transition is the centred logo
+        the user saw between two conversations. The withheld show is remembered
+        and `_reload_session` applies it once the answer is settled, so a swap
+        onto an EMPTY session — what ``/new`` is — still lands on the splash.
+        The HIDE is never deferred: it is never wrong, and a swap OUT of an
+        empty session has to retire the splash before the replacement's first
+        block mounts underneath it.
         """
+        if visible and self._swapping_session:
+            self._welcome_pending = True
+            return
+        self._welcome_pending = False
+        if visible == self._welcome_visible:
+            return
+        self._welcome_visible = visible
         if self._welcome is not None:
             self._welcome.set_visible(visible)
         self.screen.set_class(visible, BOOT_LAYOUT_CLASS)
