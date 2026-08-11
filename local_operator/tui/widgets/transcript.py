@@ -847,9 +847,11 @@ class WorkingBlock(TranscriptBlock):
     #: Cells reserved for the clock, CONSTANT so the label's clip point does not
     #: move as the number grows: an unreserved clock re-clipped the label at 10s,
     #: at 1m40s and at the hour, creeping the text leftward under the eye. Two
-    #: spaces plus the five the tool ledger gives its own duration column
-    #: (``tool_card.DURATION_COL``), inlined because that module imports this one.
-    _CLOCK_COL = 7
+    #: spaces plus the six the tool ledger gives its own duration column
+    #: (``tool_card.DURATION_COL``), inlined because that module imports this one
+    #: — and pinned to it by ``test_the_clock_column_fits_the_widest_duration``,
+    #: because the two constants are one decision written in two places.
+    _CLOCK_COL = 8
 
     def __init__(self, activity: str = DEFAULT_ACTIVITY, phase: str = DEFAULT_ACTIVITY) -> None:
         super().__init__()

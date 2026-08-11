@@ -34,6 +34,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 
 from local_operator.harness.types import (
     ToolCallComposeEvent,
@@ -55,8 +56,10 @@ from local_operator.tui.events import (
     TurnEnded,
     TurnStarted,
 )
+from local_operator.tui.widgets.tool_card import format_duration, truncate_cells
 from local_operator.tui.widgets.transcript import (
     DEFAULT_ACTIVITY,
+    SPINE_INDENT,
     NoticeBlock,
     TranscriptView,
     WorkingBlock,
@@ -278,6 +281,41 @@ async def test_the_clock_survives_a_label_change_within_one_phase() -> None:
         await pilot.pause(0.1)
         assert _activity(app) == DEFAULT_ACTIVITY
         assert line._phase_started > started
+
+
+@pytest.mark.asyncio
+async def test_the_line_holds_one_row_once_the_clock_needs_six_cells() -> None:
+    """The row reserves cells for the clock instead of measuring it, so the
+    reservation has to fit the widest clock the formatter can return.
+
+    It reserved five — the width of every duration anyone had watched — and
+    ``format_duration`` returns six from ``10m10s`` up to ``59m59s``. The
+    composed line then came out one cell over the terminal, and because the
+    label is model-supplied prose the wrap broke at the word boundary AHEAD of
+    the number: the row spent an extra row to show everything EXCEPT the clock,
+    for fifty of every sixty seconds past ten minutes. The one fact the row's
+    own docstring says nothing else on screen carries.
+
+    Latent, too. The overflow only showed at widths where the truncated label
+    did not happen to end on a space — ``rstrip()`` inside ``truncate_cells``
+    was silently absorbing the extra cell at 60, 80 and 200 columns while 120
+    wrapped. Swept across widths here for exactly that reason.
+
+    ``layout=False`` on this row now rests on this invariant: the block tells
+    the transcript it is one row and repaints without a layout pass, so a row
+    that wraps paints outside its own box rather than merely looking wrong.
+    """
+    for seconds in (5, 65, 610, 3599, 7200):
+        clock = format_duration(seconds)
+        for width in (60, 80, 120, 200):
+            block = WorkingBlock("running a tool with a long model-supplied label " * 3)
+            block._clock = clock
+            head = f"{block._SPINNER[0]} "
+            room = max(width - SPINE_INDENT - cell_len(head) - block._CLOCK_COL, 8)
+            composed = (
+                " " * SPINE_INDENT + head + truncate_cells(block._activity, room) + f"  {clock}"
+            )
+            assert cell_len(composed) <= width, (clock, width, composed)
 
 
 @pytest.mark.asyncio

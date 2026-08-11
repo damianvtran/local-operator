@@ -849,9 +849,22 @@ ApprovalBlock:focus {
  * 120x40 with a todo list up, 2 blank rows between the conversation's last row
  * and the band's slab against 1 everywhere else in the stack, which is the
  * widest interval on screen and reads as the band having come loose. Downward,
- * every join between the column's own STACKED children is one row from exactly
- * one owner: the transcript's trailing row above the band, this row between two
- * visible panels, and this row again above the composer.
+ * each join between the column's own STACKED children is one row: the
+ * transcript's trailing row above the band, and this row between two visible
+ * panels.
+ *
+ * The join above the COMPOSER is the exception, and it has two owners: the last
+ * visible slot's row here, plus `#input-shell`'s own `padding: 1`. Measured at
+ * 60/80/100/120/160 it is two rows docked against one undocked (design round
+ * 13, D1-13). Both are surface, so it reads as a slightly deeper gutter rather
+ * than a seam, which is why it survived twelve rounds unnoticed — but it is one
+ * row more than this comment used to claim. Not fixed here because the obvious
+ * spellings do not work: hidden panels keep their place in the DOM
+ * (`self.display = False`), so `:last-of-type` targets the wrong slot whenever
+ * the subagent panel is down, and dropping the shell's top padding moves the
+ * defect to the undocked case. The honest fix belongs in the container that
+ * owns this rhythm — `#band` toggling a class onto its last DISPLAYED slot —
+ * and is deliberately left out of the release that fixed the fill.
  *
  * What that last row IS changed with the fill rule on `#band`; the geometry did
  * not. It is the dock's own `$lo-surface` now, so band and composer read as one
