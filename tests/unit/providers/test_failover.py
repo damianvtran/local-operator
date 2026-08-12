@@ -234,8 +234,16 @@ def test_invalid_structured_effort_is_not_silently_dropped(caplog) -> None:
     )
     messages = " ".join(r.getMessage() for r in caplog.records)
     assert "turbo" in messages and "openai/gpt-5" in messages
-    # The message has to be actionable: name the vocabulary, not just the typo.
-    assert "medium" in messages
+    # The message has to be actionable: name the vocabulary, not just the typo,
+    # and name it as the LADDER it is - `sorted()` puts `max` between `low` and
+    # `medium`, which reads as noise to anyone who knows the scale from
+    # `/effort` (design round 28).
+    assert "minimal, low, medium, high, xhigh, max" in messages
+    # And the claim must be true: `none` IS an effort - `/effort` offers it -
+    # it is just not a fallback hop. Copy that overreaches sends the reader to
+    # check the wrong thing.
+    assert "is not an effort" not in messages
+    assert "is not a fallback effort" in messages
     assert settings.fallback_chains["anthropic/claude"]
 
 

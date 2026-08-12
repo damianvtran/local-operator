@@ -33,7 +33,7 @@ from local_operator.harness.types import (
     RenderedStreamError,
     StreamEvent,
 )
-from local_operator.model.effort import resolve_effort
+from local_operator.model.effort import EFFORT_ORDER, resolve_effort
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess
@@ -597,6 +597,15 @@ logger = logging.getLogger("local_operator.providers.failover")
 DEFAULT_CHAIN_KEY = "default"
 SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
 
+#: The same vocabulary as an ordinal ladder, for anything a person READS.
+#: ``sorted()`` puts ``max`` between ``low`` and ``medium`` and sits ``minimal``
+#: next to it - the two opposite ends of the scale, adjacent - which reads as
+#: noise to someone who already knows the ladder from ``/effort`` (design round
+#: 28). ``none`` is deliberately absent: it is a real effort everywhere else,
+#: but a chain hop exists to retry at a DIFFERENT level, and "no reasoning" is
+#: a property of the model, not a rung to fall back to.
+CHAIN_EFFORT_LADDER = tuple(e for e in EFFORT_ORDER if e in SUPPORTED_EFFORTS)
+
 
 @dataclasses.dataclass(frozen=True)
 class FallbackTarget:
@@ -792,13 +801,13 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
                 return f"{provider}/{model}"
             if str(raw_effort).strip().lower() not in SUPPORTED_EFFORTS:
                 logger.warning(
-                    "retry.fallbackChains[%s]: dropping entry %s/%s - %r is not an effort;"
-                    " expected one of %s",
+                    "retry.fallbackChains[%s]: dropping entry %s/%s - %r is not a fallback"
+                    " effort; expected one of %s",
                     chain_key,
                     provider,
                     model,
                     raw_effort,
-                    ", ".join(sorted(SUPPORTED_EFFORTS)),
+                    ", ".join(CHAIN_EFFORT_LADDER),
                 )
             return {"provider": provider, "model": model, "effort": raw_effort}
     return None

@@ -41,17 +41,21 @@ Standing user preferences — commit conventions, review gates, where projects l
 
 That single file is what the desktop UI's Settings → **Instructions** box edits and what `GET`/`PATCH /v1/config/system-prompt` reads and writes, so the CLI, TUI, server, and desktop app all share one definition of "custom instructions". There is no `AGENTS.md` mechanism and no `custom_instructions` key in `config.yml`; writing either does nothing.
 
-To install or update them, write the file directly:
+To install or update them, write the file directly. The commands below resolve
+the root by the rule at the top of this guide, so they stay correct under
+`LOCAL_OPERATOR_CONFIG_DIR` — a literal `~/.local-operator` would write a file
+no surface reads once that variable is set:
 
 ```bash
-mkdir -p ~/.local-operator
-$EDITOR ~/.local-operator/system_prompt.md
+CONFIG_ROOT="${LOCAL_OPERATOR_CONFIG_DIR:-$HOME/.local-operator}"
+mkdir -p "$CONFIG_ROOT"
+$EDITOR "$CONFIG_ROOT/system_prompt.md"
 ```
 
 Copying instructions in from another agent harness is a plain file copy — the format is just markdown, most commonly a bulleted list of standing rules:
 
 ```bash
-cp ~/.some-other-agent/AGENTS.md ~/.local-operator/system_prompt.md
+cp ~/.some-other-agent/AGENTS.md "$CONFIG_ROOT/system_prompt.md"
 ```
 
 How the content is used:
