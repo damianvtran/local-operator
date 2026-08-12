@@ -210,14 +210,52 @@ def test_structured_fallback_entry_carries_effort() -> None:
     assert spec.reasoning_effort == "high"
 
 
-def test_invalid_structured_effort_is_not_silently_dropped() -> None:
-    assert (
-        expand_fallback_targets(
-            "anthropic/claude",
-            [{"provider": "openai", "model": "gpt-5", "effort": "turbo"}],
+def test_invalid_structured_effort_is_not_silently_dropped(caplog) -> None:
+    """The name is the assertion: dropped, and NOT silently.
+
+    The entry really is discarded - an effort outside the vocabulary is not a
+    routing decision this can honour. But a typo deleting a whole fallback hop
+    with nothing in the log is how an operator ends up with no failover during
+    an outage and no way to trace it to their YAML (review round 29). This
+    previously asserted only the `== []`, which the silence also satisfied.
+    """
+    chain = [{"provider": "openai", "model": "gpt-5", "effort": "turbo"}]
+    with caplog.at_level("WARNING"):
+        settings = RetrySettings.from_settings(
+            {"retry": {"fallbackChains": {"anthropic/claude": chain}}}
         )
-        == []
-    )
+
+    assert expand_fallback_targets("anthropic/claude", chain) == []
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "turbo" in messages and "openai/gpt-5" in messages
+    # The message has to be actionable: name the vocabulary, not just the typo.
+    assert "medium" in messages
+    assert settings.fallback_chains["anthropic/claude"]
+
+
+def test_effort_survives_an_unknown_sibling_key(caplog) -> None:
+    """`effort` is honoured, so an unrelated `note:` must not cost the user
+    their routing - and the warning must not list `effort` among the keys it
+    is ignoring while claiming in the same breath that effort is supported.
+
+    Both halves are asserted. The routing is the damage; the self-contradicting
+    sentence is what would send the reader looking in the wrong place for it.
+    """
+    chain = [{"provider": "openai", "model": "gpt-5", "effort": "low", "note": "cheap hop"}]
+    with caplog.at_level("WARNING"):
+        RetrySettings.from_settings({"retry": {"fallbackChains": {"anthropic/claude": chain}}})
+
+    assert [(t.selector, t.effort) for t in expand_fallback_targets("anthropic/claude", chain)] == [
+        ("openai/gpt-5", "low")
+    ]
+
+    ignored = [
+        r.getMessage() for r in caplog.records if "ignoring unsupported key" in r.getMessage()
+    ]
+    assert len(ignored) == 1 and "note" in ignored[0]
+    # The sentence claims effort is honoured; it must not also list it as ignored.
+    key_list = ignored[0].split("key(s) ", 1)[1].split(" on entry", 1)[0]
+    assert "effort" not in key_list
 
 
 def test_retry_settings_from_config() -> None:

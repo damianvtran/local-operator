@@ -746,9 +746,17 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
       meant;
     - a mapping that ALSO carries ``effort`` - the "retry cheaper on failure"
       form - is a real routing decision the chain's (selector, effort) shape
-      now supports, so it is passed through untouched for :func:`_fallback_target`
-      to validate. Flattening it to a selector would silently discard the one
-      key that makes the entry mean something different.
+      now supports, so the effort is carried on a cleaned mapping. Flattening
+      it to a selector would silently discard the one key that makes the entry
+      mean something different.
+
+    The effort's VALUE is checked here too, even though :func:`_fallback_target`
+    is what ultimately rejects it. That function returns ``None`` for an
+    unreadable target and cannot say why, so a single typo used to delete a
+    whole fallback hop in silence: the operator configured failover, got none
+    during an outage, and nothing connected it to the YAML (review round 29).
+    Config is read once; a turn walks the chain constantly - so the diagnostic
+    belongs here, where it is emitted once and names the file's own vocabulary.
 
     ``None`` means "not something this can turn into an entry"; the caller
     warns and drops it rather than letting it reach the wire.
@@ -759,9 +767,10 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
         provider = str(entry.get("provider", "") or "").strip()
         model = str(entry.get("model", entry.get("model_id", "")) or "").strip()
         if provider and model:
-            extra = sorted(set(entry) - {"provider", "model", "model_id"})
-            if extra == ["effort"]:
-                return dict(entry)
+            # ``effort`` is honoured, so it is NOT an unsupported key - listing
+            # it here is what let the old warning claim, in one sentence, both
+            # that it was being ignored and that it was supported (R29-2).
+            extra = sorted(set(entry) - {"provider", "model", "model_id", "effort"})
             if extra:
                 # Named rather than swallowed: a chain entry that silently
                 # drops half of what the user wrote is the next bug report.
@@ -773,7 +782,20 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
                     provider,
                     model,
                 )
-            return f"{provider}/{model}"
+            raw_effort = entry.get("effort")
+            if raw_effort is None:
+                return f"{provider}/{model}"
+            if str(raw_effort).strip().lower() not in SUPPORTED_EFFORTS:
+                logger.warning(
+                    "retry.fallbackChains[%s]: dropping entry %s/%s - %r is not an effort;"
+                    " expected one of %s",
+                    chain_key,
+                    provider,
+                    model,
+                    raw_effort,
+                    ", ".join(sorted(SUPPORTED_EFFORTS)),
+                )
+            return {"provider": provider, "model": model, "effort": raw_effort}
     return None
 
 
