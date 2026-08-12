@@ -23,6 +23,7 @@ from local_operator.harness.types import (
     ImageContent,
     Message,
     ModelSpec,
+    NoticeEvent,
     StreamEndEvent,
     StreamEvent,
     StreamTextDelta,
@@ -62,6 +63,21 @@ class ScriptedStream:
                 yield event
 
         return gen()
+
+
+class PreflightStream(ScriptedStream):
+    def __init__(self) -> None:
+        super().__init__([[StreamEndEvent(stop_reason="stop")]])
+        self.notice_handler = None
+        self.preflight_models: list[ModelSpec] = []
+
+    def set_notice_handler(self, handler) -> None:
+        self.notice_handler = handler
+
+    async def preflight_usage(self, model: ModelSpec) -> None:
+        self.preflight_models.append(model)
+        assert self.notice_handler is not None
+        await self.notice_handler("anthropic quota low — falling back to openai", "warning")
 
 
 def echo_tool(executed: list[str], delay: float = 0.0, name: str = "echo") -> AgentTool:
@@ -131,6 +147,22 @@ async def test_prompt_full_turn_events_and_persistence(tmp_path):
     # System blocks reached the provider.
     assert stream.requests[0].system_blocks == ["stable", "env"]
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_usage_preflight_warns_without_starting_model_turn(tmp_path):
+    stream = PreflightStream()
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    await session.preflight_usage()
+
+    assert stream.preflight_models == [MODEL]
+    assert stream.requests == []
+    assert [event.type for event in events] == ["notice"]
+    assert isinstance(events[0], NoticeEvent)
+    assert events[0].text == "anthropic quota low — falling back to openai"
 
 
 @pytest.mark.asyncio

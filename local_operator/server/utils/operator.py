@@ -527,8 +527,8 @@ class ServerExecutor:
             self.config_manager.get_config().values if self.config_manager is not None else None
         )
         auth_store = AuthStore(credential_manager=self.credential_manager)
+        stream_fn = create_stream_fn(auth_store, settings=settings)
         try:
-            stream_fn = create_stream_fn(auth_store, settings=settings)
             request = ChatRequest(
                 model=self.model_configuration.spec,
                 system_blocks=system_blocks,
@@ -551,6 +551,10 @@ class ServerExecutor:
                     raise RuntimeError(event.error)
             return ModelResponse("".join(chunks))
         finally:
+            try:
+                await stream_fn.close()
+            except Exception:  # noqa: BLE001 — teardown must not mask the completion
+                logger.debug("stream client close failed", exc_info=True)
             try:
                 auth_store.close()
             except Exception:  # noqa: BLE001 — teardown must not mask errors

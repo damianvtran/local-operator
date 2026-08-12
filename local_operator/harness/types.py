@@ -430,6 +430,15 @@ class ToolContext(BaseModel):
     # single values on demand. ``None`` degrades those tools to the process
     # environment only.
     variables: VariableStoreProtocol | None = None
+    # Startup snapshot used only by the web_search createIf gate. Execution
+    # re-reads config so provider toggles apply to the next call without
+    # rebuilding the session; the master on/off switch removes the advertised
+    # tool on reload.
+    web_search_settings: dict[str, Any] | None = None
+    # Session-owned capability tools that built-ins may delegate to. This is
+    # deliberately a mapping rather than a second MCP client: OAuth transports
+    # and reconnect state must remain owned by the one session MCP manager.
+    delegated_tools: dict[str, Any] = Field(default_factory=dict)
     # Wake scheduling. ``None`` means the host has no scheduler, and the wake
     # tool is then not advertised at all (createIf) rather than advertised and
     # always failing.
@@ -922,6 +931,9 @@ class ModelSpec(BaseModel):
     temperature: float = 0.2
     top_p: float = 0.9
     reasoning: bool = False
+    # Explicit provider reasoning level. Fallback routes may change providers,
+    # so the effort rides on the resolved spec rather than global session state.
+    reasoning_effort: str | None = None
     # Whether the model accepts ``temperature``/``top_p`` at all. Some families
     # (Anthropic's Claude 5 generation, OpenAI's reasoning models) reject the
     # parameters outright with HTTP 400, so the defaults above are unsendable

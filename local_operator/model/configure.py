@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import inspect
 import logging
 import os
 import re
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import BaseModel, SecretStr
@@ -1397,14 +1398,17 @@ def configure_model(
 
 
 class SessionStreamFn:
-    """The ``LoopConfig.stream_fn`` for one session, plus the pool it owns.
+    """One session's shared client pool and stateful failover router.
 
-    One ``httpx.AsyncClient`` per session: every wire client shares it, and
-    :meth:`close` releases the connection pool on session dispose — a fresh
-    client per LLM round trip leaked one pool per turn for the process
-    lifetime. ``close`` lives on the callable (rather than being returned
-    alongside it) because the loop config carries nothing but the callable.
+    Hard fallback stays pinned for the rest of a user message, so tool loops,
+    compaction and naming do not re-send a warm prompt to a provider that just
+    rejected it. Optional usage preflight runs once at the message boundary,
+    rotates through same-provider OAuth accounts first, then selects the first
+    configured provider/model/effort route with working auth.
     """
+
+    USAGE_CHECK_TTL_S = 60.0
+    DEFAULT_USAGE_BLOCK_MS = 5 * 60 * 1000
 
     def __init__(
         self,
@@ -1414,21 +1418,260 @@ class SessionStreamFn:
     ) -> None:
         import httpx
 
+        from local_operator.providers.failover import FailoverRouteState
+
         self._auth_store = auth_store
         self._settings = settings
         self._session_id = session_id
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+        self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
+        self._route_state = FailoverRouteState(on_change=self._on_route_change)
+        self._message_boundary_pending = True
+        self._primary_selector: str | None = None
+        self._usage_checked_selector: str | None = None
+        self._usage_checked_at = 0.0
 
     def _client_for(self, spec: ModelSpec) -> WireClient:
         from local_operator.providers.clients import client_for_spec
 
         return client_for_spec(spec, http_client=self._http)
 
+    def set_notice_handler(
+        self, handler: Callable[[str, str], Awaitable[None] | None] | None
+    ) -> None:
+        """Install the owning session's event bridge."""
+        self._notice_handler = handler
+
+    def begin_message(self) -> None:
+        """Mark the next model call as a user-message boundary."""
+        self._message_boundary_pending = True
+
+    async def _notice(self, text: str, kind: str = "warning") -> None:
+        if self._notice_handler is None:
+            return
+        result = self._notice_handler(text, kind)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _on_route_change(self, target: Any, reason: str) -> None:
+        effort = f" ({target.effort} effort)" if target.effort else ""
+        await self._notice(f"{reason} — falling back to {target.selector}{effort}")
+
+    def _fallback_targets(self, model: ModelSpec) -> list[Any]:
+        from local_operator.providers.failover import (
+            RetrySettings,
+            expand_fallback_targets,
+            resolve_chain,
+        )
+
+        retry = RetrySettings.from_settings(self._settings)
+        if not retry.enabled or not retry.model_fallback:
+            return []
+        selector = f"{model.provider}/{model.model_id}"
+        chain = resolve_chain(selector, retry.fallback_chains)
+        return expand_fallback_targets(selector, chain or [])
+
+    async def _target_has_auth(self, target: Any) -> bool:
+        from local_operator.providers.failover import parse_selector
+        from local_operator.providers.registry import get_provider_definition
+
+        provider, _model_id = parse_selector(target.selector)
+        definition = get_provider_definition(provider)
+        if definition is not None and definition.allows_missing_api_key:
+            return True
+        try:
+            return bool(await self._auth_store.get_api_key(provider, self._session_id))
+        except Exception:
+            return False
+
+    async def _first_available_fallback(
+        self,
+        model: ModelSpec,
+        *,
+        different_provider: bool = False,
+    ) -> Any | None:
+        from local_operator.providers.failover import parse_selector
+
+        for target in self._fallback_targets(model):
+            provider, _model_id = parse_selector(target.selector)
+            if different_provider and provider == model.provider:
+                continue
+            if await self._target_has_auth(target):
+                return target
+        return None
+
+    @staticmethod
+    def _storage_provider(provider: str) -> str:
+        from local_operator.providers.registry import get_provider_definition
+
+        definition = get_provider_definition(provider)
+        return definition.store_credentials_as or provider if definition is not None else provider
+
+    async def _primary_has_auth(self, model: ModelSpec) -> bool:
+        from local_operator.providers.failover import FallbackTarget
+
+        return await self._target_has_auth(
+            FallbackTarget(f"{model.provider}/{model.model_id}", model.reasoning_effort)
+        )
+
+    async def preflight_usage(self, model: ModelSpec) -> None:
+        """Check reliable OAuth quota once per user-message boundary.
+
+        Unknown/unreachable usage fails open. A low account is suppressed only
+        when a sibling or configured fallback is ready, so preflight can never
+        turn usable reserve capacity into a dead end.
+        """
+        from local_operator.providers.failover import RetrySettings, parse_selector
+
+        selector = f"{model.provider}/{model.model_id}"
+
+        if selector != self._primary_selector:
+            self._primary_selector = selector
+            self._route_state.clear()
+            self._usage_checked_at = 0.0
+        if not self._message_boundary_pending:
+            return
+        self._message_boundary_pending = False
+
+        now = time.monotonic()
+        if (
+            selector == self._usage_checked_selector
+            and now - self._usage_checked_at < self.USAGE_CHECK_TTL_S
+        ):
+            return
+        self._usage_checked_selector = selector
+        self._usage_checked_at = now
+
+        retry = RetrySettings.from_settings(self._settings)
+        if self._route_state.active is not None and not self._route_state.primary_retry_due():
+            return
+        if not retry.usage_aware_fallback:
+            if self._route_state.active is not None and await self._primary_has_auth(model):
+                self._route_state.clear()
+            return
+
+        attempted_ids: set[int] = set()
+        while True:
+            try:
+                access = await self._auth_store.get_oauth_access(model.provider, self._session_id)
+            except Exception:
+                return
+            if access is None:
+                storage = self._storage_provider(model.provider)
+                rows = self._auth_store.list_credentials(storage)
+                if rows and all(self._auth_store.is_blocked(row.id, storage) for row in rows):
+                    fallback = await self._first_available_fallback(
+                        model,
+                        different_provider=True,
+                    )
+                    if fallback is not None:
+                        await self._route_state.activate(
+                            fallback,
+                            f"{model.provider} credentials temporarily unavailable",
+                        )
+                return
+            if access.kind != "oauth" or access.credential_id in attempted_ids:
+                return
+            attempted_ids.add(access.credential_id)
+
+            from local_operator.providers.usage import fetch_usage, usage_health
+
+            report = await fetch_usage(
+                self._http,
+                model.provider,
+                access_token=access.access_token,
+                account_id=access.account_id,
+            )
+            if report is None:
+                return
+            health = usage_health(
+                report,
+                model.model_id,
+                reserve_percent=retry.usage_reserve_percent,
+            )
+            if health.state == "healthy":
+                self._route_state.clear()
+                return
+            if health.state == "unknown":
+                return
+
+            remaining = (
+                ""
+                if health.remaining_fraction is None
+                else f" ({health.remaining_fraction * 100:.0f}% remaining)"
+            )
+            condition = "quota exhausted" if health.state == "depleted" else "quota low"
+            if health.scope != "account":
+                fallback = await self._first_available_fallback(model)
+                if fallback is None:
+                    await self._notice(
+                        f"{model.provider} {condition}{remaining} for {model.model_id}; "
+                        "no configured model fallback is available"
+                    )
+                    return
+                await self._route_state.activate(
+                    fallback,
+                    f"{model.provider} {condition}{remaining} for {model.model_id}",
+                )
+                return
+
+            storage = self._storage_provider(model.provider)
+            row = self._auth_store.get_credential(access.credential_id)
+            siblings = [
+                candidate
+                for candidate in self._auth_store.list_credentials(storage)
+                if candidate.id != access.credential_id
+                and (row is None or candidate.credential_type == row.credential_type)
+                and not self._auth_store.is_blocked(candidate.id, storage)
+            ]
+            fallback = await self._first_available_fallback(
+                model,
+                # A different effort cannot revive a fully exhausted provider,
+                # but it can preserve reserve quota by reducing token spend.
+                different_provider=health.state == "depleted",
+            )
+            if not siblings and fallback is None:
+                await self._notice(
+                    f"{model.provider} {condition}{remaining}; no configured fallback is available"
+                )
+                return
+
+            block_ms = max(
+                60_000,
+                health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS,
+            )
+            if siblings:
+                self._auth_store.block_credential(
+                    access.credential_id,
+                    storage,
+                    block_ms=block_ms,
+                )
+                await self._notice(
+                    f"{model.provider} {condition}{remaining} — trying another "
+                    f"{model.provider} account before provider fallback"
+                )
+                continue
+
+            assert fallback is not None
+            fallback_provider, _model_id = parse_selector(fallback.selector)
+            if fallback_provider != model.provider:
+                self._auth_store.block_credential(
+                    access.credential_id,
+                    storage,
+                    block_ms=block_ms,
+                )
+            await self._route_state.activate(
+                fallback,
+                f"{model.provider} {condition}{remaining}",
+            )
+            return
+
     async def __call__(
         self, request: ChatRequest, signal: AbortSignal | None
     ) -> AsyncIterator[StreamEvent]:
         from local_operator.providers.failover import stream_with_failover
 
+        await self.preflight_usage(request.model)
         async for event in stream_with_failover(
             request,
             self._auth_store,
@@ -1436,6 +1679,7 @@ class SessionStreamFn:
             self._client_for,
             signal=signal,
             session_id=self._session_id,
+            route_state=self._route_state,
         ):
             yield event
 

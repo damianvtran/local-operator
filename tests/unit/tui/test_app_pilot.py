@@ -62,6 +62,8 @@ class FakeSession:
             reason="nothing_to_compact",
             detail="nothing to compact: the whole conversation is ~0 tokens",
         )
+        self.preflight_calls = 0
+        self.preflight_notice: str | None = None
 
     @property
     def session_id(self) -> str:
@@ -96,6 +98,11 @@ class FakeSession:
 
     async def seed_history(self, messages: list[Any]) -> None:
         pass
+
+    async def preflight_usage(self) -> None:
+        self.preflight_calls += 1
+        if self.preflight_notice is not None:
+            self.emit(NoticeEvent(text=self.preflight_notice, kind="warning"))
 
     async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
@@ -219,10 +226,29 @@ async def test_boot_typing_sends_prompt() -> None:
         await pilot.pause()
         await pilot.pause()
         assert session.prompts == ["hi"]
+        assert session.preflight_calls == 1
         # A user block was appended for the submitted prompt (the boot hint
         # is lifted by the first real block, D9).
         transcript = app.query_one(TranscriptView)
         assert len(transcript.blocks()) == 1
+
+
+@pytest.mark.asyncio
+async def test_boot_renders_non_blocking_quota_warning() -> None:
+    session = FakeSession()
+    session.preflight_notice = (
+        "anthropic quota exhausted — falling back to openai/gpt-5.3-codex (high effort)"
+    )
+    app = OperatorApp(lambda: _factory(session))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+
+        text = _transcript_text(app)
+        assert "anthropic quota exhausted" in text
+        assert "falling back to openai/gpt-5.3-codex (high effort)" in text
+        assert session.prompts == []
 
 
 @pytest.mark.asyncio

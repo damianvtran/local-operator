@@ -3941,15 +3941,17 @@ class JobsParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-#: Formatted status text shared by ``wait``'s settled return and the machine
-#: detail payload.
-def _job_summary(job: Any) -> str:
+#: Formatted status text shared by ``wait``'s settled return and its detail
+#: payload.  A child report can dwarf an ordinary tool result, so it uses the
+#: same bounded, lossless spill path as every other verbose tool.
+def _job_summary(job: Any, context: ToolContext | None = None) -> tuple[str, dict[str, Any] | None]:
+    """Return a context-bounded handoff while keeping the full report readable."""
     text = f"job {job.id} ({job.label}) [{job.status}]"
     if job.status == "completed" and job.result_text:
         text += f"\n{job.result_text}"
     if job.status == "failed" and job.error_text:
         text += f"\n{job.error_text}"
-    return text
+    return spill_truncate(text, "wait", context)
 
 
 @_guard("task")
@@ -4053,11 +4055,15 @@ async def execute_wait(
         job = jobs.get(params.job_id)
         if job is None:
             return _error(tool_call_id, "wait", f"job {params.job_id} disappeared")
+    text, spill_details = _job_summary(job, context)
+    details = {"job_id": job.id, "status": job.status}
+    if spill_details:
+        details.update(spill_details)
     return _text(
         tool_call_id,
         "wait",
-        _job_summary(job),
-        details={"job_id": job.id, "status": job.status},
+        text,
+        details=details,
     )
 
 

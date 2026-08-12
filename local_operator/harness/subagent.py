@@ -598,6 +598,7 @@ async def _build_child_session(
     factory is not reused, and for the full inherit/do-not-inherit list)."""
     from datetime import datetime
 
+    from local_operator.config import ConfigManager
     from local_operator.harness.types import ToolContext
     from local_operator.prompts_api import build_system_blocks
     from local_operator.session.session import Session
@@ -668,6 +669,7 @@ async def _build_child_session(
         request_approval=request_approval,
         resolve_internal_url=resolve_internal_url,
         subagent_comms=getattr(parent_session, "subagent_comms", None),
+        web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
     if mcp is not None:

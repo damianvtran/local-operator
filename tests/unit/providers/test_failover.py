@@ -7,6 +7,7 @@ import asyncio
 import random
 from collections.abc import AsyncIterator
 from http import HTTPStatus
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -19,15 +20,19 @@ from local_operator.harness.types import (
     StreamTextDelta,
 )
 from local_operator.model.configure import build_model_spec
+from local_operator.providers import failover as failover_module
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
     AuthRetryKeyState,
+    FailoverRouteState,
+    FallbackTarget,
     ProviderError,
     RetrySettings,
     backoff_delay_ms,
     classify_provider_error,
     expand_fallback_candidates,
     is_auth_error,
+    expand_fallback_targets,
     is_direct_credential_rotation_error,
     is_image_rejection,
     is_transient_error,
@@ -35,6 +40,7 @@ from local_operator.providers.failover import (
     resolve_chain,
     resolve_next_key,
     spec_for_selector,
+    spec_for_target,
     stream_with_failover,
     wrap_transport_error,
 )
@@ -185,6 +191,35 @@ def test_expand_candidates_never_emits_current_selector() -> None:
     assert candidates == ["anthropic/claude"]
 
 
+def test_structured_fallback_entry_carries_effort() -> None:
+    targets = expand_fallback_targets(
+        "anthropic/claude-opus-5",
+        [{"provider": "openai", "model": "gpt-5.3-codex", "effort": "high"}],
+    )
+    assert targets == [FallbackTarget("openai/gpt-5.3-codex", "high")]
+    spec = spec_for_target(
+        ModelSpec(
+            provider="anthropic",
+            model_id="claude-opus-5",
+            base_url="https://api.anthropic.com",
+        ),
+        targets[0],
+    )
+    assert spec.provider == "openai"
+    assert spec.base_url == "https://api.openai.com/v1"
+    assert spec.reasoning_effort == "high"
+
+
+def test_invalid_structured_effort_is_not_silently_dropped() -> None:
+    assert (
+        expand_fallback_targets(
+            "anthropic/claude",
+            [{"provider": "openai", "model": "gpt-5", "effort": "turbo"}],
+        )
+        == []
+    )
+
+
 def test_retry_settings_from_config() -> None:
     settings = RetrySettings.from_settings(
         {
@@ -201,6 +236,8 @@ def test_retry_settings_from_config() -> None:
     assert settings.base_delay_ms == 250
     assert settings.model_fallback is False
     assert settings.fallback_chains == {"default": ["a/b"]}
+    assert settings.usage_aware_fallback is False
+    assert settings.usage_reserve_percent == 10
     empty = RetrySettings.from_settings(None)
     assert empty.enabled and empty.max_retries == 10 and empty.base_delay_ms == 500
 
@@ -339,6 +376,125 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
     got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+
+
+async def test_fallback_chain_deduplicates_current_model_and_effort() -> None:
+    specs_seen: list[str] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}/{spec.reasoning_effort}")
+        if spec.provider == "openai":
+            return ScriptedClient(ProviderError(400, "unavailable"))
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    request = _request()
+    request = request.model_copy(
+        update={"model": request.model.model_copy(update={"reasoning_effort": "low"})}
+    )
+    settings = {
+        "retry": {
+            "fallbackChains": {
+                "default": [
+                    {"provider": "openai", "model": "gpt-4o", "effort": "low"},
+                    {"provider": "anthropic", "model": "claude-x", "effort": "high"},
+                ]
+            }
+        }
+    }
+
+    _ = [
+        event
+        async for event in stream_with_failover(
+            request,
+            FakeAuth({"openai": ["k1"], "anthropic": ["k2"]}),
+            settings,
+            client_for,
+        )
+    ]
+    assert specs_seen == ["openai/gpt-4o/low", "anthropic/claude-x/high"]
+
+
+async def test_successful_fallback_stays_pinned_for_same_message() -> None:
+    """A tool loop must not probe the exhausted primary before every model call."""
+    specs_seen: list[str] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        if spec.provider == "openai":
+            return ScriptedClient(ProviderError(400, "model unavailable"))
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    settings = {
+        "retry": {
+            "fallbackChains": {
+                "default": [{"provider": "anthropic", "model": "claude-opus-5", "effort": "high"}]
+            }
+        }
+    }
+    state = FailoverRouteState()
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+
+    for _ in range(2):
+        _ = [
+            event
+            async for event in stream_with_failover(
+                _request(), auth, settings, client_for, route_state=state
+            )
+        ]
+
+    assert specs_seen == [
+        "openai/gpt-4o",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-opus-5",
+    ]
+    assert state.active == FallbackTarget("anthropic/claude-opus-5", "high")
+
+
+@pytest.mark.asyncio
+async def test_the_primary_cooldown_is_a_deadline_not_a_sliding_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-entering the SAME fallback route must not push the retry deadline out.
+
+    ``stream_with_failover`` calls ``activate`` on every request that lands on
+    the sticky fallback, so arming the cooldown before the "already on this
+    route" early return made it slide forward on each use. A user sending
+    messages more often than the cooldown never reached ``primary_retry_due``
+    and stayed pinned to the fallback for the whole session, even after the
+    primary recovered — the opposite of the fixed post-failure probe the class
+    docstring promises.
+
+    The clock MUST advance between calls or this test cannot discriminate:
+    the arming is ``max(existing, now + cooldown)``, so six re-entries inside
+    one millisecond compute the same deadline whether the bug is present or
+    not. Verified by mutation — with a frozen clock the buggy order passes.
+    """
+    now_ms = 1_000_000
+
+    def fake_time() -> float:
+        return now_ms / 1000
+
+    # `failover.py` does `import time` and calls `time.time()`, so the patch
+    # goes on the module's own `time` binding — swapping a stand-in rather
+    # than mutating the real `time` module, which every other test shares.
+    monkeypatch.setattr(failover_module, "time", SimpleNamespace(time=fake_time), raising=True)
+
+    target = FallbackTarget("anthropic/claude-opus-5", "high")
+    state = FailoverRouteState()
+
+    await state.activate(target, "quota", cooldown_ms=60_000)
+    armed = state.primary_retry_at_ms
+    assert armed == now_ms + 60_000, "the route CHANGED, so the cooldown must arm"
+
+    # Five more requests on the route that is already active, ten seconds
+    # apart — the real shape of a user who keeps typing.
+    for _ in range(5):
+        now_ms += 10_000
+        await state.activate(target, "quota", cooldown_ms=60_000)
+
+    assert state.primary_retry_at_ms == armed, "re-entry re-armed the cooldown"
+    # 50s of use later the deadline has arrived, so the primary gets probed.
+    assert state.primary_retry_due(now_ms=now_ms + 10_001)
 
 
 async def test_stream_exhaustion_raises_last_error() -> None:

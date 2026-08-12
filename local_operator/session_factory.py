@@ -868,6 +868,7 @@ async def _prepare(
         has_ui=has_ui,
         request_approval=request_approval,
         variables=variable_store,
+        web_search_settings=config_manager.get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
 

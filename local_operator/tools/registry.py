@@ -16,6 +16,7 @@ from collections.abc import Callable, Sequence
 from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
 from local_operator.tools import builtin
+from local_operator.web_search.tool import build_web_search_tool
 
 #: Factory table: tool name -> builder (createIf convention). ``wake`` takes
 #: the context and returns ``None`` when no wake scheduler is attached, so a
@@ -29,6 +30,7 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "glob": lambda _context: builtin.build_glob_tool(),
     "grep": lambda _context: builtin.build_grep_tool(),
     "todo": lambda _context: builtin.build_todo_tool(),
+    "web_search": lambda context: build_web_search_tool(context),
     "wake": lambda context: builtin.build_wake_tool(context),
     "task": lambda context: builtin.build_task_tool(context),
     "wait": lambda context: builtin.build_wait_tool(context),
@@ -51,6 +53,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "glob",
     "grep",
     "todo",
+    "web_search",
     "wake",
     "task",
     "wait",

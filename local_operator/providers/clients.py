@@ -453,6 +453,54 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
     return {"role": role, "content": parts}
 
 
+def _messages_to_openai_responses(messages: Sequence[Message]) -> list[dict[str, Any]]:
+    """Render harness history as Responses input items, including tool turns."""
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role == "assistant" and message.tool_calls:
+            if message.text:
+                items.append({"role": "assistant", "content": message.text})
+            for call in message.tool_calls:
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": (
+                            call.raw_arguments
+                            if call.raw_arguments is not None
+                            else json.dumps(call.arguments)
+                        ),
+                    }
+                )
+            continue
+        if message.role == "tool":
+            output = _tool_content_openai(message)
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message.tool_call_id or "",
+                    "output": output if isinstance(output, str) else json.dumps(output),
+                }
+            )
+            continue
+
+        content: list[dict[str, Any]] = []
+        text_type = "output_text" if message.role == "assistant" else "input_text"
+        for block in message.content:
+            if isinstance(block, TextContent):
+                content.append({"type": text_type, "text": block.text})
+            elif isinstance(block, ImageContent):
+                content.append(
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{block.mime_type};base64,{block.data}",
+                    }
+                )
+        items.append({"role": message.role, "content": content})
+    return items
+
+
 EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 
 
@@ -498,6 +546,19 @@ def _tools_to_openai(tools: Sequence[AgentTool]) -> list[dict[str, Any]]:
     ]
 
 
+def _tools_to_openai_responses(tools: Sequence[AgentTool]) -> list[dict[str, Any]]:
+    """Responses tools are flat; chat-completions nests fields under ``function``."""
+    return [
+        {
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters or {"type": "object", "properties": {}},
+        }
+        for tool in tools
+    ]
+
+
 _FINISH_TO_STOP_REASON = {
     "stop": "stop",
     "length": "length",
@@ -517,6 +578,8 @@ _FINISH_TO_STOP_REASON = {
 #: three minutes has stalled, and treating that as patience turns a dead
 #: connection into a UI that looks frozen for the whole request timeout.
 STREAM_READ_TIMEOUT_S = 180.0
+CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
+CODEX_BETA_HEADER = "responses=experimental"
 
 
 def _stream_timeout(total: float) -> httpx.Timeout:
@@ -545,10 +608,11 @@ class OpenAICompatClient:
     ``prompt_tokens_details.cached_tokens``.
 
     ChatGPT OAuth credentials (``oauth_access`` with ``kind == "oauth"`` and
-    an ``org_id``) are routed to ``{base_url}/responses`` instead — ChatGPT
-    subscription tokens are rejected by ``chat/completions`` and require the
-    Responses endpoint plus the ``chatgpt-account-id`` header
-    (mirrors ``openai-codex-responses``). Plain API keys keep ``chat/completions``.
+    an ``org_id``) are routed to ChatGPT's Codex Responses endpoint instead.
+    Subscription tokens are rejected by both ``chat/completions`` and the
+    public API's ``/responses`` endpoint; the Codex endpoint also requires its
+    account, beta, and originator headers. Plain API keys keep
+    ``chat/completions``.
     """
 
     def __init__(
@@ -578,6 +642,14 @@ class OpenAICompatClient:
             if oauth_access.org_id:
                 # ChatGPT subscription scope: which account pays for this call.
                 headers["chatgpt-account-id"] = oauth_access.org_id
+            headers.update(
+                {
+                    "Accept": "text/event-stream",
+                    "OpenAI-Beta": CODEX_BETA_HEADER,
+                    "originator": "local-operator",
+                    "User-Agent": "local-operator",
+                }
+            )
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
         return headers
@@ -707,6 +779,19 @@ class OpenAICompatClient:
             body["stop"] = list(request.stop_sequences)
         return body
 
+    def _build_codex_responses_body(self, request: ChatRequest) -> dict[str, Any]:
+        """ChatGPT Codex body: Responses-shaped, with public-API-only keys removed."""
+        body = self._build_responses_body(request)
+        body["store"] = False
+        body["input"] = _messages_to_openai_responses(request.messages)
+        body.pop("max_output_tokens", None)
+        body.pop("temperature", None)
+        body.pop("top_p", None)
+        body.pop("stop", None)
+        if request.tools:
+            body["tools"] = _tools_to_openai_responses(request.tools)
+        return body
+
     async def stream(
         self,
         request: ChatRequest,
@@ -799,8 +884,8 @@ class OpenAICompatClient:
         api_key: str | None,
         oauth_access: "OAuthAccess | None",
     ) -> AsyncIterator[StreamEvent]:
-        """SSE parse for ``POST {base}/responses`` (ChatGPT OAuth route)."""
-        url = f"{self._base_url}/responses"
+        """SSE parse for ChatGPT's Codex Responses endpoint."""
+        url = CODEX_RESPONSES_URL
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
         tool_call_count = 0
@@ -810,7 +895,7 @@ class OpenAICompatClient:
         async with self._http.stream(
             "POST",
             url,
-            json=self._build_responses_body(request),
+            json=self._build_codex_responses_body(request),
             headers=self._headers(api_key, oauth_access),
         ) as response:
             if response.status_code >= 400:
@@ -961,7 +1046,11 @@ class AnthropicClient:
         )
 
     def _headers(
-        self, api_key: str | None, oauth_access: "OAuthAccess | None" = None
+        self,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None" = None,
+        *,
+        effort: str | None = None,
     ) -> dict[str, str]:
         headers = {"anthropic-version": ANTHROPIC_VERSION, "Content-Type": "application/json"}
         if self._is_oauth(oauth_access):
@@ -972,6 +1061,10 @@ class AnthropicClient:
             headers["anthropic-beta"] = "oauth-2025-04-20"
         elif api_key:
             headers["x-api-key"] = api_key
+        if effort:
+            beta = "effort-2025-11-24"
+            existing = headers.get("anthropic-beta")
+            headers["anthropic-beta"] = f"{existing},{beta}" if existing else beta
         return headers
 
     # Anthropic caps cache_control markers per request; the harness keeps the
@@ -1178,6 +1271,12 @@ class AnthropicClient:
             # thinking — and needs no beta header, where a thinking budget only
             # bounds the thinking block and requires it to be enabled. See
             # https://platform.claude.com/docs/en/build-with-claude/effort.
+            #
+            # `thinking: adaptive` is a different thing from a budget and rides
+            # along from main: it lets the model choose its own depth instead of
+            # being handed a token ceiling. Kept INSIDE the validated gate, so a
+            # model with no effort ladder is still sent neither key.
+            body["thinking"] = {"type": "adaptive"}
             body["output_config"] = {"effort": effort}
         if request.stop_sequences:
             body["stop_sequences"] = list(request.stop_sequences)
@@ -1198,7 +1297,11 @@ class AnthropicClient:
             "POST",
             url,
             json=self._build_body(request, oauth=self._is_oauth(oauth_access)),
-            headers=self._headers(api_key, oauth_access),
+            headers=self._headers(
+                api_key,
+                oauth_access,
+                effort=request.model.reasoning_effort,
+            ),
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
