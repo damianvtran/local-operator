@@ -25,6 +25,8 @@ from local_operator.providers.clients import (
     AnthropicClient,
     MockClient,
     OpenAICompatClient,
+    _anthropic_stream_error,
+    raise_for_status,
 )
 from local_operator.providers.failover import ProviderError
 
@@ -628,6 +630,351 @@ def test_retry_after_http_date_parsed() -> None:
     assert parsed is not None and 8000 <= parsed <= 12000
 
 
+# ---------------------------------------------------------------------------
+# Error fidelity — what the provider actually said, and how fast it clears
+# ---------------------------------------------------------------------------
+
+
+class TestErrorMessageExtraction:
+    """The reported frame was ``✕ HTTP 404:`` — a wrong status and an EMPTY
+    message. This class covers the empty half: every body shape a provider
+    packs its explanation into has to reach the frame, because that text is
+    what says which limit was hit and when it resets.
+    """
+
+    def _error(self, response: httpx.Response) -> ProviderError:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(response)
+        return excinfo.value
+
+    def test_openai_style_error_message(self) -> None:
+        error = self._error(
+            httpx.Response(429, json={"error": {"message": "You exceeded your quota."}})
+        )
+        assert error.message == "You exceeded your quota."
+
+    def test_google_wraps_its_error_in_a_single_element_list(self) -> None:
+        """``streamGenerateContent`` answers a pre-stream failure with
+        ``[{"error": ...}]``. A mapping-only extractor read straight past the
+        list to ``response.text``, which is how a real quota error arrived with
+        its message replaced by raw JSON — or, once the body was empty, by
+        nothing at all."""
+        error = self._error(
+            httpx.Response(
+                429,
+                json=[
+                    {
+                        "error": {
+                            "code": 429,
+                            "message": "Resource has been exhausted (e.g. check quota).",
+                            "status": "RESOURCE_EXHAUSTED",
+                        }
+                    }
+                ],
+            )
+        )
+        assert error.message == "Resource has been exhausted (e.g. check quota)."
+        assert error.kind == "quota"
+
+    def test_blank_message_key_falls_through_instead_of_winning(self) -> None:
+        """``error.get("message", error)`` treated a present-but-EMPTY key as an
+        answer, so a provider that sent the field blank produced an error that
+        printed nothing."""
+        error = self._error(
+            httpx.Response(400, json={"error": {"message": "", "detail": "model_not_supported"}})
+        )
+        assert error.message == "model_not_supported"
+
+    def test_bare_error_string_and_detail_shapes(self) -> None:
+        assert self._error(httpx.Response(500, json={"error": "server overloaded"})).message == (
+            "server overloaded"
+        )
+        assert self._error(httpx.Response(422, json={"detail": "input too long"})).message == (
+            "input too long"
+        )
+
+    def test_openrouter_upstream_text_is_recovered_from_metadata_raw(self) -> None:
+        """OpenRouter's ``message`` is the useless half ("Provider returned
+        error"); the ORIGIN provider's real text is JSON-encoded one level down
+        in ``metadata.raw``. Both are kept because the raw part is the one that
+        names the limit."""
+        error = self._error(
+            httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": "Provider returned error",
+                        "code": 429,
+                        "metadata": {
+                            "provider_name": "Google",
+                            "raw": json.dumps(
+                                {"error": {"message": "Quota exceeded for quota metric 'Requests'"}}
+                            ),
+                        },
+                    }
+                },
+            )
+        )
+        assert error.message == (
+            "Provider returned error: Quota exceeded for quota metric 'Requests'"
+        )
+        assert error.kind == "quota"
+
+    def test_empty_body_still_says_something(self) -> None:
+        """The reported frame, reproduced: a gateway rejecting an unknown model
+        answers 404 with no body at all. ``ProviderError`` refuses to be
+        wordless, so the floor is the status's own meaning."""
+        error = self._error(httpx.Response(404, content=b""))
+        assert error.message == "Not Found — the provider sent no error message"
+        assert str(error) == (
+            "invalid request (HTTP 404): Not Found — the provider sent no error message"
+        )
+
+    def test_non_json_body_is_carried_through(self) -> None:
+        error = self._error(httpx.Response(502, content=b"<html>bad gateway</html>"))
+        assert error.message == "<html>bad gateway</html>"
+        assert error.kind == "transient"
+
+
+class TestRetryAfter:
+    """ "try again in 40s" is the single most actionable fact in a rate-limit
+    error, and providers disagree about where to put it."""
+
+    def test_header_seconds(self) -> None:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(
+                httpx.Response(429, json={"error": "slow down"}, headers={"retry-after": "42"})
+            )
+        assert excinfo.value.retry_after_ms == 42_000
+        assert "retry in 42s" in str(excinfo.value)
+
+    def test_google_puts_the_delay_in_the_body_and_sends_no_header(self) -> None:
+        """Gemini quota 429s carry ``error.details[].retryDelay`` ("41s") and NO
+        ``Retry-After``, so the one number the user needs was being dropped."""
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(
+                httpx.Response(
+                    429,
+                    json={
+                        "error": {
+                            "message": "Resource has been exhausted.",
+                            "details": [
+                                {"@type": "type.googleapis.com/google.rpc.QuotaFailure"},
+                                {
+                                    "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                    "retryDelay": "41.6s",
+                                },
+                            ],
+                        }
+                    },
+                )
+            )
+        assert excinfo.value.retry_after_ms == 41_600
+        assert "retry in 42s" in str(excinfo.value)
+
+    def test_no_delay_anywhere_is_not_invented(self) -> None:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(httpx.Response(429, json={"error": "slow down"}))
+        assert excinfo.value.retry_after_ms is None
+        assert "retry in" not in str(excinfo.value)
+
+
+class TestStatusFlags:
+    """``retryable`` and ``auth_error`` are what the failover driver acts on, so
+    the mapping from status is pinned rather than inferred from behaviour."""
+
+    @pytest.mark.parametrize(
+        ("status", "retryable", "kind"),
+        [
+            (400, False, "request"),
+            (401, False, "auth"),
+            (403, False, "auth"),
+            (404, False, "request"),
+            (408, True, "timeout"),
+            (429, True, "quota"),
+            (500, True, "transient"),
+            (503, True, "transient"),
+            (504, True, "timeout"),
+            (529, True, "transient"),
+        ],
+    )
+    def test_status_maps_to_retryability_and_kind(
+        self, status: int, retryable: bool, kind: str
+    ) -> None:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(httpx.Response(status, json={"error": "boom"}))
+        assert excinfo.value.retryable is retryable
+        assert excinfo.value.kind == kind
+
+
+class TestAnthropicStreamErrorEvent:
+    """A mid-stream ``error`` event arrives on an HTTP 200, so its status has to
+    come from anthropic's ``type``. Blanket ``retryable=True`` re-sent requests
+    the API had already refused."""
+
+    def test_overloaded_is_transient(self) -> None:
+        error = _anthropic_stream_error({"type": "overloaded_error", "message": "Overloaded"})
+        assert (error.kind, error.retryable) == ("transient", True)
+        assert error.message == "overloaded_error: Overloaded"
+
+    def test_rate_limit_is_quota(self) -> None:
+        error = _anthropic_stream_error(
+            {"type": "rate_limit_error", "message": "Number of request tokens exceeded"}
+        )
+        assert (error.kind, error.retryable) == ("quota", True)
+
+    def test_invalid_request_is_not_retried(self) -> None:
+        error = _anthropic_stream_error(
+            {"type": "invalid_request_error", "message": "max_tokens too large"}
+        )
+        assert (error.kind, error.retryable, error.status) == ("request", False, 400)
+
+    def test_authentication_error_is_auth(self) -> None:
+        error = _anthropic_stream_error({"type": "authentication_error", "message": "bad key"})
+        assert (error.kind, error.auth_error) == ("auth", True)
+
+    def test_an_event_with_no_text_still_names_itself(self) -> None:
+        error = _anthropic_stream_error({"type": "api_error"})
+        assert error.message == "api_error"
+        assert str(error) == "transient provider error (HTTP 500): api_error"
+
+    def test_an_empty_event_is_not_a_silent_error(self) -> None:
+        error = _anthropic_stream_error({})
+        assert error.message == "the provider failed without reporting a reason"
+        assert error.retryable is True  # unknown type keeps the old assumption
+
+
+class TestNoPythonReprReachesTheFrame:
+    """``str(error)`` stood in the cascade's last slot and put a dict repr in the
+    user's error frame — for the very shape the docstring claimed to fix."""
+
+    def _error(self, response: httpx.Response) -> ProviderError:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(response)
+        return excinfo.value
+
+    def test_a_blank_message_with_no_sibling_falls_to_the_wire_body(self) -> None:
+        """The docstring's own example, which used to render
+        `invalid request (HTTP 404): {'message': ''}` — a PYTHON repr of a parsed
+        object. The fallback is now the body as the provider actually sent it:
+        valid JSON, capped, and honest that the message field came through blank.
+        A body that is genuinely empty still reaches ``_describe_bare_status`` —
+        that is the owner's reported case, covered above."""
+        error = self._error(httpx.Response(404, json={"error": {"message": ""}}))
+        assert error.message == '{"error":{"message":""}}'
+        assert "'message'" not in str(error), "a Python repr must never reach the frame"
+
+    def test_a_non_string_message_falls_to_the_raw_body_not_a_repr(self) -> None:
+        """This shape was strictly WORSE than before the cascade: `{'text': 'x'}`
+        became `{'message': {'text': 'x'}}`. The real wire bytes beat both."""
+        error = self._error(httpx.Response(400, json={"error": {"message": {"text": "nested"}}}))
+        assert "'message':" not in error.message
+        assert "nested" in error.message  # the body itself, JSON as sent
+
+    def test_every_branch_is_length_capped(self) -> None:
+        """The repr branch was the only uncapped one, so a 3 KB error object went
+        into a one-line terminal notice whole."""
+        from local_operator.providers.clients import MAX_ERROR_MESSAGE_CHARS
+
+        for payload in (
+            {"error": {"message": "x" * 4000}},
+            {"error": {"code": "y" * 4000}},
+            {"detail": "z" * 4000},
+            {"error": {"blob": "q" * 4000}},
+        ):
+            error = self._error(httpx.Response(400, json=payload))
+            assert len(error.message) <= MAX_ERROR_MESSAGE_CHARS, payload
+        assert len(self._error(httpx.Response(502, content=b"w" * 4000)).message) <= (
+            MAX_ERROR_MESSAGE_CHARS
+        )
+
+
+class TestAnAdvertisedWaitIsBounded:
+    """``retry_after_ms`` is provider-supplied and reaches SQLite: a usage-limit
+    failure feeds it to ``AuthStore.block_credential``, which floors the value
+    and has no ceiling. One ``retryDelay: "99999999s"`` wrote a 27,777-hour block
+    against a working credential and printed ``retry in 27777h46m``."""
+
+    def _delay(self, response: httpx.Response) -> int | None:
+        with pytest.raises(ProviderError) as excinfo:
+            raise_for_status(response)
+        return excinfo.value.retry_after_ms
+
+    def test_an_absurd_body_delay_is_clamped(self) -> None:
+        from local_operator.providers.clients import MAX_RETRY_AFTER_MS
+
+        payload = {
+            "error": {
+                "message": "exhausted",
+                "details": [{"@type": "RetryInfo", "retryDelay": "99999999s"}],
+            }
+        }
+        assert self._delay(httpx.Response(429, json=payload)) == MAX_RETRY_AFTER_MS
+
+    def test_an_absurd_header_delay_is_clamped(self) -> None:
+        from local_operator.providers.clients import MAX_RETRY_AFTER_MS
+
+        response = httpx.Response(429, json={"error": "slow"}, headers={"retry-after": "99999999"})
+        assert self._delay(response) == MAX_RETRY_AFTER_MS
+
+    def test_an_overflowing_header_does_not_escape_as_overflowerror(self) -> None:
+        """``float("1e400")`` is ``inf`` and ``int(inf * 1000)`` raises. It escaped
+        ``raise_for_status`` entirely, and in ``ApiEmbedder`` it escaped the
+        degrade-gracefully handlers too."""
+        response = httpx.Response(429, json={"error": "slow"}, headers={"retry-after": "1e400"})
+        assert self._delay(response) is None
+
+    def test_a_zero_header_does_not_erase_the_bodys_real_delay(self) -> None:
+        """Zero is not an answer to "how long": the frame drops the wait entirely
+        and ``_same_credential_retry_allowed`` reads it as a short throttle and
+        grants an immediate same-key retry of a quota error."""
+        response = httpx.Response(
+            429,
+            json={
+                "error": {
+                    "message": "exhausted",
+                    "details": [{"@type": "RetryInfo", "retryDelay": "41s"}],
+                }
+            },
+            headers={"retry-after": "0"},
+        )
+        assert self._delay(response) == 41_000
+
+
+class TestEveryDocumentedAnthropicErrorTypeIsMapped:
+    """Two were missing, and an unmapped type gets ``status=None`` so
+    ``retryable = status is None`` is True — a billing failure was re-sent
+    ``max_retries`` times and read as a transient blip."""
+
+    def test_billing_and_conflict_are_not_retried(self) -> None:
+        billing = _anthropic_stream_error(
+            {"type": "billing_error", "message": "Your credit balance is too low"}
+        )
+        assert (billing.status, billing.kind, billing.retryable) == (402, "quota", False)
+        conflict = _anthropic_stream_error(
+            {"type": "conflict_error", "message": "concurrent write"}
+        )
+        assert (conflict.status, conflict.kind, conflict.retryable) == (409, "request", False)
+
+    def test_the_documented_set_is_complete(self) -> None:
+        """Anthropic documents exactly these; an omission is silently a retry."""
+        from local_operator.providers.clients import _ANTHROPIC_ERROR_STATUS
+
+        assert set(_ANTHROPIC_ERROR_STATUS) == {
+            "invalid_request_error",
+            "authentication_error",
+            "billing_error",
+            "permission_error",
+            "not_found_error",
+            "conflict_error",
+            "request_too_large",
+            "rate_limit_error",
+            "api_error",
+            "timeout_error",
+            "overloaded_error",
+        }
+
+
 def test_unknown_provider_raises_value_error() -> None:
     """PR-22: client_for_spec rejects unknown providers instead of silently
     defaulting to the ollama endpoint."""
@@ -746,11 +1093,15 @@ def test_openai_compat_markers_gate_on_cache_support():
 
 
 def test_reasoning_effort_reaches_openai_and_anthropic_wires() -> None:
+    # The ladder is declared on both specs: `_reasoning_effort` refuses a level
+    # the model does not accept, so a spec that names one but never lists it is
+    # sent no key at all.
     openai_spec = ModelSpec(
         provider="openai",
         model_id="gpt-5.3-codex",
         reasoning=True,
         reasoning_effort="high",
+        reasoning_efforts=("low", "medium", "high", "xhigh"),
         supports_sampling_params=False,
     )
     request = ChatRequest(model=openai_spec, messages=[Message.user("hi")])
@@ -763,6 +1114,7 @@ def test_reasoning_effort_reaches_openai_and_anthropic_wires() -> None:
         model_id="claude-opus-5",
         reasoning=True,
         reasoning_effort="max",
+        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
         supports_sampling_params=False,
     )
     anthropic = AnthropicClient()
@@ -904,3 +1256,102 @@ def test_anthropic_oauth_identity_keeps_the_cached_prefix_byte_stable() -> None:
 
     first, second = system_for("turn one"), system_for("turn two different length")
     assert first == second, "the system prefix must not vary with the conversation"
+
+
+# ---------------------------------------------------------------------------
+# Reasoning effort — one setting, one key per family
+# ---------------------------------------------------------------------------
+#
+# Specs come from `build_model_spec` rather than the bare `_spec` helper above,
+# on purpose: the point of these is that a level chosen in the UI survives the
+# whole path — derivation, spec, request, body — and a hand-built spec would
+# test the last hop only. An effort the user selects that never reaches the
+# provider is worse than no control at all, because the band then asserts a
+# depth of thought that is not in force.
+
+from local_operator.model.configure import build_model_spec  # noqa: E402
+
+
+def _effort_spec(provider: str, model_id: str, level: str | None) -> ModelSpec:
+    return build_model_spec(provider, model_id).model_copy(update={"reasoning_effort": level})
+
+
+def test_anthropic_sends_effort_as_output_config() -> None:
+    """Anthropic's own key. `output_config.effort` covers ALL response tokens —
+    text, tool calls and thinking — where a `thinking` budget bounds only the
+    thinking block and needs it enabled first."""
+    request = ChatRequest(
+        model=_effort_spec("anthropic", "claude-opus-5", "xhigh"),
+        messages=[Message.user("hi")],
+    )
+    body = AnthropicClient()._build_body(request)
+    assert body["output_config"] == {"effort": "xhigh"}
+
+
+def test_anthropic_boots_carrying_its_documented_default() -> None:
+    """No `/effort` typed: the level on the wire is the one the band shows from
+    the first frame, which is only truthful because Anthropic documents `high`
+    as identical to omitting the parameter."""
+    request = ChatRequest(
+        model=build_model_spec("anthropic", "claude-opus-5"), messages=[Message.user("hi")]
+    )
+    assert AnthropicClient()._build_body(request)["output_config"] == {"effort": "high"}
+
+
+def test_openai_chat_completions_sends_effort_flat() -> None:
+    request = ChatRequest(
+        model=_effort_spec("openai", "gpt-5.4", "medium"), messages=[Message.user("hi")]
+    )
+    body = OpenAICompatClient("https://api.openai.com/v1")._build_body(request)
+    assert body["reasoning_effort"] == "medium"
+
+
+def test_openai_responses_nests_the_same_value() -> None:
+    """The ChatGPT-OAuth route speaks Responses, where the same level lives
+    under `reasoning.effort`. Same setting, two spellings — which is exactly
+    why the spec carries the level and not the key."""
+    request = ChatRequest(
+        model=_effort_spec("openai", "gpt-5.4", "xhigh"), messages=[Message.user("hi")]
+    )
+    body = OpenAICompatClient("https://api.openai.com/v1")._build_responses_body(request)
+    assert body["reasoning"] == {"effort": "xhigh"}
+
+
+@pytest.mark.parametrize("model_id", ["gpt-4.1", "gpt-4o"])
+def test_a_model_without_a_ladder_gets_no_key_at_all(model_id: str) -> None:
+    """Omitted, never sent empty or null: a provider that rejects the key
+    rejects it just as hard with a null value — the same rule
+    `supports_sampling_params` follows for temperature."""
+    spec = _effort_spec("openai", model_id, "high")  # a level nothing could honour
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+    client = OpenAICompatClient("https://api.openai.com/v1")
+    assert "reasoning_effort" not in client._build_body(request)
+    assert "reasoning" not in client._build_responses_body(request)
+
+
+def test_a_level_outside_the_models_ladder_is_dropped_rather_than_sent() -> None:
+    """The spec is mutable at runtime — `/effort`, `shift+tab` and failover all
+    write it — so the body builder re-checks rather than trusting. Dropping
+    costs one turn's depth; sending costs the turn."""
+    spec = build_model_spec("anthropic", "claude-opus-4-5-20251101").model_copy(
+        update={"reasoning_effort": "xhigh"}  # only 4.7+ accepts xhigh
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+    assert "output_config" not in AnthropicClient()._build_body(request)
+
+
+def test_google_sends_no_effort_key() -> None:
+    """Deliberate: this client speaks `generateContent`, whose thinking control
+    on the shipped models is a token budget rather than the named tiers the
+    Interactions API exposes. No Gemini model is given a ladder for that reason,
+    so nothing here can put an unmappable level on the wire."""
+    spec = build_model_spec("google", "gemini-2.5-pro").model_copy(
+        update={"reasoning_effort": "high"}
+    )
+    request = ChatRequest(model=spec, messages=[Message.user("hi")])
+    body = GoogleClient()._build_body(request)
+    # Scanned inside `generationConfig`, where this client writes every
+    # generation setting: a top-level scan cannot fail, because no plausible
+    # edit would put the key there.
+    assert "thinkingConfig" not in body["generationConfig"]
+    assert not any("effort" in key.lower() for key in body["generationConfig"])

@@ -108,11 +108,17 @@ def test_a_turn_leading_block_always_takes_a_gap() -> None:
     assert needs_gap_above(_Stub("tool"), _Stub("user", lead=True)) is True
 
 
-def test_transient_blocks_neither_take_a_gap_nor_give_one() -> None:
-    """The working line appears and vanishes mid-turn: if it could open a
-    gap, that blank row would flash in and out under the settled rows."""
+def test_the_transient_line_takes_a_gap_but_never_gives_one() -> None:
+    """Asymmetric, and each half has its own reason.
+
+    It TAKES one because the tail pin holds it at the foot for the whole turn:
+    the row is constant rather than a flash, and flush it read as a caption on
+    the card above it. It never GIVES one because nothing is ever below it, and
+    the blocks around a line that vanishes must relate to each other as if it
+    were not there.
+    """
     working = _Stub("working", transient=True)
-    assert needs_gap_above(_Stub("tool"), working) is False
+    assert needs_gap_above(_Stub("tool"), working) is True
     assert needs_gap_above(working, _Stub("assistant")) is False
 
 
@@ -241,10 +247,10 @@ async def test_a_real_mouse_click_expands_and_collapses_under_the_real_sheet() -
         await pilot.click(card)
         await pilot.pause()
         assert card.expanded is True
-        assert card.size.height == 4
+        assert card.size.height == 5  # summary + the call + three output rows
         # Still exactly one blank row: the expansion added rows to the card,
         # not to the space under it.
-        assert below.region.y - card.region.y == 5
+        assert below.region.y - card.region.y == 6
 
         await pilot.click(card)
         await pilot.pause()
@@ -276,7 +282,7 @@ async def test_container_applies_the_gap_class_only_where_the_rule_says() -> Non
 
 @pytest.mark.asyncio
 async def test_the_working_line_does_not_disturb_the_rows_around_it() -> None:
-    """The transient line is invisible to spacing from BOTH sides.
+    """The transient line is invisible to the rows AROUND it, and takes air itself.
 
     Checked on a non-airy pair, because that is where forgetting to skip the
     transient anchor actually shows: two notices with the working line
@@ -294,7 +300,9 @@ async def test_the_working_line_does_not_disturb_the_rows_around_it() -> None:
         for block in (first, working, second, card):
             view.append_block(block)
 
-        assert not working.has_class(GAP_CLASS)
+        # It reads as the live status of the turn, not as another receipt, and
+        # the blank row is the cheapest device this app has for saying so.
+        assert working.has_class(GAP_CLASS)
         # Spaced against the NOTICE above it, not against the transient line
         # between them — which would have made it a change of kind and a gap.
         assert not second.has_class(GAP_CLASS)

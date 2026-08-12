@@ -5,7 +5,6 @@ This module contains the FastAPI route handlers for configuration-related endpoi
 """
 
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +13,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from local_operator.config import ConfigManager
+from local_operator.paths import config_dir
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.models.schemas import (
     ConfigResponse,
@@ -26,8 +26,18 @@ from local_operator.server.models.schemas import (
 router = APIRouter(tags=["Configuration"])
 logger = logging.getLogger("local_operator.server.routes.config")
 
-# Path to the system prompt file
-SYSTEM_PROMPT_FILE = Path(os.path.expanduser("~/.local-operator/system_prompt.md"))
+
+def system_prompt_file() -> Path:
+    """The operator's custom-instructions file, resolved per REQUEST.
+
+    A function and not a module constant, for the reason :func:`config_dir`
+    gives for its own lookup: a constant freezes whatever the first importer
+    saw. Here that also broke the feature's central promise — this endpoint,
+    the desktop Settings box and the session loader are supposed to be one
+    file, and a hardcoded ``~/.local-operator`` diverges from the loader the
+    moment ``LOCAL_OPERATOR_CONFIG_DIR`` is set (design round 27).
+    """
+    return config_dir() / "system_prompt.md"
 
 
 @router.get(
@@ -224,11 +234,11 @@ async def get_system_prompt() -> CRUDResponse[SystemPromptResponse] | Response:
     Retrieve the current system prompt content.
     """
     try:
-        if not SYSTEM_PROMPT_FILE.exists():
+        if not system_prompt_file().exists():
             return Response(status_code=204)
 
-        content = SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
-        last_modified = datetime.fromtimestamp(SYSTEM_PROMPT_FILE.stat().st_mtime).isoformat()
+        content = system_prompt_file().read_text(encoding="utf-8")
+        last_modified = datetime.fromtimestamp(system_prompt_file().stat().st_mtime).isoformat()
 
         return CRUDResponse(
             status=200,
@@ -287,13 +297,13 @@ async def update_system_prompt(system_prompt_update: SystemPromptUpdate) -> JSON
     """
     try:
         # Create directory if it doesn't exist
-        SYSTEM_PROMPT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        system_prompt_file().parent.mkdir(parents=True, exist_ok=True)
 
         # Write the updated content to the file
-        SYSTEM_PROMPT_FILE.write_text(system_prompt_update.content, encoding="utf-8")
+        system_prompt_file().write_text(system_prompt_update.content, encoding="utf-8")
 
         # Get the updated timestamp
-        last_modified = datetime.fromtimestamp(SYSTEM_PROMPT_FILE.stat().st_mtime).isoformat()
+        last_modified = datetime.fromtimestamp(system_prompt_file().stat().st_mtime).isoformat()
 
         response = CRUDResponse(
             status=200,

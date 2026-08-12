@@ -25,12 +25,29 @@ meanings more cleanly, so the API bar sits near the local match floor.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import re
-from typing import Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 import httpx
+
+from local_operator.providers.clients import raise_for_status
+from local_operator.providers.failover import (
+    ProviderError,
+    backoff_delay_ms,
+    is_transient_error,
+    wrap_transport_error,
+)
+
+#: Same-endpoint attempts for one embedding request. Small on purpose: the
+#: index degrades to :class:`LocalEmbedder` when this gives up, so the cost of
+#: stopping is worse routing rather than a broken session, and this call sits on
+#: the start-of-session critical path where a long retry ladder is felt as boot
+#: lag. Three attempts covers the single-blip case that used to be terminal.
+EMBED_MAX_ATTEMPTS = 3
+EMBED_BASE_DELAY_MS = 250
 
 
 class EmbeddingError(RuntimeError):
@@ -249,18 +266,7 @@ class ApiEmbedder:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        try:
-            response = await self._client.post(
-                f"{self.base_url}/embeddings",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json={"model": self.model, "input": texts},
-                timeout=60.0,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            vectors = [item["embedding"] for item in payload["data"]]
-        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-            raise EmbeddingError(f"Embedding request failed: {exc}") from exc
+        vectors = await self._fetch(texts)
         if len(vectors) != len(texts):
             raise EmbeddingError(
                 f"Embedding API returned {len(vectors)} vectors for {len(texts)} inputs"
@@ -283,6 +289,58 @@ class ApiEmbedder:
         # bar, blowing the token budget), OpenAI's shortened embeddings
         # < 1 (nothing ever matches). Normalize here, once.
         return [_normalize(vector) for vector in vectors]
+
+    async def _fetch(self, texts: list[str]) -> list[Any]:
+        """POST once, retrying only what a retry can fix.
+
+        Before this, ONE dropped connection or 503 ended the API backend for the
+        whole session: :class:`~local_operator.skills.index.SkillIndex` memoizes
+        a backend failure, so a blip on the first turn silently downgraded every
+        later selection to the offline embedder. This is a provider call like
+        any other and gets the harness's retry.
+
+        The status is mapped through the wire clients' own
+        :func:`~local_operator.providers.clients.raise_for_status` rather than
+        ``httpx.raise_for_status`` so the classification is the SAME vocabulary
+        the streaming paths use: ``httpx.HTTPStatusError`` carries its status
+        only inside a prose message, which no classifier can read.
+
+        Not retried, and each for its own reason: a rate limit needs a wait
+        longer than a boot-path budget, a rejected key gives the same answer
+        forever, and a malformed payload is a defect rather than weather.
+        """
+        for attempt in range(1, EMBED_MAX_ATTEMPTS + 1):
+            last = attempt >= EMBED_MAX_ATTEMPTS
+            try:
+                response = await self._client.post(
+                    f"{self.base_url}/embeddings",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={"model": self.model, "input": texts},
+                    timeout=60.0,
+                )
+                raise_for_status(response)
+                payload = response.json()
+                return [item["embedding"] for item in payload["data"]]
+            except ProviderError as exc:
+                if last or not is_transient_error(exc):
+                    raise EmbeddingError(f"Embedding request failed: {exc}") from exc
+            except httpx.TransportError as exc:
+                # A connect/read/protocol failure is weather. It must be listed
+                # ahead of HTTPError (its own base) and is wrapped through the
+                # driver's helper rather than interpolated raw, because the
+                # argumentless httpx errors stringify to nothing at all.
+                if last:
+                    raise EmbeddingError(
+                        f"Embedding request failed: {wrap_transport_error(exc)}"
+                    ) from exc
+            except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+                # A malformed response is a defect, not weather: asking again
+                # gets the same unparseable answer.
+                raise EmbeddingError(f"Embedding request failed: {exc}") from exc
+            await asyncio.sleep(backoff_delay_ms(EMBED_BASE_DELAY_MS, attempt) / 1000)
+        raise EmbeddingError(  # unreachable: the last attempt always raises above
+            f"Embedding request failed after {EMBED_MAX_ATTEMPTS} attempts"
+        )
 
     async def aclose(self) -> None:
         """Close the client only when we created it (injected clients are

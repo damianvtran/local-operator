@@ -400,3 +400,91 @@ def test_db_and_sidecars_created_0600(tmp_path: Path, monkeypatch: pytest.Monkey
                 assert stat.S_IMODE(os.stat(sidecar).st_mode) == 0o600, sidecar.name
     finally:
         auth.close()
+
+
+class TestListOauthAccesses:
+    """Enumeration for REPORTING, which is not the same question as routing.
+
+    The cascade answers "which account does the next request run as" and can
+    only ever name one. Quota is per account, so a usage screen needs all of
+    them — and needs the ones the cascade has deliberately taken out of service
+    most of all.
+    """
+
+    @staticmethod
+    def _account(email: str, account_id: str) -> dict[str, Any]:
+        return {**_oauth(access=f"access-{account_id}"), "email": email, "account_id": account_id}
+
+    async def test_every_account_is_returned_in_id_order(self, store: AuthStore) -> None:
+        store.upsert_credential("anthropic", self._account("a@example.com", "acct-a"))
+        store.upsert_credential("anthropic", self._account("b@example.com", "acct-b"))
+        accesses = await store.list_oauth_accesses("anthropic")
+        assert [a.email for a in accesses] == ["a@example.com", "b@example.com"]
+        assert [a.access_token for a in accesses] == ["access-acct-a", "access-acct-b"]
+
+    async def test_order_does_not_depend_on_prior_requests(self, store: AuthStore) -> None:
+        """The cascade round-robins with no session id; enumeration must not.
+
+        Two `get_api_key` calls advance that rotation, and if enumeration
+        shared it the account list would reshuffle under the reader between
+        one refresh and the next.
+        """
+        store.upsert_credential("anthropic", self._account("a@example.com", "acct-a"))
+        store.upsert_credential("anthropic", self._account("b@example.com", "acct-b"))
+        first = [a.email for a in await store.list_oauth_accesses("anthropic")]
+        await store.get_api_key("anthropic")
+        await store.get_api_key("anthropic")
+        second = [a.email for a in await store.list_oauth_accesses("anthropic")]
+        assert first == second == ["a@example.com", "b@example.com"]
+
+    async def test_a_blocked_account_is_still_reported(self, store: AuthStore) -> None:
+        """The whole point: an account is usually blocked because it ran out.
+
+        Filtering blocked rows is right for routing and exactly wrong here —
+        it guarantees the exhausted account is the one missing from the screen
+        that exists to show exhaustion.
+        """
+        first = store.upsert_credential("anthropic", self._account("a@example.com", "acct-a"))
+        store.upsert_credential("anthropic", self._account("b@example.com", "acct-b"))
+        store.block_credential(first.id, "anthropic", block_ms=3600_000)
+
+        assert store.is_blocked(first.id, "anthropic") is True
+        # Routing has rotated away from it...
+        assert await store.get_api_key("anthropic") == "access-acct-b"
+        # ...and reporting still sees it.
+        assert [a.email for a in await store.list_oauth_accesses("anthropic")] == [
+            "a@example.com",
+            "b@example.com",
+        ]
+
+    async def test_enumeration_does_not_pin_a_sessions_account(self, store: AuthStore) -> None:
+        """Reading quota must not repoint which credential a session transacts on."""
+        store.upsert_credential("anthropic", self._account("a@example.com", "acct-a"))
+        store.upsert_credential("anthropic", self._account("b@example.com", "acct-b"))
+        before = dict(store._sticky)
+        await store.list_oauth_accesses("anthropic")
+        assert dict(store._sticky) == before
+
+    async def test_a_logged_out_account_is_not_reported(self, store: AuthStore) -> None:
+        """Blocked is temporary and worth showing; signed out is not ours to show."""
+        store.upsert_credential("anthropic", self._account("a@example.com", "acct-a"))
+        store.upsert_credential("anthropic", self._account("b@example.com", "acct-b"))
+        store.delete_credentials_for_provider("anthropic")
+        assert await store.list_oauth_accesses("anthropic") == []
+
+    async def test_an_unrefreshable_account_is_omitted_without_blocking_it(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A read may drop a row from its own output; it may not retire it."""
+        row = store.upsert_credential("anthropic", self._account("a@example.com", "acct-a"))
+        store.upsert_credential("anthropic", self._account("b@example.com", "acct-b"))
+
+        async def explode(self_, credential_row, *, force=False):  # noqa: ANN001
+            if credential_row.id == row.id:
+                raise AuthStoreError("refresh failed")
+            return dict(credential_row.data)
+
+        monkeypatch.setattr(AuthStore, "_ensure_oauth_fresh", explode)
+        accesses = await store.list_oauth_accesses("anthropic")
+        assert [a.email for a in accesses] == ["b@example.com"]
+        assert store.is_blocked(row.id, "anthropic") is False

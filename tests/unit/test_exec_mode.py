@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -26,6 +27,7 @@ from local_operator.harness.types import (
     AgentEvent,
     AgentMessage,
     AgentStartEvent,
+    ImageContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -37,6 +39,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.headless_print import PrintRenderer, printable_event, run_print_mode
+from local_operator.session.protocol import CompactionOutcome
 
 # --- Fakes ---------------------------------------------------------------------
 
@@ -101,7 +104,7 @@ class FakeSession:
         pass
 
     # driving turns
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
         events = (
             self.scripts[self._script_index]
@@ -115,7 +118,7 @@ class FakeSession:
                 if asyncio.iscoroutine(result):
                     await result
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
     def set_approval_handler(self, handler: object | None) -> None:
@@ -139,6 +142,27 @@ class FakeSession:
     # lifecycle
     async def dispose(self) -> None:
         self.disposed = True
+
+    async def complete_aside(
+        self,
+        turns: list[Any],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> str:
+        # exec mode never opens an aside; present only so the fake still
+        # satisfies SessionProtocol, which is what these tests type against.
+        return ""
+
+    async def adopt_aside(self, messages: list[Any]) -> None:
+        return None
+
+    async def compact_now(self) -> CompactionOutcome:
+        # No history to compact: this fake never carries a conversation, which
+        # is the state a real session answers with the same refusal.
+        return CompactionOutcome(
+            ran=False, reason="nothing_to_compact", detail="nothing to compact"
+        )
 
 
 def _success_script(reply: str = "Hello from the agent") -> list[AgentEvent]:
@@ -327,7 +351,7 @@ def test_run_exec_prompt_raising_exits_one(fake_factory, capsys) -> None:
     stderr — never the interactive red banner."""
 
     class RaisingSession(FakeSession):
-        async def prompt(self, text: str, attachments=None) -> None:
+        async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
             raise RuntimeError("turn blew up")
 
     fake_factory(RaisingSession([]))
@@ -576,7 +600,7 @@ def test_exec_worker_sigterm_yields_130(tmp_path: Path) -> None:
         "        return lambda: None\n"
         "    def abort(self, reason):\n"
         "        self._abort.set()\n"
-        "    async def prompt(self, text, attachments=None):\n"
+        "    async def prompt(self, text, images=None):\n"
         # READY is printed from inside the turn, which is the only point where
         # the signal handler is provably installed AND the turn has started.
         # A fixed sleep here raced under full-suite load: the child took SIGTERM

@@ -38,6 +38,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.widgets import Static
 
+from local_operator.model.naming import model_label as model_label_forms
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import format_duration, truncate_cells
 
@@ -53,7 +54,25 @@ _SPINNER_INTERVAL_S = 0.08
 #: for exactly that reason (the omp reference uses them; it can afford to).
 #: Geometric and technical symbols only, so no Nerd font is required.
 ICON_MODEL = "◆"
-ICON_EFFORT = "◐"
+#: Reasoning effort. A CATEGORY marker like every other icon here — the value is
+#: the word beside it (`▴ high`), and the glyph never varies with the rung. A
+#: varying glyph would buy one cell of redundancy and cost a legend nobody is
+#: given; the owner's own reference reads its effort glyph as a category mark
+#: too.
+#:
+#: It was `◐`, which is the wrong constant for a category: that glyph belongs to
+#: a series (`◐◑◒◓`) that encodes FRACTIONS, so a half-filled circle reads as a
+#: gauge — and it showed the identical half-filled mark beside `low` and beside
+#: `xhigh`, which is either a stuck meter or a mark contradicting the word next
+#: to it. A triangle carries no fill to misread.
+#:
+#: Triangles are also the one glyph family this band does not otherwise use, so
+#: it cannot be confused with the model diamond, the cost diamond, the MCP circle
+#: or the agents circle. `●` was rejected for the opposite reason: it already
+#: means "the current row" in the model picker and "the rung in force" in
+#: `/effort`'s listing, and a glyph with two meanings in one feature is worse
+#: than a plain one with none.
+ICON_EFFORT = "▴"
 ICON_CWD = "⌂"
 ICON_AGENTS = "◍"
 ICON_JOBS = "⊞"
@@ -145,15 +164,18 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
-    # Second-to-last, just ahead of mcp. This rung only EXISTS while the
-    # tool-approval gate has been disarmed for the session, so it is an alarm by
-    # the same argument mcp's failure branch is one — but it is the WIDEST
-    # segment in the band (`! auto-approve` is 14 cells against `⊙ 3 MCP`'s 7),
-    # and this ladder sheds by what a drop BUYS. Dropping the widest alarm first
-    # is what lets the narrow one survive to the very last step, so a cramped
-    # terminal keeps saying something rather than falling straight to the
-    # truncated tail. The mode is still not silent when it goes: `/approvals`
-    # reports it, and the notice that latched it is in the transcript.
+    # Second-to-last, just ahead of mcp — but only while mcp is an ALARM, which
+    # is the one case something here beats it for last place (see
+    # :func:`_narrowest_survivor_last`; in every quiet ladder this rung IS the
+    # last survivor). It only EXISTS while the tool-approval gate is disarmed,
+    # so it is an alarm by the same argument mcp's failure branch is one — but
+    # it is the WIDEST segment in the band (`! auto-approve` is 14 cells against
+    # `⊙ 3 MCP`'s 7), and this ladder sheds by what a drop BUYS. Dropping the
+    # widest alarm first is what lets the narrow one survive to the very last
+    # step, so a cramped terminal keeps saying something rather than falling
+    # straight to the truncated tail. The mode is still not silent when it goes:
+    # `/approvals` reports it, and the notice that latched it is in the
+    # transcript.
     "approvals",
     # DEAD LAST *when it is an alarm*, mirroring the reference's
     # `flexShrink={0}` on this indicator. Two reasons it then outlives even the
@@ -170,22 +192,66 @@ _DROP_LADDER: tuple[str, ...] = (
 )
 
 
+#: Rungs whose painted width is not knowable from the ladder. ``cwd`` is as wide
+#: as the user's path — a basename alone runs from 3 cells to 30 — so it can
+#: never be relied on as the thing that still fits at the narrowest width. The
+#: render walk is monotone (it sheds until the row fits and can never add a
+#: segment back), so a ladder ending on one of these sheds a bounded segment to
+#: make room for a path that then does not fit either, and paints neither. No
+#: ladder may end on one; ``test_status_line`` holds every variant to it.
+_UNBOUNDED_RUNGS = frozenset({"cwd"})
+
+
+def _narrowest_survivor_last(rungs: list[str]) -> list[str]:
+    """Re-seat ``approvals`` off last place — but only when ``mcp`` can take it.
+
+    Every ``_x_before_cwd`` helper below promotes one rung, and promoting a rung
+    leaves whatever FOLLOWED it at the end of the ladder. In this ladder that is
+    reliably ``approvals`` — the 14-cell segment the authored order sheds FIRST,
+    precisely because dropping it buys the most width.
+
+    Last place goes to the narrowest BOUNDED rung, and that rule was written
+    when the only rung competing for it was ``mcp``: 7 cells against 14, and its
+    failure branch is an alarm too, so it wins on both counts. The rule then
+    fired in ladders where ``mcp`` had been promoted away, and handed last place
+    to whatever happened to be there instead — the context percentage — which is
+    not the same trade at all. Measured by a design pass across 13 widths with a
+    healthy MCP: at 56 cells the band read ``◆ Claude Opus 5 › ⣿  ▦ 49.6%/1M ‹ !
+    auto-approve`` and at 48 it read ``◆ Claude Opus 5 › ⣟  ▦ 49.6%/1M``. A
+    narrow terminal quietly stopped saying that every tool runs without asking,
+    in order to keep a compaction forecast.
+
+    So the rule is: last place goes to the narrowest bounded rung, and an ALARM
+    outranks a reading. ``mcp`` is the only rung that beats ``approvals`` on
+    both, so the repair applies exactly when ``mcp`` would land there. Anywhere
+    else the alarm stays last, which also settles a disagreement the two quiet
+    ladders used to have with each other: with an estimated context reading the
+    alarm already survived to the end (the repair was refused there because it
+    would have stranded the unbounded ``cwd`` last), and with an exact one it
+    did not.
+
+    The alarm is not silent when it finally goes: ``/approvals`` reports the
+    mode, and the notice that latched it is in the transcript.
+    """
+    if rungs[-1] != "approvals":
+        return rungs
+    repaired = [step for step in rungs if step != "approvals"]
+    repaired.insert(len(repaired) - 1, "approvals")
+    if repaired[-1] != "mcp":
+        return rungs
+    return repaired
+
+
 def _mcp_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
     """``ladder`` with the mcp rung moved to just ahead of ``cwd``.
 
-    Moving mcp forward leaves whatever followed it at the END of the ladder, and
-    in the full order that is ``approvals`` — the 14-cell segment this ladder
-    documents as the FIRST alarm to shed because dropping it buys the most width.
-    Left last it became the thing that outlived the context number in the quiet
-    band, which inverts the whole argument. So the tail is re-ordered too: the
-    narrowest survivor goes last.
+    A healthy `⊙ 2 MCP` is a nicety, and last place had it outranking both the
+    working directory and the full model label. The rung moves rather than the
+    render site special-casing the segment.
     """
     rungs = [step for step in ladder if step != "mcp"]
     rungs.insert(rungs.index("cwd"), "mcp")
-    if rungs[-1] == "approvals":
-        rungs.remove("approvals")
-        rungs.insert(rungs.index("context"), "approvals")
-    return tuple(rungs)
+    return tuple(_narrowest_survivor_last(rungs))
 
 
 #: The ladder for a band whose MCP segment is NOT an alarm. Precomputed rather
@@ -194,18 +260,50 @@ def _mcp_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
 _DROP_LADDER_QUIET: tuple[str, ...] = _mcp_before_cwd(_DROP_LADDER)
 
 
-def drop_ladder(status: McpStatus) -> tuple[str, ...]:
+def _context_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
+    """``ladder`` with the context rung moved to just ahead of ``cwd``.
+
+    The full order puts cwd first because the context number "predicts the
+    operator's next action". That is true of a number the model reported, and
+    false of the boot ESTIMATE: before a single turn, nothing has been spent,
+    nothing is approaching compaction, and the figure is a static property of a
+    session that has not done anything yet. Meanwhile "where am I" is exactly
+    as load-bearing as it always was — more so, since a fresh session is when a
+    user is most likely to be checking they opened the right directory.
+
+    Shedding the estimate first is therefore the same trade ``_mcp_before_cwd``
+    exists to make: rank by what the segment is worth RIGHT NOW, not by what
+    its slot is usually worth. It inherits the same tail rule for the same
+    reason — promoting context out of last place in the quiet ladder is exactly
+    what left ``approvals`` stranded there.
+    """
+    rungs = [step for step in ladder if step != "context"]
+    rungs.insert(rungs.index("cwd"), "context")
+    return tuple(_narrowest_survivor_last(rungs))
+
+
+#: Estimate variants of both ladders, precomputed for the same reason.
+_DROP_LADDER_ESTIMATE: tuple[str, ...] = _context_before_cwd(_DROP_LADDER)
+_DROP_LADDER_QUIET_ESTIMATE: tuple[str, ...] = _context_before_cwd(_DROP_LADDER_QUIET)
+
+
+def drop_ladder(status: McpStatus, *, context_estimated: bool = False) -> tuple[str, ...]:
     """Which reduction order this band uses, given its MCP state.
 
     The mcp rung's place is earned by the ALARM, not by the segment. Unconditional
     last place meant a healthy `⊙ 2 MCP` outranked both the working directory and
     the full model label: at 40 cells the band read `◆ model › ⊙ 2 MCP` where the
     same terminal with no MCP configured showed `◆ test/model › ⌂ local-operator`.
-    A count nobody has to act on was costing the user "where am I" AND "which
-    provider". So a neutral count sheds early, just ahead of the working
-    directory, and a danger one still outlives everything.
+    A healthy count is a nicety and a failed one is the only warning the band
+    carries, so the rung moves rather than the segment being special-cased at the
+    render site.
+
+    ``context_estimated`` demotes the context rung for the same kind of reason —
+    see :func:`_context_before_cwd`.
     """
-    return _DROP_LADDER if mcp_semantic(status) == "danger" else _DROP_LADDER_QUIET
+    if mcp_semantic(status) == "danger":
+        return _DROP_LADDER_ESTIMATE if context_estimated else _DROP_LADDER
+    return _DROP_LADDER_QUIET_ESTIMATE if context_estimated else _DROP_LADDER_QUIET
 
 
 def format_context_tokens(tokens: int) -> str:
@@ -245,11 +343,56 @@ def format_context_usage(tokens: int, window: int) -> str:
     credential renders ``—``. Two spellings of "unknown" in one row would read
     as two different states.
     """
+    return context_spelling(tokens, window, form="full")
+
+
+#: The forms a context reading may be written in, widest first. Named rather
+#: than inlined at each site because the band and the subagent rows show the
+#: SAME child's reading four rows apart, and they were spelling it two ways —
+#: `▦ 24.1%/200k` above `24%/200k`. Cost never had that problem because both
+#: sides go through `format_cost` and differ only by a documented magnitude
+#: rule; this gives the context reading the same treatment.
+#:
+#: * ``full``  — ``24.1%/200k``. What the band always shows.
+#: * ``nodec`` — ``24%/200k``. Two cells cheaper, denominator kept, so two
+#:   children on different windows stay comparable.
+#: * ``short`` — ``24%``. Seven cells cheaper; the denominator is the half a
+#:   reader can recover by opening the child's page.
+#:
+#: Only the rows reduce. The band has one segment and the cells to spell it
+#: whole, so a band that shortened would be shortening for no reason.
+CONTEXT_FORMS = ("full", "nodec", "short")
+
+
+def context_spelling(tokens: int, window: int, *, form: str = "full") -> str:
+    """One context reading in one of :data:`CONTEXT_FORMS`.
+
+    Empty when there is nothing to report, so every caller's segment
+    disappears on the same test. A percentage needs a denominator: with no
+    window the spend is reported against an explicit unknown rather than
+    against an invented one, and that is true of every form.
+
+    A rounded ``0%`` over a non-zero reading is refused in all of them, for
+    the reason a confident ``$0.0000`` over real spend is refused — a child
+    holding three thousand tokens is not holding none.
+    """
     if tokens <= 0:
         return ""
     if window <= 0:
-        return f"{format_context_tokens(tokens)}/—"
-    return f"{tokens / window * 100:.1f}%/{format_window(window)}"
+        return (
+            f"{format_context_tokens(tokens)}/—"
+            if form != "short"
+            else (format_context_tokens(tokens))
+        )
+    percent = tokens / window * 100
+    if form == "short":
+        return f"{percent:.0f}%" if percent >= 1 else "<1%"
+    denominator = format_window(window)
+    if form == "nodec":
+        return f"{max(percent, 0.5):.0f}%/{denominator}"
+    if percent < 0.05:
+        return f"<0.1%/{denominator}"
+    return f"{percent:.1f}%/{denominator}"
 
 
 def format_cost(cost: float) -> str:
@@ -395,21 +538,83 @@ def format_cwd(cwd: str, *, short: bool) -> str:
         return str(path)
 
 
-def format_model_label(label: str, *, short: bool) -> str:
-    """``provider/model``, or just the model id when ``short``.
+def format_model_label(label: str, *, short: bool, name: str = "") -> str:
+    """A model's human name, or its selector when no name can be trusted.
 
-    The provider is the droppable half: an operator who has switched
-    providers knows which one they are on, but two providers' model ids are
-    rarely confusable, so ``openrouter/moonshotai/kimi-k2`` degrades to
-    ``kimi-k2`` rather than disappearing. Only the LAST path segment is kept
-    — vendor-scoped ids carry two prefixes, and dropping one of them would
-    leave a label that is still too long to help.
+    ``label`` is the selector the rest of the app identifies a model by
+    (``anthropic/claude-opus-5``); ``name`` is the resolved ``ModelInfo.name``
+    when the caller has one, and is what lets an aggregator id no registry row
+    covers still read as ``MoonshotAI: Kimi K2``. Callers without it still get
+    the curated name, which is every direct provider.
+
+    Both the choice of name and the ``short`` narrowing are
+    ``model/naming.py``'s: it refuses a name that two models answer to, so the
+    23 cells of ``anthropic/claude-opus-5`` become the 13 of ``Claude Opus 5``
+    without the band ever printing a string that fails to say which model is
+    replying. Where it refuses, the selector comes back and ``short`` keeps only
+    the last path segment — the behaviour this segment has always had, now
+    reached only when a name would have been a guess.
     """
     if not label:
         return ""
-    if not short:
-        return label
-    return label.rpartition("/")[2] or label
+    provider, _, model_id = label.partition("/")
+    forms = model_label_forms(provider, model_id, name)
+    return forms.compact if short else forms.full
+
+
+@dataclass(frozen=True)
+class SubagentBand:
+    """The CHILD's readings, shown in place of the session's own.
+
+    While the full-page subagent view is up, the band four rows under it was
+    still describing the PARENT — its model, its context, its spend — over a
+    frame whose entire subject is a different session. A child frequently runs
+    a different model than its parent (``run_subagent`` takes a ``model_spec``
+    override), so that was not merely redundant, it was wrong.
+
+    An OVERLAY rather than a save-and-restore of the band's own fields,
+    because the parent does not stop while the page is open: its turn keeps
+    ending, and every ``on_turn_ended`` writes a fresh cost and context into
+    those fields. Saving them on the way in would hand back a snapshot that
+    went stale in the reader's hand. Shadowed, the parent's numbers stay live
+    underneath and are revealed intact the moment the overlay is dropped.
+
+    Every field is OMITTABLE and empty means omitted, never zero: a child that
+    has reported no usage has no context reading and no spend, and the band's
+    own segments already disappear on exactly those emptiness tests. Printing
+    the parent's figure in a child's frame is the one thing this class exists
+    to prevent, so there is no field here that can fall back to it.
+    """
+
+    #: Never empty in practice: a child with no recorded model of its own is
+    #: running the parent's, so the caller resolves that before constructing
+    #: this. The band keeps the model segment down every rung of the ladder,
+    #: and "which model is replying" has an answer here even when nothing else
+    #: does — with ONE exception, which is the narrow end of an overlay. Below
+    #: the last aligned rung the irreducible row carries `◍ <name>` alone
+    #: (:meth:`StatusLine._render`), because a child's model with no owner
+    #: beside it reads as the SESSION's model and misattributes the one fact
+    #: this class exists to keep straight. The name is the segment that never
+    #: drops; the model yields to it, and only there.
+    model_label: str = ""
+    #: The child's own name, which REPLACES the parent's running-agent counter
+    #: while the overlay is up. Without it the band interleaves three owners
+    #: with no mark — the model, context, cost and duration are the child's,
+    #: the cwd and MCP are shared, and the parent's `◍ 2 agents` sat between
+    #: them. Naming the child at the head of the right-hand group makes
+    #: everything after it belong to one session, and the count it displaces
+    #: is redundant to a reader who is already inside one of those agents and
+    #: has the whole list four rows below.
+    label: str = ""
+    context_tokens: int = 0
+    context_window: int = 0
+    #: Already formatted, because the vocabulary for "billed but unpriceable"
+    #: (``$—``) belongs to the caller that knows the difference between a
+    #: child that spent nothing and one nobody can price.
+    cost: str = ""
+    #: The child's own age. ``None`` leaves the segment off rather than
+    #: reporting the parent's cumulative active time under a child's title.
+    duration: float | None = None
 
 
 class StatusLine:
@@ -435,9 +640,21 @@ class StatusLine:
         # is worse than no duration.
         self._clock = clock
         self._model_label: str = ""
+        # The resolved ``ModelInfo.name`` for the selector above, "" when the
+        # host could not supply one. Kept beside the selector rather than
+        # replacing it because the selector is still what the segment falls back
+        # to, and because a caller that knows neither (the boot frame, before a
+        # session exists) must not have to invent one.
+        self._model_name: str = ""
         self._effort: str = ""
         self._cwd: str = ""
         self._context_tokens: int = 0
+        # Provenance of the reading above: True while it is the host's LOCAL
+        # estimate of what is already loaded, False once a provider's exact
+        # prompt_tokens has replaced it. Lives here rather than on the app
+        # because both readers need it — the app for precedence, the band for
+        # how hard to fight to keep the segment on screen.
+        self._context_is_estimate: bool = False
         self._context_window: int = 0
         self._subagents: int = 0
         self._jobs: int = 0
@@ -445,10 +662,20 @@ class StatusLine:
         self._cost: str = ""
         self._conversation_name: str = ""
         self._mcp: McpStatus = McpStatus()
-        # True once the user has answered a tool-approval prompt with "allow
-        # all": a session-wide mode with no persistent indicator is how a
-        # disarmed gate gets forgotten about.
+        # Which segments the drop ladder shed on the LAST render. Every segment
+        # is dropped until something has been rendered, which is the honest
+        # starting state: nothing has been shown yet.
+        self._dropped: frozenset[str] = frozenset(_DROP_LADDER)
+        # True while the tool-approval gate is disarmed — by the prompt's "allow
+        # all", by `/approvals auto`, or by a saved default adopted at boot: a
+        # session-wide mode with no persistent indicator is how a disarmed gate
+        # gets forgotten about.
         self._approvals_auto: bool = False
+        # And whether that mode is the SAVED default rather than this session's
+        # choice. Two different promises — "until I close this window" and
+        # "every window from now on" — and the alarm is the only place a user
+        # sees either without running a command.
+        self._approvals_always: bool = False
         # Cumulative ACTIVE processing time: the sum of turn durations, not
         # wall clock since launch. A session left open over lunch has not
         # been working for two hours, and reporting that it has makes the
@@ -457,15 +684,45 @@ class StatusLine:
         self._turn_started_at: float | None = None
         self._spinner_index: int = 0
         self._spinner_timer = None
+        #: The child's readings, shadowing the session's own while the
+        #: full-page subagent view is up. ``None`` is the ordinary band.
+        self._subagent: SubagentBand | None = None
+
+    @property
+    def context_tokens(self) -> int:
+        """Tokens currently attributed to the context segment.
+
+        Read by the boot-time estimator, which must not overwrite a provider's
+        exact ``prompt_tokens`` if a turn beat it to the finish.
+        """
+        return self._context_tokens
+
+    @property
+    def context_is_estimate(self) -> bool:
+        """Whether :attr:`context_tokens` is a local estimate, not the wire."""
+        return self._context_is_estimate
+
+    def set_subagent(self, band: SubagentBand | None) -> None:
+        """Describe a CHILD session instead of this one, or stop (``None``).
+
+        Idempotent and cheap enough to call from the 1 Hz refresh that keeps
+        the open page live: an unchanged overlay repaints nothing.
+        """
+        if band == self._subagent:
+            return
+        self._subagent = band
+        self.refresh()
 
     # -- segment setters ----------------------------------------------------
     def update(
         self,
         *,
         model_label: str | None = None,
+        model_name: str | None = None,
         effort: str | None = None,
         cwd: str | None = None,
         context_tokens: int | None = None,
+        context_is_estimate: bool | None = None,
         context_window: int | None = None,
         subagents: int | None = None,
         jobs: int | None = None,
@@ -474,16 +731,21 @@ class StatusLine:
         conversation_name: str | None = None,
         mcp: McpStatus | None = None,
         approvals_auto: bool | None = None,
+        approvals_always: bool | None = None,
     ) -> None:
         """Update any subset of segments and repaint the band."""
         if model_label is not None:
             self._model_label = model_label
+        if model_name is not None:
+            self._model_name = model_name
         if effort is not None:
             self._effort = effort
         if cwd is not None:
             self._cwd = cwd
         if context_tokens is not None:
             self._context_tokens = context_tokens
+        if context_is_estimate is not None:
+            self._context_is_estimate = context_is_estimate
         if context_window is not None:
             self._context_window = context_window
         if subagents is not None:
@@ -494,6 +756,8 @@ class StatusLine:
             self._mcp = mcp
         if approvals_auto is not None:
             self._approvals_auto = approvals_auto
+        if approvals_always is not None:
+            self._approvals_always = approvals_always
         if cost is not None:
             self._cost = cost
         if conversation_name is not None:
@@ -505,9 +769,30 @@ class StatusLine:
         self.refresh()
 
     def refresh(self) -> None:
-        """Rebuild the band content, truncated to the dock's inner width."""
+        """Rebuild the band content, truncated to the dock's inner width.
+
+        ``layout=False`` because the band's box is fixed by the sheet
+        (``#status-band { height: 2 }``) and docked, so its content can never
+        move anything: whatever the ladder sheds, the row count is two. The
+        default reflows the WHOLE screen, and this runs on the 12.5 Hz spinner
+        for the whole of every turn. A/B in one process, 161-block transcript,
+        turn running, three-second idle windows: 9.6% of a core with the
+        default against 7.2% with this, and 7.4% against 5.2% on a second run
+        — about a quarter of the turn's idle burn, to animate one glyph.
+        """
         width = max(self._dock.size.width, 10)
-        self._dock.update(self._render(width))
+        self._dock.update(self._render(width), layout=False)
+
+    def is_showing(self, segment: str) -> bool:
+        """Whether ``segment`` survived the drop ladder on the last render.
+
+        Exists because "the band said it" is not the same claim as "the band was
+        told it": at ordinary widths the ladder sheds segments, and a caller that
+        treats the band as its only receipt has to know when the band could not
+        deliver one. Reads the last render rather than re-measuring, so the
+        answer is about the row the user is looking at.
+        """
+        return segment not in self._dropped
 
     def dispose(self) -> None:
         """Stop the spinner timer (idempotent)."""
@@ -529,10 +814,103 @@ class StatusLine:
 
     def _elapsed(self) -> float:
         """Banked active time plus the turn in flight, so the segment ticks
-        live off the spinner's repaint rather than needing its own timer."""
+        live off the spinner's repaint rather than needing its own timer.
+
+        Under a subagent overlay this is the CHILD's age instead — wall clock
+        since it was launched, which is the only duration a child has. The
+        parent's banked active time is not a fact about the child and would be
+        a bigger number than its whole life on a frame titled with its name.
+        """
+        if self._subagent is not None:
+            return self._subagent.duration or 0.0
         if self._turn_started_at is None:
             return self._active_seconds
         return self._active_seconds + (self._clock() - self._turn_started_at)
+
+    # -- overlay ---------------------------------------------------------------
+    # Five segments answer from the overlay when one is set, and the rest are
+    # left alone deliberately: cwd, MCP and the approval alarm describe the
+    # HOST, which the child shares — it runs in the same directory, on the
+    # parent's live MCP surface, under the same approval policy. Re-pointing
+    # those would say something changed when nothing did. The counters (agents,
+    # jobs) are the parent's ledger, and that ledger is what the page is a
+    # window onto.
+    #
+    # EFFORT used to be in that host list and did not belong there: it is a
+    # property of the MODEL, which is the one thing this overlay exists because
+    # the child can change. The parent's level beside the child's model name was
+    # not merely stale — a child on another family's model can be shown a level
+    # that model's ladder does not contain.
+    def _shown_effort(self) -> str:
+        """The effort level for whichever model the band is describing.
+
+        Same rule as :meth:`_shown_model_name`, for the same reason: a child
+        built on the parent's spec IS running the parent's level (the spec is
+        copied whole, effort included), and that is the normal path, so blanking
+        it unconditionally would hide a true reading on the common case.
+
+        A DIFFERENT model gets nothing rather than a guess. The overlay carries
+        no level of its own, and the segment's whole contract is that it names
+        the level in force — an empty segment says "not known here", which is
+        the only honest thing the band can say about a ladder it cannot see.
+        """
+        if self._subagent is not None:
+            if self._subagent.model_label == self._model_label:
+                return self._effort
+            return ""
+        return self._effort
+
+    def _shown_model_label(self) -> str:
+        if self._subagent is not None:
+            return self._subagent.model_label
+        return self._model_label
+
+    def _shown_model_name(self) -> str:
+        """The resolved name for whichever model the segment is describing.
+
+        Inherited under an overlay ONLY when the overlay names the same model.
+        Returning nothing unconditionally looked like the safe reading of the
+        overlay's rule and was not: ``job_stats`` documents an inherited spec as
+        the NORMAL path and ``harness/subagent.py`` sets the child's label from a
+        child built on the parent's spec, so the common case is a child on the
+        parent's own model — and then the same model was spelled two ways seconds
+        apart, ``MoonshotAI: Kimi K2`` with the page closed and
+        ``openrouter/moonshotai/kimi-k2`` with it open, because the fallback
+        lookup only reaches curated rows. A user reads that as a model switch.
+        That is D10, the defect this app has already shipped once between its
+        splash and its band.
+
+        A DIFFERENT selector still gets nothing, which is the rule that actually
+        matters: the parent's name must never be attributed to another model. The
+        child then falls back to its curated name, exactly as any caller with no
+        resolved metadata does.
+        """
+        if self._subagent is not None:
+            if self._subagent.model_label == self._model_label:
+                return self._model_name
+            return ""
+        return self._model_name
+
+    def _shown_context(self) -> tuple[int, int]:
+        """``(tokens, window)`` for the context segment."""
+        if self._subagent is not None:
+            return self._subagent.context_tokens, self._subagent.context_window
+        return self._context_tokens, self._context_window
+
+    def _shown_cost(self) -> str:
+        if self._subagent is not None:
+            return self._subagent.cost
+        return self._cost
+
+    def _shown_context_is_estimate(self) -> bool:
+        """A child's reading is always the provider's own, never an estimate.
+
+        Which matters beyond a tone: the drop ladder fights harder to keep an
+        ESTIMATED reading on screen, and inheriting the parent's estimate flag
+        would have the band making that trade on behalf of a number that has
+        nothing to do with it.
+        """
+        return self._subagent is None and self._context_is_estimate
 
     # -- rendering ----------------------------------------------------------
     def _render(self, width: int) -> Text:
@@ -550,7 +928,10 @@ class StatusLine:
         # string joins and the ladder is nine steps, so the worst case is ten
         # cheap rebuilds on a resize — far cheaper than measuring segments
         # independently and getting the separator arithmetic subtly wrong.
-        for step in (None, *drop_ladder(self._mcp)):
+        for step in (
+            None,
+            *drop_ladder(self._mcp, context_estimated=self._shown_context_is_estimate()),
+        ):
             if step is not None:
                 target = step.partition("shorten-")[2]
                 (short if target else dropped).add(target or step)
@@ -570,6 +951,13 @@ class StatusLine:
             # label at a width where the row it reflowed to was no narrower.
             gap = _MIN_GROUP_GAP if right.plain else 0
             if cell_len(left.plain) + cell_len(right.plain) + gap <= width:
+                # Recorded so a caller can ask whether the band actually SAID
+                # what it was asked to show. The effort segment needs it: it is
+                # the one segment a keystroke changes, so when the ladder has
+                # shed it the app owes the user a receipt somewhere else (see
+                # ``OperatorApp.action_cycle_effort``). Set on the fitting pass
+                # only — the intermediate rungs are attempts, not what shipped.
+                self._dropped = frozenset(dropped)
                 return self._compose(left, right, width, dim)
 
         # Even the irreducible row overflows. Truncate the model label rather
@@ -593,7 +981,26 @@ class StatusLine:
             if shimmer_enabled():
                 tail.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
                 tail.append(" ", style=dim)
-        label = format_model_label(self._model_label, short=True) if self._model_label else ""
+        if self._subagent is not None and self._subagent.label:
+            # The name goes on the IRREDUCIBLE row too. Without it this path
+            # emitted `⣾ ◆ Gemini 2.5 Pro Preview` while the session's own
+            # model was something else entirely — a child's model on screen
+            # attributed to nobody, which is worse than dropping the model
+            # with it. The docstring on the wide path calls this segment
+            # never-dropped; below 48 columns that was a claim and not a fact.
+            tail.append(f"{ICON_AGENTS} ", style=dim)
+            tail.append(
+                truncate_cells(self._subagent.label, max(1, width - cell_len(tail.plain))),
+                style=Style(color=theme_mod.semantic_color("label")),
+            )
+            tail.truncate(width, overflow="ellipsis")
+            return tail
+        model_label = self._shown_model_label()
+        label = (
+            format_model_label(model_label, short=True, name=self._shown_model_name())
+            if model_label
+            else ""
+        )
         if label:
             tail.append(f"{ICON_MODEL} ", style=dim)
             tail.append(
@@ -629,18 +1036,24 @@ class StatusLine:
         # every segment whose glyph is pure framing, and set only where the
         # glyph itself is the signal.
         parts: list[tuple[str, str, Style, Style | None]] = []
-        if self._model_label and "model" not in dropped:
+        model_label = self._shown_model_label()
+        if model_label and "model" not in dropped:
             parts.append(
                 (
                     ICON_MODEL,
-                    format_model_label(self._model_label, short="model" in short),
+                    format_model_label(
+                        model_label,
+                        short="model" in short,
+                        name=self._shown_model_name(),
+                    ),
                     Style(color=theme_mod.semantic_color("fg")),
                     None,
                 )
             )
-        if self._effort and "effort" not in dropped:
+        effort = self._shown_effort()
+        if effort and "effort" not in dropped:
             parts.append(
-                (ICON_EFFORT, self._effort, Style(color=theme_mod.semantic_color("label")), None)
+                (ICON_EFFORT, effort, Style(color=theme_mod.semantic_color("label")), None)
             )
         if self._cwd and "cwd" not in dropped:
             rendered = format_cwd(self._cwd, short="cwd" in short)
@@ -695,7 +1108,18 @@ class StatusLine:
         at all — it belongs to the running indicator.
         """
         parts: list[tuple[str, str, Style]] = []
-        if "subagents" not in dropped:
+        if self._subagent is not None and self._subagent.label:
+            # Never dropped: it is what says whose numbers follow it, and a
+            # band that sheds the owner while keeping the figures is worse
+            # than one that sheds a figure.
+            parts.append(
+                (
+                    ICON_AGENTS,
+                    truncate_cells(self._subagent.label, 24),
+                    Style(color=theme_mod.semantic_color("label")),
+                )
+            )
+        elif "subagents" not in dropped:
             agents = format_agents(self._subagents)
             if agents:
                 parts.append((ICON_AGENTS, agents, Style(color=theme_mod.semantic_color("label"))))
@@ -704,11 +1128,12 @@ class StatusLine:
             if jobs:
                 parts.append((ICON_JOBS, jobs, Style(color=theme_mod.semantic_color("label"))))
         if "context" not in dropped:
-            usage = format_context_usage(self._context_tokens, self._context_window)
+            usage = format_context_usage(*self._shown_context())
             if usage:
                 parts.append((ICON_CONTEXT, usage, Style(color=theme_mod.semantic_color("signal"))))
-        if self._cost and "cost" not in dropped:
-            parts.append((ICON_COST, self._cost, Style(color=theme_mod.semantic_color("warning"))))
+        cost = self._shown_cost()
+        if cost and "cost" not in dropped:
+            parts.append((ICON_COST, cost, Style(color=theme_mod.semantic_color("warning"))))
         if "duration" not in dropped:
             elapsed = self._elapsed()
             # Zero means "nothing has run yet" — an idle band should not claim a
@@ -730,10 +1155,17 @@ class StatusLine:
             # because the loop below paints icons `dim` — which made the one alarm
             # in the band its quietest mark (4.18:1, against the same `!` at
             # 9.4:1 in the transcript).
+            # `always` when the mode is the SAVED default, and nothing when it is
+            # only this session's. The alarm already answers "is the gate
+            # disarmed"; the one extra word answers the question that follows it,
+            # "until when", which is otherwise only reachable by running a
+            # command. Six cells, and the segment sheds as one unit, so the
+            # narrow-width behaviour is unchanged.
+            armed = f"{ICON_APPROVALS} auto-approve"
             parts.append(
                 (
                     "",
-                    f"{ICON_APPROVALS} auto-approve",
+                    f"{armed} always" if self._approvals_always else armed,
                     Style(color=theme_mod.semantic_color("warning"), bold=True),
                 )
             )

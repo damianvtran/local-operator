@@ -5,7 +5,9 @@ import pytest
 from local_operator.compaction import tokens as tokens_mod
 from local_operator.compaction.tokens import (
     IMAGE_TOKEN_ESTIMATE,
+    approx_text_tokens,
     clear_estimate_cache,
+    count_text_tokens,
     estimate_messages_tokens,
     estimate_tokens,
     invalidate_message_cache,
@@ -270,3 +272,61 @@ def test_upper_bound_does_not_load_tiktoken(monkeypatch):
     monkeypatch.setattr(tokens_mod, "_get_encoding", _boom)
     messages = [Message.user("hello " * 500), Message.assistant("world " * 500)]
     assert messages_tokens_upper_bound(messages) > 0
+
+
+class TestApproxTextTokens:
+    """The estimate for callers who cannot afford the exact ruler."""
+
+    def test_it_never_reaches_the_encoding(self, monkeypatch) -> None:
+        """The whole point. Loading cl100k_base costs ~43.6 MB RSS and, on a
+        cold cache, a network fetch — so a status readout that wanted a number
+        immediately was buying the most expensive object in the process."""
+
+        def _boom():
+            raise AssertionError("the approximation must not touch tiktoken")
+
+        monkeypatch.setattr(tokens_mod, "_get_encoding", _boom)
+        monkeypatch.setattr(tokens_mod, "_get_model_encoding", lambda _m: _boom())
+        assert approx_text_tokens("hello world " * 200) > 0
+
+    def test_empty_text_is_zero(self) -> None:
+        assert approx_text_tokens("") == 0
+
+    def test_it_tracks_the_exact_count_closely_enough_for_a_percentage(self) -> None:
+        """The claim is narrow on purpose: this payload, this direction.
+
+        Skipped without a working ENCODING, which is NOT paranoia: whenever
+        ``_get_encoding()`` returns None, ``count_text_tokens`` degrades to the
+        identical ``len(text) // 4`` expression, so both assertions below hold
+        by identity and this test measures nothing while looking green.
+
+        Guarding the import alone was not enough. ``_get_encoding`` also
+        swallows a failure from ``tiktoken.get_encoding("cl100k_base")``, which
+        on a cold cache is a network fetch and offline is a connection timeout
+        — tiktoken imports fine, ``importorskip`` does not fire, and the
+        comparison is an identity again. The same offline-cold-cache case the
+        estimator's own docstring calls out.
+
+        The bound is 20% because the payload below measures +17.3% — not
+        because 20% is a general property of ``chars // 4``. On other content
+        the same function is off by -66% (CJK) to +40% (English prose), which
+        is why the docstring tabulates rather than advertises a single figure,
+        and why this test names the payload it is calibrated against.
+
+        The direction matters as much as the size. Over-counting is the safe
+        error for a context readout: it reports less headroom than there really
+        is, so the failure mode is compacting slightly early rather than
+        promising room that does not exist.
+        """
+        pytest.importorskip("tiktoken")
+        if tokens_mod._get_encoding() is None:
+            pytest.skip("cl100k_base unavailable — the comparison would be an identity")
+        text = (
+            "You are a careful assistant. Read the repository before editing. "
+            '{"type":"object","properties":{"path":{"type":"string"}}}'
+        ) * 40
+        exact = count_text_tokens(text)
+        approx = approx_text_tokens(text)
+        assert exact > 0
+        assert approx >= exact, "a context readout must not under-report a Latin+JSON payload"
+        assert (approx - exact) / exact < 0.20

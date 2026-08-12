@@ -144,3 +144,44 @@ def test_documented_cli_shapes_parse(argv: list[str]) -> None:
     from local_operator.cli import build_cli_parser
 
     build_cli_parser().parse_args(argv)
+
+
+@pytest.mark.asyncio
+async def test_custom_instructions_task_routes_to_the_configuration_guide(
+    tmp_path: Path,
+) -> None:
+    """The phrasings a user actually reaches for when moving standing rules
+    into Local Operator must select the guide that names the real file."""
+    guides = discover_guides()
+    index = SkillIndex(cast(Any, guides), LocalEmbedder(), cache_dir=tmp_path / "cache")
+    await index.build()
+
+    for query in (
+        "update the system prompt / custom instructions",
+        "copy my AGENTS.md standing rules into local-operator",
+    ):
+        selected = {guide.name for guide in await index.select(query)}
+        assert "configuration" in selected, query
+
+
+def test_configuration_guide_names_the_real_instructions_file() -> None:
+    # The guide exists so an agent does not have to infer this from source and
+    # end up editing a file nothing reads.
+    body = make_guide_resolver({guide.name: guide for guide in discover_guides()})(
+        "guide://configuration"
+    )
+
+    assert body is not None
+    assert "system_prompt.md" in body
+    # The two mechanisms that look authoritative but are not.
+    assert "no `custom_instructions` key" in body
+    assert "next session, not the running one" in body
+
+
+def test_system_prompt_demands_a_guide_read_before_acting() -> None:
+    # A soft "may appear" was not enough to make the protocol fire on a real
+    # configuration question; the rule has to be imperative.
+    text = render_template("system.md", {})
+
+    assert "guide://<name>" in text
+    assert "MUST" in text

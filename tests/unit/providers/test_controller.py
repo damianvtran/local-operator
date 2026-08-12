@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from local_operator.providers.controller import ProviderController
+from local_operator.providers.usage import UsageReport
 
 
 class FakeAuthStore:
@@ -24,6 +25,9 @@ class FakeAuthStore:
         self._next_id = 1
         self.api_keys: dict[str, str] = {}
         self.oauth: dict[str, object] = {}
+        #: Every OAuth account per provider, as the real store now enumerates
+        #: them. Distinct from `oauth`, which is the cascade's single pick.
+        self.oauth_accounts: dict[str, list[object]] = {}
 
     def list_credentials(self, provider=None):
         rows = (
@@ -52,6 +56,9 @@ class FakeAuthStore:
 
     async def get_oauth_access(self, provider):
         return self.oauth.get(provider)
+
+    async def list_oauth_accesses(self, provider):
+        return list(self.oauth_accounts.get(provider, []))
 
     async def get_api_key(self, provider):
         return self.api_keys.get(provider)
@@ -128,8 +135,104 @@ async def test_fetch_usage_never_raises(controller) -> None:
 async def test_fetch_one_no_credential_returns_none(controller) -> None:
     # No stored credential and no api key -> None, not a crash.
     async with httpx.AsyncClient() as client:
-        result = await controller._fetch_one(client, "openrouter")
+        result = await controller._fetch_one(client, "openrouter", access=None)
     assert result is None
+
+
+class TestUsageIsPerAccount:
+    """Quota is per account, so a provider with two logins has two reports.
+
+    The cascade (`get_oauth_access`) answers "which account will the next
+    request run as" and can only ever name one — and with no session id its
+    selection order round-robins, so the one account that got reported was not
+    even stable between refreshes. A user with two Anthropic logins saw a
+    single block and no sign the other existed.
+    """
+
+    @staticmethod
+    def _account(email: str, account_id: str):
+        return types.SimpleNamespace(
+            access_token=f"tok-{account_id}",
+            credential_id=0,
+            account_id=account_id,
+            email=email,
+            org_id=None,
+            api_endpoint=None,
+            kind="oauth",
+        )
+
+    @pytest.mark.asyncio
+    async def test_every_account_gets_its_own_report(self, controller, store, monkeypatch) -> None:
+        store.oauth_accounts["anthropic"] = [
+            self._account("first@example.com", "acct-1"),
+            self._account("second@example.com", "acct-2"),
+        ]
+        seen: list[tuple[str, str | None]] = []
+
+        async def fake_fetch(client, provider, *, api_key, access_token, account_id):
+            seen.append((provider, account_id))
+            return UsageReport(provider=provider, limits=[])
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["anthropic"])
+
+        assert [r.identity for r in reports] == ["first@example.com", "second@example.com"]
+        # Each report was fetched with ITS OWN account, not the same one twice.
+        assert seen == [("anthropic", "acct-1"), ("anthropic", "acct-2")]
+
+    @pytest.mark.asyncio
+    async def test_order_is_stable_across_refreshes(self, controller, store, monkeypatch) -> None:
+        """Two refreshes must not reshuffle the list under the reader."""
+        store.oauth_accounts["anthropic"] = [
+            self._account("first@example.com", "acct-1"),
+            self._account("second@example.com", "acct-2"),
+        ]
+
+        async def fake_fetch(client, provider, *, api_key, access_token, account_id):
+            return UsageReport(provider=provider, limits=[])
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        first = [r.identity for r in await controller.fetch_usage(["anthropic"])]
+        second = [r.identity for r in await controller.fetch_usage(["anthropic"])]
+        assert first == second == ["first@example.com", "second@example.com"]
+
+    @pytest.mark.asyncio
+    async def test_one_failing_account_does_not_hide_the_others(
+        self, controller, store, monkeypatch
+    ) -> None:
+        store.oauth_accounts["anthropic"] = [
+            self._account("broken@example.com", "acct-1"),
+            self._account("fine@example.com", "acct-2"),
+        ]
+
+        async def fake_fetch(client, provider, *, api_key, access_token, account_id):
+            if account_id == "acct-1":
+                raise RuntimeError("quota endpoint exploded")
+            return UsageReport(provider=provider, limits=[])
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["anthropic"])
+        assert [r.identity for r in reports] == ["fine@example.com"]
+
+    @pytest.mark.asyncio
+    async def test_api_key_route_reports_once(self, controller, store, monkeypatch) -> None:
+        """No OAuth account means one report, not one per nothing.
+
+        An API key is not an identity — the cascade resolves a single secret
+        per provider — so fanning out there would print the same numbers twice.
+        """
+        store.api_keys["openrouter"] = "sk-or-1"
+        calls = 0
+
+        async def fake_fetch(client, provider, *, api_key, access_token, account_id):
+            nonlocal calls
+            calls += 1
+            return UsageReport(provider=provider, limits=[])
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["openrouter"])
+        assert len(reports) == 1
+        assert calls == 1
 
 
 def test_usage_enabled_provider_ids(controller) -> None:

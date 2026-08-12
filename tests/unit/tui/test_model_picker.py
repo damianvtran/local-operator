@@ -486,3 +486,69 @@ async def test_large_degraded_catalogue_leads_with_current_family_and_status() -
     assert first[0].selector == current.selector
     assert all(row.provider == "anthropic" for row in first)
     assert "live model list unavailable" in painted, painted
+
+
+def test_a_row_shows_the_display_name_beside_the_selector() -> None:
+    """The band prints the display name and nothing else once a model is running.
+    A picker that offered only the selector gave the user two names for one model
+    with no way to connect them, so the row carries both: the selector first,
+    because that is what ``/model`` takes and what ``rank_rows`` matches, and the
+    name after it as a parenthetical.
+    """
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows(), current="openai/gpt-4o")
+    picker.open("opus-5")
+    row = picker.render_text(120).plain
+    assert "anthropic/claude-opus-5" in row
+    assert "(Claude Opus 5)" in row
+
+
+def test_a_row_whose_name_says_nothing_new_does_not_repeat_itself() -> None:
+    """A model with no display name — a local Ollama tag, a resold aggregator id —
+    carries its selector as its label, and printing that twice on one row would
+    read as two different columns saying the same thing."""
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(
+        [ModelRow("ollama", "qwen3:8b", "ollama/qwen3:8b", 0, 0.0, 0.0, True)],
+        current="",
+    )
+    picker.open("qwen")
+    row = picker.render_text(120).plain
+    assert row.count("qwen3:8b") == 1, row
+
+
+def test_a_name_that_cannot_be_read_whole_is_not_painted_at_all() -> None:
+    """Truncation keeps the HEAD, and the head of a model name is the vendor word
+    every sibling row already shares: at 60 columns two anthropic rows both read
+    ``Claude…`` while the part that tells them apart is exactly what was cut. A
+    secondary aid that cannot be read should not spend cells."""
+    long_name = "Claude Opus 4.5 (2025-11-01)"
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(
+        [ModelRow("anthropic", "claude-opus-4-5-20251101", long_name, 200_000, 5.0, 25.0, True)],
+        current="",
+    )
+    picker.open("opus")
+    wide = picker.render_text(120).plain
+    assert f"({long_name})" in wide, wide
+    narrow = picker.render_text(60).plain
+    assert "Claude" not in narrow, narrow
+    assert "claude-opus-4-5-20251101" in narrow, narrow
+
+
+def test_the_name_never_grows_as_the_window_narrows() -> None:
+    """Sized against the PAINTED layout, the annotation grew as the window shrank:
+    crossing below ``_NUMBERS_MIN_WIDTH`` freed ~13 cells and handed all of them
+    here, so at 56 columns the row read ``Cla…`` and at 55 the fuller
+    ``Claude Opus 4.5…``. Content appearing as space disappears is the kind of
+    thing a reader stops trusting a layout over, so the room is measured against a
+    layout that always reserves the numbers run."""
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(_rows(), current="")
+    picker.open("")
+    widths = list(range(110, 44, -1))
+    painted = []
+    for width in widths:
+        row = picker.render_text(width).plain.splitlines()[0]
+        painted.append(len(row.partition("(")[2].partition(")")[0]))
+    assert painted == sorted(painted, reverse=True), list(zip(widths, painted))

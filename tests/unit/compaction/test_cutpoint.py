@@ -85,6 +85,64 @@ def test_no_cut_when_cut_would_be_trivial():
     assert find_cut_point(messages2, keep2) is None
 
 
+def test_no_cut_when_only_a_previous_summary_and_one_message_precede_it():
+    """A prior marker is not history to summarize — it is already a summary.
+
+    The state an on-demand ``/compact`` pressed straight after a pass lands in:
+    the context is ``[marker, older, recent…]``, so a raw index test sees two
+    messages before the cut and re-summarizes the previous summary plus one
+    message, spending a provider call and a full cache rewrite to compress what
+    is already compressed. Counted over REAL messages, there is one, and one is
+    not worth the pass.
+    """
+    marker = CustomMessage(custom_type="compaction_summary", details={"summary": "s" * 400})
+    # Held by name, not read back out of the mixed list: the keep budget is a
+    # fact about THIS message, and indexing the list hands back the
+    # ``Message | CustomMessage`` union that ``estimate_tokens`` cannot take.
+    tail = Message.user("tail")
+    messages = [marker, _big_user(), tail]
+    keep = estimate_tokens(tail) + 10
+    assert find_cut_point(messages, keep) is None
+
+    # Two real messages before the cut and the pass IS worth running — the rule
+    # is "fewer than two summarizable", not "any marker present".
+    with_two = [marker, _big_user(), _big_user(), _big_user(), Message.user("tail")]
+    cut = find_cut_point(with_two, keep)
+    assert cut == 3
+    assert [m for m in with_two[:cut] if m is not marker] == with_two[1:3]
+
+
+def test_one_summarizable_message_still_runs_when_it_is_the_reason_the_window_is_full():
+    """The marker exclusion must not block a pass over real tokens.
+
+    Counting messages answers in the wrong unit. ``[marker, X, …]`` cut at
+    index 2 leaves ONE summarizable message, which the count rule refuses and
+    the older ``index <= 1`` rule ran. When X is a huge tool result it is the
+    whole reason the context is full: refusing hands the AUTOMATIC trigger
+    nothing to do while the window keeps filling, which is a pass blocked
+    forever by the arithmetic meant to skip trivial ones.
+
+    The line is the recency budget, which is the only scale in scope: a lone
+    message that outweighs everything the caller asked to protect is not a
+    trivial rewrite.
+    """
+    marker = CustomMessage(custom_type="compaction_summary", details={"summary": "s" * 400})
+    tail = Message.user("tail")
+    huge = _big_user(20_000)
+    recent = _big_user(600)
+    # The budget is met by `recent` alone, so the backwards walk stops there and
+    # `huge` lands on the SUMMARIZE side with the marker — the shape where the
+    # count rule and the token question disagree.
+    keep = estimate_tokens(recent)
+
+    cut = find_cut_point([marker, huge, recent, tail], keep)
+    assert cut == 2
+
+    # And the case the exclusion exists for is untouched: one SMALL message
+    # after a pass is still not worth a provider call and a cache rewrite.
+    assert find_cut_point([marker, _big_user(40), recent, tail], keep) is None
+
+
 def test_none_when_snap_runs_past_end():
     """Trailing tool cluster with nothing valid after it -> None."""
     messages = [

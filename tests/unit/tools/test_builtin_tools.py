@@ -9,13 +9,26 @@ and range-beyond-EOF.
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import os
+import random
+import struct
+import zlib
 from pathlib import Path
 from typing import Any
 
 import pytest
+from PIL import Image
 
-from local_operator.harness.types import AbortSignal, AgentTool, ToolContext, ToolResult
+from local_operator.harness.types import (
+    AbortSignal,
+    AgentTool,
+    ImageContent,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
 
@@ -342,12 +355,279 @@ async def test_read_refuses_oversized_file(tools, context, tmp_path) -> None:
     assert "bash" in result.text
 
 
+# ---------------------------------------------------------------------------
+# read: images
+# ---------------------------------------------------------------------------
+
+
+def _write_png(
+    path: Path, size: tuple[int, int], noise: str | None = None, colours: int = 0
+) -> Path:
+    """A real PNG on disk.
+
+    ``noise`` defeats PNG compression, which is what drives the file over the
+    byte budget and reaches the lossy rung — a flat fill never gets close.
+    ``smooth`` noise is photographic and compresses better as JPEG; ``sharp``
+    noise over a small ``colours`` palette is the inverse, the case where PNG
+    wins and the lossy rung must decline itself.
+
+    Saved with maximum compression on purpose: PIL's default settings
+    round-trip an image it wrote itself to BYTE-IDENTICAL output, which would
+    silently make any "was this forwarded verbatim?" assertion vacuous. Real
+    PNGs on disk come from other encoders, so this is also the honest fixture.
+    """
+    image = Image.new("RGB", size, (10, 60, 120))
+    if noise:
+        rng = random.Random(1234)
+        pixels = image.load()
+        assert pixels is not None
+        palette = [
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (0, 255, 255),
+            (255, 0, 255),
+            (255, 255, 255),
+            (0, 0, 0),
+        ][:colours]
+        for y in range(size[1]):
+            if noise == "sharp":
+                for x in range(size[0]):
+                    pixels[x, y] = rng.choice(palette)
+                continue
+            for x in range(0, size[0], 4):
+                value = rng.randint(0, 255)
+                for offset in range(4):
+                    pixels[x + offset, y] = (value, (value * 3) % 256, (value + 77) % 256)
+    image.save(path, format="PNG", optimize=True, compress_level=9)
+    return path
+
+
+def _image_blocks(result: ToolResult) -> list[ImageContent]:
+    return [block for block in result.content if isinstance(block, ImageContent)]
+
+
 @pytest.mark.asyncio
-async def test_read_binary_detected(tools, context, tmp_path) -> None:
+async def test_read_png_returns_caption_then_image_block(tools, context, tmp_path) -> None:
+    # The whole point of the feature: the model receives the pixels, not
+    # "Binary file not readable as text". The caption leads because every
+    # text-only consumer (ToolResult.text, compaction, the TUI row) sees that
+    # and nothing else, and a bare image says neither what nor whether.
+    source = _write_png(tmp_path / "shot.png", (320, 200))
+    result = await _call(tools, "read", {"path": "shot.png"}, context)
+
+    assert result.is_error is False
+    assert [type(block) for block in result.content] == [TextContent, ImageContent]
+    caption, image = result.content
+    assert isinstance(caption, TextContent) and isinstance(image, ImageContent)
+    assert "shot.png" in caption.text
+    assert "image/png" in caption.text and "320x200" in caption.text
+    assert image.mime_type == "image/png"
+    # In-bounds images go over the wire byte-for-byte: a re-encode can only
+    # lose fidelity for an image the model sees at its original size.
+    assert base64.b64decode(image.data) == source.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_read_png_over_the_edge_cap_is_resized(tools, context, tmp_path) -> None:
+    # Pixels, not bytes, are what an image costs in context (~w*h/750 tokens),
+    # and Anthropic resizes past 1568 anyway while billing the resized count —
+    # so anything above the cap is upload the model never benefits from.
+    _write_png(tmp_path / "wide.png", (3000, 1500))
+    result = await _call(tools, "read", {"path": "wide.png"}, context)
+
+    assert result.is_error is False
+    (image,) = _image_blocks(result)
+    with Image.open(io.BytesIO(base64.b64decode(image.data))) as delivered:
+        assert max(delivered.size) == builtin.READ_IMAGE_MAX_EDGE
+        assert delivered.size == (1568, 784)
+    # What the model sees and what is on disk now differ; the caption must say
+    # so or a later `ls -l` looks like it contradicts the read.
+    assert "1568x784" in result.text
+    assert "source 3000x1500 image/png" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_photographic_png_falls_back_to_jpeg(tools, context, tmp_path) -> None:
+    # PNG is the right default (screenshots of small text are what this tool
+    # reads), but it is a bad photographic codec: the lossy rung exists so an
+    # image PNG cannot compress does not ride to the provider at several MB.
+    _write_png(tmp_path / "photo.png", (2000, 1500), noise="smooth")
+    result = await _call(tools, "read", {"path": "photo.png"}, context)
+
+    assert result.is_error is False
+    (image,) = _image_blocks(result)
+    assert image.mime_type == "image/jpeg"
+    # The rung is only allowed to fire when it wins; taking a lossy encode
+    # that is also bigger would be strictly worse on both axes.
+    lossless = io.BytesIO()
+    with Image.open(tmp_path / "photo.png") as original:
+        original.resize((1568, 1176), Image.Resampling.LANCZOS).save(lossless, format="PNG")
+    assert len(base64.b64decode(image.data)) < len(lossless.getvalue())
+    # base64 inflates by 4/3 and Anthropic rejects an image block over 5 MB.
+    assert len(image.data) < 5_000_000
+
+
+@pytest.mark.asyncio
+async def test_read_keeps_png_when_jpeg_would_be_bigger(tools, context, tmp_path) -> None:
+    # The mirror of the case above, and not hypothetical: sharp noise over an
+    # 8-colour palette measures 1145 KiB as PNG (over the budget, so the lossy
+    # rung fires) against 1704 KiB as quality-85 JPEG. Taking JPEG on the way
+    # past the budget would then be worse on BOTH axes — bigger and lossy — so
+    # the rung has to measure rather than assume it wins.
+    _write_png(tmp_path / "sharp.png", (1568, 1176), noise="sharp", colours=8)
+    result = await _call(tools, "read", {"path": "sharp.png"}, context)
+
+    assert result.is_error is False
+    (image,) = _image_blocks(result)
+    assert image.mime_type == "image/png"
+    assert len(base64.b64decode(image.data)) > builtin.READ_IMAGE_MAX_BYTES
+
+
+@pytest.mark.asyncio
+async def test_read_image_without_pillow_is_forwarded_verbatim(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    # Pillow reaches a default install only as a pillow-heif dependency, and
+    # that is the most platform-fragile wheel here. With no decoder there is
+    # no resize and no validation, but a screenshot the model can look at
+    # still beats a paragraph explaining why it cannot.
+    source = _write_png(tmp_path / "shot.png", (320, 200))
+    monkeypatch.setattr(builtin, "pillow_image_module", lambda: None)
+    result = await _call(tools, "read", {"path": "shot.png"}, context)
+
+    assert result.is_error is False
+    (image,) = _image_blocks(result)
+    assert base64.b64decode(image.data) == source.read_bytes()
+    assert "without resizing" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_large_image_without_pillow_is_refused(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    # The byte cap is the only bound still enforceable with no decoder, so it
+    # becomes the line. Forwarding an unbounded unvalidated blob is how a
+    # session ends up wedged behind a provider that refuses it.
+    _write_png(tmp_path / "fat.png", (2400, 1800), noise="smooth")
+    monkeypatch.setattr(builtin, "pillow_image_module", lambda: None)
+    result = await _call(tools, "read", {"path": "fat.png"}, context)
+
+    assert result.is_error is True
+    assert _image_blocks(result) == []
+    assert str(builtin.READ_IMAGE_MAX_BYTES) in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_heic_without_pillow_heif_refuses_rather_than_forwarding(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    # No provider accepts HEIC, so forwarding it verbatim would GUARANTEE the
+    # refusal rather than risk it. Transcoding is the only way to send one,
+    # and transcoding is exactly what is unavailable here.
+    (tmp_path / "pic.heic").write_bytes(b"\x00\x00\x00\x1cftypheic" + b"\x00" * 64)
+    monkeypatch.setattr(builtin, "heif_image_module", lambda: None)
+    result = await _call(tools, "read", {"path": "pic.heic"}, context)
+
+    assert result.is_error is True
+    assert _image_blocks(result) == []
+    assert "images" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_refuses_a_decompression_bomb_from_the_header(tools, context, tmp_path) -> None:
+    # A bomb is small on disk by construction, so the byte cap cannot see it
+    # coming and only the dimensions can. media.sniff_image reads those from
+    # the IHDR, which is what lets the refusal land BEFORE a decode allocates
+    # 3.6 GB of RGBA — hence a forged header rather than a real 30000px file.
+    small = _write_png(tmp_path / "seed.png", (8, 8)).read_bytes()
+    forged = bytearray(small)
+    struct.pack_into(">II", forged, 16, 30000, 30000)
+    struct.pack_into(">I", forged, 29, zlib.crc32(bytes(forged[12:29])) & 0xFFFFFFFF)
+    (tmp_path / "bomb.png").write_bytes(bytes(forged))
+
+    result = await _call(tools, "read", {"path": "bomb.png"}, context)
+    assert result.is_error is True
+    assert _image_blocks(result) == []
+    assert "30000x30000" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_non_image_binary_is_unchanged(tools, context, tmp_path) -> None:
+    # The image branch must not swallow the binary refusal it sits in front of.
     (tmp_path / "blob.bin").write_bytes(b"\x00\x01\x02payload")
     result = await _call(tools, "read", {"path": "blob.bin"}, context)
     assert result.is_error is True
-    assert "Binary" in result.text
+    assert "Binary file not readable as text" in result.text
+    assert _image_blocks(result) == []
+
+
+@pytest.mark.asyncio
+async def test_read_corrupt_image_errors_without_an_image_block(tools, context, tmp_path) -> None:
+    # Load-bearing, not defensive: Anthropic answers an undecodable image with
+    # `Could not process image`, and the bad block is already in the
+    # transcript by then, so every later request in the session dies on it
+    # too. The decode here is the only place that failure is still recoverable.
+    intact = _write_png(tmp_path / "shot.png", (320, 200)).read_bytes()
+    (tmp_path / "truncated.png").write_bytes(intact[: len(intact) // 2])
+    result = await _call(tools, "read", {"path": "truncated.png"}, context)
+
+    assert result.is_error is True
+    assert _image_blocks(result) == []
+    assert "truncated.png" in result.text and "as an image" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_classifies_by_magic_bytes_not_extension(tools, context, tmp_path) -> None:
+    # A `.png` holding an HTML error page is the realistic version of this: it
+    # is readable text and must never be shipped as an image. An extensionless
+    # screenshot is the mirror case — still a screenshot.
+    (tmp_path / "fake.png").write_text("<html><body>404 not found</body></html>\n")
+    fake = await _call(tools, "read", {"path": "fake.png"}, context)
+    assert fake.is_error is False
+    assert _image_blocks(fake) == []
+    assert "404 not found" in fake.text
+
+    _write_png(tmp_path / "screenshot", (64, 48))
+    bare = await _call(tools, "read", {"path": "screenshot"}, context)
+    assert bare.is_error is False
+    assert len(_image_blocks(bare)) == 1
+
+
+@pytest.mark.asyncio
+async def test_read_unsupported_image_format_names_it(tools, context, tmp_path) -> None:
+    # No provider takes BMP, so the extension is the only evidence left once
+    # the sniff declines. "Binary file not readable as text" reads as a bug in
+    # read to a caller who can plainly see a .bmp.
+    Image.new("RGB", (32, 32), (0, 0, 0)).save(tmp_path / "pic.bmp")
+    result = await _call(tools, "read", {"path": "pic.bmp"}, context)
+    assert result.is_error is True
+    assert _image_blocks(result) == []
+    assert "image/bmp" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_image_above_the_text_cap_is_still_read(tools, context, tmp_path) -> None:
+    # The 2 MB text cap exists because bytes become context; an image's cost
+    # is its pixels and is already bounded by the resize. Refusing a 2 MB
+    # screenshot with "use bash (head/tail)" helped nobody.
+    _write_png(tmp_path / "fat.png", (2400, 1800), noise="smooth")
+    assert (tmp_path / "fat.png").stat().st_size > builtin.READ_FILE_LIMIT_BYTES
+    result = await _call(tools, "read", {"path": "fat.png"}, context)
+    assert result.is_error is False
+    assert len(_image_blocks(result)) == 1
+
+
+@pytest.mark.asyncio
+async def test_read_image_reports_that_range_was_ignored(tools, context, tmp_path) -> None:
+    # Dropping the argument silently would leave the model believing it read a
+    # slice of something.
+    _write_png(tmp_path / "shot.png", (64, 48))
+    result = await _call(tools, "read", {"path": "shot.png", "range": "1-10"}, context)
+    assert result.is_error is False
+    assert len(_image_blocks(result)) == 1
+    assert "'range' does not apply" in result.text
 
 
 @pytest.mark.asyncio

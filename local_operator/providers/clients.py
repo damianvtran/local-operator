@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import email.utils
 import json
+import logging
+import re
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
@@ -46,6 +48,16 @@ from local_operator.providers.failover import ProviderError
 
 if TYPE_CHECKING:
     from local_operator.providers.auth_store import OAuthAccess
+
+
+#: "no payload supplied" — distinct from ``None``, which is the legitimate
+#: result of a non-JSON body. Lets the two extractors share one parse when the
+#: caller has it and still stand alone when it does not.
+_UNSET: Any = object()
+
+#: Config/transport problems go to the LOG, never the terminal: this module runs
+#: under a full-screen TUI that owns stderr.
+logger = logging.getLogger("local_operator.providers.clients")
 
 
 @runtime_checkable
@@ -74,18 +86,176 @@ class WireClient(Protocol):
 # ---------------------------------------------------------------------------
 
 
-def _parse_retry_after(response: httpx.Response) -> int | None:
-    """``Retry-After`` as milliseconds; supports seconds AND HTTP-date form."""
-    header = response.headers.get("retry-after")
-    if header is None:
-        return None
+def _error_payload(response: httpx.Response) -> Any:
+    """The parsed error body, or ``None`` when it is not JSON.
+
+    A single-element LIST is unwrapped: google's ``streamGenerateContent``
+    answers a pre-stream failure with ``[{"error": {...}}]``, and the mapping-only
+    extractor read straight past it to ``response.text``.
+    """
     try:
-        return int(float(header) * 1000)
+        payload = response.json()
     except ValueError:
+        return None
+    if isinstance(payload, list) and len(payload) == 1:
+        return payload[0]
+    return payload
+
+
+def _first_text(*candidates: Any) -> str:
+    """The first candidate that is a non-blank string."""
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+#: Longest provider message carried into an error frame. Every branch of the
+#: cascade below is bounded by it: the frame is one wrapped notice line in a
+#: terminal, and a provider that answers with a 3 KB error object must not spend
+#: the transcript on it.
+MAX_ERROR_MESSAGE_CHARS = 500
+
+
+def _extract_error_message(response: httpx.Response, payload: Any = _UNSET) -> str:
+    """The provider's OWN words about the failure, from whichever slot it used.
+
+    A cascade rather than one lookup, because the shapes genuinely differ and
+    the message is the useful half of the frame — it says WHICH limit and WHEN
+    it resets. Covered here:
+
+    - ``{"error": {"message": ...}}`` — openai, anthropic, google.
+    - ``{"error": "..."}`` — ollama and several openai-compatible servers.
+    - ``{"message": ...}`` / ``{"detail": ...}`` — gateways and FastAPI-shaped
+      proxies (litellm, vLLM).
+    - ``{"error": {"metadata": {"raw": "<json>"}}}`` — openrouter puts a bare
+      ``"Provider returned error"`` in ``message`` and the UPSTREAM provider's
+      real text, JSON-encoded, in ``metadata.raw``; both are kept, in that
+      order, because the raw part is the one that names the limit.
+    - anything else — the raw body, capped.
+
+    ``{"error": {"message": ""}}`` falls THROUGH to the next slot: the previous
+    ``error.get("message", error)`` treated a present-but-empty key as an
+    answer, so a provider that sent the field blank produced an error that
+    printed nothing at all.
+
+    Nothing here ever renders a Python ``repr``. An ``error`` object with no
+    readable text falls through to the raw BODY — the real wire bytes, capped —
+    and a body that is empty too returns ``""`` so that ``ProviderError``'s own
+    floor speaks instead. ``str(error)`` used to stand in that slot and put
+    ``{'message': ''}`` in the frame, which is both uglier than the status phrase
+    and, uncapped, unbounded.
+    """
+    if payload is _UNSET:
+        payload = _error_payload(response)
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            message = _first_text(error.get("message"), error.get("detail"), error.get("msg"))
+            upstream = _openrouter_upstream_text(error)
+            if message and upstream and upstream not in message:
+                return _capped(f"{message}: {upstream}")
+            resolved = message or upstream or _first_text(error.get("status"), error.get("code"))
+            if resolved:
+                return _capped(resolved)
+        else:
+            direct = _first_text(error, payload.get("message"), payload.get("detail"))
+            if direct:
+                return _capped(direct)
+    return _capped(response.text)
+
+
+def _capped(text: str) -> str:
+    return text.strip()[:MAX_ERROR_MESSAGE_CHARS].strip()
+
+
+def _openrouter_upstream_text(error: Mapping[str, Any]) -> str:
+    """The upstream provider's message out of openrouter's ``metadata.raw``.
+
+    ``raw`` is a JSON *string* holding the origin provider's own error body, so
+    it is re-parsed one level. Anything unexpected degrades to the raw string
+    itself, which still says more than "Provider returned error".
+    """
+    metadata = error.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return ""
+    raw = metadata.get("raw")
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    try:
+        inner = json.loads(raw)
+    except ValueError:
+        return raw.strip()[:500]
+    if isinstance(inner, Mapping):
+        nested = inner.get("error")
+        if isinstance(nested, Mapping):
+            return _first_text(nested.get("message")) or raw.strip()[:500]
+        return _first_text(inner.get("message"), nested) or raw.strip()[:500]
+    return raw.strip()[:500]
+
+
+#: Ceiling on any advertised wait. A ``Retry-After`` is provider-supplied and
+#: reaches SQLite: a usage-limit failure feeds ``retry_after_ms_from_error``
+#: into ``AuthStore.rotate_sibling`` → ``block_credential(block_ms=...)``, which
+#: floors the value but has no ceiling of its own. A single ``retryDelay:
+#: "99999999s"`` would therefore write a 27,777-hour block against a working
+#: credential and print ``retry in 27777h46m`` at the user. Past a day the number
+#: is not a wait any interactive session can act on, so it is clamped and the
+#: original is logged.
+MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1000
+
+
+def _clamp_retry_after(delay_ms: int, source: str) -> int:
+    if delay_ms <= MAX_RETRY_AFTER_MS:
+        return delay_ms
+    logger.warning(
+        "provider advertised a %d ms wait via %s; clamped to %d ms",
+        delay_ms,
+        source,
+        MAX_RETRY_AFTER_MS,
+    )
+    return MAX_RETRY_AFTER_MS
+
+
+def _parse_retry_after(response: httpx.Response, payload: Any = _UNSET) -> int | None:
+    """How long to wait, as milliseconds, from the header OR the body.
+
+    ``Retry-After`` (seconds or HTTP-date) first. Google is the reason the body
+    is consulted too: gemini sends NO ``Retry-After`` on a quota 429 and puts
+    the delay in ``error.details[].retryDelay`` as ``"41s"``. That figure is the
+    single most actionable fact in a rate-limit error, and dropping it left the
+    frame saying only that the limit was hit.
+
+    A NON-POSITIVE header falls through to the body rather than winning. Zero is
+    not an answer to "how long": it renders as no wait at all (``__str__`` tests
+    the value for truth) and, worse, ``_same_credential_retry_allowed`` reads it
+    as a short throttle and grants an immediate same-key retry of a quota error.
+    A gateway that sends ``Retry-After: 0`` alongside google's real ``retryDelay``
+    should not erase it.
+    """
+    header = response.headers.get("retry-after")
+    if header is not None:
+        parsed = _retry_after_from_header(header)
+        if parsed:
+            return _clamp_retry_after(parsed, "the Retry-After header")
+    if payload is _UNSET:
+        payload = _error_payload(response)
+    delay = _retry_delay_from_payload(payload)
+    return None if delay is None else _clamp_retry_after(delay, "the response body")
+
+
+def _retry_after_from_header(header: str) -> int | None:
+    try:
+        # OverflowError as well as ValueError: `float("1e400")` is `inf`, and
+        # `int(inf * 1000)` raises rather than returning a number. Unhandled it
+        # escaped `raise_for_status` entirely, and in `ApiEmbedder._fetch` it
+        # escaped the graceful-degradation handlers too.
+        return max(0, int(float(header) * 1000))
+    except (ValueError, OverflowError):
         pass
     try:
         when = email.utils.parsedate_to_datetime(header)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if when.tzinfo is None:
         # HTTP dates are GMT; parsedate yields a naive datetime when the
@@ -95,36 +265,48 @@ def _parse_retry_after(response: httpx.Response) -> int | None:
     return max(0, delta_ms)
 
 
-def _extract_error_message(response: httpx.Response) -> str:
-    try:
-        payload = response.json()
-    except ValueError:
-        return response.text[:500]
-    if isinstance(payload, Mapping):
-        error = payload.get("error")
-        if isinstance(error, Mapping):
-            return str(error.get("message", error))
-        if isinstance(error, str):
-            return error
-        message = payload.get("message")
-        if message:
-            return str(message)
-    return response.text[:500]
+#: Google's ``RetryInfo.retryDelay``: a protobuf Duration rendered as seconds
+#: with an ``s`` suffix (``"41s"``, ``"1.5s"``). Bounded to 12 digits so a
+#: pathological body cannot build an enormous int before the clamp sees it.
+_RETRY_DELAY_RE = re.compile(r"^\s*(\d{1,12}(?:\.\d{1,6})?)s\s*$")
 
 
-def _raise_for_status(response: httpx.Response) -> None:
-    """Map HTTP errors onto ProviderError with failover-relevant flags."""
+def _retry_delay_from_payload(payload: Any) -> int | None:
+    if not isinstance(payload, Mapping):
+        return None
+    error = payload.get("error")
+    details = error.get("details") if isinstance(error, Mapping) else None
+    if not isinstance(details, Sequence) or isinstance(details, (str, bytes)):
+        return None
+    for detail in details:
+        if not isinstance(detail, Mapping):
+            continue
+        match = _RETRY_DELAY_RE.match(str(detail.get("retryDelay", "")))
+        if match:
+            return max(0, int(float(match.group(1)) * 1000))
+    return None
+
+
+def raise_for_status(response: httpx.Response) -> None:
+    """Map HTTP errors onto ProviderError with failover-relevant flags.
+
+    The body is parsed ONCE and handed to both extractors: the message and the
+    retry delay can live in the same payload (google puts them there), and
+    re-reading ``response.json()`` per lookup parsed it three times.
+    """
     status = response.status_code
     if status < 400:
         return
-    message = _extract_error_message(response)
+    payload = _error_payload(response)
     auth_error = status in (401, 403)
-    retryable = status == 429 or status >= 500 or status == 408
+    # 408/504 are the two "ran out of time" statuses; 429 and 5xx are the
+    # classic retryables. Everything else in 4xx is an answer, not a blip.
+    retryable = status == 429 or status >= 500 or status in (408, 504)
     raise ProviderError(
         status,
-        message,
+        _extract_error_message(response, payload),
         retryable=retryable,
-        retry_after_ms=_parse_retry_after(response),
+        retry_after_ms=_parse_retry_after(response, payload),
         auth_error=auth_error,
     )
 
@@ -200,6 +382,27 @@ def _sampling_params(request: ChatRequest, *, top_p_key: str = "top_p") -> dict[
         ),
         top_p_key: request.top_p if request.top_p is not None else request.model.top_p,
     }
+
+
+def _reasoning_effort(request: ChatRequest) -> str | None:
+    """The effort level to send, or ``None`` when the key must not appear.
+
+    Same omission rule as :func:`_sampling_params`, and for the same reason: a
+    model with no effort ladder rejects the key however politely it is spelled,
+    so the body must not carry it at all. Each client then places the value
+    under its own family's key — the level names are shared vocabulary, the
+    key is not.
+
+    The level is re-checked against the spec's ladder rather than trusted,
+    because the spec is mutable at runtime: ``/effort`` and ``shift+tab`` write
+    it, and a fallback can swap the model underneath it. A value the model does
+    not accept is dropped here rather than sent, which costs one turn's worth of
+    depth instead of the whole turn.
+    """
+    level = request.model.reasoning_effort
+    if not level or level not in request.model.reasoning_efforts:
+        return None
+    return level
 
 
 def _message_to_openai(message: Message) -> dict[str, Any]:
@@ -474,8 +677,17 @@ class OpenAICompatClient:
         if max_tokens and max_tokens > 0:
             body["max_tokens"] = max_tokens
         body.update(_sampling_params(request))
-        if request.model.reasoning_effort:
-            body["reasoning_effort"] = request.model.reasoning_effort
+        effort = _reasoning_effort(request)
+        if effort is not None:
+            # Chat-completions spells it flat and top-level; the Responses body
+            # below nests the same value under `reasoning`. Aggregators fronting
+            # OpenAI-shaped endpoints take the same key: measured live through
+            # OpenRouter on 2026-08-11, `reasoning_effort: "low"` to
+            # `openai/gpt-5.4` and `openai/o4-mini` both answered 200. That is
+            # the extent of what was measured — an Anthropic model reached
+            # through an aggregator, and the top rungs (`xhigh`/`max`), were not
+            # exercised, so treat those as expected-to-work rather than proven.
+            body["reasoning_effort"] = effort
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
         return body
@@ -560,8 +772,9 @@ class OpenAICompatClient:
         if max_tokens and max_tokens > 0:
             body["max_output_tokens"] = max_tokens
         body.update(_sampling_params(request))
-        if request.model.reasoning_effort:
-            body["reasoning"] = {"effort": request.model.reasoning_effort}
+        effort = _reasoning_effort(request)
+        if effort is not None:
+            body["reasoning"] = {"effort": effort}
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
         return body
@@ -602,7 +815,7 @@ class OpenAICompatClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
-                _raise_for_status(response)
+                raise_for_status(response)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
                     break
@@ -687,7 +900,7 @@ class OpenAICompatClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
-                _raise_for_status(response)
+                raise_for_status(response)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
                     break
@@ -747,6 +960,49 @@ class OpenAICompatClient:
 
 ANTHROPIC_API_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
+
+#: Anthropic's mid-stream ``error`` events carry the diagnosis in ``type``, not
+#: in a status: the HTTP response was 200 long before one arrives. Mapping the
+#: type back to the status it would have had is what lets the shared classifier
+#: call an ``overloaded_error`` transient and an ``authentication_error`` auth,
+#: instead of the blanket ``retryable=True`` that used to re-send a request the
+#: API had already refused.
+_ANTHROPIC_ERROR_STATUS = {
+    "invalid_request_error": 400,
+    "authentication_error": 401,
+    "billing_error": 402,
+    "permission_error": 403,
+    "not_found_error": 404,
+    "conflict_error": 409,
+    "request_too_large": 413,
+    "rate_limit_error": 429,
+    "api_error": 500,
+    "timeout_error": 504,
+    "overloaded_error": 529,
+}
+
+
+def _anthropic_stream_error(error: Mapping[str, Any]) -> ProviderError:
+    """One mid-stream anthropic ``error`` event as a ``ProviderError``.
+
+    The ``type`` is prepended to the message because anthropic's text alone is
+    frequently one bare word ("Overloaded"), and an unknown type keeps
+    ``retryable=True`` — the pre-existing assumption, correct for the api_error
+    and overloaded cases this event mostly carries.
+    """
+    error_type = str(error.get("type") or "")
+    status = _ANTHROPIC_ERROR_STATUS.get(error_type)
+    message = _first_text(error.get("message"))
+    if not message:
+        message = error_type or (str(error) if error else "")
+    elif error_type and error_type not in message:
+        message = f"{error_type}: {message}"
+    return ProviderError(
+        status,
+        message,
+        retryable=status is None or status == 429 or status >= 500,
+        auth_error=status in (401, 403),
+    )
 
 
 class AnthropicClient:
@@ -1008,9 +1264,20 @@ class AnthropicClient:
                 "required": {"type": "any"},
             }.get(request.tool_choice, {"type": "auto"})
         body.update(_sampling_params(request))
-        if request.model.reasoning_effort:
+        effort = _reasoning_effort(request)
+        if effort is not None:
+            # `output_config`, NOT a `thinking` budget: Anthropic's effort
+            # parameter covers ALL tokens in the response — text, tool calls and
+            # thinking — and needs no beta header, where a thinking budget only
+            # bounds the thinking block and requires it to be enabled. See
+            # https://platform.claude.com/docs/en/build-with-claude/effort.
+            #
+            # `thinking: adaptive` is a different thing from a budget and rides
+            # along from main: it lets the model choose its own depth instead of
+            # being handed a token ceiling. Kept INSIDE the validated gate, so a
+            # model with no effort ladder is still sent neither key.
             body["thinking"] = {"type": "adaptive"}
-            body["output_config"] = {"effort": request.model.reasoning_effort}
+            body["output_config"] = {"effort": effort}
         if request.stop_sequences:
             body["stop_sequences"] = list(request.stop_sequences)
         return body
@@ -1038,7 +1305,7 @@ class AnthropicClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
-                _raise_for_status(response)
+                raise_for_status(response)
             async for data in _iter_sse_lines(response):
                 try:
                     event = json.loads(data)
@@ -1086,8 +1353,7 @@ class AnthropicClient:
                     if "output_tokens" in raw_usage:
                         usage.output_tokens = int(raw_usage["output_tokens"])
                 elif event_type == "error":
-                    error = event.get("error") or {}
-                    raise ProviderError(None, str(error.get("message", error)), retryable=True)
+                    raise _anthropic_stream_error(event.get("error") or {})
 
         mapped = {
             "end_turn": "stop",
@@ -1168,6 +1434,12 @@ class GoogleClient:
         if max_tokens and max_tokens > 0:
             generation_config["maxOutputTokens"] = max_tokens
         generation_config.update(_sampling_params(request, top_p_key="topP"))
+        # No effort key here, deliberately: Gemini's named thinking tiers belong
+        # to the Interactions API, while this client speaks `generateContent`,
+        # where the shipped 2.5-series models take a token budget instead. No
+        # Gemini model is given an effort ladder for that reason
+        # (``model.effort``), so `_reasoning_effort` would return None anyway —
+        # the note is here because its absence is a decision, not an oversight.
         if request.stop_sequences:
             generation_config["stopSequences"] = list(request.stop_sequences)
         body["generationConfig"] = generation_config
@@ -1230,7 +1502,7 @@ class GoogleClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
-                _raise_for_status(response)
+                raise_for_status(response)
             async for data in _iter_sse_lines(response):
                 try:
                     chunk = json.loads(data)

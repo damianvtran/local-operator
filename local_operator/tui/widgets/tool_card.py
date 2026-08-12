@@ -81,6 +81,7 @@ Widths measured through ``rich.cells.cell_len`` only (one width model).
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Any
@@ -100,6 +101,7 @@ from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL_MAX,
     TranscriptBlock,
     TranscriptView,
+    wrap_cells,
 )
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
@@ -184,6 +186,62 @@ OUTPUT_INDENT = 2
 #: transcript into a scroll trap. The head is kept (it carries the command's
 #: framing) and the remainder is announced on a dim marker row.
 EXPAND_MAX_LINES = 40
+#: Per-ARGUMENT cap in the expansion. Much tighter than the output cap because
+#: a payload argument is unbounded by design — `write` carries a whole file in
+#: `content` — and the block exists to answer "what was this call", which a
+#: dozen rows settles. A truncated command is the one thing it must never be,
+#: and no realistic command reaches this.
+INPUT_MAX_LINES = 12
+#: Rows the LIVE view spends on a still-running tool's output. Tighter than
+#: :data:`EXPAND_MAX_LINES` on purpose: this block is on screen while the
+#: transcript underneath it is being scrolled and re-laid-out, so its height
+#: is a reflow budget rather than a reading budget, and twenty rows is already
+#: a quarter of a standard frame.
+#:
+#: The TAIL is kept, where the settled block keeps the head — the two answer
+#: different questions. A receipt is read from the top ("what did this do");
+#: a live view is watched at the bottom ("what is it doing NOW"), and a
+#: `seq 10000` whose live view froze on lines 1-40 would be indistinguishable
+#: from a hung command, which is the exact anxiety this feature exists to
+#: relieve.
+LIVE_MAX_LINES = 20
+#: Characters of a partial payload the card will look at, counted from the
+#: END. bash re-sends its whole accumulated output every 500 ms (a SNAPSHOT,
+#: not a delta — see `execute_bash._emit_update`), so a command that has
+#: printed 40 MB delivers 40 MB per update and a naive `splitlines()` of it is
+#: O(total output) twice a second, forever. Only the tail can survive the line
+#: cap anyway, so everything before it is dropped without being parsed and
+#: per-update work becomes a constant. Sized well above ``LIVE_MAX_LINES`` ×
+#: a wide terminal so the cap is reached by the line count, not by the slice.
+LIVE_INGEST_CHARS = 64 * 1024
+#: The live block's heading, stating the one thing a half-drawn card must not
+#: leave ambiguous. An expanded running card that showed a command and an
+#: empty output area is byte-identical to a FINISHED call that printed
+#: nothing, and those two frames mean opposite things.
+LIVE_HEADER_RUNNING = "⋯ running"
+#: Appended when nothing has STREAMED to this card yet. "no output" alone is
+#: the SETTLED card's answer and means "never will"; this one means "not yet",
+#: and the difference is whether the user should keep waiting.
+#:
+#: It is a statement about the CARD's buffer, not about the tool, and against
+#: the real producer that is a narrow window: bash's first 500 ms update is
+#: `--- stdout ---\n(empty)\n--- stderr ---\n(empty)`, four non-blank lines,
+#: which fills the buffer and lifts this caveat on a command that has printed
+#: nothing. Deliberately not special-cased — the card would have to parse one
+#: tool's private banner format to tell an empty payload from a full one, and
+#: it refuses that everywhere else (see :meth:`set_partial_detail`). The
+#: banners are themselves legible as "nothing yet", so the frame stays honest;
+#: it is this clause that stops being load-bearing, not the card.
+LIVE_HEADER_PENDING = "no output yet"
+#: How often a live card repaints, in seconds. ONE timer drives both the
+#: duration on the collapsed row and the streaming body, for the reason the
+#: subagent panel gives for its own single tick: a repaint scheduled per
+#: arriving event turns a chatty producer into a repaint storm, and a card
+#: that is dirty is repainted whole on the next tick instead. 1 Hz is the
+#: app's existing cadence for "this is still going" (the composing clock ran
+#: at exactly this rate before it was folded into this one) and it is a
+#: CEILING: bash's own 500 ms emit floor cannot push the card past it.
+CLOCK_INTERVAL_S = 1.0
 #: Search details are persisted separately from the token-bounded model text.
 #: The expansion gets enough of each provider snippet to identify the page,
 #: while the source URL remains the path to the complete document.
@@ -226,12 +284,29 @@ def _format_bytes(count: int) -> str:
 
 
 def format_duration(seconds: float) -> str:
-    """Active processing time: ``9s``, ``41m1s``, ``1h2m``.
+    """Active processing time: ``9s``, ``41m1s``, ``1h2m``, ``4d5h``.
 
     Units are dropped once they stop carrying information: past an hour the
     seconds are noise, and a whole minute renders as ``5m`` rather than
     ``5m0s``. Sub-second work renders as ``0s`` rather than vanishing, so a
     finished turn always leaves a mark.
+
+    BOUNDED AT SIX CELLS over the whole domain, which callers rely on. The
+    widest strings are ``59m59s``, ``23h59m`` and ``99d23h``; from 100 days it
+    is ``100d+``. It used to end at ``{h}h{m}m`` with an unbounded hours field,
+    so ``100h30m`` was 7 cells and ``1000h30m`` was 8 — and
+    :data:`WorkingBlock._CLOCK_COL` RESERVES cells for this rather than
+    measuring them, so a wider string pushed its row over the terminal (review
+    round 15).
+
+    The days branch is also the more readable answer at that magnitude, which
+    is the reason it is a branch and not a clamp: clipping the number to fit
+    would render ``100h40m`` as ``100h4…``, and ``100h4m``, ``100h40m`` and
+    ``100h45m`` all collapse to that same string. Prose survives truncation
+    because the reader reconstructs it; a duration does not — and this number
+    is load-bearing exactly when it is largest, since a phase that has been
+    running for days is the "is this stuck" question the clock exists to
+    answer (design round 14).
     """
     total = int(seconds)
     if total < 60:
@@ -239,9 +314,25 @@ def format_duration(seconds: float) -> str:
     if total < 3600:
         minutes, secs = divmod(total, 60)
         return f"{minutes}m{secs}s" if secs else f"{minutes}m"
-    hours, remainder = divmod(total, 3600)
-    minutes = remainder // 60
-    return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+    if total < 86_400:
+        hours, remainder = divmod(total, 3600)
+        minutes = remainder // 60
+        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+    days, remainder = divmod(total, 86_400)
+    if days > 99:
+        # The cap, so the width is bounded by CONSTRUCTION and not by how large
+        # anyone expected the input to get.
+        #
+        # It says `100d+` and not `99d+` because the threshold IS 100 days, and
+        # a cap has to name the bound it actually fired at. `99d+` was the first
+        # spelling and design round 15 caught it: the row shows `99d23h`, then a
+        # minute later shows `99d+`, which reads as the duration having got
+        # SMALLER. That is the same "the number is now lying to you" failure as
+        # the clipped `100h4…` this branch exists to avoid, arriving at exactly
+        # the magnitude the clock matters most.
+        return "100d+"
+    hours = remainder // 3600
+    return f"{days}d{hours}h" if hours else f"{days}d"
 
 
 def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
@@ -323,6 +414,55 @@ def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
     if not parts:
         parts = [text for value in args.values() if (text := _scalar_text(value))]
     return " ".join(parts[:2]) or tool_name
+
+
+def _argument_text(value: object) -> str:
+    """One argument value as the expansion should print it.
+
+    Unlike :func:`_scalar_text` this keeps NEWLINES — a heredoc or a multi-line
+    patch is the shape of the thing being reported, and flattening it to one
+    line is what made the collapsed row unable to carry it in the first place.
+    Structured values are JSON so they are at least readable and unambiguous;
+    ``default=str`` because an argument dict reaching here has already been
+    through the provider and may hold anything.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    try:
+        return json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def clean_intent(intent: str | None) -> str | None:
+    """A model-supplied intent, safe to paint, or ``None``.
+
+    The harness sanitises and bounds this before it reaches the event, so this
+    is a boundary re-check rather than the primary defence: the TUI also runs
+    against embedders and replayed transcripts that construct cards directly,
+    and an escape sequence in a string painted on every frame clears the
+    terminal (the same hazard ``tool_name`` is guarded against below).
+
+    An empty or whitespace-only intent collapses to ``None`` so callers can
+    write ``intent or <fallback>`` and get the fallback rather than a blank row.
+
+    CASE and a trailing period are normalised because this string shares a row
+    with app-authored labels. The prompt asks the model for sentence case, and
+    every other micro-label in this app is lowercase (`interrupted`,
+    `context compacted`, `never sent`, `thinking`), so an unnormalised intent
+    made the one row that alternates between the two look like two different
+    components from one frame to the next. Only an ordinary capitalised word is
+    lowered — `MCP`, `SQL` and `README.md` keep their shape.
+    """
+    if not intent:
+        return None
+    cleaned = _strip_control_sequences(" ".join(intent.split())).rstrip(".")
+    head, _, rest = cleaned.partition(" ")
+    if head[:1].isupper() and head[1:].islower():
+        cleaned = head.lower() + (" " + rest if rest else "")
+    return cleaned or None
 
 
 def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
@@ -498,22 +638,80 @@ class ToolCard(TranscriptBlock):
         # erase-display in it clears the terminal without the tool even running.
         self.tool_name = _strip_control_sequences(tool_name)
         self.add_class("tool-card", "tool-running")
-        # Sanitised at the boundary: args and intent can carry escapes too
-        # (a bash command containing a colour code, an MCP tool's intent).
-        self._summary = _strip_control_sequences(
-            intent or _summary_from_args(tool_name, args or {})
-        )
+        # The row's IDENTITY: what the call was made against. Sanitised at the
+        # boundary because argument values are model-controlled too (a bash
+        # command can carry a colour code).
+        #
+        # Deliberately NOT the ``intent``, which is available here and used by
+        # the working line instead. The two say different kinds of thing: an
+        # intent is the model's CLAIM about what it is doing, the arguments are
+        # what it actually ran. A user scrolls the ledger back precisely when
+        # those two might disagree, and a card captioned with the claim would
+        # hide the disagreement — so the receipt keeps the fact and the
+        # transient working line carries the claim. (Reported from the field as
+        # bash rows that could not say which command they had run.)
+        self._summary = _strip_control_sequences(_summary_from_args(tool_name, args or {}))
+        #: The call's arguments, kept WHOLE for the expansion. The collapsed
+        #: row can only ever show a truncated identity, so without this there
+        #: was no state of the card — collapsed or expanded — from which a user
+        #: could learn what actually ran: the expansion showed exit code, stdout
+        #: and stderr and never the command. A receipt that cannot name what it
+        #: is a receipt for is not auditable.
+        self._args: dict[str, object] = dict(args or {})
+        #: The tail of the tool's output SO FAR, one entry per line, shown in
+        #: the EXPANSION of a running card and dropped when the real result
+        #: lands. It used to be a single collapsed-to-one-line string painted
+        #: over the summary, and nothing restored the summary afterwards: a
+        #: bash row whose last fragment was `--- stderr --- (empty)` carried
+        #: that as its settled receipt forever, so four finished rows read the
+        #: same and none could say which command it had run.
+        #:
+        #: Moving it into the expansion settles that class of defect rather
+        #: than patching it. The collapsed row is the IDENTITY and now never
+        #: yields it to progress; progress is what the user opens the card for
+        #: ("if we wish to"), so it costs no rows until then.
+        self._live: list[str] = []
+        #: Lines the bound has discarded off the FRONT of ``_live``, announced
+        #: on a marker row so a truncated live view never reads as complete.
+        self._live_dropped = 0
+        #: True when the payload itself was sliced before parsing, so the drop
+        #: count above is a floor rather than a total (see
+        #: :meth:`set_partial_detail`) and the marker must not quote a number.
+        self._live_elided = False
+        #: Set by an arriving update, consumed by the clock tick. The
+        #: coalescing itself comes from `set_partial_detail` never repainting
+        #: and the tick repainting on its own schedule; what this bit adds is
+        #: the answer to "can the card have changed HEIGHT" — only a tick that
+        #: took new output may have, and only that tick needs the container's
+        #: gap and scroll work (see :meth:`_tick_clock`).
+        self._live_dirty = False
+        #: The model's stated reason for this call, sanitised, or None. Carried
+        #: on the card but never RENDERED by it (see ``_summary`` above): the
+        #: working line reads it from here so that "which calls are live and
+        #: what did the model say it was doing" stays one dictionary rather than
+        #: two that can disagree.
+        self.intent = clean_intent(intent)
         self._state: str = "running"
-        # Composing-row bookkeeping: bytes seen so far, when dictation started,
-        # and the clock that keeps the row visibly alive through a provider's
-        # silence. All three are None/0 for a row that never composed.
+        # Live-row bookkeeping: bytes dictated so far, when dictation started,
+        # and the ONE clock that keeps a live row visibly moving — through a
+        # provider's silence while composing, and through a slow command's
+        # while running. Both states need exactly the same 1 Hz repaint, and
+        # two timers for it would be two things to leak.
         self._compose_bytes: int = 0
         self._compose_facts: str = ""
         self._compose_started: float | None = None
-        self._compose_timer: Timer | None = None
+        self._clock_timer: Timer | None = None
         self._duration: float | None = None
         self._error: str = ""
-        self._started = time.monotonic()
+        #: When THIS card's execution began, or ``None`` when the card cannot
+        #: know. ``None`` is the replay case and it is not a missing value to
+        #: be defaulted: a card rebuilt by a surface that is re-painting a
+        #: recorded trajectory (`subagent_view.entry_block`) was constructed
+        #: when the page painted, not when the tool started, so a duration
+        #: measured from here would be how long ago the panel drew the row.
+        #: The settled states already refuse to invent that number — see
+        #: :meth:`restore` — and the running state has to refuse it too.
+        self._started: float | None = time.monotonic()
         self._expanded = False
         self._hovered = False
         #: True while the row holds keyboard focus. Tracked separately from
@@ -533,13 +731,22 @@ class ToolCard(TranscriptBlock):
         self._diff: list[str] | None = None
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
+        #: ``_row_count`` as of the last content APPLIED to the widget, or -1
+        #: when nothing has been applied yet. ``_refresh_row`` compares the two
+        #: to decide whether the update needs a layout pass; the sentinel makes
+        #: the first application always lay out.
+        self._applied_rows = -1
+        #: The width the applied content was folded to, or -1 when nothing has
+        #: been applied. ``on_resize`` compares against it so a height-only
+        #: resize does not rebuild a row that would come out identical.
+        self._built_width = -1
         self._refresh_row()
 
     # -- lifecycle ----------------------------------------------------------
     def mark_done(self, result_text: str = "", details: dict[str, Any] | None = None) -> None:
         """Record success with elapsed duration; the row goes quiet."""
-        self._stop_composing()
-        self._duration = time.monotonic() - self._started
+        self._settle_live()
+        self._duration = self._elapsed()
         self._state = "success"
         self._absorb_result(result_text, details)
         self.remove_class("tool-running")
@@ -556,7 +763,13 @@ class ToolCard(TranscriptBlock):
         message is frequently a stack trace or a multi-line diagnostic, and
         that is exactly what the expansion exists to show.
         """
-        self._duration = time.monotonic() - self._started
+        # `_settle_live`, not just a duration: `mark_failed` was the ONE settle
+        # path that never stopped the clock. Harmless while only a composing
+        # row had one — a failed call has almost always started running — but
+        # the clock now runs for the whole of `running` too, so every failing
+        # tool would have left a 1 Hz timer repainting a finalized card.
+        self._settle_live()
+        self._duration = self._elapsed()
         self._state = "error"
         self._error = _strip_control_sequences(" ".join(error.split())) or "error"
         self._absorb_result(result_text or error, details)
@@ -568,7 +781,7 @@ class ToolCard(TranscriptBlock):
     def mark_interrupted(self) -> None:
         """Turn ended before this tool completed: dim 'interrupted' state."""
         was_composing = self._state == "composing"
-        self._stop_composing()
+        self._settle_live()
         if was_composing:
             # The call was never sent, so the row must stop saying it is being
             # written. It keeps the size as a record of how far the model got.
@@ -580,10 +793,73 @@ class ToolCard(TranscriptBlock):
             # from 40 columns down.
             self._compose_facts = f"{size} composed"
             self._summary = f"never sent · {self._compose_facts}"
-        self._duration = time.monotonic() - self._started
+        self._duration = self._elapsed()
         self._state = "interrupted"
         self.remove_class("tool-running")
         self.add_class("tool-interrupted")
+        self._refresh_row()
+        self.finalize()
+
+    def _elapsed(self) -> float | None:
+        """Seconds this call has been running, or ``None`` when unknowable.
+
+        ``None`` propagates rather than collapsing to ``0.0``: a card that
+        never learned when its call started must paint a blank column, not a
+        number that says the tool returned instantly.
+        """
+        return None if self._started is None else time.monotonic() - self._started
+
+    def restore(
+        self,
+        *,
+        state: str,
+        result_text: str = "",
+        details: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> None:
+        """Adopt a card for a call from a PREVIOUS session, or another agent's.
+
+        Separate from :meth:`mark_done` / :meth:`mark_failed` for one reason:
+        those three compute ``_duration`` from ``self._started``, which for a
+        row mounted during replay is the moment the row was mounted. That is
+        not how long the tool took, it is how long ago the app painted the row,
+        and it renders as ``0.0s`` on every card in a resumed conversation.
+        The transcript does not record durations, so replay leaves
+        ``_duration`` at ``None`` and the column paints blank.
+
+        ``state`` is ``"success"``, ``"error"``, ``"interrupted"`` — the third
+        for a call whose result is not in the transcript, which is what a
+        session killed mid-turn leaves behind — or ``"running"``.
+
+        ``"running"`` exists for the same reason the other three do, one step
+        further on. `subagent_view.entry_block` rebuilds a child's whole
+        trajectory as blocks, and an entry with no outcome yet is a call that
+        is STILL GOING: the card has to stay live. It just must not time
+        itself, because its ``_started`` is when the page painted the row —
+        so ``_started`` is cleared here and the running row blanks its
+        duration exactly as its settled siblings blank theirs. Without this
+        the replayed live row counted up from zero (and reset to zero every
+        time an earlier entry changed and the page rebuilt it), inventing
+        precisely the number this method exists to refuse.
+        """
+        self._settle_live()
+        self._state = state
+        self._started = None
+        if state == "running":
+            # Still live: it keeps `tool-running`, it is not finalized, and the
+            # expansion still offers the command. Only the clock is withheld.
+            self._refresh_row()
+            return
+        self.remove_class("tool-running")
+        if state == "error":
+            self._error = _strip_control_sequences(" ".join(error.split())) or "error"
+            self._absorb_result(result_text or error, details)
+            self.add_class("tool-error")
+        elif state == "interrupted":
+            self.add_class("tool-interrupted")
+        else:
+            self._absorb_result(result_text, details)
+            self.add_class("tool-success")
         self._refresh_row()
         self.finalize()
 
@@ -626,15 +902,8 @@ class ToolCard(TranscriptBlock):
         self._compose_bytes = argument_bytes
         if self._compose_started is None:
             self._compose_started = time.monotonic()
-            # One second: fast enough to read as alive, slow enough that the
-            # repaint cost is nothing next to the stream it is reporting on.
-            self._compose_timer = self.set_interval(1.0, self._tick_composing)
+        self._start_clock()
         self._render_composing()
-
-    def _tick_composing(self) -> None:
-        """Repaint the elapsed half of a composing row (no new bytes needed)."""
-        if self._state == "composing":
-            self._render_composing()
 
     def _render_composing(self) -> None:
         started = self._compose_started or time.monotonic()
@@ -659,11 +928,102 @@ class ToolCard(TranscriptBlock):
         self._summary = f"composing… {facts}"
         self._refresh_row()
 
-    def _stop_composing(self) -> None:
+    def _start_clock(self) -> None:
+        """Run the 1 Hz repaint for as long as this row is live (idempotent).
+
+        Guarded on the message pump, the way :meth:`_flash_notice` is: a card
+        built but not yet mounted — which every unit test holding one directly
+        is — has no loop to schedule against, and ``set_interval`` would raise
+        out of a lifecycle method and leave an unawaited coroutine behind. With
+        no clock the row simply stops animating between events, which is the
+        right degradation for a timer whose entire job is cosmetic.
+
+        A REPLAYED live card (``restore(state="running")``) gets none: it has
+        no start time to count from and nothing streams into it, so every
+        tick would repaint an unchanged row. See :attr:`_started`.
+        """
+        if self._started is None:
+            return
+        if self._clock_timer is None and self.is_running:
+            self._clock_timer = self.set_interval(CLOCK_INTERVAL_S, self._tick_clock)
+
+    def _tick_clock(self) -> None:
+        """The card's ONE repaint point while it is live.
+
+        Three things ride this tick, and none of them may schedule a repaint of
+        its own: the composing row's byte clock, the running row's duration,
+        and the coalesced live-output buffer. The last is why the bit exists —
+        bash re-sends its whole accumulated output every 500 ms and a `yes`
+        loop would otherwise repaint a growing widget twice a second forever.
+        """
+        if self._state == "composing":
+            self._render_composing()
+            return
+        if self._state != "running":
+            # Belt for a clock that outlived its row: every settle path calls
+            # `_settle_live`, so this should be unreachable.
+            self._stop_clock()
+            return
+        # The duration is on the row whether or not output moved, so the tick
+        # always REPAINTS a running card — the clock IS the "not hung" signal
+        # and skipping the paint would freeze it.
+        grew = self._live_dirty
+        self._live_dirty = False
+        # …but only a tick that took new output can have changed the card's
+        # HEIGHT, and only a height change concerns the container. Collapsed,
+        # the card is one row and cannot reflow anything at all; expanded with
+        # nothing new, the gap work below would run once a second per open card
+        # — a linear `_blocks.index` scan — to re-settle a layout that did not
+        # move.
+        if not self._expanded or not grew:
+            self._refresh_row()
+            return
+        parent = self.parent if isinstance(self.parent, TranscriptView) else None
+        self._refresh_row()
+        if parent is None:
+            return
+        # A card that changed height changes the gap its neighbours need, above
+        # as well as below (see `refresh_gap_around`).
+        #
+        # It does NOT scroll. Keeping the tail in view as a live card grew was
+        # sampled and re-pinned here, which made this a third private copy of
+        # the sticky-bottom rule. `TranscriptView` now follows its own extent
+        # (`_size_updated`), so a growing card is anchored by the same state
+        # machine as a streaming message — and, unlike the copy, honours the
+        # release when the reader has scrolled up to read.
+        parent.refresh_gap_around(self)
+
+    def on_mount(self) -> None:
+        """Start the clock for a card that was mounted already RUNNING.
+
+        The common path — a call the model dictated — starts it in
+        :meth:`begin_running`, but a card built straight from
+        ``tool_execution_start`` (a provider that never streams a compose
+        event, or a replayed batch) is constructed running and mounted after,
+        and ``__init__`` has no message pump to schedule against.
+        """
+        if self._state in ("running", "composing"):
+            self._start_clock()
+
+    def _stop_clock(self) -> None:
         """Retire the clock; the row is about to become something else."""
-        if self._compose_timer is not None:
-            self._compose_timer.stop()
-            self._compose_timer = None
+        if self._clock_timer is not None:
+            self._clock_timer.stop()
+            self._clock_timer = None
+
+    def _settle_live(self) -> None:
+        """Stop the clock and drop the streamed tail: the real result is here.
+
+        The live buffer is a stand-in for a result that had not arrived. Once
+        it has, keeping the tail would leave the card holding two accounts of
+        the same output — and the streamed one is the truncated, out-of-date
+        one.
+        """
+        self._stop_clock()
+        self._live = []
+        self._live_dropped = 0
+        self._live_elided = False
+        self._live_dirty = False
 
     def begin_running(
         self, tool_name: str, args: dict[str, object] | None, intent: str | None
@@ -675,7 +1035,7 @@ class ToolCard(TranscriptBlock):
         ledger flicker a row out and an identical row back in at the moment the
         call finally starts.
         """
-        self._stop_composing()
+        self._stop_clock()
         # The name comes from the EXECUTION, not from the announcement. The first
         # compose event fires on the first name fragment — deliberately, so the
         # row appears immediately — and a provider that splits `write` into `wr`
@@ -691,20 +1051,103 @@ class ToolCard(TranscriptBlock):
         self._started = time.monotonic()
         self._state = "running"
         # The same construction the constructor uses, so an adopted row is
-        # byte-identical to one that had never been a composing row.
-        self._summary = _strip_control_sequences(
-            intent or _summary_from_args(self.tool_name, args or {})
-        )
+        # byte-identical to one that had never been a composing row — including
+        # taking the ARGUMENTS rather than the intent (see the constructor for
+        # why the receipt keeps the fact).
+        self._summary = _strip_control_sequences(_summary_from_args(self.tool_name, args or {}))
+        self._args = dict(args or {})
+        self._live = []
+        self._live_dropped = 0
+        self._live_elided = False
+        self._live_dirty = False
+        # THE INVARIANT: `_compose_facts` is non-empty exactly while `_summary`
+        # is the one built FROM it. `_build_row` reads it as "this row's summary
+        # is boilerplate plus two moving numbers, so shed the boilerplate before
+        # you truncate the numbers" — a ladder that is right for a composing row
+        # and catastrophic for any other, because on any other row it sheds the
+        # SUMMARY and keeps the numbers.
+        #
+        # Nothing cleared it here, so it stayed set for the whole life of the
+        # card, and the ladder fires whenever `width < _label_min_width()` — a
+        # threshold computed FROM the summary's own length. Measured at 80
+        # columns: a 75-character command needs 97, so every bash row in the
+        # ledger, running AND settled, painted `199 B · 1s` where its command
+        # belonged. `read` and `grep` escaped only because a path summary is
+        # short enough to clear the threshold; the defect was never about bash,
+        # it was about any summary longer than the frame.
+        #
+        # The `· 1s` was the same bug's other half: the frozen compose clock,
+        # last ticked before dictation ended, sitting beside the real duration
+        # in the status column and disagreeing with it. One row, two clocks,
+        # neither labelled — and the one the eye reached first was the wrong one.
+        self._compose_facts = ""
+        # The EXECUTION's intent supersedes whatever the announcement carried,
+        # for the same reason the name does: a partial intent scraped from a
+        # still-streaming call is a draft, and this event carries the finished
+        # one. Kept when the execution reports none, so a compose-time intent is
+        # not thrown away by a provider that omits it on start.
+        self.intent = clean_intent(intent) or self.intent
+        # The same 1 Hz clock the composing row used, now counting EXECUTION.
+        # Without it the duration on a running row is painted once, at zero,
+        # and then holds still for the whole call — which is the frame this
+        # change exists to stop producing, since a timer that never moves is
+        # indistinguishable from a hung command.
+        self._start_clock()
         self._refresh_row()
 
     def set_partial_detail(self, detail: str) -> None:
-        """Replace the running summary with a streaming partial result line."""
+        """Take the tool's output SO FAR into the card's live view.
+
+        The payload is a SNAPSHOT, not a delta: bash — the only producer of
+        ``on_update`` in the codebase — re-sends its whole accumulated stdout
+        and stderr every 500 ms, so each call REPLACES the buffer. Appending
+        would duplicate the entire output on every update.
+
+        Two bounds, both load-bearing under a chatty command:
+
+        * only the last :data:`LIVE_INGEST_CHARS` of the payload are parsed, so
+          the per-update cost stops growing with the total output. Without it a
+          command that has printed 40 MB is 40 MB of ``splitlines()`` twice a
+          second, and only the tail could ever have been displayed anyway.
+        * only the last :data:`LIVE_MAX_LINES` lines are kept, so the widget's
+          height is bounded no matter what the command does.
+
+        The card does NOT re-parse bash's ``--- stdout ---`` / ``--- stderr ---``
+        banners into separate streams. They already distinguish the two, the
+        settled expansion shows the identical framing so the card does not
+        change vocabulary when the call ends, and a card that understood one
+        tool's private format would silently mangle the next producer's.
+
+        Nothing is repainted here. The tick owns the repaint (see
+        :meth:`_tick_clock`); this only marks the buffer dirty.
+        """
         if self._state != "running":
             return
-        cleaned = _strip_control_sequences(" ".join(detail.split()))
-        if cleaned:
-            self._summary = cleaned
-            self._refresh_row()
+        # An exact drop count is only knowable when the WHOLE payload was
+        # parsed. Past the slice the card has not seen the earlier output and
+        # must not put a number on it: unfixed, a `seq 100000` snapshot showed
+        # `… 10903 earlier lines` — the lines dropped from the 64 KB tail, not
+        # the 99981 actually missing. A marker that quantifies what it cannot
+        # count is worse than one that admits the gap, because it reads as a
+        # measurement.
+        elided = len(detail) > LIVE_INGEST_CHARS
+        if elided:
+            detail = detail[-LIVE_INGEST_CHARS:]
+        lines = [
+            _strip_control_sequences(line.rstrip()) for line in detail.expandtabs(4).splitlines()
+        ]
+        while lines and not lines[-1]:
+            lines.pop()
+        if not lines:
+            return
+        # Counted from the SNAPSHOT's own line count, not accumulated across
+        # updates: each payload is the whole output, so the number of lines
+        # scrolled off is a property of this payload alone. Accumulating would
+        # multiply the count by the number of updates.
+        self._live_elided = elided
+        self._live_dropped = max(0, len(lines) - LIVE_MAX_LINES)
+        self._live = lines[-LIVE_MAX_LINES:]
+        self._live_dirty = True
 
     def _absorb_result(self, result_text: str, details: dict[str, Any] | None) -> None:
         """Capture the expansion payload and diff counters.
@@ -751,13 +1194,27 @@ class ToolCard(TranscriptBlock):
 
     # -- expansion ----------------------------------------------------------
     def can_expand(self) -> bool:
-        """True when the card holds output the one-line summary cannot show.
+        """True when the card holds more than the one-line summary can show.
 
-        Either the plain result output, or a write/edit diff (which can be
+        Three sources: the plain result output, a write/edit diff (which can be
         present on its own — a new-file write's summary line is one sentence
-        while its diff is the whole file).
+        while its diff is the whole file), and a call that is STILL RUNNING.
+
+        The third is what makes "show me what it is doing" reachable. A live
+        card has neither output nor diff yet, so it used to answer an
+        activation with ``⟨still running⟩`` and stay shut — which told the user
+        the call was alive and then refused to say anything more about it,
+        during precisely the stretch they wanted to look. It opens on its
+        arguments (the command) plus whatever has streamed so far, and both are
+        strictly more than the row can hold.
+
+        Still deliberately NOT "or it has arguments" in the SETTLED states:
+        that would make every row expandable and retire the inert-row answer
+        (``⟨no output⟩``), which is a separate affordance decision. A finished
+        call that printed nothing still cannot be opened to see what it ran;
+        that gap is known.
         """
-        return bool(self._output) or bool(self._diff)
+        return bool(self._output) or bool(self._diff) or self._state == "running"
 
     @property
     def expanded(self) -> bool:
@@ -770,8 +1227,14 @@ class ToolCard(TranscriptBlock):
         Also nudges the transcript to re-decide the gap below this card: a
         card that just grew from one row to twenty may change what the block
         under it needs, and only the container can answer that.
+
+        An OPEN card can always be closed, even once ``can_expand`` has gone
+        false under it. That is reachable now that running cards open: expand a
+        live call, let it finish having printed nothing, and the gate that
+        guards opening would have refused to let it shut again — a card stuck
+        open is the same trap as a card that will not open.
         """
-        if not self.can_expand():
+        if not self._expanded and not self.can_expand():
             return self._expanded
         self._expanded = not self._expanded
         self.set_class(self._expanded, "tool-expanded")
@@ -933,12 +1396,17 @@ class ToolCard(TranscriptBlock):
     def _flash_notice(self) -> None:
         """Put the inert-row answer in the hint slot for a couple of seconds.
 
-        A RUNNING tool has no output yet but will; a settled one never will.
-        Saying which is the difference between "wait" and "there is nothing
-        here", and the row is the only place the user is looking.
+        A call still being DICTATED has no output yet but will; a settled one
+        never will. Saying which is the difference between "wait" and "there is
+        nothing here", and the row is the only place the user is looking.
+
+        ``composing`` is now the ONLY live state that reaches here. A running
+        card expands — onto its command and its streamed output — so
+        ``activate`` toggles it rather than falling through to this, and the
+        `⟨still running⟩` answer belongs to the row that genuinely has nothing
+        behind the affordance yet.
         """
-        live = self._state in ("running", "composing")
-        self._notice = RUNNING_NOTICE if live else NO_OUTPUT_NOTICE
+        self._notice = RUNNING_NOTICE if self._state == "composing" else NO_OUTPUT_NOTICE
         self._refresh_row()
         if self._notice_timer is not None:
             self._notice_timer.stop()
@@ -964,7 +1432,52 @@ class ToolCard(TranscriptBlock):
 
     # -- resize (TUI-017: rebuild the row when the width changes) -----------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Re-fit the row at the new width.
+
+        Guarded on the WIDTH, because the card's content is a pure function of
+        its state and the width it is folded to — a resize that only changed
+        the HEIGHT reproduces the rows byte for byte. That is not a rare case:
+        an expanded card's own content sets its height, so every expansion
+        raises a Resize that landed straight back here. Measured on a session
+        replay, this handler was a third of the ``_refresh_row`` calls: 645
+        builds for 215 cards, ~366 ms.
+        """
+        size = getattr(event, "size", None)
+        if size is not None and size.width == self._built_width:
+            return
         self._refresh_row()
+
+    # -- text selection (TUI-021) -------------------------------------------
+    #: The icon field on the summary row: the per-tool glyph and its separator,
+    #: which every rung of :meth:`_build_row` writes as ``icon + " "`` and every
+    #: width budget in this file counts as ``+ 2``.
+    ICON_COLS = 2
+
+    def copy_gutter(self, index: int) -> int:
+        """The icon field on the summary row; the expansion's indent below it.
+
+        Both are gutter for the same reason, and the summary row's case is the
+        one worth arguing. ``tool_icon`` returns a NERD FONT private-use
+        codepoint (``\\uf120`` for bash), which is the strongest possible form
+        of the failure a copy gutter exists to prevent: pasted into a bug report
+        or an issue it is a replacement box, and it carries nothing the row does
+        not immediately restate — the tool NAME is the next field along, in
+        text. It is a fixed leading field on a single row, which is a gutter by
+        the same test that makes ``NoticeBlock``'s kind glyph one, and treating
+        the two differently would have been the inconsistency.
+
+        The rest of the row stays: name column, what ran, outcome glyph and
+        duration are the receipt, and a user who selects a settled row wants it.
+
+        Below the summary, every row is written by
+        ``_append_input_body``/``_append_output_body``/``_append_diff_body``/
+        ``_append_live_body``, each of which opens with
+        ``"\\n" + " " * OUTPUT_INDENT``. That indent is the card's own layout,
+        and it is the thing standing between a copied stderr and a paste that
+        goes straight into a bug report — or, for a diff, between ``+ added``
+        and something ``git apply`` will not read.
+        """
+        return self.ICON_COLS if index == 0 else OUTPUT_INDENT
 
     # -- rendering ----------------------------------------------------------
     def refresh_row(self) -> None:
@@ -990,6 +1503,15 @@ class ToolCard(TranscriptBlock):
         Finalization is bypassed deliberately: a resize or an expand must be
         able to re-fit a settled card, and the content it produces is a pure
         function of the card's state, never new history.
+
+        The LAYOUT pass is asked for only when the row count moved. Textual's
+        ``Static.update`` reflows by default and a reflow re-arranges the whole
+        transcript — 7.8 ms across 173 widgets on a 161-block screen — but a
+        card's footprint is its row count and nothing else: collapsed, the
+        sheet pins it to ``height: 1`` and the row cannot reflow anything at
+        all. Without this guard the 1 Hz clock on every running card, and every
+        pointer crossing a card's edge, each reflowed the entire screen to
+        repaint one row.
         """
         container = getattr(self, "container_size", None)
         width = self.size.width or (container.width if container else 0)
@@ -1004,25 +1526,147 @@ class ToolCard(TranscriptBlock):
         self._row_count = max(1, len(content.plain.splitlines()))
         if detached:
             return
+        self._built_width = width
+        moved = self._row_count != self._applied_rows
+        self._applied_rows = self._row_count
         was_finalized = self._finalized
         self._finalized = False
         try:
-            self.set_content(content)
+            self.set_content(content, layout=moved)
         finally:
             self._finalized = was_finalized
 
     def _build_content(self, width: int) -> Text:
-        """The card: the one-row summary, plus the output when expanded."""
+        """The card: the one-row summary, plus the CALL and its result expanded.
+
+        The call comes FIRST, before the output, because it is the question a
+        reader opens the card to answer. Reported from the field on an expanded
+        bash card that listed exit code, stdout and stderr and never the
+        command — leaving no state of the card, collapsed or expanded, from
+        which a user could learn what had run.
+        """
         row = self._build_row(width)
         if not self._expanded:
             return row
-        if self._diff:
+        self._append_input_body(row, width)
+        # A RUNNING card has no result to show and must not look like one that
+        # came back empty. Its own block states the state and carries whatever
+        # has streamed, and it takes precedence over the settled blocks, which
+        # are empty at this point anyway.
+        if self._state == "running":
+            self._append_live_body(row, width)
+        elif self._diff:
             self._append_diff_body(row, width)
         elif self.tool_name.lower() == "web_search" and self._output:
             self._append_search_body(row, width)
         elif self._output:
             self._append_output_body(row, width)
         return row
+
+    def _append_live_body(self, row: Text, width: int) -> None:
+        """The in-progress block: what state this call is in, then its output.
+
+        The HEADER is not decoration. Expanded, a running call and a finished
+        call that printed nothing produce the same frame — a command and then
+        nothing — and they mean opposite things ("wait" against "that is all
+        there is"). The header is the only thing on the card that separates
+        them, so it is stated in words rather than left to the absence of a
+        ✓, and it carries the elapsed time for the same reason the row does.
+
+        The TAIL is shown, oldest-dropped, with the drop announced. See
+        :data:`LIVE_MAX_LINES` for why this block keeps the end where the
+        settled block keeps the beginning.
+        """
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        accent = Style(color=theme_mod.semantic_color("accent"))
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        # State, then time, then the caveat — read left to right that is "it is
+        # running / for this long / and has printed nothing", which is the
+        # order the questions are asked in. The caveat last also means it
+        # simply disappears when the first line arrives, instead of the row
+        # rewriting itself around a moving middle.
+        #
+        # Both trailing clauses are dropped for a REPLAYED live card, which
+        # knows neither. It has no start time (see :attr:`_started`), and
+        # nothing streams into it — the surface rebuilding it never calls
+        # `set_partial_detail` — so `no output yet` there is not a caveat that
+        # will lift, it is a permanent claim about a child's tool that this
+        # card has no way to make. `⋯ running` alone is the whole of what it
+        # honestly knows.
+        header = LIVE_HEADER_RUNNING
+        elapsed = self._elapsed()
+        if elapsed is not None:
+            header = f"{header} · {format_duration(max(0, int(elapsed)))}"
+            if not self._live:
+                header = f"{header} · {LIVE_HEADER_PENDING}"
+        row.append("\n" + indent, style=dim)
+        # Accent, the same ink the running icon spends: this row is the card's
+        # answer to "is it alive", and it has to survive a still frame.
+        row.append(truncate_cells(header, line_width), style=accent)
+        if self._live_elided or self._live_dropped > 0:
+            plural = "s" if self._live_dropped != 1 else ""
+            marker = (
+                "… earlier output not shown"
+                if self._live_elided
+                else f"… {self._live_dropped} earlier line{plural}"
+            )
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(marker, line_width), style=dim)
+        for line in self._live:
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(line, line_width), style=dim)
+
+    def _append_input_body(self, row: Text, width: int) -> None:
+        """The arguments the call was made with, one labelled block per key.
+
+        WRAPPED, not truncated: the collapsed row is where a command is cut to
+        fit, and the expansion exists precisely to show what the cut hid. Long
+        payloads are still bounded per key — a ``write`` carries the whole file
+        in ``content``, and a card that painted it would be a file viewer with
+        a tool row on top — so each value keeps its head and reports the rest as
+        a count, which is the same bargain the output block strikes.
+        """
+        if not self._args:
+            return
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        label = Style(color=theme_mod.semantic_color("label"))
+        body = Style(color=theme_mod.semantic_color("fg"))
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        for key, value in self._args.items():
+            text = _strip_control_sequences(_argument_text(value))
+            if not text:
+                continue
+            # The KEY is model-controlled too — an MCP server or a hallucinated
+            # call names it — so it gets the same stripping the value and
+            # `tool_name` get, and a bound: an unbounded key drove the value's
+            # width budget to a single cell while wrapping over several rows.
+            key_text = truncate_cells(_strip_control_sequences(str(key)), TOOL_NAME_COL_MAX)
+            head = f"{key_text}: "
+            # The label is wrapped WITH the value rather than printed and then
+            # the value clipped to fit beside it. Clipping silently deleted the
+            # middle of the first row — a 100-column `pytest … -k expansion
+            # --maxfail=1` rendered as `-k expa… --maxfail=1`, which is not a
+            # shortened command but a different one, and this block exists
+            # precisely so that a command the collapsed row had to cut can be
+            # read whole.
+            rows: list[str] = []
+            for index, source in enumerate(text.splitlines() or [""]):
+                rows.extend(wrap_cells(f"{head}{source}" if not index else source, line_width))
+            shown = rows[:INPUT_MAX_LINES]
+            for index, line in enumerate(shown):
+                row.append("\n" + indent, style=dim)
+                if index == 0 and line.startswith(head):
+                    row.append(head, style=label)
+                    row.append(line[len(head) :], style=body)
+                else:
+                    row.append(line, style=body)
+            hidden = len(rows) - len(shown)
+            if hidden > 0:
+                row.append("\n" + indent, style=dim)
+                marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+                row.append(truncate_cells(marker, line_width), style=dim)
 
     def _append_output_body(self, row: Text, width: int) -> None:
         """The plain-result expansion (bash/read/etc.): one line per row.
@@ -1222,7 +1866,16 @@ class ToolCard(TranscriptBlock):
                     break
         slot_cells = cell_len(slot) + 1 if slot else 0
         budget = max(0, remaining - slot_cells)
-        if self._compose_facts:
+        # The ladder below belongs to the compose-shaped summary ALONE, and the
+        # state test is what says so. `_compose_facts` was the only gate, and it
+        # outlived the state that set it: every row that had ever composed took
+        # this branch for the rest of its life, where "shed the label, keep the
+        # facts" means "shed the COMMAND, keep a byte count from a minute ago".
+        # `begin_running` now clears the field, and this makes the invariant
+        # checkable from the render side too, so the next way to leave it set
+        # cannot reopen the same hole.
+        composed = self._compose_facts and self._state in ("composing", "interrupted")
+        if composed:
             # The label is shed WHOLE before the facts are touched, the same
             # ladder this file uses for the key hints and the approval clause.
             # Truncating instead protected `composing…` — seventeen cells that
@@ -1241,6 +1894,15 @@ class ToolCard(TranscriptBlock):
             if width < self._label_min_width() or cell_len(summary) > budget:
                 summary = truncate_cells(self._compose_facts, budget)
         else:
+            # The IDENTITY, in every other state, truncated by the one rule the
+            # settled row uses — which is the whole of the owner's ask: "the
+            # command abbreviated within the available horizontal line space for
+            # all bash/command line calls". One rule, so a call cannot read as
+            # one thing running and another thing done.
+            #
+            # Streaming output no longer displaces it. It used to, and there was
+            # no state of the card from which the command could then be read;
+            # the stream now goes to the EXPANSION, where the user asks for it.
             summary = truncate_cells(self._summary, budget)
 
         row = _row_text()
@@ -1322,8 +1984,38 @@ class ToolCard(TranscriptBlock):
         it wrote is meta. ``terse`` goes one step further and drops the
         failure reason too; see :meth:`_outcome_runs`.
         """
-        if self._state in ("running", "composing"):
-            return []  # D28: no trailing glyph until the duration lands
+        if self._state == "composing":
+            # Nothing has RUN, so there is no execution time to report. The
+            # dictation clock rides in the summary instead (`_render_composing`)
+            # where it is next to the byte count it belongs with.
+            return []
+        if self._state == "running":
+            # D28 said "no trailing glyph until the duration lands", and the
+            # glyph still waits — an outcome column may only ever show an
+            # outcome. But the DURATION lands immediately, and withholding it
+            # left the one row on screen that is actually consuming time as the
+            # only row with no time on it. Reported against a call at 34s whose
+            # card said nothing while the working line said 34s: the card was
+            # not stuck, it was silent, and a silent row and a stuck row are the
+            # same frame.
+            #
+            # Two blanks stand in for `<glyph> `, so the number lands in exactly
+            # the column the ✓ beside it will use when it settles. The spine
+            # holds and the row does not jump on settling.
+            #
+            # A REPLAYED live row reports nothing at all. `subagent_view`
+            # rebuilds a child's trajectory into cards and leaves the
+            # outcome-less ones running, where `_started` is when the PAGE
+            # painted the row — so this counted up from zero and reset to zero
+            # every time an earlier entry changed. A clock started from the
+            # wrong zero is worse than no clock, and the settled rows on that
+            # same page already blank the column for exactly this reason.
+            elapsed = self._elapsed()
+            if elapsed is None:
+                return []
+            dim = Style(color=theme_mod.semantic_color("dim"))
+            text = format_duration(max(0, int(elapsed)))
+            return [("  ", dim), (text.rjust(DURATION_COL), dim)]
         core = self._outcome_runs(cap, terse=terse)
         diff = self._diff_runs()
         if not diff:
@@ -1368,18 +2060,27 @@ class ToolCard(TranscriptBlock):
         has stopped being a ledger entry.
         """
         dim = Style(color=theme_mod.semantic_color("dim"))
-        elapsed = self._duration or 0.0
-        # Sub-second precision where it distinguishes tools, and the SAME
-        # grammar as everything else past a minute: the composing row above this
-        # one says `1m57s`, and `117s` two seconds later on the same row is the
-        # app disagreeing with itself about how it writes a duration.
-        if elapsed < 10:
-            duration = f"{elapsed:.1f}s"
-        elif elapsed < 60:
-            duration = f"{elapsed:.0f}s"
+        if self._duration is None:
+            # A REPLAYED row: the transcript records what a tool did, never how
+            # long it took. `self._duration or 0.0` rendered that as `0.0s`,
+            # which is not a missing number, it is a wrong one — it says every
+            # tool in a resumed conversation returned instantly. Blank keeps
+            # the column aligned and says nothing, which is the truth.
+            duration = " " * DURATION_COL
         else:
-            duration = format_duration(elapsed)
-        duration = duration.rjust(DURATION_COL)
+            elapsed = self._duration
+            # Sub-second precision where it distinguishes tools, and the SAME
+            # grammar as everything else past a minute: the composing row above
+            # this one says `1m57s`, and `117s` two seconds later on the same
+            # row is the app disagreeing with itself about how it writes a
+            # duration.
+            if elapsed < 10:
+                duration = f"{elapsed:.1f}s"
+            elif elapsed < 60:
+                duration = f"{elapsed:.0f}s"
+            else:
+                duration = format_duration(elapsed)
+            duration = duration.rjust(DURATION_COL)
         if self._state == "success":
             # D12: success is quiet — check + duration both dim, no reason.
             return [(f"{ICON_SUCCESS} ", dim), (duration, dim)]

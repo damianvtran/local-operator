@@ -15,6 +15,7 @@ import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+from local_operator.harness.intent import INTENT_FIELD, apply_intent_schema
 from local_operator.harness.types import (
     AgentTool,
     TextContent,
@@ -26,10 +27,6 @@ if TYPE_CHECKING:
     # Annotation-only: the SDK is an optional extra, and this module must
     # stay importable (and cheap) for config-only callers.
     from mcp.types import CallToolResult, ContentBlock, Tool
-
-# The harness injects an ``i`` (intent) field into every tool's wire schema;
-# strict-schema MCP servers reject calls that carry undeclared fields.
-INTENT_FIELD = "i"
 
 # Network-level and stale-session errors that warrant a reconnect + single
 # retry. Conservative: only errors where the server is likely alive but the
@@ -280,7 +277,15 @@ def build_agent_tool(
         name=create_mcp_tool_name(server_name, raw_name),
         label=f"{server_name}/{raw_name}",
         description=description,
-        parameters=normalize_input_schema(input_schema),
+        # MCP tools get `i` too. Their schemas are server-owned, so this is
+        # the one place where injection could reach a foreign process — but
+        # the loop lifts the key before `execute`, `prepare_outbound_args`
+        # drops it again against the SERVER's schema (never this one), and a
+        # server that declares its own `i` is left alone by
+        # `apply_intent_schema`. Skipping MCP instead would put a hole in the
+        # narration exactly where the user has least idea what is happening:
+        # a remote call whose name is `mcp__linear_save_issue`.
+        parameters=apply_intent_schema(normalize_input_schema(input_schema)),
         approval_tier="exec",  # unknown external side effects default to exec
         interruptible=True,
         execute=call_fn,

@@ -22,21 +22,63 @@ the factory: the factory needs the three legacy managers plus an argparse
 namespace to resolve hosting/model/skills, none of which a child needs — the
 child inherits the parent's model and STREAM FN (the parent's shared httpx
 pool serves any spec, so a ``model_spec`` override works through the same
-pipe), the parent's cwd, the parent's approval handler, and the parent's
-compaction settings (a one-shot child was assumed too short to need them,
-but a real review child ran 48 requests / 1.5M tokens — a delegated task
-must not bypass the operator's compaction cap). What it does NOT inherit:
-yolo (always False — the child goes through the same approval gate
-as the parent, never around it), skills (a per-launch selection pass would
-make spawning expensive and flaky), and
-the subagent launcher itself (children are one level deep: a grandchild
-would register on the CHILD's job manager where no panel looks).
+pipe, and the retry/fallback cascade the stream fn was built with therefore
+applies unchanged), the parent's cwd, the parent's approval handler, the
+parent's compaction settings (a one-shot child was assumed too short to need
+them, but a real review child ran 48 requests / 1.5M tokens — a delegated
+task must not bypass the operator's compaction cap), the parent's lazy
+internal-URL resolver, the parent's ``/goal`` (a standing constraint binds
+the delegated slice too), the parent's transcript→LLM rendering, and the
+parent's LIVE MCP manager (see :func:`_child_mcp_wiring`), the parent's
+variable store, and the parent's approval MODE.
+
+That last one is a decision, not an accident, and it is the one an operator
+has to know about. The child is built ``yolo=False``, which reads like a
+protection and is not one: the mode lives in the HANDLER, which the child
+inherits, so under ``--yolo`` the parent's handler is ``auto_approve`` and
+the child auto-approves too, and a ``/approvals auto`` (or a single ``a``
+answer) latched anywhere in a TUI session applies to every subagent spawned
+for the rest of that session. AUTO-APPROVE IS SESSION-WIDE, INCLUDING
+DELEGATED WORK. It is deliberate: a delegated slice must not be able to
+re-demand approval the operator has already granted, and a background job
+blocking on a prompt nobody is watching is a hang, not a safety feature. All
+``yolo=False`` actually buys is that the child cannot skip the gate object
+the way ``Session._build_tool_context`` lets a yolo session skip it.
+
+What it does NOT inherit: the frozen knowledge block (a per-launch semantic
+selection pass would make spawning expensive and flaky; ``read skill://`` and
+``read guide://`` still resolve on demand through the inherited resolver),
+and the session-capability tools ``task``/``wait``/``jobs``/``wake`` —
+children are one level deep, because a grandchild registers on the CHILD's
+job manager, which no panel renders and which dies with the child's single
+prompt. That last exclusion used to be implicit in the child's ToolContext
+carrying no launcher; it stopped holding when ``Session.__init__`` grew
+``_merge_capability_tools``, which re-derives those four from the session's
+OWN context and so handed every child a ``task`` tool. They are pruned
+explicitly now (:data:`_CHILD_FORBIDDEN_TOOLS`).
+
+``hub`` is the deliberate exception to that prune, and the mechanism matters:
+it is built into the inventory this module CONSTRUCTS (the child's tool
+context carries the parent's ``subagent_comms``), so it is never part of what
+``_merge_capability_tools`` added and the prune never sees it. A child gets
+the child-shaped tool — one peer, its parent — which is how it answers a
+question the parent asked and how it reports being blocked without waiting
+for its final result. See :mod:`local_operator.harness.comms`.
+
+Approvals the child asks for carry ``ToolContext.job_id`` — the id of the job
+this child IS — so a host can scope an approval decision to the delegated
+work that provoked it. Live failure it exists for: a subagent outliving its
+parent's turn was stamped with that turn's approval state and had its tools
+denied with no prompt shown to anyone.
 
 Capacity: registration honours ``AsyncJobManager.at_capacity`` by parking
 the job with ``queued=True``; the manager's ``_promote_oldest_queued`` starts
 parked jobs whenever any job settles and frees a slot. ``jobs.cancel`` aborts the
 child: the manager aborts the job signal (bridged onto ``child.abort``) and
-cancels the runner task, and the runner's teardown disposes the child.
+cancels the runner task, and the runner's teardown disposes the child — after
+:func:`_persist_inflight` saves the turn the hard cancel pre-empted, so a
+``resume_dir`` relaunch replays what the stopped child had already done
+rather than only its launch prompt.
 """
 
 from __future__ import annotations
@@ -45,24 +87,36 @@ import asyncio
 import contextlib
 import logging
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from local_operator.harness.intent import (
+    ACTIVITY_RESPONDING,
+    ACTIVITY_THINKING,
+    batch_activity,
+    tool_activity,
+)
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
+    AgentTool,
     Message,
     MessageEndEvent,
+    MessageStartEvent,
     ModelSpec,
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
+    Usage,
 )
 from local_operator.paths import config_dir
 
 if TYPE_CHECKING:
     from local_operator.harness.jobs import AsyncJobManager
+    from local_operator.mcp.manager import McpManager
     from local_operator.session.session import Session
 
 logger = logging.getLogger(__name__)
@@ -80,6 +134,7 @@ def run_subagent(
     parent_session: "Session",
     jobs_manager: "AsyncJobManager",
     model_spec: ModelSpec | None = None,
+    resume_dir: "Path | None" = None,
 ) -> str:
     """Register one child-session run as a background job; return the job id.
 
@@ -87,6 +142,12 @@ def run_subagent(
     immediately, so registration happens here and the runner coroutine is the
     manager's own task. The parent session's dispose cancels it through
     ``jobs_manager.dispose()`` like every other job.
+
+    ``resume_dir`` continues a PREVIOUS child instead of starting a new one:
+    the child is built on that session directory, so ``Transcript`` rehydrates
+    it and the new run replays everything the old one said and did before
+    reading ``prompt``. Used by ``hub op='resume'`` (see
+    :mod:`local_operator.harness.comms`); ``None`` is a fresh child.
     """
     queued = jobs_manager.at_capacity()
     job_id = jobs_manager.register(
@@ -98,9 +159,24 @@ def run_subagent(
             parent_session=parent_session,
             jobs_manager=jobs_manager,
             model_spec=model_spec,
+            resume_dir=resume_dir,
         ),
         queued=queued,
     )
+    job = jobs_manager.get(job_id)
+    if job is not None:
+        # Recorded at REGISTRATION, not in the runner: a queued job has not
+        # started and may never start, and a reader opening its panel still
+        # needs to see what it was asked to do. ``trajectory`` is the opposite
+        # case and is deliberately left until the runner, because an empty list
+        # would claim the child had begun and produced nothing.
+        job.prompt = prompt
+    # Same reason: the parent must be able to address a child that is parked
+    # behind the capacity gate (messages to it buffer until it starts), so the
+    # comms record exists from the moment the id does.
+    comms = getattr(parent_session, "subagent_comms", None)
+    if comms is not None:
+        comms.record_launch(job_id, label)
     if queued:
         logger.info("subagent job %s (%s) queued: manager at capacity", job_id, label)
     return job_id
@@ -113,6 +189,7 @@ def _make_runner(
     parent_session: "Session",
     jobs_manager: "AsyncJobManager",
     model_spec: ModelSpec | None,
+    resume_dir: "Path | None" = None,
 ) -> Callable[[str, Any, Callable[[str], None]], Awaitable[str | None]]:
     """Build the JobRunFn for one child run (closure over its launch args)."""
     # The parent seam is private-attribute access on purpose: this module is
@@ -120,6 +197,7 @@ def _make_runner(
     # production caller), and the session exposes no public emit/stream
     # accessors. ``_emit`` gives the parent's isolated handler fan-out.
     emit = parent_session._emit
+    comms = getattr(parent_session, "subagent_comms", None)
 
     async def runner(
         job_id: str, signal: Any, report_progress: Callable[[str], None]
@@ -139,7 +217,26 @@ def _make_runner(
                 prompt=prompt,
                 parent_session=parent_session,
                 model_spec=model_spec,
+                job_id=job_id,
+                resume_dir=resume_dir,
             )
+            if job is not None:
+                # Off the CHILD, not the parent: ``model_spec`` may have put
+                # this child on a different model, which is precisely the fact
+                # a reader of the job row needs.
+                job.model_label = child.model_label
+                # From the spec the child was ALREADY built with, so this
+                # costs nothing: no registry resolve, no provider discovery,
+                # and none of it on anyone's render path.
+                job.context_window = child.model.context_window
+            if comms is not None:
+                # Before the prompt runs: the parent may already have a
+                # question queued for this child, and attach is what flushes
+                # it into the child's first injection boundary.
+                # ``_transcript`` is the same private seam ``_emit`` above is:
+                # this module composes the child, and its transcript directory
+                # is what makes the child resumable later.
+                comms.attach(job_id, child, child._transcript.directory)
             await emit(SubagentStartEvent(job_id=job_id, label=label, agent_id=child.agent_id))
             unsubscribe = child.subscribe(
                 _make_relay(job_id, label, job, emit, report_progress, final)
@@ -171,6 +268,8 @@ def _make_runner(
             # cancels THIS task. Emit the settle event shielded: the current
             # task is mid-cancellation, but the parent stream must still see
             # the end of the subagent it was shown start.
+            if child is not None:
+                await _persist_inflight(child)
             with contextlib.suppress(BaseException):
                 await asyncio.shield(
                     emit(SubagentEndEvent(job_id=job_id, label=label, status="cancelled"))
@@ -184,6 +283,12 @@ def _make_runner(
         finally:
             if unsubscribe is not None:
                 unsubscribe()
+            if comms is not None:
+                # BEFORE dispose: detach fails any question still waiting on
+                # this child with "it finished before answering" rather than
+                # leaving the parent to burn its whole timeout on an agent
+                # that no longer exists.
+                comms.detach(job_id)
             if child is not None:
                 await _dispose_child(child)
 
@@ -199,6 +304,73 @@ async def _abort_bridge(signal: Any, child: "Session") -> None:
     """
     await signal.wait()
     child.abort(signal.reason or "cancelled")
+
+
+async def _persist_inflight(child: "Session") -> None:
+    """Write the cancelled child's unsaved turn to its own transcript.
+
+    ``Session.prompt`` persists a turn's messages AFTER its loop finishes, so
+    a child whose runner task is hard-cancelled mid-turn loses everything it
+    said and did — measured: a cancelled child's transcript held one entry,
+    its launch prompt, with the tool calls and results it had already
+    completed gone. That is invisible while a cancelled child is a dead end,
+    and wrong the moment one can be resumed: ``hub op='resume'`` replays this
+    file, so what is missing here is what the resumed agent has forgotten.
+
+    Deduplicated by message id (the transcript uses the message's own id as
+    the entry id), so anything ``prompt`` already wrote is not written twice —
+    a duplicate entry would replay as a duplicate message. Shielded, because
+    the calling task is already being cancelled; best-effort, because failing
+    to save a cancelled turn must not break teardown.
+
+    The tail is trimmed to a COHERENT history first (see
+    :func:`_answered_prefix`): a cancel lands mid tool batch, so the live
+    context routinely ends with an assistant message whose tool calls have no
+    results yet, and every major provider rejects a request carrying a
+    tool-use block with no matching tool result. Persisting that tail would
+    make the resumed child unable to make its first request at all.
+    """
+
+    async def _write() -> None:
+        known = {entry.id for entry in child._transcript.entries()}
+        for message in _answered_prefix(list(child._context.messages)):
+            if message.id not in known:
+                await child._transcript.append_message(message)
+
+    try:
+        await asyncio.shield(_write())
+    except asyncio.CancelledError:
+        pass  # the shielded write continues without us
+    except Exception:
+        logger.warning("could not persist cancelled subagent turn", exc_info=True)
+
+
+def _answered_prefix(messages: list[Any]) -> list[Any]:
+    """The longest prefix whose every tool call has its result.
+
+    Only the TAIL can be incoherent: a cancel interrupts one in-flight tool
+    batch, and every earlier batch completed. So this walks back from the end
+    and cuts at the last assistant message whose calls are unanswered,
+    stopping at the first fully-answered one. Messages before the cut are
+    untouched, which is the point — the child keeps everything it finished
+    and loses only the batch it was cancelled inside.
+    """
+    answered = {
+        message.tool_call_id
+        for message in messages
+        if isinstance(message, Message) and message.role == "tool" and message.tool_call_id
+    }
+    cut = len(messages)
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not (isinstance(message, Message) and message.role == "assistant"):
+            continue
+        if not message.tool_calls:
+            continue
+        if all(call.id in answered for call in message.tool_calls):
+            break
+        cut = index
+    return messages[:cut]
 
 
 async def _dispose_child(child: "Session") -> None:
@@ -227,11 +399,25 @@ def _make_relay(
 ) -> Callable[[AgentEvent], Awaitable[None]]:
     """The child-stream handler: trajectory + throttled parent relay.
 
-    EVERY child event lands in the trajectory; only tool starts/ends and
-    assistant message ends become parent-stream progress events — per-delta
-    relaying would flood the parent stream while a child streams a long
-    message.
+    EVERY child event lands in the trajectory; only message boundaries and
+    tool starts/ends become parent-stream progress events — per-delta relaying
+    would flood the parent stream while a child streams a long message.
+
+    The progress string is what the child's ROW says it is doing, and it is
+    phrased the way the main conversation's working line phrases the parent's
+    step (:mod:`local_operator.harness.intent`): the model's own intent while a
+    tool runs, ``running N tools`` for a batch, ``responding`` while prose
+    streams, ``thinking`` in the model call between them. It used to read
+    ``tool: bash done`` — the mechanism rather than the work, which is the
+    exact narration the intent field exists to replace, and a reader watching
+    both surfaces at once should not have to learn two vocabularies for one
+    state.
+
+    ``running`` is the live tool-call set, kept because the phrase for a batch
+    is a COUNT: a relay that only remembered the last event said ``thinking``
+    the moment one call of three settled, with two still running.
     """
+    running: dict[str, str] = {}
 
     async def relay(event: AgentEvent) -> None:
         if job is not None and job.trajectory is not None:
@@ -241,15 +427,23 @@ def _make_relay(
                 del job.trajectory[:overflow]
         progress: str | None = None
         if isinstance(event, ToolExecutionStartEvent):
-            progress = f"tool: {event.tool_name}"
+            running[event.tool_call_id] = tool_activity(event.tool_name, event.intent)
+            progress = batch_activity(list(running.values()))
         elif isinstance(event, ToolExecutionEndEvent):
-            progress = f"tool: {event.tool_name} {'failed' if event.is_error else 'done'}"
+            running.pop(event.tool_call_id, None)
+            # Back to the model as soon as the batch empties: a settled call is
+            # not the child's current activity, and the ledger the page draws
+            # already carries its outcome.
+            progress = batch_activity(list(running.values())) if running else ACTIVITY_THINKING
+        elif isinstance(event, MessageStartEvent):
+            progress = ACTIVITY_RESPONDING
         elif isinstance(event, MessageEndEvent):
             message = event.message
             if isinstance(message, Message) and message.role == "assistant":
                 # Capture the last assistant text as the job's result.
                 final["text"] = message.text
-                progress = "message end"
+                _accumulate_usage(job, message.usage)
+                progress = ACTIVITY_THINKING
         elif isinstance(event, AgentEndEvent):
             if event.error:
                 final["error"] = event.error
@@ -262,16 +456,146 @@ def _make_relay(
     return relay
 
 
+def _accumulate_usage(job: Any, usage: "Usage | None") -> None:
+    """Fold one child ``message_end``'s usage into the job's running total.
+
+    Summed per assistant message rather than taken from the final one: a
+    tool-using child spends most of its tokens in the earlier model calls of
+    the same run, so the last message's usage understates the child by
+    whatever the tool loop cost.
+
+    ``context_tokens`` is point-in-time (how full the child's window was on
+    that request), so it is REPLACED, never summed. The field stays ``None``
+    until a provider actually reports something: a zeroed total would read as
+    "this child used nothing" when the truth is "nobody told us".
+    """
+    if job is None or usage is None:
+        return
+    total = job.usage
+    if total is None:
+        job.usage = usage.model_copy()
+        return
+    total.input_tokens += usage.input_tokens
+    total.output_tokens += usage.output_tokens
+    total.cache_read_tokens += usage.cache_read_tokens
+    total.cache_write_tokens += usage.cache_write_tokens
+    if usage.context_tokens is not None:
+        total.context_tokens = usage.context_tokens
+
+
+@dataclass(frozen=True)
+class _ChildMcp:
+    """The child's slice of the parent's MCP surface (see :func:`_child_mcp_wiring`).
+
+    ``attach`` is called once, after the child Session exists, because lazy
+    activation has to refresh the child's inventory and the closure cannot
+    hold a session that has not been constructed yet.
+
+    ``catalogue`` is a callable and not a string, matching the parent's
+    ``knowledge_hooks.mcp_catalogue`` exactly: ``/mcp reload`` replaces
+    ``McpManager._configs`` wholesale, and a catalogue frozen at child build
+    would go on advertising a server the operator just removed while hiding
+    one they just added.
+    """
+
+    tools: list[AgentTool]
+    catalogue: Callable[[], str]
+    resolve: Callable[[str], str | None]
+    attach: Callable[["Session"], None]
+
+
+def _child_mcp_wiring(parent_session: "Session") -> _ChildMcp | None:
+    """Give the child the PARENT's MCP surface, on the parent's live manager.
+
+    The reported failure: a delegated task could not call the Linear MCP tools
+    its parent had, so it reached for the parent's stored OAuth token and made
+    raw API calls instead. A child built from ``create_tools`` alone has no MCP
+    tools, no ``mcp://`` resolver and no catalogue, so from inside the child
+    those servers do not exist at all — improvising with credentials is the
+    only route left, which is a capability gap and a credential-handling
+    problem at once.
+
+    The child BORROWS the parent's manager instead of running a second
+    discovery pass: discovery costs a process spawn or an HTTP round trip per
+    server plus an OAuth exchange, the duplicate connections would live for one
+    prompt, and two managers racing the same refresh is exactly the token churn
+    the shared auth store exists to prevent. Borrowing has two consequences,
+    both deliberate. The child registers NO dispose hook — ``disconnect_all``
+    belongs to the parent, and a child tearing the servers down mid-session
+    would break the parent. And the child does NOT call
+    ``set_on_tools_changed``: that is a single slot the parent already holds,
+    so installing there would freeze the PARENT's inventory for the rest of the
+    session. The cost is that a reconnect during the child's run leaves the
+    child holding stale ``AgentTool`` objects, which is harmless — their
+    execute closes over the manager plus the (server, tool) pair, so calls
+    still route and still reconnect (``manager._execute_tool_call``); only a schema
+    changed mid-run is missed, over a window bounded by one prompt.
+
+    Activation is the parent's lazy path unchanged: ``read mcp://<server>``
+    lists a server, ``read mcp://<server>/<tool>`` activates exactly one tool —
+    into the CHILD's inventory. The child starts from the set the parent has
+    already activated, derived from the parent's live tool list rather than
+    plumbed out of ``wire_mcp_into_session``'s closure: a tool the manager
+    knows is in that list exactly when the parent activated it, so the fact is
+    already public. The parent paid those schemas' token cost for the very task
+    it is now delegating.
+
+    ``None`` when the parent has no manager: MCP unconfigured, SDK missing, or
+    a bare ``Session`` built by a host that never wired one.
+    """
+    manager: McpManager | None = getattr(parent_session, "mcp_manager", None)
+    if manager is None:
+        return None
+
+    from local_operator.mcp.resources import make_mcp_resolver, render_mcp_catalogue
+
+    def origin(tool: AgentTool) -> tuple[str, str] | None:
+        meta = manager.get_tool_meta(tool.name)
+        if meta is None:
+            return None
+        return (str(meta.get("server_name", "")), str(meta.get("mcp_tool_name", "")))
+
+    enabled: set[tuple[str, str]] = {
+        found for tool in parent_session._tools if (found := origin(tool)) is not None
+    }
+    child: Session | None = None
+    base: list[AgentTool] = []
+
+    def selected(source: list[AgentTool]) -> list[AgentTool]:
+        return [tool for tool in source if origin(tool) in enabled]
+
+    def activate(server_name: str, raw_tool_name: str) -> None:
+        enabled.add((server_name, raw_tool_name))
+        if child is not None:
+            child.refresh_tools(base + selected(manager.get_tools()))
+
+    def attach(session: "Session") -> None:
+        nonlocal child, base
+        child = session
+        # The non-MCP base is DERIVED, not remembered: Session.__init__ merges
+        # its own capability tools in and this module prunes some back out, so
+        # the constructor's list is not what the session ended up with.
+        base = [tool for tool in session._tools if origin(tool) is None]
+
+    return _ChildMcp(
+        tools=selected(manager.get_tools()),
+        catalogue=lambda: render_mcp_catalogue(manager),
+        resolve=make_mcp_resolver(manager, activate),
+        attach=attach,
+    )
+
+
 async def _build_child_session(
     *,
     label: str,
     prompt: str,
     parent_session: "Session",
     model_spec: ModelSpec | None,
+    job_id: str,
+    resume_dir: "Path | None" = None,
 ) -> "Session":
     """Compose the child Session directly (see module docstring for why the
-    factory is not reused). Inherits model (unless overridden), stream fn,
-    cwd and the parent's approval handler; explicitly NOT yolo."""
+    factory is not reused, and for the full inherit/do-not-inherit list)."""
     from datetime import datetime
 
     from local_operator.config import ConfigManager
@@ -279,49 +603,142 @@ async def _build_child_session(
     from local_operator.prompts_api import build_system_blocks
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
-    from local_operator.session_factory import _env_details
+    from local_operator.session_factory import _env_details, load_user_instructions
     from local_operator.tools.registry import create_tools
 
-    session_dir = config_dir() / "sessions" / uuid.uuid4().hex[:12]
+    # A resumed child is built on the STOPPED child's directory, and that is
+    # the whole of the resume mechanism: ``Transcript.__init__`` reads the
+    # file back, and ``Session.__init__`` seeds its ``LoopContext`` from
+    # ``build_llm_history()``, so the new run starts holding everything the
+    # old one said, did, and read. Same path the CLI's ``--resume`` takes.
+    session_dir = (
+        resume_dir if resume_dir is not None else config_dir() / "sessions" / uuid.uuid4().hex[:12]
+    )
     transcript = Transcript(session_dir)
+    # The operator's standing instructions are machine-wide, so a delegated
+    # slice inherits them for the same reason it inherits the goal: the parent
+    # authoring a task prompt is not a reliable channel for a preference the
+    # operator meant to apply everywhere. Re-read here rather than plumbed off
+    # the parent — children are built outside the factory, and this keeps the
+    # one source of truth in one function.
+    user_instructions = load_user_instructions()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
-    # The child context carries NO subagent_launcher, jobs, background-bash
-    # launcher or wake scheduler: create_tools below therefore advertises
-    # none of task/wait/job/wake to the child, keeping it one level deep and
-    # free of machinery whose lifetime ends with this one prompt.
+    mcp = _child_mcp_wiring(parent_session)
+    parent_resolver = parent_session._skill_resolver
+
+    def resolve_internal_url(url: str) -> str | None:
+        # MCP FIRST, and the order is load-bearing: the parent's resolver
+        # chains guide:// then skill:// then its OWN mcp:// link, and that last
+        # link activates into the PARENT's inventory — a child reading
+        # ``mcp://linear/list_issues`` through it would enable the tool on the
+        # wrong session and see nothing appear in its own. Asking the child's
+        # resolver first fixes that without having to decompose the parent's
+        # chain, because ``make_mcp_resolver`` returns None for every URL that
+        # is not ``mcp://`` — guide:// and skill:// fall through untouched.
+        if mcp is not None:
+            handled = mcp.resolve(url)
+            if handled is not None:
+                return handled
+        return parent_resolver(url) if parent_resolver is not None else None
+
+    # The child context carries no subagent_launcher, jobs or wake scheduler,
+    # so create_tools advertises none of task/wait/jobs/wake here. That is no
+    # longer sufficient on its own — Session.__init__ re-derives them from the
+    # session's own context — so the merge is undone after construction.
+    #
+    # ``subagent_comms`` is the PARENT's instance and is why ``hub`` survives
+    # the prune below. Not because the object here is the one that lives: the
+    # merge in ``Session.__init__`` REPLACES it with a tool built from the
+    # child's own context (verified: the constructed AgentTool is not the one
+    # in ``child._tools`` afterwards). The NAME is what spares it — the prune
+    # removes what the merge ADDED, and ``hub`` was already present.
+    #
+    # So the load-bearing invariant is not this line but the merge-time
+    # context: ``Session._build_tool_context`` passes ``job_id``, and
+    # ``is_child(job_id)`` is what makes the replacement the CHILD shape
+    # (message your parent) rather than the parent shape (address, steer,
+    # stop and resume your children). If ``job_id`` ever stopped reaching
+    # that context, a child would silently be handed its parent's tool.
     tool_context = ToolContext(
         cwd=cwd,
         session_id=transcript.directory.name,
         agent_id=parent_session.agent_id,
+        job_id=job_id,
         has_ui=parent_session._has_ui,
         request_approval=request_approval,
+        resolve_internal_url=resolve_internal_url,
+        subagent_comms=getattr(parent_session, "subagent_comms", None),
         web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
+    if mcp is not None:
+        tools = tools + mcp.tools
 
     def system_blocks_provider() -> list[str]:
-        # Standard block layout with an empty lazy-knowledge tail: rebuilding
-        # semantic indexes per one-shot child would add cost without giving the
-        # parent a new durable capability.
+        # Standard block layout. The lazy-knowledge tail carries the MCP
+        # catalogue and nothing else: re-running semantic skill selection per
+        # one-shot child would add cost without giving the parent a new durable
+        # capability, but the catalogue is a bounded list of server names the
+        # parent has ALREADY discovered, and without it the child has no way to
+        # learn that ``read mcp://<server>`` is a thing to try.
+        #
+        # The goal rides the same tail. ``/goal`` is a standing constraint the
+        # operator set on the whole session ("don't touch prod"), and a
+        # delegated slice of that session is exactly where an unstated
+        # constraint gets violated — the parent authoring the task prompt is
+        # not a reliable channel for a rule the operator meant to apply to
+        # everything. Read once per call off the parent's live holder, so a
+        # ``/goal`` edit reaches children spawned after it.
         return build_system_blocks(
-            tools, "", _env_details(cwd), datetime.now().strftime("%Y-%m-%d")
+            tools,
+            mcp.catalogue() if mcp is not None else "",
+            _env_details(cwd),
+            datetime.now().strftime("%Y-%m-%d"),
+            goal=parent_session.goal,
+            user_instructions=user_instructions,
         )
 
     child = Session(
         model=model_spec if model_spec is not None else parent_session.model,
         # The parent's stream fn: one shared httpx pool serves any ModelSpec
         # (the client is chosen per request), so an override rides the same
-        # pipe and the pool's lifetime stays the parent's dispose hook.
+        # pipe and the pool's lifetime stays the parent's dispose hook. The
+        # retry/failover cascade is baked into that stream fn at construction,
+        # which is how the operator's fallback chain reaches the child too.
         stream_fn=parent_session._stream_fn,
         tools=tools,
         transcript=transcript,
         agent_id=parent_session.agent_id,
         system_blocks_provider=system_blocks_provider,
-        yolo=False,  # NEVER inherited: the child faces the same gate as the parent
+        # The FLAG is never inherited, and that buys less than it sounds like:
+        # ``Session._build_tool_context`` passes no gate at all when ``_yolo``
+        # is set, so all this prevents is the child skipping the gate OBJECT.
+        # The parent's approval MODE still applies, because the mode lives in
+        # the handler below, not in this flag. Stated, not assumed: see the
+        # module docstring.
+        yolo=False,
         has_ui=parent_session._has_ui,
         cwd=cwd,
         request_approval=request_approval,
+        # Which job the child's approvals belong to, so a host can scope a
+        # denial to the work that provoked it. Reaches the executor through
+        # ``Session._build_tool_context``; the construction-time context above
+        # only feeds createIf.
+        job_id=job_id,
+        # The PARENT's comms instance, so the child's every-turn tool context
+        # rebuild keeps pointing at the agent that delegated to it instead of
+        # minting a private one nobody is listening to.
+        subagent_comms=getattr(parent_session, "subagent_comms", None),
+        # The parent's variable store: same cwd, same config overrides, so a
+        # child reading a variable must see exactly what its parent would.
+        variables=parent_session._variables,
+        skill_resolver=resolve_internal_url,
+        # How the transcript renders into LLM messages. Today every host uses
+        # the default, so this changes nothing; it is plumbed because a host
+        # that DOES override it would otherwise have its children silently
+        # rendering their history by different rules than their parent.
+        convert_to_llm=parent_session._convert_to_llm,
         # The parent's compaction budget. A one-shot child was assumed to be
         # too short to need compaction, but a real review child ran 48
         # requests / 1.5M tokens before its default (600k-cap) threshold
@@ -335,5 +752,24 @@ async def _build_child_session(
             else None
         ),
     )
+    # Undo ``Session.__init__``'s capability merge. The set is DERIVED, not a
+    # copy of the ``enabled=("task", "wait", "jobs", "wake")`` tuple in
+    # ``_merge_capability_tools``: nothing links a copy to that tuple, so a
+    # fifth session-gated tool would be handed to every child silently — the
+    # exact rot the module docstring says this prune exists to stop. The merge
+    # only appends new names or replaces same-named entries, so whatever the
+    # constructor ADDED to the list we passed in is precisely the set of tools
+    # gated on capabilities only a top-level session should have.
+    #
+    # ``refresh_tools`` rather than touching ``_tools``: it is the committed
+    # hook and it keeps the loop's ``context.tools`` in step.
+    merged_in = {tool.name for tool in child._tools} - {tool.name for tool in tools}
+    child.refresh_tools([tool for tool in child._tools if tool.name not in merged_in])
+    if mcp is not None:
+        mcp.attach(child)
+        # Diagnostics only, and BORROWED: unlike attach_mcp_dispose this adds no
+        # disconnect hook, because the child does not own the servers.
+        child.mcp_manager = parent_session.mcp_manager
+        child.mcp_startup = parent_session.mcp_startup
     await child.async_init()
     return child

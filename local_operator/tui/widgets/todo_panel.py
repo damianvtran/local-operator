@@ -69,9 +69,12 @@ def todo_items(session_id: str) -> list[dict[str, str]]:
 class TodoPanel(Container):
     """The session's todo list, rendered in the dock band above the input.
 
-    The panel is a transparent SLOT (its top padding row is the gap that
-    separates it from whatever sits above — a margin would violate the sheet's
-    one-margin rule) holding one filled body. Visibility is the panel's own:
+    The panel is a transparent SLOT (its BOTTOM padding row is the rhythm row
+    between it and whatever sits below — a margin would violate the sheet's
+    one-margin rule), holding one filled body. Transparent means the dock's
+    fill, not the screen's: ``#band`` carries ``$lo-surface``, so the slot's
+    blank row is part of the dock rather than a strip of transcript showing
+    through between the list and the composer. Visibility is the panel's own:
     ``display: none`` whenever the store is empty, so the band collapses to
     zero rows.
     """

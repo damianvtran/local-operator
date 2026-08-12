@@ -17,9 +17,9 @@ Hot-path hygiene (TUI-011):
   only in the NEW text while carrying the running ``in_fence`` state and the
   covered-line set; a full re-scan runs only when the update was not a pure
   append. The frozen prefix is never re-lexed on the streaming path.
-- Row accounting is lazy (inherited from ``TranscriptBlock``): streaming
-  updates never measure the renderable; ``settled_rows`` estimates via rich
-  measurement only when asked.
+- Row accounting is exact and free: the frozen prefix is already flattened, so
+  ``settled_rows`` COUNTS its rows instead of re-rendering the markdown at a
+  guessed width to measure them.
 
 Splice preconditions (TUI-010): the freeze is REFUSED when it would break
 markdown semantics across the boundary — a reference-link definition line
@@ -37,11 +37,12 @@ from __future__ import annotations
 import re
 
 from rich.cells import cell_len
-from rich.console import Group
+from rich.console import Console, RenderableType
 from rich.markdown import Markdown
 from rich.text import Text
 
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.markdown_theme import brand_markdown_theme
 from local_operator.tui.widgets.transcript import TranscriptBlock
 
 #: Reference-link definition line: ``[label]: target`` (TUI-010 refusal).
@@ -50,6 +51,75 @@ _REF_DEF_RE = re.compile(r"^\s*\[[^\]]+\]:\s", re.MULTILINE)
 _LIST_ITEM_RE = re.compile(r"^\s{0,3}(?:[-+*]|\d{1,9}[.)])\s")
 #: Fence marker: 3+ backticks or tildes (commonmark fenced-code opener).
 _FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+
+#: Width a block builds at before it has been laid out. The correct width
+#: arrives with the first resize, which rebuilds (see
+#: :meth:`AssistantBlock.on_resize`).
+FALLBACK_WIDTH = 80
+
+
+def flatten(renderable: RenderableType, width: int, console: Console | None = None) -> Text:
+    """A rich renderable's rendered rows, as ONE styled ``Text``.
+
+    Why this exists at all: Textual decides per widget whether its content can
+    be selected, and it decides it from the TYPE of the visual. ``visualize()``
+    (``textual/visual.py``) promotes ``str`` and ``rich.text.Text`` to a
+    ``Content``, and wraps every other rich renderable in a ``RichVisual``.
+    ``Content`` applies ``options.selection`` while formatting and tags each
+    segment with its content offset; ``RichVisual.render_strips`` ignores the
+    selection argument entirely and tags nothing. A ``Markdown`` therefore
+    cannot highlight and cannot be copied — ``Widget.get_selection`` bails on
+    the first line, because the visual is not a ``Text`` or ``Content``.
+
+    So the markdown is rendered ONCE, here, at a known width, and handed to
+    Textual as the one renderable it treats as selectable. The rows are byte
+    identical to what ``RichVisual`` painted before (both walk the same segment
+    stream from the same console), so this buys selection without moving a
+    single cell.
+
+    Width is BAKED IN, which is the cost: the caller owns rebuilding on resize
+    and pinning its height, the same bargain ``UserBlock`` and ``ToolCard``
+    already make.
+
+    ``console``: the app's own, so the brand markdown theme and the terminal's
+    encoding are the ones in force. Detached (tests holding a block directly,
+    a block built before mount) falls back to a private console carrying the
+    same theme.
+    """
+    if console is None:
+        console = Console(width=width, theme=brand_markdown_theme())
+    options = console.options.update(width=width, height=None, highlight=False)
+    text = Text(end="")
+    # Cells emitted on the row currently being built. Rich pads a row that has
+    # CONTENT out to the full width, but emits a row that has none as nothing
+    # at all — so a blank line between two paragraphs was zero cells wide.
+    # Selection paints the cells a row actually has, so a multi-paragraph
+    # answer highlighted as a stack of disconnected slabs with unpainted gaps
+    # between them, while `get_selection` returned one continuous string. The
+    # highlight has to describe what gets copied; padding the blank rows is
+    # what makes the band continuous.
+    #
+    # Safe for the clipboard: `TranscriptBlock.get_selection` drops each row's
+    # trailing pad, which it already had to do for the content rows Rich pads.
+    row_cells = 0
+    for segment in console.render(renderable, options):
+        if segment.control:
+            continue
+        for index, part in enumerate(segment.text.split("\n")):
+            if index:
+                if row_cells == 0:
+                    text.append(" " * width)
+                text.append("\n")
+                row_cells = 0
+            if part:
+                text.append(part, segment.style)
+                row_cells += cell_len(part)
+    # Rich closes every block with a newline; kept, that is a blank row the
+    # markdown never had, and one row of height the block would reserve and
+    # never paint.
+    while text.plain.endswith("\n"):
+        text.right_crop(1)
+    return text
 
 
 def _scan_fences(
@@ -196,6 +266,29 @@ class AssistantBlock(TranscriptBlock):
     The frozen renderable is kept together with the theme epoch it was built
     under (TUI-016): when the epoch changes, the cache is dropped so the
     next update re-renders against the new ramp.
+
+    The Markdown is FLATTENED to a ``Text`` before it is applied (see
+    :func:`flatten`), because that is what makes agent prose selectable and
+    copyable — reported from the field as "I can't seem to highlight the agent
+    messages which is important to be able to copy/paste agent content". The
+    rows are unchanged; only the type Textual sees is. Two consequences the
+    block now owns:
+
+    * **Width is baked in**, so :meth:`on_resize` rebuilds — the discipline
+      ``UserBlock``, ``NoticeBlock`` and ``ToolCard`` already follow.
+    * **Height is pinned** to the row count, for the reason
+      ``TranscriptBlock.invalidate_row_measurements`` records: a block that
+      authors its own rows must not be MEASURED, because the measurement is
+      cached on width alone and the first one is taken of the fallback build.
+
+    The frozen prefix is cached as its FLATTENED text, not just as a
+    ``Markdown``, and the flush concatenates. That is exact rather than
+    approximate: rich ends every renderable with a newline, so flattening
+    ``Group(prefix, tail)`` and joining ``flatten(prefix)`` to
+    ``flatten(tail)`` with one newline produce the same rows (asserted in
+    ``test_transcript_selection.py``). It also makes streaming CHEAPER than
+    before — the prefix's markdown was re-rendered by the compositor on every
+    repaint, and now it is rendered once per settled block.
     """
 
     SPACING_KIND = "assistant"
@@ -206,6 +299,12 @@ class AssistantBlock(TranscriptBlock):
         self._full_text: str = ""
         self._frozen_text: str = ""
         self._frozen_rendered: Markdown | None = None
+        #: The frozen prefix's FLATTENED rows, and the width they were built
+        #: at. Both, because the flatten bakes the width in: a cached prefix
+        #: from a 120-column frame is wrong rows at 60, and the epoch check
+        #: alone would never notice.
+        self._frozen_flat: Text | None = None
+        self._frozen_width: int = -1
         self._frozen_epoch: int = -1
         # Incremental fence tracking (TUI-011a): state as of the last scan.
         self._scanned_len: int = 0
@@ -213,6 +312,15 @@ class AssistantBlock(TranscriptBlock):
         self._in_fence: bool = False
         self._fence_marker: str = ""
         self._covered: set[int] = set()
+        #: The row count last written to ``styles.height``. ``_apply_rows``
+        #: compares against it to decide whether the content update needs a
+        #: LAYOUT pass or only a repaint; -1 means nothing is pinned yet, so
+        #: the first apply always lays out.
+        self._pinned_rows: int = -1
+        #: The width the applied rows were flattened at. ``on_resize`` compares
+        #: against it so a height-only resize — which every height pin raises
+        #: — does not re-flatten a message to reproduce identical rows.
+        self._built_width: int = -1
 
     def update_text(self, text: str) -> None:
         """Apply ``text`` as the accumulated message content.
@@ -233,6 +341,7 @@ class AssistantBlock(TranscriptBlock):
         if self._frozen_rendered is not None and epoch != self._frozen_epoch:
             self._frozen_text = ""
             self._frozen_rendered = None
+            self._frozen_flat = None
 
         append_only = text.startswith(self._full_text) and self._scanned_len <= len(text)
         self._track_fences(text, append_only)
@@ -240,23 +349,121 @@ class AssistantBlock(TranscriptBlock):
 
         lines = text.split("\n")
         boundary = _stable_boundary(text, lines, self._covered)
-        if boundary > 0:
-            prefix = text[:boundary]
-            tail = text[boundary:]
-            if prefix != self._frozen_text:
-                # Prefix grew: a new block settled. Re-render frozen once.
-                self._frozen_text = prefix
-                self._frozen_rendered = Markdown(prefix)
-                self._frozen_epoch = epoch
-            assert self._frozen_rendered is not None
-            # The tail is rebuilt per flush; a keyed cache here retained a
-            # full copy of the message per flush (O(n^2) bytes) for a cache
-            # that can never hit — the equality guard already no-ops
-            # identical re-emits and append-only text only moves forward.
-            renderable = Group(self._frozen_rendered, Markdown(tail))
-        else:
-            renderable = Markdown(text)
-        self.set_content(renderable)
+        prefix = text[:boundary] if boundary > 0 else ""
+        if prefix != self._frozen_text:
+            # The prefix moved (grew, or was dropped by an epoch change): the
+            # cached flatten is stale. `_flat_rows` re-renders it once.
+            self._frozen_text = prefix
+            self._frozen_flat = None
+            self._frozen_epoch = epoch
+        self._apply_rows(self._flat_rows(self._flat_width()))
+
+    def _flat_width(self) -> int:
+        """The width the rows are built at — the block's own once laid out."""
+        return self.size.width or FALLBACK_WIDTH
+
+    def _flat_console(self) -> Console | None:
+        """The app's console, or ``None`` when this block is detached.
+
+        Detached is not exotic: a block is constructed and given its first
+        text before it is mounted, and the unit tests hold blocks with no app
+        at all. :func:`flatten` falls back to a private console carrying the
+        same markdown theme, so the rows are the same either way.
+        """
+        try:
+            return self.app.console
+        except Exception:
+            return None
+
+    def _apply_rows(self, text: Text) -> None:
+        """Apply flattened rows and PIN the height to the count of them.
+
+        Pinned for the reason ``UserBlock._build`` records at length: a block
+        that authors its own rows must not be MEASURED, because Textual caches
+        the measurement on ``_content_height_cache`` keyed on the WIDTH ALONE
+        and the first measurement is taken of the fallback-width build. Under
+        ``height: auto`` (which the sheet still gives this block, and which is
+        now only the pre-first-content default) a message built at
+        :data:`FALLBACK_WIDTH` and then laid out narrower reserves the inflated
+        count forever and paints a hole under itself.
+
+        The height pin is also what makes the LAYOUT pass skippable. Textual's
+        ``Static.update`` reflows by default, and a reflow re-arranges every
+        widget in the transcript — measured at 7.8 ms across 173 widgets on a
+        161-block screen. A pinned block's footprint is exactly its pin, so a
+        delta that lands inside the same number of rows changes nothing the
+        container has to re-place and needs a repaint only. Deltas arrive at
+        30 Hz and most of them add a few characters to a line that already
+        exists, so this is the common case, not the rare one: it took the cost
+        of a streaming delta from 4.54 ms to 1.98 ms at the median and from
+        56.4 ms to 11.4 ms at the worst.
+        """
+        self._built_width = self._flat_width()
+        rows = text.plain.count("\n") + 1
+        moved = rows != self._pinned_rows
+        self._pinned_rows = rows
+        self.styles.height = rows
+        self.set_content(text, layout=moved)
+
+    def _flat_rows(self, width: int) -> Text:
+        """The block's rows at ``width``, from the state the last update left.
+
+        The frozen prefix is cached as FLATTENED TEXT and this concatenates —
+        exact rather than approximate, because rich ends every renderable with
+        a newline, so ``flatten(Group(prefix, tail))`` and
+        ``flatten(prefix) + "\\n" + flatten(tail)`` produce identical rows
+        (pinned in ``test_transcript_selection.py``). It also makes streaming
+        CHEAPER than the ``Group`` it replaces: that re-rendered the prefix's
+        markdown on every repaint, and this renders it once per settled block.
+        """
+        if not self._full_text:
+            return Text("")
+        if not self._frozen_text:
+            return self._flat_whole()
+        console = self._flat_console()
+        if self._frozen_flat is None or self._frozen_width != width:
+            self._frozen_rendered = Markdown(self._frozen_text)
+            self._frozen_flat = flatten(self._frozen_rendered, width, console)
+            self._frozen_width = width
+        tail = self._full_text[len(self._frozen_text) :]
+        rows = self._frozen_flat.copy()
+        rows.append("\n")
+        rows.append_text(flatten(Markdown(tail), width, console))
+        return rows
+
+    def on_resize(self, event: object) -> None:
+        """Rebuild at the new width — the flatten baked the old one in.
+
+        The same discipline ``UserBlock`` and ``NoticeBlock`` already follow,
+        and it arrives with the flatten rather than being a new cost: a
+        ``Markdown`` re-folded itself per repaint, so nothing had to be told
+        the width had changed. A ``Text`` carries the fold it was built with.
+
+        Finalized blocks rebuild too. The FINALIZED-BLOCK protocol promises
+        the container that committed ROWS never change under scroll, and at a
+        new width they are a different set of rows whatever this does; the
+        alternative is a settled message that keeps a stale fold and either
+        clips or leaves a hole.
+
+        Guarded on the WIDTH, because a resize is not evidence that the rows
+        moved. The rows are a pure function of the text and the width, and
+        ``_apply_rows`` pins the height — so every height pin raises a Resize
+        of its own and this handler re-ran the whole flatten to reproduce the
+        rows it had just been given. Measured on a session replay: 122 rebuilds
+        for 75 blocks, ~175 ms, all of the excess for a width that never
+        changed.
+        """
+        if not self._full_text:
+            return
+        if self._flat_width() == self._built_width:
+            return
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            rows = self._flat_whole() if was_finalized else self._flat_rows(self._flat_width())
+            self._apply_rows(rows)
+        finally:
+            self._finalized = was_finalized
 
     @property
     def frozen_renderable(self) -> Markdown | None:
@@ -307,21 +514,33 @@ class AssistantBlock(TranscriptBlock):
         return self._in_fence
 
     def finalize_text(self) -> None:
-        """Commit the full text as one render and freeze the block."""
+        """Commit the full text as one render and freeze the block.
+
+        One render of the WHOLE message, not the concatenation: the splice was
+        only ever a streaming economy, and a settled message is re-lexed once.
+        """
         if self._finalized:
             return
         self._full_text = self._full_text or ""
-        self.set_content(Markdown(self._full_text) if self._full_text else Text(""))
+        self._apply_rows(self._flat_whole())
         self.finalize()
+
+    def _flat_whole(self) -> Text:
+        """The whole message as one flatten, at the block's current width."""
+        if not self._full_text:
+            return Text("")
+        return flatten(Markdown(self._full_text), self._flat_width(), self._flat_console())
 
     def settled_rows(self) -> int:
         """Rows provably stable now: the frozen prefix's render while live."""
         if self._finalized:
             return super().settled_rows()
-        # While streaming, only the frozen prefix is byte-stable. Lazy: the
-        # count is estimated only when asked, at the block's own width (D3).
-        if self._frozen_rendered is not None:
-            return _measure_rows(self._frozen_rendered, self.size.width or 80)
+        # While streaming, only the frozen prefix is byte-stable — and it is
+        # already flattened, so the count is COUNTED rather than re-measured
+        # through rich. Exact, and it is the same number the compositor will
+        # paint, which a second render at a guessed width was not.
+        if self._frozen_flat is not None:
+            return self._frozen_flat.plain.count("\n") + 1
         return 0
 
     def spans_multiple_rows(self) -> bool:
@@ -342,18 +561,3 @@ class AssistantBlock(TranscriptBlock):
     def text(self) -> str:
         """The accumulated message text (for tests and export)."""
         return self._full_text
-
-
-def _measure_rows(renderable: object, width: int = 80) -> int:
-    """Row count a rich renderable occupies, measured lazily via rich."""
-    from rich.console import Console
-
-    console = Console(width=max(width, 10))
-    try:
-        segments = console.render(renderable, console.options)  # type: ignore[arg-type]
-    except Exception:
-        return 1
-    rows = 1
-    for segment in segments:
-        rows += segment.text.count("\n")
-    return rows

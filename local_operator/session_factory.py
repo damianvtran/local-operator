@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import logging
 import os
 import sys
@@ -66,6 +67,59 @@ if TYPE_CHECKING:
     from local_operator.variables import VariableStore
 
 logger = logging.getLogger("local_operator.session_factory")
+
+
+#: Modules whose import dominates :func:`create_session`, measured rather than
+#: guessed: on this machine ``mcp`` costs 443 ms and ``httpx`` 234 ms to import,
+#: and the engine entries below another 195 ms between them. Everything here is
+#: imported lazily by the factory or by something it calls, which is what makes
+#: session construction a ~700 ms burst of import machinery.
+#:
+#: Third-party names sit alongside our own deliberately: the cost is theirs, and
+#: naming only our modules would warm the cheap half of the problem.
+_WARM_IMPORTS: tuple[str, ...] = (
+    "mcp",
+    "httpx",
+    "httpcore",
+    "truststore",
+    "local_operator.compaction.api",
+    "local_operator.mcp.manager",
+    "local_operator.model.configure",
+    "local_operator.model.discovery",
+    "local_operator.providers.auth_store",
+    "local_operator.session.session",
+    "local_operator.skills.discovery",
+)
+
+
+def warm_session_imports() -> None:
+    """Pay :func:`create_session`'s import cost, off whatever loop is running.
+
+    ``create_session`` is a coroutine, but its body is one long SYNCHRONOUS
+    stretch — the awaits are few and none of them yield until the imports are
+    done — so a caller with a live event loop is frozen for the whole of it.
+    Under the TUI that is a ~700 ms window in which no frame is painted and no
+    keypress is handled: the user types the first words of their prompt into a
+    screen that does not move, and the characters all appear at once when it
+    unfreezes.
+
+    Importing is CPU and file I/O, both of which drop the GIL, so running this
+    in a worker thread (``await asyncio.to_thread(warm_session_imports)``)
+    turns that one long stall into interleaved sub-frame ones — measured at
+    16 ms worst case, against 699 ms for the unwarmed factory. The factory
+    itself is unchanged: it still imports what it needs, and finds it cached.
+
+    Never raises. An optional extra that is not installed (``mcp``) or a module
+    that fails to import is the factory's problem to report, in the factory's
+    own words, at the point where it actually needs it.
+    """
+    import importlib
+
+    for name in _WARM_IMPORTS:
+        try:
+            importlib.import_module(name)
+        except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+            logger.debug("prewarm skipped %s", name, exc_info=True)
 
 
 def coerce_compaction_settings(raw: object) -> CompactionSettings | None:
@@ -336,6 +390,43 @@ def _env_details(cwd: str | None = None) -> str:
     )
 
 
+def load_user_instructions(agent_prompt: str = "") -> str:
+    """Read the operator's standing custom instructions for the system prompt.
+
+    Source of truth is ``<config_dir>/system_prompt.md`` — the same file the
+    desktop UI's Settings "Instructions" box and the
+    ``/v1/config/system-prompt`` endpoint write, so the three surfaces cannot
+    drift into separate notions of "custom instructions".
+
+    ``agent_prompt`` is the selected agent profile's own ``system_prompt.md``.
+    It is appended rather than allowed to replace the global file: an agent is
+    a specialization ("you review Python"), not a reason to forget the
+    operator's machine-wide preferences, and a profile that genuinely must
+    override one can say so in its own text.
+
+    Failures degrade instead of breaking startup: an unreadable file is
+    skipped, and undecodable bytes are REPLACED rather than dropping the whole
+    file, because a stray bad byte in a long instructions file should cost the
+    operator one glyph and not every preference they wrote. Either way a bad
+    edit never costs a session.
+    """
+    # Imported as an alias: ``config_dir`` is a local parameter name in two
+    # other functions here, and a module-level import of the same spelling
+    # would read like one of them.
+    from local_operator.paths import config_dir as app_config_dir
+
+    parts: list[str] = []
+    path = app_config_dir() / "system_prompt.md"
+    try:
+        if path.is_file():
+            parts.append(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        pass
+    if agent_prompt.strip():
+        parts.append(agent_prompt)
+    return "\n\n".join(part.strip() for part in parts if part.strip())
+
+
 def _build_variable_store(cwd: str, config_manager: ConfigManager) -> VariableStore:
     """Construct the session's VariableStore for the list/read variable
     tools. Config ``variables`` ride above the project file and environment;
@@ -586,6 +677,7 @@ def _make_system_blocks_provider(
     hooks: _KnowledgeHooks,
     cwd: str | None = None,
     goal_state: "GoalState | None" = None,
+    user_instructions: str = "",
 ) -> Callable[[], Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
@@ -598,6 +690,12 @@ def _make_system_blocks_provider(
     ``goal_state`` is the SAME holder the session facade exposes through
     ``set_goal``, which is how a ``/goal`` edit reaches the next turn's
     prompt without rebuilding the session.
+
+    ``user_instructions`` is captured once by the caller and closed over
+    rather than re-read here: it lands in the byte-stable head block, so
+    re-reading the file per turn would let a mid-session edit silently
+    invalidate the whole cached prefix. Editing the file takes effect on the
+    next session, which is also what makes a session's prompt reproducible.
     """
 
     async def provider() -> list[str]:
@@ -610,7 +708,14 @@ def _make_system_blocks_provider(
             knowledge_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
         goal = goal_state.text if goal_state is not None else ""
-        return build_system_blocks(tools, knowledge_block, _env_details(cwd), date_str, goal=goal)
+        return build_system_blocks(
+            tools,
+            knowledge_block,
+            _env_details(cwd),
+            date_str,
+            goal=goal,
+            user_instructions=user_instructions,
+        )
 
     return provider
 
@@ -701,12 +806,24 @@ async def _prepare(
             value = getattr(agent, field_name, None)
             if value is not None:
                 chat_kwargs[field_name] = value
-    model_configuration = configure_model(
-        hosting=hosting,
-        model_name=model_name,
-        credential_manager=credential_manager,
-        env_config=get_env_config(),
-        **chat_kwargs,
+    # OFF THE EVENT LOOP. `configure_model` is synchronous, and for a model the
+    # shipped registry does not fully describe it fetches the provider's live
+    # listing over a BLOCKING httpx client (see
+    # `model.configure._info_from_discovery`). On the TUI's loop that is a
+    # frozen screen and a swallowed keystroke buffer for as long as the
+    # provider takes to answer — up to `discovery.DEFAULT_TIMEOUT_S`, 10 s, on
+    # a bad network. A thread costs nothing here: every caller is already
+    # awaiting this line, and the work is a network wait plus a memoised
+    # lookup.
+    model_configuration = await asyncio.to_thread(
+        functools.partial(
+            configure_model,
+            hosting=hosting,
+            model_name=model_name,
+            credential_manager=credential_manager,
+            env_config=get_env_config(),
+            **chat_kwargs,
+        )
     )
     spec = model_configuration.spec
 
@@ -733,16 +850,24 @@ async def _prepare(
 
     request_approval = _make_request_approval(yolo)
     effective_cwd = cwd if cwd is not None else os.getcwd()
+    # The variables surface behind list_variables/read_variable: config
+    # overrides ride above the project file and process environment, and
+    # values stay out of the system prompt (read on demand, not baked).
+    #
+    # Built once and handed to BOTH contexts. The factory context below is what
+    # `create_tools` inspects to decide which tools exist; the context a tool
+    # actually executes against is rebuilt by `Session._build_tool_context` on
+    # every turn, so a store installed only here reached the createIf check and
+    # nothing else — `list_variables` advertised itself and then read a bare
+    # process-env store, in every session.
+    variable_store = _build_variable_store(effective_cwd, config_manager)
     tool_context = ToolContext(
         cwd=effective_cwd,
         session_id=transcript_dir.name,
         agent_id=agent_id,
         has_ui=has_ui,
         request_approval=request_approval,
-        # The variables surface behind list_variables/read_variable: config
-        # overrides ride above the project file and process environment, and
-        # values stay out of the system prompt (read on demand, not baked).
-        variables=_build_variable_store(effective_cwd, config_manager),
+        variables=variable_store,
         web_search_settings=config_manager.get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
@@ -754,8 +879,24 @@ async def _prepare(
     # One holder shared by the prompt provider and the session facade, so a
     # ``/goal`` change lands in the next turn without a session rebuild.
     goal_state = GoalState()
+    # Read once, at session construction: see the provider's docstring for why
+    # this must not be re-read per turn. A profile's own prompt is layered on
+    # top of the global file rather than replacing it.
+    agent_prompt = ""
+    if agent is not None:
+        try:
+            agent_prompt = agent_registry.get_agent_system_prompt(str(agent.id))
+        except (KeyError, OSError):
+            agent_prompt = ""
+    user_instructions = load_user_instructions(agent_prompt)
+
     system_blocks_provider = _make_system_blocks_provider(
-        tools, transcript, hooks, cwd=effective_cwd, goal_state=goal_state
+        tools,
+        transcript,
+        hooks,
+        cwd=effective_cwd,
+        goal_state=goal_state,
+        user_instructions=user_instructions,
     )
 
     session_kwargs: dict[str, Any] = dict(
@@ -777,6 +918,7 @@ async def _prepare(
         skill_resolver=_make_knowledge_resolver(hooks),
         request_approval=request_approval,
         goal_state=goal_state,
+        variables=variable_store,
     )
     return _SessionPlan(
         session_kwargs=session_kwargs,

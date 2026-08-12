@@ -65,6 +65,7 @@ class Config:
             model_name (str): Name of the AI model to use
             rag_enabled (bool): Whether RAG is enabled
             auto_save_conversation (bool): Whether to automatically save the conversation
+            tool_approval_mode (str): Interactive tool-approval default, ask or auto
     """
 
     version: str
@@ -136,6 +137,19 @@ DEFAULT_CONFIG = Config(
             "hosting": "",
             "model_name": "",
             "auto_save_conversation": False,
+            # The tool-approval mode a NEW interactive session opens in, written
+            # by ``/approvals default <mode>`` and read by the TUI at mount.
+            # ``ask`` (prompt before write/exec tools) or ``auto`` (run them
+            # without asking). A STRING and not a bool because the command's
+            # vocabulary is a mode: a bool would have to be translated in both
+            # directions, and the translation is where "off" ends up meaning
+            # "prompting is off" in one place and "auto is off" in another.
+            #
+            # Read by the TUI only. The headless paths keep ``--yolo`` as their
+            # one control: a saved file must not be able to disarm the gate of a
+            # ``local-operator exec`` running in CI, where nobody is watching the
+            # tools it approves.
+            "tool_approval_mode": "ask",
             # One ordered cascade for every text-model call. Entries may be
             # "provider/model" strings or {provider, model, effort} mappings;
             # usage-aware switching is opt-in because it spends one lightweight
@@ -163,6 +177,26 @@ DEFAULT_CONFIG = Config(
         },
     }
 )
+
+
+def _fresh_default_config() -> Config:
+    """A private copy of the shipped defaults, safe to mutate.
+
+    :data:`DEFAULT_CONFIG` is a module-level object holding two mutable dicts,
+    and a manager that adopted it directly wrote THROUGH it: on a machine with
+    no config file yet, ``set_config_value`` mutated the process's idea of the
+    defaults, so every later ``ConfigManager`` in the same process started from
+    the last write instead of from the shipped values. It surfaced as
+    ``/approvals default auto`` in one session leaking into the next session
+    built in the same process — an app that had never read the file believing
+    the gate was disarmed.
+
+    Deep, not shallow: ``metadata`` and ``values`` are both dicts, and
+    ``Config.__init__`` aliases ``metadata`` straight through, so a shallow
+    copy would leave the timestamp shared.
+    """
+    return Config(deepcopy(vars(DEFAULT_CONFIG)))
+
 
 # Name of the YAML configuration file
 CONFIG_FILE_NAME = "config.yml"
@@ -210,9 +244,7 @@ class ConfigManager:
         """
         if not self.config_file.exists():
             self.config_dir.mkdir(parents=True, exist_ok=True)
-            # DEFAULT_CONFIG is process-global; every manager needs its own
-            # nested values so one setup command cannot change later sessions.
-            return Config(deepcopy(vars(DEFAULT_CONFIG)))
+            return _fresh_default_config()
 
         with open(self.config_file, "r", encoding="utf-8") as f:
             config_dict = yaml.safe_load(f) or deepcopy(vars(DEFAULT_CONFIG))
@@ -309,7 +341,10 @@ class ConfigManager:
 
     def reset_to_defaults(self) -> None:
         """Reset configuration to default values."""
-        self.config = DEFAULT_CONFIG
+        # A COPY, for the reason `_fresh_default_config` exists: adopting the
+        # module-level object made the next `set_config_value` a write into the
+        # process's defaults.
+        self.config = _fresh_default_config()
         self._write_config(vars(self.config))
 
     def get_config_value(self, key: str, default: Any = None) -> Any:

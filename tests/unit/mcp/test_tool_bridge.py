@@ -15,6 +15,7 @@ from mcp.types import (
     Tool,
 )
 
+from local_operator.harness.intent import INTENT_PROPERTY
 from local_operator.mcp.tool_bridge import (
     INTENT_FIELD,
     build_agent_tool,
@@ -285,7 +286,14 @@ class TestBuildAgentTool:
         assert tool.label == "linear/search"
         assert tool.description == "Search things"
         assert tool.parameters["type"] == "object"
-        assert tool.parameters["properties"] == {"q": {"type": "string"}}
+        # The harness injects `i` FIRST and leaves the server's own properties
+        # after it, untouched.
+        assert tool.parameters["properties"] == {
+            INTENT_FIELD: dict(INTENT_PROPERTY),
+            "q": {"type": "string"},
+        }
+        assert list(tool.parameters["properties"]) == [INTENT_FIELD, "q"]
+        assert INTENT_FIELD not in tool.parameters.get("required", [])
 
     def test_wraps_cached_dict(self) -> None:
         entry = {"name": "ping", "description": "", "inputSchema": None}
@@ -295,4 +303,8 @@ class TestBuildAgentTool:
 
         tool = build_agent_tool("srv", entry, call_fn)
         assert tool.name == "mcp__srv_ping"
-        assert tool.parameters == {"type": "object", "properties": {}, "required": []}
+        assert tool.parameters == {
+            "type": "object",
+            "properties": {INTENT_FIELD: dict(INTENT_PROPERTY)},
+            "required": [],
+        }

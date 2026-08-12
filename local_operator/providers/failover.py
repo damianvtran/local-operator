@@ -19,10 +19,12 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import logging
 import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from local_operator.harness.types import (
     AbortSignal,
@@ -31,6 +33,7 @@ from local_operator.harness.types import (
     RenderedStreamError,
     StreamEvent,
 )
+from local_operator.model.effort import EFFORT_ORDER, resolve_effort
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess
@@ -40,16 +43,191 @@ if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
 # Errors
 # ---------------------------------------------------------------------------
 
+#: The KINDS of provider failure. This is the one thing an error frame has to
+#: get across — what SORT of problem this is, and therefore what to do about
+#: it — and it is exactly what the reported frame `✕ HTTP 404:` did not say.
+#: Names, not codes: nobody reads a status and knows whether to wait, re-login,
+#: or fix their request.
+ProviderErrorKind = Literal[
+    "quota",  # rate limited or out of quota: wait, or use another credential
+    "auth",  # the bearer was rejected: re-login or rotate
+    "timeout",  # the request or the stream ran out of time: retry
+    "transient",  # 5xx, dropped connection, stalled stream: retry
+    "request",  # the provider read the request and refused it: fix the request
+    "aborted",  # the user stopped it
+    "unknown",
+]
+
+#: What each kind is CALLED in the frame the user reads. Lowercase to match the
+#: harness's notice voice ("turn failed", "interrupted", "usage panel
+#: unavailable") — a capitalised label in that column reads as a different app.
+_KIND_LABELS: dict[str, str] = {
+    "quota": "rate limit or quota exceeded",
+    "auth": "authentication failed",
+    "timeout": "provider timeout",
+    "transient": "transient provider error",
+    "request": "invalid request",
+    "aborted": "aborted",
+    "unknown": "provider error",
+}
+
+#: Substrings that mean "you have run out" UNAMBIGUOUSLY, wherever the provider
+#: chose to put them. Matched against the provider's own message because the
+#: status alone is not enough: anthropic answers an OAuth credential used
+#: off-Claude-Code with an opaque 429, and google/openrouter both report quota
+#: through a 403 or a bare body.
+_USAGE_LIMIT_MARKERS = (
+    "quota",
+    "rate limit",
+    "rate_limit",
+    "resource_exhausted",
+    "limit reached",
+)
+
+#: Words that USUALLY mean exhaustion and sometimes mean permission. They are
+#: separated from the set above because they are the ones that misfire: google's
+#: real 403 PERMISSION_DENIED text is "Request had insufficient authentication
+#: scopes.", which the combined set read as a quota exhaustion and rendered as
+#: `rate limit or quota exceeded (HTTP 403)` — sending the user to wait out a
+#: problem only a re-login or a scope change clears. So on a status that is
+#: ITSELF about the bearer (401/403), only the unambiguous set counts.
+_WEAK_USAGE_LIMIT_MARKERS = ("usage", "insufficient")
+
+_TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled")
+
+
+def _is_usage_limit(status: int | None, message: str) -> bool:
+    """429, or a body that SAYS it ran out.
+
+    Three bounds, each of which was a real misclassification:
+
+    - **Not above 500.** A 5xx is the server failing, so a 5xx body mentioning a
+      limit is still the server failing and still worth retrying. Without this an
+      empty-bodied 507 read as quota, because :func:`_describe_bare_status` fills
+      the message from the status phrase and "Insufficient Storage" contains
+      ``insufficient``. (Found by enumerating every ``HTTPStatus`` phrase against
+      these markers. 408/504 collide with the timeout markers too, harmlessly:
+      both are already timeouts by status.)
+    - **Unambiguous markers only on 401/403**, per
+      :data:`_WEAK_USAGE_LIMIT_MARKERS`.
+    - **402 is NOT here**, though it is a quota problem: this predicate also
+      drives ``AuthStore.rotate_sibling``, which PRESERVES the sticky credential
+      for a usage limit on the reasoning that the same account is first choice
+      again once the window passes. A spent balance does not come back in sixty
+      seconds, so 402 is named as quota in :func:`_classify_fields` and routed
+      past the pointless token refresh by
+      :func:`is_direct_credential_rotation_error`, without claiming that its
+      credential is worth staying on.
+    """
+    if status == 429:
+        return True
+    if status is not None and status >= 500:
+        return False
+    lowered = message.lower()
+    if any(marker in lowered for marker in _USAGE_LIMIT_MARKERS):
+        return True
+    if status in (401, 403):
+        return False
+    return any(marker in lowered for marker in _WEAK_USAGE_LIMIT_MARKERS)
+
+
+def _classify_fields(
+    status: int | None, message: str, *, retryable: bool, auth_error: bool
+) -> ProviderErrorKind:
+    """The kind, decided ONCE from the raw fields.
+
+    ``message`` MUST be the provider's own words, and empty when it sent none.
+    Never a message the harness synthesized: text this function wrote itself
+    coming back through the markers is how an empty-bodied 507 became a quota
+    exhaustion. :class:`ProviderError` classifies before it substitutes its
+    floor text, and :func:`wrap_transport_error` states its kind outright.
+
+    Order is the whole content of this function, so it is written down:
+
+    1. A 401 is always the bearer. Nothing else produces one, and a 401 body
+       mentioning "insufficient permissions" must not read as a quota problem.
+       :func:`_is_usage_limit` extends the same care to 403 for the same reason.
+    2. Quota next, ahead of 403: google and openrouter both report exhausted
+       quota with a 403, and telling that user "authentication failed" sends
+       them to re-login for a problem that a login cannot fix. This is why the
+       display order differs from :func:`is_auth_error`, which stays a pure
+       401/403 rotation predicate. 402 joins it here rather than inside
+       ``_is_usage_limit`` — see that function for the sticky-credential reason.
+    3. Timeout ahead of transient: both retry, but only one of them tells the
+       user the request was too slow rather than the provider being unwell.
+    4. Anything else in the 4xx range is a request the provider READ and
+       refused — retrying it unchanged burns quota for the same answer.
+    """
+    if status == 401:
+        return "auth"
+    if status == 402 or _is_usage_limit(status, message):
+        return "quota"
+    if auth_error or status == 403:
+        return "auth"
+    if status in (408, 504) or any(m in message.lower() for m in _TIMEOUT_MARKERS):
+        return "timeout"
+    if retryable or (status is not None and status >= 500):
+        return "transient"
+    if status is not None and 400 <= status < 500:
+        return "request"
+    return "unknown"
+
+
+def _describe_bare_status(status: int | None) -> str:
+    """A message for a provider that sent NONE.
+
+    An empty message is its own defect: it was half of the reported
+    ``✕ HTTP 404:`` frame, and no amount of downstream care can render text
+    that was never captured. Providers really do answer with an empty body —
+    a gateway rejecting an unknown model is the common one — so the floor is
+    set here, at construction, rather than trusted to every call site.
+    """
+    if status is None:
+        return "the provider failed without reporting a reason"
+    try:
+        phrase = HTTPStatus(status).phrase
+    except ValueError:  # a status no stdlib release has heard of
+        return f"the provider sent no error message with its HTTP {status}"
+    return f"{phrase} — the provider sent no error message"
+
+
+def _format_retry_delay(delay_ms: int) -> str:
+    """A wait as the phrase a waiting human wants: ``42s``, ``1m30s``.
+
+    Neither existing formatter fits: ``wake.format_duration`` renders only
+    EXACT units (a 41.6s ``Retry-After`` becomes ``41600ms``) and
+    ``tui.widgets.tool_card.format_duration`` is a widget-layer import that has
+    no business inside the provider driver. Rounded to the second because the
+    fact being communicated is "come back in about this long".
+    """
+    if delay_ms < 1000:
+        return f"{delay_ms}ms"
+    seconds = round(delay_ms / 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+    if minutes:
+        return f"{minutes}m{seconds}s" if seconds else f"{minutes}m"
+    return f"{seconds}s"
+
 
 class ProviderError(RenderedStreamError):
-    """A provider call failed. ``status`` is the HTTP status when known.
+    """A provider call failed, in a way the frame has to NAME.
 
-    ``retryable`` reflects whether the SAME credential may succeed again
-    (429/5xx/network); auth errors are retryable only via rotation.
+    ``status`` is the HTTP status when known. ``retryable`` reflects whether
+    the SAME credential may succeed again (429/5xx/timeout/network); auth
+    errors are retryable only via rotation.
 
     A provider's answer, not a defect: ``RenderedStreamError`` tells the loop
     that ``__str__`` below is the complete diagnosis, so it logs the line
-    without a stack.
+    without a stack. That makes ``__str__`` the whole of what the user is told,
+    which is why it leads with :attr:`kind` and why an empty ``message`` is
+    refused at construction rather than rendered as ``HTTP 404:``.
+
+    ``message`` stays the provider's OWN words (the classifiers read it, and it
+    usually says the useful thing — which limit, when it resets); the kind and
+    the wait are composed in only on the way out.
     """
 
     def __init__(
@@ -60,44 +238,173 @@ class ProviderError(RenderedStreamError):
         retryable: bool = False,
         retry_after_ms: int | None = None,
         auth_error: bool = False,
+        kind: ProviderErrorKind | None = None,
     ) -> None:
-        super().__init__(message)
+        provider_text = message.strip() if isinstance(message, str) else str(message)
+        #: Classified BEFORE the floor text is substituted, so the classifier only
+        #: ever reads the provider's own words. Feeding it a message the harness
+        #: wrote is how an empty-bodied 507 became a quota exhaustion —
+        #: "Insufficient Storage" is the status phrase, not a provider saying it
+        #: ran out. Empty text matches no marker, so a wordless failure is
+        #: classified from its status alone, which is all the evidence there is.
+        self.kind: ProviderErrorKind = kind or _classify_fields(
+            status, provider_text, retryable=retryable, auth_error=auth_error
+        )
+        text = provider_text or _describe_bare_status(status)
+        super().__init__(text)
         self.status = status
-        self.message = message
+        self.message = text
         self.retryable = retryable
         self.retry_after_ms = retry_after_ms
         self.auth_error = auth_error
 
     def __str__(self) -> str:
-        prefix = f"HTTP {self.status}: " if self.status is not None else ""
-        return f"{prefix}{self.message}"
+        """``<kind> (HTTP <status>, retry in <wait>): <the provider's words>``.
+
+        The kind comes first because it is the actionable part, and the wait
+        rides in the parenthetical rather than the tail so that "try again in
+        40s" survives a long provider message being wrapped or clipped.
+
+        Two cases render as the bare message, because a label would restate what
+        the text already says. An abort: the user pressed the key. And an error
+        with NO status and NO kind — which is only ever one the harness wrote
+        about itself ("No API key configured for provider 'openai'", "Failover
+        exhausted for …"); prefixing those with ``provider error:`` produced a
+        stutter and named a provider that was never called.
+        """
+        if self.kind == "aborted" or (self.kind == "unknown" and self.status is None):
+            return self.message
+        facts = []
+        if self.status is not None:
+            facts.append(f"HTTP {self.status}")
+        if self.retry_after_ms:
+            facts.append(f"retry in {_format_retry_delay(self.retry_after_ms)}")
+        label = _KIND_LABELS.get(self.kind, _KIND_LABELS["unknown"])
+        detail = f" ({', '.join(facts)})" if facts else ""
+        return f"{label}{detail}: {self.message}"
+
+
+#: Provider wordings that mean "an image block in this request is unusable".
+#: Matched on the provider's OWN message, because no status distinguishes it:
+#: it arrives as a plain 400 alongside every other malformed-request refusal.
+#:
+#: This is worth naming as its own condition because of how it FAILS. The image
+#: lives in the conversation history, so once one is rejected every subsequent
+#: request carries it again and gets the same 400 — including compaction, which
+#: has to send the history to summarise it. The session is then unrecoverable
+#: from inside: reload replays the same blocks, and /compact cannot run either.
+#: Anthropic have had this open for over a year across many reports
+#: (anthropics/claude-code#19031, #24387, #47391, #50708), where the same bytes
+#: are accepted for hours and then refused, so the client cannot prevent it by
+#: validating on the way in — it can only stop being poisoned by it.
+_IMAGE_REJECTION_MARKERS = (
+    "could not process image",
+    "image could not be processed",
+    "unable to process image",
+    "invalid image",
+    "does not match the provided media type",
+    "image exceeds",
+    "unsupported image",
+)
+
+
+def is_image_rejection(error: BaseException | str) -> bool:
+    """Did the provider refuse the request BECAUSE of an image block?
+
+    Accepts either the exception or its RENDERED form, because the two callers
+    hold different things: the client layer catches a :class:`ProviderError`,
+    while ``AgentEndEvent.error`` carries the already-rendered
+    ``"<kind> (HTTP <status>): <provider's words>"`` string that the UI shows.
+
+    Gated on the kind as well as the wording, either way round. A 5xx that
+    happens to mention an image is the provider failing, not a bad block, and
+    the degrade this drives is STICKY — so misreading weather as a poisoned
+    image would quietly strip every image from the rest of the session for no
+    reason. On the rendered form the gate is the kind's own label, so the two
+    paths agree by construction instead of by a duplicated status range.
+    """
+    if isinstance(error, ProviderError):
+        if error.status is not None and not 400 <= error.status < 500:
+            return False
+        haystack = error.message.lower()
+    else:
+        text = error if isinstance(error, str) else str(error)
+        haystack = text.lower()
+        if not haystack.startswith(_KIND_LABELS["request"]):
+            return False
+    return any(marker in haystack for marker in _IMAGE_REJECTION_MARKERS)
+
+
+def classify_provider_error(error: BaseException) -> ProviderErrorKind:
+    """The failure kind for anything the harness can catch.
+
+    A raw exception is read best-effort from its CLASS and, for the timeout
+    family, its text — which is enough for the stdlib timeout family and honest
+    about the rest: a bare ``ValueError`` is a defect, not weather, and must NOT
+    come back retryable.
+
+    Deliberately NOT through the usage markers. The text of a raw exception is
+    the harness's own words — a client's ``KeyError('usage')``, a parser's
+    ``ValueError('insufficient data in chunk')`` — and reading them as evidence
+    about the user's account is how the harness came to diagnose its own bugs as
+    ``rate limit or quota exceeded``. :func:`wrap_transport_error` states its
+    kind outright for exactly this reason; the same care belongs here, because
+    this is the entry point every caller holding an unwrapped exception uses.
+    A class name IS legitimate evidence of a timeout. Nothing in an exception's
+    text is evidence about anyone's quota.
+
+    A caller holding a TRANSPORT exception — ``httpx.TransportError`` and
+    friends — should pass it through :func:`wrap_transport_error` first. Only
+    the raiser knows that a dropped connection is weather; this function cannot
+    tell that from a parse failure, and guessing in either direction is worse
+    than being asked.
+    """
+    if isinstance(error, ProviderError):
+        return error.kind
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+        return "timeout"
+    haystack = f"{type(error).__name__}: {error}".lower()
+    if any(marker in haystack for marker in _TIMEOUT_MARKERS):
+        return "timeout"
+    return "unknown"
 
 
 def is_auth_error(error: BaseException) -> bool:
-    """401/403-class failures (bearer rejected or denied)."""
+    """401/403-class failures (bearer rejected or denied).
+
+    Deliberately NOT ``kind == "auth"``: this is the rotation predicate, and a
+    403 whose body says "quota exceeded" must still rotate to a sibling
+    credential even though the user is told it is a quota problem.
+    """
     if isinstance(error, ProviderError):
         return error.auth_error or error.status in (401, 403)
     return False
 
 
 def is_usage_limit_error(error: BaseException) -> bool:
-    """429 or provider-reported quota/rate exhaustion."""
+    """402/429 or provider-reported quota/rate exhaustion."""
     if not isinstance(error, ProviderError):
         return False
-    if error.status == 429:
-        return True
-    lowered = error.message.lower()
-    return any(
-        marker in lowered
-        for marker in (
-            "usage",
-            "quota",
-            "rate limit",
-            "rate_limit",
-            "limit reached",
-            "insufficient",
-        )
-    )
+    return _is_usage_limit(error.status, error.message)
+
+
+def is_timeout_error(error: BaseException) -> bool:
+    """The request or the stream ran out of time (408/504, or a timeout
+    exception the driver wrapped). Retryable: the next attempt may be served
+    by a healthy node."""
+    return classify_provider_error(error) == "timeout"
+
+
+def is_transient_error(error: BaseException) -> bool:
+    """Worth trying again UNCHANGED — 5xx, a dropped connection, a stalled
+    stream, a timeout.
+
+    Excludes quota (a wait, not a blip — retrying it immediately burns the
+    quota that is already gone), auth (no retry can mint a valid bearer) and
+    a refused request (the same bytes get the same answer). Those three are
+    the errors that must NOT be retried, and this is the one place that says so.
+    """
+    return classify_provider_error(error) in ("transient", "timeout")
 
 
 def is_invalidated_credential_error(error: BaseException) -> bool:
@@ -125,14 +432,49 @@ def is_invalidated_credential_error(error: BaseException) -> bool:
 
 def is_direct_credential_rotation_error(error: BaseException) -> bool:
     """Skip the refresh-same-account step for these: refreshing a
-    valid-but-denied token cannot help, so rotate through the pool."""
-    return is_usage_limit_error(error) or (isinstance(error, ProviderError) and error.status == 403)
+    valid-but-denied token cannot help, so rotate through the pool.
+
+    402 is listed explicitly rather than through :func:`is_usage_limit_error`,
+    which deliberately excludes it: a refreshed token still has no credits, so
+    the refresh step is as pointless here as for a 403 — but a spent balance is
+    not a window that reopens, so the credential must not keep its sticky place.
+    """
+    if not isinstance(error, ProviderError):
+        return False
+    return is_usage_limit_error(error) or error.status in (402, 403)
 
 
 def retry_after_ms_from_error(error: BaseException) -> int | None:
     if isinstance(error, ProviderError):
         return error.retry_after_ms
     return None
+
+
+#: How much a failure tells the USER, which is what decides who owns the
+#: reported-error slot when several attempts fail. The reported frame
+#: ``✕ HTTP 404:`` was a real 429 quota exhaustion on the requested model,
+#: overwritten by a bare 404 from a fallback selector the account cannot
+#: serve — last-wins reported the least informative failure of the set.
+_KIND_DIAGNOSTIC_RANK: dict[str, int] = {
+    "quota": 5,  # names the user's actual problem AND when it clears
+    "auth": 4,  # names a credential they have to fix
+    "request": 3,  # names something wrong with the request itself
+    "timeout": 2,
+    "transient": 2,
+    "unknown": 1,
+    "aborted": 0,  # they already know; never worth reporting over a real failure
+}
+
+
+def error_report_score(error: ProviderError, *, primary: bool) -> int:
+    """Rank a failure for the reported-error slot; higher wins.
+
+    The PRIMARY selector dominates every fallback: the user asked for that
+    model, so its failure is the news of the turn, and a fallback's failure is
+    a problem with the configured chain (logged, and reported only when the
+    primary never failed at all).
+    """
+    return (10 if primary else 0) + _KIND_DIAGNOSTIC_RANK.get(error.kind, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -248,8 +590,35 @@ async def resolve_next_key(
 # Tier 2 — model fallback chains
 # ---------------------------------------------------------------------------
 
+#: Config problems are reported to the LOG, never the terminal: this module runs
+#: under a full-screen TUI that owns stderr.
+logger = logging.getLogger("local_operator.providers.failover")
+
 DEFAULT_CHAIN_KEY = "default"
 SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+
+#: The same vocabulary as an ordinal ladder, for anything a person READS.
+#: ``sorted()`` puts ``max`` between ``low`` and ``medium`` and sits ``minimal``
+#: next to it - the two opposite ends of the scale, adjacent - which reads as
+#: noise to someone who already knows the ladder from ``/effort`` (design round
+#: 28).
+#:
+#: ``none`` is absent because :data:`SUPPORTED_EFFORTS` predates this and does
+#: not admit it. An earlier version of this comment justified that as "no
+#: reasoning is a property of the model, not a rung to fall back to", which the
+#: set itself refutes: ``minimal`` is admitted, and no shipped model has a
+#: ``minimal`` rung either, so that is the same kind of value being treated the
+#: opposite way. (:func:`resolve_effort` clamps it to ``none`` on the gpt-5
+#: family - the only tables carrying a ``none`` rung - and UP to ``low``
+#: everywhere else.) So the boundary is the set's, not a semantic line:
+#: recorded rather than rationalised, because the next person to move it should
+#: know there is no principle holding it in place.
+#:
+#: What it costs, which is the part worth knowing before moving it: on the
+#: Anthropic and o-series tables there is no way to say "retry with reasoning
+#: off" in a chain hop at all. ``none`` is refused here, and ``minimal`` is not
+#: a substitute because it clamps upward to ``low`` (design round 30).
+CHAIN_EFFORT_LADDER = tuple(e for e in EFFORT_ORDER if e in SUPPORTED_EFFORTS)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -384,6 +753,110 @@ def _same_credential_retry_allowed(
     return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_USAGE_RETRIES)
 
 
+def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
+    """One fallback-chain entry, checked and returned in its own shape.
+
+    The declared shape is a list of ``provider/model`` selector strings, and
+    until this existed that shape was assumed rather than checked: a config
+    written with structured entries parsed cleanly, resolved cleanly, and then
+    died in the expansion with ``'dict' object has no attribute 'endswith'``.
+    Not at startup, where a config error belongs: on EVERY turn, because that
+    is the first moment a fallback chain is walked.
+
+    So a mapping is accepted rather than rejected. Two forms are honoured:
+
+    - ``{provider, model}`` becomes the selector string, which is all it ever
+      meant;
+    - a mapping that ALSO carries ``effort`` - the "retry cheaper on failure"
+      form - is a real routing decision the chain's (selector, effort) shape
+      now supports, so the effort is carried on a cleaned mapping. Flattening
+      it to a selector would silently discard the one key that makes the entry
+      mean something different.
+
+    The effort's VALUE is checked here too, even though :func:`_fallback_target`
+    is what ultimately rejects it. That function returns ``None`` for an
+    unreadable target and cannot say why, so a single typo used to delete a
+    whole fallback hop in silence: the operator configured failover, got none
+    during an outage, and nothing connected it to the YAML (review round 29).
+    It belongs here rather than at the point of rejection because this is the
+    only layer that still holds the user's own text - the key it was written
+    under and the value they typed - so the message can name the config rather
+    than an internal target. It is NOT emitted once: ``from_settings`` is not
+    memoized and re-normalizes per model call (review round 30), so a standing
+    typo repeats in the log exactly as the sibling unsupported-key warning
+    beside it always has.
+
+    ``None`` means "not something this can turn into an entry"; the caller
+    warns and drops it rather than letting it reach the wire.
+    """
+    if isinstance(entry, str):
+        return entry.strip() or None
+    if isinstance(entry, Mapping):
+        provider = str(entry.get("provider", "") or "").strip()
+        model = str(entry.get("model", entry.get("model_id", "")) or "").strip()
+        if provider and model:
+            # ``effort`` is honoured, so it is NOT an unsupported key - listing
+            # it here is what let the old warning claim, in one sentence, both
+            # that it was being ignored and that it was supported (R29-2).
+            extra = sorted(set(entry) - {"provider", "model", "model_id", "effort"})
+            if extra:
+                # Named rather than swallowed: a chain entry that silently
+                # drops half of what the user wrote is the next bug report.
+                logger.warning(
+                    "retry.fallbackChains[%s]: ignoring unsupported key(s) %s on entry %s/%s"
+                    " - only provider, model and effort are honoured",
+                    chain_key,
+                    ", ".join(extra),
+                    provider,
+                    model,
+                )
+            raw_effort = entry.get("effort")
+            if raw_effort is None:
+                return f"{provider}/{model}"
+            if str(raw_effort).strip().lower() not in SUPPORTED_EFFORTS:
+                logger.warning(
+                    "retry.fallbackChains[%s]: dropping entry %s/%s - %r is not accepted in"
+                    " a fallback chain hop; expected one of %s",
+                    chain_key,
+                    provider,
+                    model,
+                    raw_effort,
+                    ", ".join(CHAIN_EFFORT_LADDER),
+                )
+            return {"provider": provider, "model": model, "effort": raw_effort}
+    return None
+
+
+def _normalize_chains(chains: Mapping[str, Any]) -> dict[str, list[Any]]:
+    """Coerce the configured chains to ``{key: [entry, ...]}``, selector strings
+    where that is what was written and structured entries where an ``effort``
+    made the mapping load-bearing.
+
+    Follows the convention the session factory uses for its compaction block:
+    a malformed value degrades with a warning and never blocks. A bad chain is
+    a preference about what to do when a model fails — losing it must not be
+    more disruptive than the failure it was written to handle.
+    """
+    normalized: dict[str, list[str]] = {}
+    for key, raw in chains.items():
+        if not isinstance(key, str):
+            logger.warning("retry.fallbackChains: ignoring non-string key %r", key)
+            continue
+        if isinstance(raw, str) or not isinstance(raw, Sequence):
+            logger.warning("retry.fallbackChains[%s]: expected a list, got %s", key, type(raw))
+            continue
+        entries = []
+        for entry in raw:
+            kept = _normalize_chain_entry(entry, key)
+            if kept is None:
+                logger.warning("retry.fallbackChains[%s]: ignoring unreadable entry %r", key, entry)
+                continue
+            entries.append(kept)
+        if entries:
+            normalized[key] = entries
+    return normalized
+
+
 @dataclasses.dataclass(frozen=True)
 class RetrySettings:
     """The ``values.retry.*`` config surface."""
@@ -418,7 +891,9 @@ class RetrySettings:
                 retry.get("usageAwareFallback", retry.get("usage_aware_fallback", False))
             ),
             usage_reserve_percent=reserve_percent,
-            fallback_chains=chains,
+            # Normalized HERE, at the one place config crosses into the module,
+            # so every consumer downstream can rely on the declared type.
+            fallback_chains=_normalize_chains(chains),
         )
 
 
@@ -492,15 +967,37 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
     a cross-provider fallback could therefore send an OpenAI model to the
     Anthropic endpoint. Model metadata and transport identity belong to the
     target, while temperature/top-p remain session preferences.
+
+    Reasoning effort is the exception in BOTH directions, and has to be. Its
+    valid values are a property of the MODEL, so carrying the primary's level
+    across a swap sends ``xhigh`` to a model whose ladder stops at ``high`` -
+    a 400 on the request that was supposed to rescue the turn. But dropping it
+    is not right either: a cascade entry that names no effort should not cost
+    the user the level they asked for wherever the fallback accepts it. So an
+    explicit ``target.effort`` wins, and otherwise :func:`resolve_effort` keeps
+    the chosen level when the fallback accepts it and falls back to that
+    model's own default when it does not.
+
+    ``supports_sampling_params`` needs no such care here, unlike in the
+    clone-based version this replaced: it comes from the target's own
+    ``build_model_spec`` rather than from the primary.
     """
     from local_operator.model.configure import build_model_spec
 
-    target_spec = build_model_spec(*parse_selector(target.selector))
+    provider, model_id = parse_selector(target.selector)
+    target_spec = build_model_spec(provider, model_id)
     return target_spec.model_copy(
         update={
             "temperature": base.temperature,
             "top_p": base.top_p,
-            "reasoning_effort": target.effort,
+            "reasoning_effort": (
+                target.effort
+                if target.effort is not None
+                # Clamped to the nearest rung rather than dropped or defaulted: see
+                # `resolve_effort` for why "the model's default" silently inverts
+                # a `none`, and why clamping preserves the direction of the ask.
+                else resolve_effort(model_id, base.reasoning_effort or target_spec.reasoning_effort)
+            ),
         }
     )
 
@@ -577,7 +1074,38 @@ async def _abortable_sleep(delay_ms: int, signal: AbortSignal | None) -> None:
         sleeper.cancel()
         abort_waiter.cancel()
     if abort_waiter in done:
-        raise ProviderError(None, signal.reason or "aborted", retryable=False)
+        raise ProviderError(None, signal.reason or "aborted", retryable=False, kind="aborted")
+
+
+def wrap_transport_error(exc: BaseException) -> ProviderError:
+    """A non-``ProviderError`` failure as one, without losing what it was.
+
+    The exception CLASS is kept in the message because for this family it is
+    most of the diagnosis and often all of it: ``httpx.ConnectTimeout()`` and
+    ``httpx.RemoteProtocolError()`` are routinely raised with no arguments at
+    all, and ``ProviderError(None, str(exc))`` turned those into an error that
+    printed nothing.
+
+    The kind is stated OUTRIGHT rather than left to the text classifier, because
+    the text here is the harness's own and running it through the quota markers
+    made the harness misdiagnose its own bugs: a ``KeyError('usage')`` from a
+    client parsing a usage block rendered as ``rate limit or quota exceeded``,
+    and ``ValueError('insufficient data in chunk')`` did the same. The class name
+    IS legitimate evidence of a timeout; nothing in an exception's text is
+    evidence about the user's quota.
+    """
+    detail = str(exc).strip()
+    name = type(exc).__name__
+    haystack = f"{name} {detail}".lower()
+    timed_out = isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or any(
+        marker in haystack for marker in _TIMEOUT_MARKERS
+    )
+    return ProviderError(
+        None,
+        f"{name}: {detail}" if detail else name,
+        retryable=True,
+        kind="timeout" if timed_out else "transient",
+    )
 
 
 async def stream_with_failover(
@@ -602,10 +1130,15 @@ async def stream_with_failover(
     SAME credential before any rotation (PR-06); the budget resets when the
     credential changes.
 
-    Events are forwarded as they arrive — once anything has been yielded, a
-    mid-stream failure is re-raised (partial output cannot be replayed).
-    Raises :class:`ProviderError` with the last failure when every option is
-    spent.
+    Events are forwarded as they arrive, so once anything has been yielded a
+    mid-stream failure is re-raised: partial output cannot be un-shown. A
+    ``request.replayable`` call opts out of that by BUFFERING instead of
+    forwarding, which is what extends retry coverage to the one-shot errands
+    (compaction summary, auto-naming) whose streams used to die permanently on
+    a single stalled read — see the field's own docstring.
+
+    Raises :class:`ProviderError` with the most diagnostic failure seen — see
+    :func:`error_report_score` — when every option is spent.
     """
     retry = RetrySettings.from_settings(settings)
     primary_selector = _selector_for_request(request)
@@ -621,15 +1154,42 @@ async def stream_with_failover(
     if route_state is not None and route_state.active in targets:
         targets = targets[targets.index(route_state.active) :]
 
-    last_error: ProviderError | None = None
+    reported: ProviderError | None = None
+    reported_score = -1
     clients: dict[tuple[str, str | None], "WireClient"] = {}
     rng = random.Random()
+
+    def record(error: ProviderError, *, primary: bool) -> None:
+        """Offer ``error`` the reported-error slot, keeping the best so far.
+
+        ``>=`` so that at equal rank the LATEST attempt wins, which is the
+        long-standing behaviour within one selector.
+
+        EVERY error that does not win the slot is logged, not just a fallback's.
+        Only one failure can reach the frame, and picking the most diagnostic one
+        means the others now go somewhere the user cannot see — so they have to
+        go somewhere the reader of a log file can. A 429 on the first key
+        followed by "api key is invalid or revoked" on the sibling reports the
+        429 correctly and would otherwise mention the revoked credential
+        nowhere at all.
+        """
+        nonlocal reported, reported_score
+        score = error_report_score(error, primary=primary)
+        if score >= reported_score:
+            if reported is not None:
+                logger.warning("superseded by a more diagnostic failure: %s", reported)
+            reported, reported_score = error, score
+        else:
+            logger.warning(
+                "%s failed: %s", "requested model" if primary else "fallback selector", error
+            )
 
     for target in targets:
         selector = target.selector
         if signal is not None and signal.aborted:
-            raise ProviderError(None, signal.reason or "aborted", retryable=False)
+            raise ProviderError(None, signal.reason or "aborted", retryable=False, kind="aborted")
 
+        is_primary = selector == primary_selector
         provider, _model_id = parse_selector(selector)
         spec = request.model if target == primary_target else spec_for_target(request.model, target)
         route_key = (selector, target.effort)
@@ -642,7 +1202,7 @@ async def stream_with_failover(
             request if target == primary_target else request.model_copy(update={"model": spec})
         )
         if route_state is not None and target != primary_target:
-            cooldown_ms = max(60_000, last_error.retry_after_ms or 0) if last_error else 60_000
+            cooldown_ms = max(60_000, reported.retry_after_ms or 0) if reported else 60_000
             await route_state.activate(
                 target,
                 "provider failure",
@@ -657,7 +1217,9 @@ async def stream_with_failover(
 
         while state.attempts <= AUTH_RETRY_MAX_ATTEMPTS:
             if signal is not None and signal.aborted:
-                raise ProviderError(None, signal.reason or "aborted", retryable=False)
+                raise ProviderError(
+                    None, signal.reason or "aborted", retryable=False, kind="aborted"
+                )
             if not retry_same_key:
                 access = await _resolve_access_for_provider(
                     auth, provider, session_id, state, error
@@ -669,8 +1231,13 @@ async def stream_with_failover(
                 if access is None and error is not None:
                     break  # rotation exhausted for this provider
                 if access is None and not _provider_allows_missing(provider):
-                    last_error = last_error or ProviderError(
-                        None, f"No API key configured for provider '{provider}'", retryable=False
+                    record(
+                        ProviderError(
+                            None,
+                            f"No API key configured for provider '{provider}'",
+                            retryable=False,
+                        ),
+                        primary=is_primary,
                     )
                     break
                 error = None
@@ -678,19 +1245,27 @@ async def stream_with_failover(
             key = access.access_token if access is not None else None
 
             forwarded_any = False
+            # A replayable call holds its events back so a failed attempt can be
+            # discarded whole. Bounded by the errand's own output (a summary, a
+            # title), which the caller was going to hold in full regardless.
+            buffered: list[StreamEvent] | None = [] if current_request.replayable else None
             try:
                 async for event in client.stream(current_request, key, oauth_access=access):
+                    if buffered is not None:
+                        buffered.append(event)
+                        continue
                     forwarded_any = True
                     yield event
                 if route_state is not None and target == primary_target:
                     route_state.clear()
-                return  # clean completion
+                if buffered is None:
+                    return  # clean completion; a buffered stream flushes below
             except asyncio.CancelledError:
                 raise
             except ProviderError as exc:
                 if forwarded_any:
                     raise  # partial output already reached the caller
-                last_error = exc
+                record(exc, primary=is_primary)
                 if not retry.enabled:
                     raise
                 if _same_credential_retry_allowed(exc, transport_retries, retry):
@@ -712,10 +1287,16 @@ async def stream_with_failover(
                     continue
                 break  # non-retryable for this provider
             except Exception as exc:  # network errors et al.
+                wrapped = wrap_transport_error(exc)
                 if forwarded_any:
-                    raise
-                wrapped = ProviderError(None, str(exc), retryable=True)
-                last_error = wrapped
+                    # Partial output already reached the caller, so this attempt
+                    # cannot be retried — but the failure still has to arrive
+                    # NAMED. Re-raised raw it was not a ``RenderedStreamError``,
+                    # so the loop printed ``str(httpx.ConnectTimeout())`` (which
+                    # is the empty string) into the frame AND a full traceback
+                    # into the log.
+                    raise wrapped from exc
+                record(wrapped, primary=is_primary)
                 if not retry.enabled:
                     raise wrapped from exc
                 if transport_retries < retry.max_retries:
@@ -727,11 +1308,18 @@ async def stream_with_failover(
                     continue
                 error = wrapped
                 continue
+            else:
+                # Clean completion. The buffer is flushed OUTSIDE the try so a
+                # consumer raising back into this generator is not mistaken for
+                # a provider failure and retried.
+                for event in buffered or ():
+                    yield event
+                return
 
         # Provider exhausted — walk on to the next fallback selector.
 
-    if last_error is not None:
-        raise last_error
+    if reported is not None:
+        raise reported
     raise ProviderError(None, f"Failover exhausted for '{primary_selector}'", retryable=False)
 
 

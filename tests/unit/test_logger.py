@@ -34,31 +34,6 @@ from local_operator.logger import (
 from local_operator.paths import CONFIG_DIR_ENV
 
 
-@pytest.fixture(autouse=True)
-def restore_root_logger():
-    """Give every test the root logger back exactly as it found it.
-
-    The module under test mutates process-global state (root handlers,
-    ``logging.lastResort``, ``logging.Logger.addHandler``). Leaking any of that
-    into a sibling test would show up as an unrelated failure somewhere else in
-    the session, which is the hardest kind of test bug to trace.
-    """
-    root = logging.getLogger()
-    saved_handlers = list(root.handlers)
-    saved_level = root.level
-    saved_last_resort = logging.lastResort
-    saved_raise = logging.raiseExceptions
-    saved_add_handler = logging.Logger.addHandler
-    try:
-        yield
-    finally:
-        logging.Logger.addHandler = saved_add_handler  # type: ignore
-        logging.lastResort = saved_last_resort
-        logging.raiseExceptions = saved_raise
-        root.handlers[:] = saved_handlers
-        root.setLevel(saved_level)
-
-
 @pytest.fixture
 def log_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Point the log directory at a tmp dir and return the expected file path."""

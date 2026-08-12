@@ -41,12 +41,14 @@ from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import OperatorType
 
-# The server is its own entry point: uvicorn imports this module by name, so
-# there is no `main()` above it to configure logging. Importing
-# `local_operator.logger` used to do it as a side effect; now it is stated
-# here, with the same level (LOG_LEVEL, default WARNING) and format the module
-# import installed.
-configure_console_logging()
+# NO logging configuration at import. `configure_console_logging` REPLACES the
+# root logger's handlers, so calling it here made merely importing this module
+# — which `generate_openapi`, the test suite's collection phase and any
+# tooling that wants `app.openapi()` all do — reconfigure logging for the whole
+# process. That is the same import side effect `helpers.py` was stripped of,
+# and it leaked a stderr handler across the test session. The server's entry
+# point is `lifespan`, which uvicorn runs on startup and nothing else runs at
+# all, so the call lives there.
 
 logger = get_logger("local_operator.server")
 
@@ -61,6 +63,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Args:
         app: The FastAPI application instance
     """
+    # Console logging for the server process, at the same level (LOG_LEVEL,
+    # default WARNING) and format the old import-time call used. uvicorn has
+    # already configured its own named loggers by the time startup runs, and
+    # this only touches the root logger, so the two do not fight.
+    configure_console_logging()
+
     # Initialize on startup by setting up the credential and config managers
     config_dir = Path.home() / ".local-operator"
     agent_home_dir = Path.home() / "local-operator-home"

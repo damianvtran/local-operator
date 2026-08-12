@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, TypeVar
 
+from local_operator.ansi import strip_control_sequences
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -271,9 +272,187 @@ def stdio_start_new_session() -> bool:
     return sys.platform not in ("win32", "darwin")
 
 
+# ---------------------------------------------------------------------------
+# Child output containment
+# ---------------------------------------------------------------------------
+
+#: Environment that asks a stdio child not to decorate its output.
+#:
+#: This is the BRACES, not the belt, and the measurement says so plainly.
+#: MEASURED 2026-08-11 against ``workspace-mcp`` 1.23.1 — the server the defect
+#: was reported on — with its stderr on a real PTY:
+#:
+#: ===============================  ==========  =======
+#: child stderr                     bytes       artwork
+#: ===============================  ==========  =======
+#: PTY, ``TERM=xterm-256color``     3289        yes
+#: PTY, all of ``CHILD_QUIET_ENV``  2391        yes
+#: PIPE                            **303**      **no**
+#: ===============================  ==========  =======
+#:
+#: So these variables do NOT stop this server drawing its logo: it decides on
+#: ``isatty()``, and only redirecting the stream (see ``_stdio_transport``)
+#: actually silences it. What they buy is the ~900 bytes of colour escapes
+#: between rows one and two, which would otherwise be written into the log
+#: file and corrupt ``less``/``tail`` there instead of on the frame.
+#:
+#: Kept for that, and because the next third-party server will differ — one
+#: that renders unconditionally is exactly the case the stream redirect
+#: handles and the environment does not, and vice versa.
+#:
+#: EVERY ENTRY HERE TURNS COLOUR OFF BY ITS OWN CONVENTION, and that is a
+#: harder rule than it looks. ``FORCE_COLOR`` and ``CLICOLOR_FORCE`` were in
+#: this dict set to ``"0"``, which reads like an opt-out and is not one:
+#: force-color.org senses PRESENCE, so Rich takes ``FORCE_COLOR=0`` as "yes, I
+#: am a terminal" (``rich/console.py``: ``if force_color is not None: return
+#: force_color != ""``). MEASURED on a pipe — where the child had already
+#: given up on colour — adding ``FORCE_COLOR=0`` to the rest of this dict
+#: turned ``b'LOGO\n'`` back into ``b'\x1b[1mLOGO\x1b[0m\n'`` for a server
+#: whose config restores ``TERM``; ``test_the_quiet_env_actually_silences_rich``
+#: keeps that measurement running. ``CLICOLOR_FORCE=0`` is inert in Rich by the
+#: same measurement and by bixense's spec (force only when non-zero), but it is
+#: presence-sensed elsewhere and buys nothing here, so it goes with it.
+#: Both are gone, and leaving them UNSET is the whole of the fix: this dict is
+#: not merged into the operator's own environment but into
+#: ``get_default_environment()``, which copies an allowlist
+#: (``DEFAULT_INHERITED_ENV_VARS``: ``HOME``, ``LOGNAME``, ``PATH``, ``SHELL``,
+#: ``TERM``, ``USER``) and nothing else, so a ``FORCE_COLOR`` in the shell that
+#: launched us cannot reach a server either. What is left here is only opt-OUT
+#: switches: ``NO_COLOR`` (https://no-color.org, presence disables),
+#: ``TERM=dumb``, ``CLICOLOR=0`` (bixense.com/clicolors), and ``PY_COLORS=0``.
+#: Before adding another, check that its documented sense is "off" and not
+#: "force" — and that its off value is a VALUE and not an absence.
+#:
+#: A server that wants any of them back sets it in its config ``env``, which is
+#: merged last and wins.
+CHILD_QUIET_ENV: dict[str, str] = {
+    "NO_COLOR": "1",
+    "TERM": "dumb",
+    "CLICOLOR": "0",
+    "PY_COLORS": "0",
+}
+
+#: How long teardown waits for the stderr pump after the child has exited. The
+#: pipe is normally at EOF already and this returns instantly; the bound only
+#: bites when a surviving descendant still holds the write end, and there is
+#: nothing more of the SERVER's own output to wait for in that case. Short
+#: because ``disconnect_all`` tears connections down one at a time, so this is
+#: paid per server on quit.
+STDERR_DRAIN_GRACE_S = 0.25
+
+#: Stderr lines retained per stdio server for the failure report. A Python
+#: traceback plus the banner that preceded it fits inside this; a chatty server
+#: cannot pin more than this many lines of memory per connection.
+STDERR_TAIL_LINES = 50
+
+#: Longest stderr line kept whole. A server that writes without ever emitting a
+#: newline must not turn into an unbounded log record.
+STDERR_LINE_LIMIT = 2_000
+
+#: How many trailing stderr lines are quoted into a failed connect's error
+#: text, and how many characters of them. That message is rendered whole by the
+#: transcript notice and by ``/mcp`` — only the toast truncates — so a server
+#: whose last words are a 2000-character line must not become a wall of text
+#: where a reason belongs. The full tail is in the log.
+STDERR_QUOTED_LINES = 2
+STDERR_QUOTED_CHARS = 200
+
+
+class McpServerStderr:
+    """One stdio child's stderr: into the session log, never onto the terminal.
+
+    A stdio MCP server speaks protocol on stdout, so the SDK captures that. Its
+    stderr used to be inherited (``stderr=None`` on the spawn), which put every
+    byte the child logged straight onto the file descriptor Textual is painting
+    — reproduced as 2508 bytes of Rich artwork tearing the boot splash in half.
+
+    Discarding it is not an option either: a missing credential, a bad config
+    or a crash on startup is reported on exactly this stream, and it is the
+    only answer a user has to "why did my server not start". So it follows the
+    convention the rest of the app already uses for output that cannot go on
+    screen (``local_operator.logger.file_logging``): every line becomes a log
+    record, under a per-server logger name so ``grep`` finds one server's
+    output, and the tail is retained so a failure can be reported WITH its
+    cause instead of as a bare transport error.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        # Per-server child logger: a record's own name says which server wrote
+        # it, and `logging` levels can then silence one noisy server without
+        # silencing the manager's own diagnostics.
+        self._log = logging.getLogger(f"local_operator.mcp.server.{name}")
+        self._tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+        self._reported = False
+
+    def feed(self, line: str) -> None:
+        """Record one line of the child's stderr."""
+        # Stripped: the child may ignore CHILD_QUIET_ENV, and a raw CSI in the
+        # log file corrupts `less`/`tail` the same way it corrupted the frame.
+        text = strip_control_sequences(line).rstrip()
+        if not text:
+            return
+        if len(text) > STDERR_LINE_LIMIT:
+            text = text[:STDERR_LINE_LIMIT] + " …[truncated]"
+        self._tail.append(text)
+        # INFO, not WARNING: an ordinary server's startup chatter is not a
+        # problem, and the TUI's log file is opened at INFO
+        # (`configure_cli_logging`), so this is visible without being alarming.
+        # The failure path re-reports the tail at ERROR below.
+        self._log.info("%s", text)
+
+    @property
+    def captured(self) -> bool:
+        """Whether the child said anything at all on stderr."""
+        return bool(self._tail)
+
+    def tail_text(self) -> str:
+        """The retained tail as one block of text."""
+        return "\n".join(self._tail)
+
+    def quoted_tail(self, lines: int = STDERR_QUOTED_LINES) -> str:
+        """The last few lines, joined and bounded, for a one-line error message."""
+        text = " / ".join(list(self._tail)[-lines:])
+        if len(text) <= STDERR_QUOTED_CHARS:
+            return text
+        return text[:STDERR_QUOTED_CHARS].rstrip() + "…"
+
+    def report_failure(self, reason: str) -> None:
+        """Log the retained tail at ERROR, once, when the server failed.
+
+        Once: the connect path and the transport teardown both notice the same
+        dead child, and one failure deserves one report.
+        """
+        if self._reported or not self._tail:
+            return
+        self._reported = True
+        self._log.error(
+            "MCP server %r %s; its last %d stderr line(s) follow:\n%s",
+            self.name,
+            reason,
+            len(self._tail),
+            self.tail_text(),
+        )
+
+    def explain(self, exc: Exception) -> Exception:
+        """``exc``, restated with the child's own last words when it has any.
+
+        A stdio server that dies during the handshake surfaces as a transport
+        error whose text ("") says nothing at all, while the reason it died is
+        sitting in the tail. This is what puts that reason in
+        ``McpStartupOutcome.failures`` and therefore in the TUI's notice.
+        """
+        if not self._tail:
+            return exc
+        detail = str(exc).strip() or type(exc).__name__
+        return McpConnectionError(f"{detail}: {self.quoted_tail()}")
+
+
 @asynccontextmanager
 async def _stdio_transport(
-    cfg: MCPStdioServerConfig, on_close: Callable[[], None]
+    cfg: MCPStdioServerConfig,
+    on_close: Callable[[], None],
+    stderr_log: McpServerStderr,
 ) -> AsyncIterator[TransportStreams]:
     """Spawn an MCP stdio server and pump newline-delimited JSON-RPC.
 
@@ -282,6 +461,8 @@ async def _stdio_transport(
     the platform spawn rules the SDK hardcodes differently (see
     :func:`stdio_start_new_session`). ``on_close`` fires once when the
     connection can no longer carry traffic (process exit or pump failure).
+    ``stderr_log`` receives everything the child writes to stderr; see
+    :class:`McpServerStderr` for why it may not reach the terminal.
     """
     import anyio
     import mcp.types as mcp_types
@@ -289,10 +470,15 @@ async def _stdio_transport(
     from mcp.shared.message import SessionMessage
 
     argv = build_stdio_argv(cfg.command, list(cfg.args))
-    env = get_default_environment() | dict(cfg.env or {})
+    env = get_default_environment() | CHILD_QUIET_ENV | dict(cfg.env or {})
     cwd = cfg.cwd or None
 
-    kwargs: dict[str, Any] = {"env": env, "stderr": None, "cwd": cwd}
+    # stderr on a PIPE, never inherited. `stderr=None` handed the child the
+    # parent's own fd 2, so a server's startup banner landed on top of the
+    # Textual frame (the reported defect). The pump below drains it into the
+    # session log; leaving the pipe unread would eventually block the child on
+    # a full 64 KiB buffer, which is why the pump is not optional.
+    kwargs: dict[str, Any] = {"env": env, "stderr": subprocess.PIPE, "cwd": cwd}
     target: str | list[str]
     if sys.platform == "win32":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -361,6 +547,42 @@ async def _stdio_transport(
         finally:
             _fire_close()
 
+    stderr_drained = anyio.Event()
+
+    async def _stderr_pump() -> None:
+        """Drain the child's stderr into ``stderr_log``, line by line.
+
+        Deliberately does NOT fire ``on_close``: stderr reaching EOF says
+        nothing about whether the protocol channel still carries traffic, and a
+        server that closes stderr early would otherwise be treated as dead.
+        """
+        from anyio.streams.text import TextReceiveStream
+
+        stderr = process.stderr
+        if stderr is None:  # pragma: no cover - PIPE always yields one
+            stderr_drained.set()
+            return
+        text_stream = TextReceiveStream(stderr, encoding="utf-8", errors="replace")
+        try:
+            buffer = ""
+            async for chunk in text_stream:
+                lines = (buffer + chunk).split("\n")
+                buffer = lines.pop()
+                # A single unterminated line must not grow without bound: a
+                # server printing a progress bar with \r and no \n would
+                # otherwise accumulate in this buffer for the whole session.
+                if len(buffer) > STDERR_LINE_LIMIT:
+                    lines.append(buffer)
+                    buffer = ""
+                for line in lines:
+                    stderr_log.feed(line)
+            if buffer:
+                stderr_log.feed(buffer)
+        except Exception:
+            logger.debug("stdio stderr pump ended for %r", cfg.command, exc_info=True)
+        finally:
+            stderr_drained.set()
+
     async def _stop() -> None:
         """Close stdin, give the server a grace window, then kill the tree."""
         stdin = process.stdin
@@ -388,11 +610,46 @@ async def _stdio_transport(
         async with anyio.create_task_group() as tg:
             tg.start_soon(_stdout_pump)
             tg.start_soon(_stdin_pump)
+            tg.start_soon(_stderr_pump)
             try:
                 yield read_stream, write_stream
             finally:
+                # Sampled BEFORE `_stop` closes stdin, because closing stdin is
+                # how we ASK the server to leave: an exit status observed after
+                # that is a response to the request, not a fault. Reading it
+                # afterwards manufactured a failure on every clean quit — a
+                # server that treats stdin EOF as an error exits non-zero on
+                # being asked politely, and on Windows `Popen.terminate` is
+                # `TerminateProcess(handle, 1)` so EVERY kill reports status 1
+                # (found in review, reproduced).
+                #
+                # Non-zero rather than positive: a status we did not cause is
+                # worth reporting whichever sign it has. A child SIGKILLed by
+                # the OOM killer arrives as -9 and is exactly the death whose
+                # last stderr lines someone will come looking for.
+                died_unbidden = process.returncode
                 with suppress(Exception):
                     await _stop()
+                # Let the stderr pump finish before the cancel below kills it.
+                # Without this wait a server that died DURING the handshake
+                # loses the last lines of its own stderr — exactly the ones
+                # saying why — because `_stop` returns up to one 0.1 s poll
+                # before the pump has drained them, and `_connect_server`
+                # quotes that tail into the error the user is shown.
+                #
+                # Bounded because EOF is not guaranteed: the write end is held
+                # by every process that inherited it, so a server that spawned
+                # a grandchild (`uvx` doing the real work in a subprocess, for
+                # one) keeps the pipe open past its own death, and MEASURED in
+                # review that teardown then runs to the full bound (0.101 s
+                # plain child vs 0.602 s with a surviving grandchild). Kept
+                # short for that reason: by this point the direct child has
+                # exited, so anything still holding the pipe is a descendant
+                # whose output was never the server's own.
+                with anyio.move_on_after(STDERR_DRAIN_GRACE_S):
+                    await stderr_drained.wait()
+                if died_unbidden is not None and died_unbidden != 0:
+                    stderr_log.report_failure(f"exited with status {died_unbidden}")
                 tg.cancel_scope.cancel()
     finally:
         _fire_close()
@@ -876,15 +1133,25 @@ class McpManager:
         """
         timeout_s = resolve_mcp_timeout_s(cfg)
         stack = AsyncExitStack()
+        # One collector per connect ATTEMPT, so a retry never quotes the
+        # previous attempt's stderr as this one's reason. Made unconditionally:
+        # a remote transport spawns nothing, so its collector stays empty and
+        # both methods below are then no-ops by construction rather than by a
+        # branch someone has to keep in step with the transport list.
+        stderr_log = McpServerStderr(name)
         try:
-            conn = await self._open_transport_and_session(stack, name, cfg, timeout_s)
-        except BaseException:
-            await stack.aclose()
-            raise
-
-        try:
+            conn = await self._open_transport_and_session(stack, name, cfg, timeout_s, stderr_log)
             tools = await self._list_all_tools(conn.live_session)
+        except Exception as exc:
+            # `aclose` FIRST: it stops the child and drains its stderr, so the
+            # tail is complete by the time `explain` quotes it. A stdio server
+            # that dies mid-handshake otherwise surfaces as a bare transport
+            # error with no text at all.
+            await stack.aclose()
+            stderr_log.report_failure(f"failed to connect: {exc}")
+            raise stderr_log.explain(exc) from exc
         except BaseException:
+            # Cancellation is not a server failure and must propagate as-is.
             await stack.aclose()
             raise
 
@@ -899,8 +1166,14 @@ class McpManager:
         name: str,
         cfg: MCPServerConfig,
         timeout_s: float | None,
+        stderr_log: McpServerStderr,
     ) -> ServerConnection:
-        """Enter the transport + ClientSession context managers on ``stack``."""
+        """Enter the transport + ClientSession context managers on ``stack``.
+
+        ``stderr_log`` is what the stdio transport writes the child's stderr to
+        instead of the terminal. The remote transports spawn nothing and leave
+        it untouched.
+        """
         import mcp.types as mcp_types
         from mcp.client.session import ClientSession
 
@@ -912,7 +1185,7 @@ class McpManager:
         )
 
         if isinstance(cfg, MCPStdioServerConfig):
-            streams_cm = _stdio_transport(cfg, lambda: conn.closed_event.set())
+            streams_cm = _stdio_transport(cfg, lambda: conn.closed_event.set(), stderr_log)
         elif isinstance(cfg, MCPHttpServerConfig):
             from mcp.client.streamable_http import (
                 create_mcp_http_client,
@@ -968,13 +1241,9 @@ class McpManager:
         if auth is None or auth.type != "oauth":
             return None
         try:
-            from mcp.client.auth import OAuthClientProvider
+            from local_operator.mcp.auth import build_oauth_provider
 
-            from local_operator.mcp.auth import wire_oauth_auth
-
-            return OAuthClientProvider(
-                **wire_oauth_auth(url, cfg, store=self._effective_auth_store())
-            )
+            return build_oauth_provider(url, cfg, store=self._effective_auth_store())
         except Exception:
             logger.warning(
                 "OAuth wiring unavailable for %r; connecting unauthenticated",
@@ -1509,13 +1778,16 @@ class McpManager:
 
 # Re-export for callers that serialize cache entries.
 __all__ = [
+    "CHILD_QUIET_ENV",
     "RECONNECT_BACKOFF_S",
     "RECONNECT_BURST_LIMIT",
     "RECONNECT_BURST_WINDOW_S",
     "STARTUP_GATE_MS",
+    "STDERR_TAIL_LINES",
     "McpConnectionError",
     "McpLoadResult",
     "McpManager",
+    "McpServerStderr",
     "ServerConnection",
     "build_cmd_exe_argv",
     "build_stdio_argv",

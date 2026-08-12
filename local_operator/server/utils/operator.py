@@ -537,6 +537,9 @@ class ServerExecutor:
                 temperature=self.model_configuration.temperature,
                 max_tokens=self.model_configuration.max_tokens,
                 tool_choice="none",
+                # The chunks are joined and returned, never streamed to a
+                # caller, so a transient mid-stream failure is retryable here.
+                replayable=True,
             )
             chunks: list[str] = []
             async for event in stream_fn(request, None):

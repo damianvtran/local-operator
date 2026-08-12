@@ -192,3 +192,90 @@ def test_theme_epoch_invalidates_frozen_renderable() -> None:
     finally:
         theme_mod.set_theme("dark")
     assert theme_mod.get_theme_epoch() > epoch_before
+
+
+# --- repaint vs reflow (the layout pass a pinned block does not need) ------
+
+
+def _layout_flags(block: AssistantBlock) -> list[bool]:
+    """Record the ``layout`` argument of every content update on ``block``."""
+    seen: list[bool] = []
+    original = type(block).set_content
+
+    def recording(self, renderable, *, layout: bool = True) -> None:
+        seen.append(layout)
+        original(self, renderable, layout=layout)
+
+    block.set_content = recording.__get__(block)  # type: ignore[assignment]
+    return seen
+
+
+def test_a_delta_inside_the_same_rows_repaints_without_a_layout_pass() -> None:
+    """The height pin is the block's whole footprint, so a delta that lands
+    in the rows already reserved has nothing for the container to re-place.
+
+    Asking anyway reflowed every widget in the transcript — measured at 7.8 ms
+    across 173 widgets — thirty times a second for the length of an answer.
+    """
+    block = AssistantBlock()
+    block.update_text("one short line")
+    rows = block._pinned_rows
+    flags = _layout_flags(block)
+
+    block.update_text("one short line plus")
+
+    assert block._pinned_rows == rows, "precondition: the row count did not move"
+    assert flags == [False]
+
+
+def test_a_delta_that_adds_a_row_still_asks_for_the_layout_pass() -> None:
+    """The other half of the guard: a pin that MOVES must reflow, or the
+    container reserves the old height and the block paints into a hole."""
+    block = AssistantBlock()
+    block.update_text("first line")
+    flags = _layout_flags(block)
+
+    block.update_text("first line\n\nsecond paragraph\n\nthird paragraph")
+
+    assert block._pinned_rows > 1, "precondition: the row count moved"
+    assert flags == [True]
+
+
+def test_a_resize_that_did_not_change_the_width_rebuilds_nothing() -> None:
+    """The rows are a pure function of the text and the width, and pinning the
+    height raises a Resize of its own — so an unguarded handler re-flattened
+    the message to reproduce the rows it had just been given."""
+    block = AssistantBlock()
+    block.update_text("settled paragraph\n\ntail")
+    width = block._built_width
+    applied: list[object] = []
+    original = AssistantBlock._apply_rows
+    block._apply_rows = (  # type: ignore[assignment]
+        lambda text: (applied.append(text), original(block, text))[1]
+    )
+
+    block.on_resize(object())
+
+    assert block._built_width == width
+    assert applied == []
+
+
+def test_a_resize_to_a_new_width_does_rebuild() -> None:
+    """The guard must not swallow the case it exists to let through: a real
+    width change is a different set of rows, and a stale fold clips or holes."""
+    block = AssistantBlock()
+    block.update_text("settled paragraph\n\ntail")
+    applied: list[object] = []
+    original = AssistantBlock._apply_rows
+    block._apply_rows = (  # type: ignore[assignment]
+        lambda text: (applied.append(text), original(block, text))[1]
+    )
+
+    # `_flat_width` reads `self.size.width`, which is 0 for this unmounted
+    # block and falls back to FALLBACK_WIDTH. Move the recorded width instead:
+    # the handler compares the two, and either side moving is a real change.
+    block._built_width = 40
+    block.on_resize(object())
+
+    assert len(applied) == 1
+    assert block._built_width != 40

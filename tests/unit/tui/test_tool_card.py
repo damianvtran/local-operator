@@ -23,7 +23,8 @@ hexes so a ramp change moves one file, not this suite.
 from __future__ import annotations
 
 import unicodedata
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
@@ -52,6 +53,9 @@ from local_operator.tui.widgets.tool_card import (
     ICON_ERROR,
     ICON_INTERRUPTED,
     ICON_SUCCESS,
+    LIVE_HEADER_PENDING,
+    LIVE_HEADER_RUNNING,
+    LIVE_MAX_LINES,
     NO_OUTPUT_NOTICE,
     RUNNING_NOTICE,
     TERSE_NO_OUTPUT_NOTICE,
@@ -358,13 +362,17 @@ def test_click_expands_then_collapses_back_to_one_row() -> None:
 
     assert card.toggle_expanded() is True
     assert card.expanded is True
-    # One summary row plus one row per output line — no reflow, no wrapping.
-    assert card._row_count == 4
+    # One summary row, then the CALL, then one row per output line — no reflow,
+    # no wrapping. The call comes first: it is the question the card was opened
+    # to answer, and an expansion that showed only the output left no state of
+    # the card able to say what had run.
+    assert card._row_count == 5
     assert card.spans_multiple_rows() is True
-    assert card.settled_rows() == 4
+    assert card.settled_rows() == 5
     body = card._build_content(80).plain.splitlines()
-    assert body[1].strip() == "total 8"
-    assert body[3].strip() == "-rw-r--r--  b"
+    assert body[1].strip() == "command: ls -la"
+    assert body[2].strip() == "total 8"
+    assert body[4].strip() == "-rw-r--r--  b"
 
     assert card.toggle_expanded() is False
     assert card.expanded is False
@@ -427,15 +435,25 @@ def test_activating_an_inert_card_answers_instead_of_ignoring_the_click() -> Non
 def test_an_unfinished_card_says_it_is_still_running_not_that_it_is_empty() -> None:
     """Nothing to show and nothing YET are different answers to one click.
 
-    A running tool has no output *yet*; telling the user there is none is
-    wrong and reads as a failure. This is the state the reported freeze
-    actually left the rows in, so it is the state the answer has to get right.
+    The state that answers rather than opens is now COMPOSING: nothing has run,
+    so there is no command to show and no output to stream, and the honest
+    reply is "not yet". A RUNNING card opens instead — it has both the command
+    and its live output, which is strictly more than the row can hold — so it
+    is checked here too, because the two live states must not give the same
+    answer to the same click.
     """
-    card = ToolCard("t", "bash", {"command": "sleep 30"})
-    assert card.can_expand() is False
-    assert card.activate() is False
-    row = card._build_row(80).plain
+    composing = ToolCard("t", "bash")
+    composing._state = "composing"
+    composing._render_composing()
+    assert composing.can_expand() is False
+    assert composing.activate() is False
+    row = composing._build_row(80).plain
     assert RUNNING_NOTICE in row and NO_OUTPUT_NOTICE not in row
+
+    running = ToolCard("t", "bash", {"command": "sleep 30"})
+    assert running.can_expand() is True
+    assert running.activate() is True
+    assert running.expanded is True
 
 
 def test_the_notice_is_one_shot_and_leaves_with_the_focus() -> None:
@@ -459,9 +477,18 @@ def test_hint_appears_only_when_expandable_and_pointed_at_or_focused() -> None:
     inert._set_hovered(True)
     assert EXPAND_HINT not in inert._build_row(80).plain  # nothing to expand
 
+    # A RUNNING row is expandable — it holds the command and its live output —
+    # so it makes the same offer under the pointer that a settled row does.
+    # A COMPOSING row is the one with nothing behind the affordance.
     running = ToolCard("t", "bash", {"command": "ls"})
     running._set_hovered(True)
-    assert EXPAND_HINT not in running._build_row(80).plain  # not finished
+    assert EXPAND_HINT in running._build_row(80).plain
+
+    composing = ToolCard("t", "bash")
+    composing._state = "composing"
+    composing._render_composing()
+    composing._set_hovered(True)
+    assert EXPAND_HINT not in composing._build_row(80).plain  # nothing yet
 
     expandable = ToolCard("t", "bash", {"command": "ls"})
     expandable.mark_done("one\ntwo")
@@ -922,7 +949,9 @@ def test_expanded_output_is_capped_and_says_how_much_is_hidden() -> None:
     card.toggle_expanded()
 
     rows = card._build_content(80).plain.splitlines()
-    assert len(rows) == 1 + EXPAND_MAX_LINES + 1  # summary + window + marker
+    # summary + the one-row call + window + marker
+    assert len(rows) == 1 + 1 + EXPAND_MAX_LINES + 1
+    assert rows[1].strip() == "path: big.txt"
     assert rows[-1].strip() == "… 20 more lines"
     assert card._row_count == len(rows)
 
@@ -986,9 +1015,21 @@ def test_summary_falls_back_to_the_tool_name_when_no_scalars_exist() -> None:
     assert "todo" in card._build_row(80).plain
 
 
-def test_explicit_intent_wins_over_argument_derived_summaries() -> None:
+def test_the_row_keeps_the_arguments_when_the_model_supplied_an_intent() -> None:
+    """The receipt records the FACT; the claim goes on the transient working line.
+
+    This used to be the other way round. An intent is the model's assertion
+    about what it is doing and the arguments are what it actually ran, and a
+    user reads the ledger back precisely when those two might disagree — a row
+    captioned with the claim hides the disagreement. It also put the same
+    sentence on the card and on the working line pinned directly beneath it.
+    """
     card = ToolCard("t", "write", {"path": "notes.md"}, intent="Recording the decision")
-    assert "Recording the decision" in card._build_row(80).plain
+    row = card._build_row(80).plain
+    assert "notes.md" in row
+    assert "Recording the decision" not in row
+    # Carried, though — the working line reads it from here.
+    assert card.intent == "recording the decision"
 
 
 def test_compact_path_shrinks_against_cwd_then_home(monkeypatch) -> None:
@@ -1122,7 +1163,7 @@ async def test_a_focused_row_expands_and_collapses_on_enter_and_space() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert card.expanded is True
-        assert card.size.height == 4
+        assert card.size.height == 5  # summary + the call + three output rows
         assert COLLAPSE_HINT in _card_text(card).plain
 
         await pilot.press("space")
@@ -1336,7 +1377,336 @@ def test_control_sequences_in_args_and_partials_are_stripped() -> None:
     card = ToolCard("t", "bash", {"command": "echo \x1b[1mbold\x1b[0m"})
     assert "\x1b" not in card._build_row(80).plain
     card.set_partial_detail("progress \x1b[32m50%\x1b[0m")
-    assert "\x1b" not in card._build_row(80).plain
+    card._expanded = True
+    assert "\x1b" not in card._build_content(80).plain
+
+
+def test_a_streaming_partial_never_destroys_the_row_s_identity() -> None:
+    """Reported from the field: four settled bash rows reading
+
+        >_bash    --- stdout --- (empty) --- stderr --- (empty)    ✓ 1.0s
+
+    and not one of them able to say which command it had run.
+    ``set_partial_detail`` was writing over ``_summary`` and nothing restored
+    it, so the row's own progress permanently replaced the only record of what
+    it did.
+
+    The contract is now stronger than "restored afterwards": progress never
+    touches the row at all. It goes to the EXPANSION, where the user asks for
+    it, and the collapsed row names the command in every state — which is the
+    same guarantee stated as an invariant rather than as a repair.
+    """
+    card = ToolCard("t", "bash", {"command": "pytest -q tests/unit/tui"})
+    card.set_partial_detail("--- stdout ---\nrunning 40 tests")
+
+    running = card._build_row(120).plain
+    assert "pytest -q tests/unit/tui" in running
+    assert "stdout" not in running
+
+    # …and the same fragment IS reachable, one keystroke away.
+    card._expanded = True
+    assert "running 40 tests" in card._build_content(120).plain
+
+    card.set_partial_detail("--- stderr ---\nboom")
+    card.mark_done("")
+    settled = card._build_row(120).plain
+    assert "pytest -q tests/unit/tui" in settled
+    assert "stderr" not in settled
+
+
+# -- the LIVE card: a running row names its command, moves, and can be opened -
+#
+# Reported as three symptoms of one defect. A settled bash row read
+#
+#     >_bash    199 B · 1s                    ⟨expand⟩ ✓  0.3s
+#
+# where `199 B · 1s` is the COMPOSING summary — the argument byte count and the
+# dictation clock, frozen at the moment dictation ended — sitting where the
+# command belongs, beside a second and disagreeing duration. `_compose_facts`
+# was never cleared when the row started running, so the label-shed ladder it
+# gates stayed armed for the whole life of the card; on a compose row that
+# ladder drops the word `composing…` and keeps the numbers, and on every other
+# row it drops the COMMAND and keeps them.
+
+
+def test_a_running_row_names_its_command_not_its_argument_bytes() -> None:
+    """The reported frame, at the width that produced it.
+
+    The ladder fires when ``width < _label_min_width()``, a threshold computed
+    from the summary's own length — so it is not a bash defect but a
+    LONG-SUMMARY defect, and bash is merely the tool whose summaries are long.
+    Asserted across the lifecycle because the row was wrong in all of it.
+    """
+    command = 'cd ~/local-operator && git remote -v; echo "--- gitconfig"; cat .git/config'
+    card = ToolCard("t", "bash")
+    card.set_composing(199, "bash")
+    assert "199 B" in card._build_row(80).plain  # composing: the bytes ARE the news
+
+    card.begin_running("bash", {"command": command}, None)
+    running = card._build_row(80).plain
+    assert "199 B" not in running
+    assert running.startswith(f"{tool_icon('bash')} bash")
+    assert "cd ~/local-operator && git remote" in running
+
+    card.mark_done("exit code: 0\nok")
+    settled = card._build_row(80).plain
+    assert "199 B" not in settled
+    assert "cd ~/local-operator && git remote" in settled
+
+
+def test_a_short_identity_summary_was_never_broken_and_must_stay_that_way() -> None:
+    """The CONTROL case, asserted beside the broken one.
+
+    A settled MCP row rendered correctly throughout::
+
+        🛡 workspace_get_gmail_mes…  damian@gominerva.com full        ✓  0.5s
+
+    — real identity arguments, correctly truncated, one duration on the right
+    and no `· Ns` artefact in the headline. So the shared path through
+    ``_summary_from_args`` was never the problem, and the fix must not have
+    moved this row by a cell.
+
+    The two differ in ONE property, which is the whole diagnosis: summary
+    LENGTH. ``_label_min_width`` is computed from the summary, so a
+    twenty-five-cell identity clears the threshold at every realistic width
+    and a seventy-five-cell command clears none of them — which is why the
+    ladder fired for shell-shaped calls and only for them. Asserted here so a
+    future change to either row has to keep both true at once.
+    """
+    identity = ToolCard("t", "workspace_get_gmail_messages_content_batch")
+    identity.set_composing(240, "workspace_get_gmail_messages_content_batch")
+    identity.begin_running(
+        "workspace_get_gmail_messages_content_batch",
+        {"user_google_email": "damian@gominerva.com", "format": "full"},
+        None,
+    )
+    identity.mark_done("ok\nmore")
+
+    shell = ToolCard("t", "bash")
+    shell.set_composing(199, "bash")
+    shell.begin_running(
+        "bash",
+        {"command": 'cd ~/local-operator && git remote -v; echo "--- gitconfig"; cat .git/config'},
+        None,
+    )
+    shell.mark_done("exit code: 0\nok")
+
+    for width in (80, 100, 120):
+        identity_row = identity._build_row(width).plain
+        shell_row = shell._build_row(width).plain
+        # The control: unchanged, and never carrying a compose artefact.
+        assert "damian@gominerva.com full" in identity_row
+        assert "240 B" not in identity_row
+        assert width >= identity._label_min_width()  # never on the ladder
+        # The row that was broken, now telling the same kind of truth.
+        assert "cd ~/local-operator && git remote" in shell_row
+        assert "199 B" not in shell_row
+        # Both settle into exactly ONE duration, in the same column. ` · ` is
+        # the compose facts' own separator (`199 B · 1s`), so its absence is
+        # what says no second clock reached the headline — which was the
+        # difference between the two rows in the reported frames.
+        for row in (identity_row, shell_row):
+            assert row.rstrip().endswith("s")
+            assert " · " not in row
+        assert identity_row.index(ICON_SUCCESS) == shell_row.index(ICON_SUCCESS)
+
+
+def test_the_command_is_abbreviated_to_the_row_by_one_rule_in_every_state() -> None:
+    """ "Abbreviated within the available horizontal line space" — and the SAME
+    abbreviation running as settled, so a call cannot read as one thing while
+    it works and another once it is done. A row that composed first must be
+    indistinguishable from one that did not.
+    """
+    command = "python -m pytest tests/unit/tui -q -p no:cacheprovider -k expansion"
+    for width in (48, 60, 80, 120, 200):
+        composed = ToolCard("t", "bash")
+        composed.set_composing(203, "bash")
+        composed.begin_running("bash", {"command": command}, None)
+        direct = ToolCard("t", "bash", {"command": command})
+        assert composed._build_row(width).plain == direct._build_row(width).plain
+        # A PREFIX of the command survives the cut — never a different command
+        # and never a byte count. Measured on the longest prefix the row holds
+        # rather than by carving the status off the tail, because the pad
+        # between summary and status shrinks to one cell at tight widths and
+        # is then indistinguishable from a space inside the command.
+        row = direct._build_row(width).plain
+        assert "203 B" not in row
+        kept = max((n for n in range(1, len(command) + 1) if command[:n] in row), default=0)
+        assert kept >= 20, f"width {width} kept only {kept!r} cells of the command"
+        assert cell_len(row) <= width
+
+
+def test_a_running_rows_duration_advances_and_holds_the_settled_column() -> None:
+    """A timer that never moves is indistinguishable from a hung command.
+
+    The card reported ``0s`` against a working line reporting 34s because the
+    only clock on the row was the composing one, stopped. The running row now
+    counts its OWN execution — and lands the number in the column the ✓ will
+    use, so settling does not make the row jump.
+    """
+    card = ToolCard("t", "bash", {"command": "sleep 30"})
+    assert card._build_row(80).plain.rstrip().endswith("0s")
+
+    # A card built here started its own clock; ``_started`` is only ``None`` for
+    # a card adopted through ``restore()``, which refuses to time a row it did
+    # not watch run. Winding the clock back is only meaningful for the former.
+    assert card._started is not None, "a card that begins running times itself"
+    card._started -= 34.0
+    assert card._build_row(80).plain.rstrip().endswith("34s")
+
+    # The duration occupies exactly the cells it will occupy once settled: the
+    # two blanks the running row reserves are where the ✓ arrives, so the
+    # number does not shift under the eye at the moment the row settles.
+    running = card._build_row(80).plain
+    card.mark_done("out")
+    settled = card._build_row(80).plain
+    assert running.index("34s") == settled.index("34s")
+    # `34s` is right-justified into DURATION_COL, so the glyph run sits four
+    # cells back from the digits, where the running row was painting blanks.
+    assert settled[settled.index("34s") - 4 : settled.index("34s") - 2] == f"{ICON_SUCCESS} "
+    assert running[running.index("34s") - 4 : running.index("34s") - 2] == "  "
+
+
+def test_a_composing_row_reports_no_execution_time() -> None:
+    """Nothing has RUN, so there is no execution to time. The dictation clock
+    rides in the summary beside the byte count it belongs with; a duration in
+    the outcome column would claim a tool was executing."""
+    card = ToolCard("t", "bash")
+    card.set_composing(199, "bash")
+    assert card._status_runs() == []
+
+
+def test_expanding_a_running_call_says_so_and_shows_the_command() -> None:
+    """Expanded, a running call and a finished call that printed nothing are
+    the same frame — a command and then nothing — and they mean opposite
+    things. The header is what separates them, and it says which in words."""
+    card = ToolCard("t", "bash", {"command": "sleep 30"})
+    assert card.toggle_expanded() is True
+    body = card._build_content(80).plain
+    assert "command: sleep 30" in body
+    assert LIVE_HEADER_RUNNING in body
+    assert LIVE_HEADER_PENDING in body  # nothing yet, said as "not yet"
+
+    card.set_partial_detail("--- stdout ---\nline 1")
+    body = card._build_content(80).plain
+    assert LIVE_HEADER_RUNNING in body
+    assert LIVE_HEADER_PENDING not in body  # output arrived: caveat gone
+    assert "line 1" in body
+
+
+def test_the_in_progress_header_is_the_accent_the_running_icon_spends() -> None:
+    """Asserted through the semantic ramp, not read off a render.
+
+    The header is the card's answer to "is this alive", and it has to carry in
+    a STILL, and possibly colourless, frame — which is why the words say
+    "running" rather than leaving it to the tint. But the tint is a real claim
+    and a greyscale capture cannot check it: two colours that differ render
+    identically once the terminal drops colour, so the assertion belongs here
+    where the ramp is addressable.
+    """
+    card = ToolCard("t", "bash", {"command": "sleep 30"})
+    card.toggle_expanded()
+    content = card._build_content(80)
+    lit = _style_at(content, LIVE_HEADER_RUNNING)
+    assert _triplet(lit.color) == _triplet(Style(color=theme_mod.semantic_color("accent")).color)
+
+
+def test_an_expanded_running_card_can_still_be_closed_once_it_settles_empty() -> None:
+    """`can_expand` goes false under an OPEN card when a running call finishes
+    having printed nothing — reachable only now that running cards open. A card
+    stuck open is the same trap as one that will not open."""
+    card = ToolCard("t", "bash", {"command": "true"})
+    card.toggle_expanded()
+    card.mark_done("")
+    assert card.can_expand() is False
+    assert card.toggle_expanded() is False
+    assert card.expanded is False
+
+
+def test_the_live_view_keeps_the_tail_and_bounds_the_card() -> None:
+    """A `seq 100000` must not grow the widget without bound, and the live view
+    keeps the END: a live view frozen on the first forty lines of a command
+    still running is indistinguishable from a hung one, which is the anxiety
+    the whole feature exists to relieve."""
+    card = ToolCard("t", "bash", {"command": "seq 100000"})
+    card._expanded = True
+    card.set_partial_detail("\n".join(str(n) for n in range(1, 501)))
+
+    assert len(card._live) == LIVE_MAX_LINES
+    assert card._live[-1] == "500"  # the TAIL, not the head
+    assert card._live_dropped == 500 - LIVE_MAX_LINES
+    body = card._build_content(80).plain
+    assert f"… {500 - LIVE_MAX_LINES} earlier lines" in body
+    # Bounded height: command row + header + marker + the capped tail.
+    assert len(body.splitlines()) <= LIVE_MAX_LINES + 8
+
+
+def test_a_payload_past_the_ingest_slice_refuses_to_quote_a_line_count() -> None:
+    """The slice caps per-update work at a constant — bash re-sends its WHOLE
+    accumulated output every 500 ms, so an unsliced parse of a 22 MB snapshot
+    measured 1026 ms against 2.95 ms sliced, which at a 2 Hz emit cannot keep
+    up at all. What the card has not parsed it must not count: quoting the
+    lines dropped from the SLICE reported `… 10903 earlier lines` on a payload
+    missing 99981 of them, which reads as a measurement."""
+    card = ToolCard("t", "bash", {"command": "seq 1000000"})
+    card._expanded = True
+    card.set_partial_detail("\n".join(str(n) for n in range(1, 1_000_001)))
+
+    assert card._live_elided is True
+    assert card._live[-1] == "1000000"  # still the true tail
+    body = card._build_content(80).plain
+    assert "… earlier output not shown" in body
+    assert "earlier lines" not in body  # no invented number
+
+
+def test_an_arriving_update_does_not_repaint_and_the_tick_does() -> None:
+    """The coalescing, as a contract. A chatty command must cost one repaint
+    per tick, not one per update — the same bargain the subagent panel strikes
+    with its own single timer."""
+    card = ToolCard("t", "bash", {"command": "yes"})
+    painted: list[int] = []
+    card._refresh_row = lambda: painted.append(1)  # type: ignore[method-assign]
+
+    for n in range(50):
+        card.set_partial_detail(f"line {n}")
+    assert painted == []  # fifty updates, no repaints
+    assert card._live_dirty is True
+
+    card._tick_clock()
+    assert painted == [1]  # one tick, one repaint
+    assert card._live_dirty is False
+
+
+def test_the_result_replaces_the_streamed_tail_rather_than_joining_it() -> None:
+    """Two accounts of one output, and the streamed one is the truncated,
+    out-of-date one. It goes when the real result lands — along with the clock,
+    on every settle path including the failing one, which was the only path
+    that never stopped it.
+
+    The clock is SEEDED rather than started. These cards are never mounted, so
+    ``_start_clock``'s message-pump guard means ``_clock_timer`` is ``None`` for
+    their whole life and an ``is None`` assertion after the settle passes no
+    matter what the settle does — deleting the ``_settle_live()`` call this
+    defends left the suite green. A stub that records its own ``stop`` is the
+    difference between asserting the timer was retired and asserting one never
+    existed.
+    """
+    for settle in (
+        lambda c: c.mark_done("exit code: 0\nreal output"),
+        lambda c: c.mark_failed("boom", "exit code: 1\nreal output"),
+        lambda c: c.mark_interrupted(),
+    ):
+        card = ToolCard("t", "bash", {"command": "sleep 5"})
+        card._expanded = True
+        card.set_partial_detail("--- stdout ---\npartial output")
+        stopped: list[int] = []
+        card._clock_timer = cast(Any, SimpleNamespace(stop=lambda: stopped.append(1)))
+        assert card._live
+        settle(card)
+        assert stopped == [1]
+        assert card._clock_timer is None
+        assert card._live == []
+        assert "partial output" not in card._build_content(80).plain
 
 
 def test_width_accounting_is_correct_once_escapes_are_gone() -> None:
@@ -1408,3 +1778,99 @@ def test_no_control_codepoint_ever_survives() -> None:
             continue
         out = _strip_control_sequences(f"a{chr(code)}b")
         assert chr(code) not in out, f"U+{code:04X} survived: {out!r}"
+
+
+# --- repaint vs reflow -----------------------------------------------------
+#
+# A collapsed card is pinned to `height: 1` by the sheet and an expanded one is
+# exactly its row count, so a repaint that did not move the row count cannot
+# move anything the container places. Textual's `Static.update` reflows by
+# default, and a reflow re-arranges the WHOLE transcript — 7.8 ms across 173
+# widgets on a 161-block screen. That was being paid by the 1 Hz clock on every
+# running card and by every pointer crossing a row's edge.
+
+
+def _layout_flags(card: ToolCard) -> list[bool]:
+    """Record the ``layout`` argument of every content update on ``card``."""
+    seen: list[bool] = []
+    original = type(card).set_content
+
+    def recording(self, renderable, *, layout: bool = True) -> None:
+        seen.append(layout)
+        original(self, renderable, layout=layout)
+
+    card.set_content = recording.__get__(card)  # type: ignore[assignment]
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_repaint_that_kept_the_row_count_asks_for_no_layout_pass() -> None:
+    """The running card's clock repaints once a second to move the duration.
+    The row is still one row, so nothing needs re-placing.
+
+    Mounted, because a detached card measures its content and applies none of
+    it — the branch under test is the one that only runs with a real width.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(90, 14)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("t", "bash", {"command": "sleep 30"})
+        view.append_block(card)
+        await pilot.pause()
+        flags = _layout_flags(card)
+
+        card._refresh_row()
+
+        assert card._row_count == 1, "precondition: a collapsed card is one row"
+        assert flags == [False]
+
+
+@pytest.mark.asyncio
+async def test_expanding_a_card_does_ask_for_the_layout_pass() -> None:
+    """The other half: expansion is the case where the footprint really moves,
+    and skipping the reflow there would paint the body into reserved-for-one."""
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(90, 14)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("t", "bash", {"command": "ls"})
+        view.append_block(card)
+        card.mark_done("line one\nline two\nline three")
+        await pilot.pause()
+        flags = _layout_flags(card)
+
+        assert card.toggle_expanded() is True
+
+        assert card._row_count > 1, "precondition: the expansion added rows"
+        assert flags and flags[-1] is True
+
+
+def test_a_resize_that_did_not_change_the_width_rebuilds_nothing() -> None:
+    """An expanded card's own content sets its height, so every expansion
+    raises a Resize straight back into ``on_resize``. Unguarded, that rebuilt
+    the row to reproduce it byte for byte — measured at half of all rebuilds."""
+    card = ToolCard("t", "bash", {"command": "ls"})
+    width = card._built_width
+    builds = {"n": 0}
+    original = ToolCard._refresh_row
+    card._refresh_row = (  # type: ignore[assignment]
+        lambda: (builds.__setitem__("n", builds["n"] + 1), original(card))[1]
+    )
+
+    card.on_resize(SimpleNamespace(size=SimpleNamespace(width=width)))
+
+    assert builds["n"] == 0
+
+
+def test_a_resize_to_a_new_width_does_rebuild() -> None:
+    """The guard must still let a real width change through: the row is folded
+    to a width, and a stale fold either clips or leaves a hole."""
+    card = ToolCard("t", "bash", {"command": "ls"})
+    builds = {"n": 0}
+    original = ToolCard._refresh_row
+    card._refresh_row = (  # type: ignore[assignment]
+        lambda: (builds.__setitem__("n", builds["n"] + 1), original(card))[1]
+    )
+
+    card.on_resize(SimpleNamespace(size=SimpleNamespace(width=card._built_width - 20)))
+
+    assert builds["n"] == 1

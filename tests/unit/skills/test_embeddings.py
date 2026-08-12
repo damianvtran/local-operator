@@ -3,6 +3,7 @@ ApiEmbedder wire contract, and the env-based backend picker."""
 
 from __future__ import annotations
 
+import asyncio
 import math
 from typing import Any
 
@@ -10,12 +11,18 @@ import httpx
 import pytest
 
 from local_operator.skills.embeddings import (
+    EMBED_MAX_ATTEMPTS,
     ApiEmbedder,
     EmbeddingBackend,
     EmbeddingError,
     LocalEmbedder,
     default_backend_from_env,
 )
+
+
+async def _no_sleep(delay: float) -> None:
+    """Backoff without the wall clock: the delays are pinned in
+    ``test_failover.py``; here only the ATTEMPT COUNT is the contract."""
 
 
 def _norm(vec: list[float]) -> float:
@@ -114,6 +121,75 @@ class TestApiEmbedder:
         embedder = ApiEmbedder(base_url="http://x/v1", api_key="k", client=client)
         with pytest.raises(EmbeddingError):
             await embedder.embed(["hello"])
+
+    @pytest.mark.asyncio
+    async def test_a_transient_failure_is_retried_rather_than_ending_the_backend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """This is a provider call and gets the harness's retry.
+
+        Before it, ONE dropped connection ended the API backend for the whole
+        session: ``SkillIndex`` memoizes a backend failure, so a blip on the
+        first turn silently downgraded every later skill selection to the
+        offline embedder — worse routing, permanently, for a 200 ms outage.
+        """
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(503, json={"error": "overloaded"})
+            if calls["n"] == 2:
+                raise httpx.ConnectError("connection reset")
+            return httpx.Response(200, json={"data": [{"embedding": [1.0, 0.0]}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        embedder = ApiEmbedder(base_url="http://x/v1", api_key="k", client=client)
+        assert await embedder.embed(["hello"]) == [[1.0, 0.0]]
+        assert calls["n"] == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "reason"),
+        [
+            (401, "a rejected key gives the same answer forever"),
+            (429, "a quota reset needs a wait longer than a boot-path budget"),
+            (400, "the same request gets the same refusal"),
+        ],
+    )
+    async def test_what_a_retry_cannot_fix_is_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch, status: int, reason: str
+    ) -> None:
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(status, json={"error": {"message": "nope"}})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        embedder = ApiEmbedder(base_url="http://x/v1", api_key="k", client=client)
+        with pytest.raises(EmbeddingError):
+            await embedder.embed(["hello"])
+        assert calls["n"] == 1, reason
+
+    @pytest.mark.asyncio
+    async def test_the_retry_budget_is_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The index degrades to the local embedder when this gives up, and this
+        call sits on the start-of-session path, so giving up has to happen."""
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(503, json={"error": "still down"})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        embedder = ApiEmbedder(base_url="http://x/v1", api_key="k", client=client)
+        with pytest.raises(EmbeddingError, match="Embedding request failed"):
+            await embedder.embed(["hello"])
+        assert calls["n"] == EMBED_MAX_ATTEMPTS
 
     @pytest.mark.asyncio
     async def test_vector_count_mismatch_raises(self) -> None:

@@ -55,3 +55,63 @@ class StyledTranscriptApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield TranscriptView()
+
+
+#: The composer's prompt marker. The pickers repeat the glyph — deliberately,
+#: so a highlighted row sits in the prompt's own column — but they mount BELOW
+#: the input row, so the FIRST match down the frame is always the composer's.
+PROMPT_CHEVRON = "❯"
+
+
+def composer_cells(app: App[None]) -> list[tuple[str, str | None, str | None]]:
+    """(text, fg hex, bg hex) for every segment of the composer's row.
+
+    Shared because the composer's focus state is not a widget attribute: a
+    caret is a cell whose colours have been swapped, and the chevron's ink is
+    a colour the stylesheet resolved. Both are only answerable from what the
+    terminal was SENT, which is what ``render_strips`` returns.
+
+    Located by the chevron rather than by the copy so the same reader works in
+    every mode the composer has words for — ``Read-only — press esc to reply``
+    and ``Aside — esc returns to the chat`` are composer rows too.
+
+    The FIRST match is the composer's even with a picker open. Both pickers
+    repeat the glyph, deliberately in the prompt's own column, but ``compose``
+    yields them AFTER ``#input-row`` in ``#input-shell``'s normal flow, so they
+    can only render below it. The ``/resume`` picker is a pushed Screen, so
+    while it is up the composer is genuinely off the frame and the raise is the
+    honest answer rather than a missed row.
+    """
+    for strip in app.screen._compositor.render_strips():
+        if PROMPT_CHEVRON not in strip.text:
+            continue
+        cells = []
+        for segment in strip._segments:
+            style = segment.style
+            fg = style.color.get_truecolor().hex.lower() if style and style.color else None
+            bg = style.bgcolor.get_truecolor().hex.lower() if style and style.bgcolor else None
+            cells.append((segment.text, fg, bg))
+        return cells
+    raise AssertionError("the composer row is not on the frame at all")
+
+
+def caret_cells(cells: list[tuple[str, str | None, str | None]]) -> list[str]:
+    """What the caret is sitting ON: cells drawn with its inverted ground.
+
+    The TEXT is returned rather than a count because "is there a caret" and
+    "is the caret eating a letter" are the two questions this app has got
+    wrong, and only the second one needs the content.
+    """
+    caret_ground = theme_mod.semantic_color("fg").lower()
+    return [text for text, _, bg in cells if bg == caret_ground]
+
+
+def chevron_colour(cells: list[tuple[str, str | None, str | None]]) -> str | None:
+    """The prompt marker's ink — `fg` while the composer has focus, else `dim`.
+
+    NOT the accent (D5): green means a turn is live, and a marker that is lit
+    in nearly every frame cannot also mean that. Focus is a brightness step in
+    the same neutral ramp, which is a 3.86x luminance move against `dim` where
+    the accent was 2.15x.
+    """
+    return next(fg for text, fg, _ in cells if PROMPT_CHEVRON in text)

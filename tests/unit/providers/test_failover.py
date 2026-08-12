@@ -6,9 +6,11 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import AsyncIterator
+from http import HTTPStatus
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from local_operator.harness.types import (
@@ -17,22 +19,32 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
 )
+from local_operator.model.configure import build_model_spec
 from local_operator.providers import failover as failover_module
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
+    CHAIN_EFFORT_LADDER,
+    SUPPORTED_EFFORTS,
     AuthRetryKeyState,
     FailoverRouteState,
     FallbackTarget,
     ProviderError,
     RetrySettings,
     backoff_delay_ms,
+    classify_provider_error,
     expand_fallback_candidates,
     expand_fallback_targets,
+    is_auth_error,
     is_direct_credential_rotation_error,
+    is_image_rejection,
+    is_transient_error,
+    is_usage_limit_error,
     resolve_chain,
     resolve_next_key,
+    spec_for_selector,
     spec_for_target,
     stream_with_failover,
+    wrap_transport_error,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -200,14 +212,100 @@ def test_structured_fallback_entry_carries_effort() -> None:
     assert spec.reasoning_effort == "high"
 
 
-def test_invalid_structured_effort_is_not_silently_dropped() -> None:
-    assert (
-        expand_fallback_targets(
-            "anthropic/claude",
-            [{"provider": "openai", "model": "gpt-5", "effort": "turbo"}],
+def test_invalid_structured_effort_is_not_silently_dropped(caplog) -> None:
+    """The name is the assertion: dropped, and NOT silently.
+
+    The entry really is discarded - an effort outside the vocabulary is not a
+    routing decision this can honour. But a typo deleting a whole fallback hop
+    with nothing in the log is how an operator ends up with no failover during
+    an outage and no way to trace it to their YAML (review round 29). This
+    previously asserted only the `== []`, which the silence also satisfied.
+    """
+    chain = [{"provider": "openai", "model": "gpt-5", "effort": "turbo"}]
+    with caplog.at_level("WARNING"):
+        settings = RetrySettings.from_settings(
+            {"retry": {"fallbackChains": {"anthropic/claude": chain}}}
         )
+
+    # Expand what NORMALIZATION produced, not the raw config: production always
+    # walks the normalized chain, and `_fallback_target` honours a raw mapping
+    # on its own, so expanding `chain` here would bypass the function under test.
+    assert (
+        expand_fallback_targets("anthropic/claude", settings.fallback_chains["anthropic/claude"])
         == []
     )
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "turbo" in messages and "openai/gpt-5" in messages
+    # The message has to be actionable: name the vocabulary, not just the typo,
+    # and name it as the LADDER it is - `sorted()` puts `max` between `low` and
+    # `medium`, which reads as noise to anyone who knows the scale from
+    # `/effort` (design round 28).
+    # Anchored on the prefix, not a bare substring: a SUPERSET satisfies
+    # `"minimal, low, ..." in messages`, so re-admitting `none` to the
+    # advertised list would pass while making the sentence contradict itself
+    # (`'none' is not accepted ...; expected one of none, ...`) - review round 32
+    # built exactly that mutant and it survived.
+    assert "expected one of minimal, low, medium, high, xhigh, max" in messages
+    # And the claim must be true: `none` IS an effort - `/effort` offers it -
+    # it is just not accepted in a chain hop. Copy that overreaches sends the
+    # reader to check the wrong thing.
+    assert "is not an effort" not in messages
+    assert "is not accepted in a fallback chain hop" in messages
+    # The chain itself survives: one bad hop is not a reason to lose the rest.
+    assert settings.fallback_chains["anthropic/claude"]
+
+
+def test_the_advertised_ladder_is_exactly_what_is_accepted() -> None:
+    """The message's list and the gate that refuses a value must be one set.
+
+    `CHAIN_EFFORT_LADDER` filters `EFFORT_ORDER` by `SUPPORTED_EFFORTS`, so the
+    drift is asymmetric: a rung added to `EFFORT_ORDER` alone is filtered out
+    and can never be advertised while refused (safe), but a rung added to
+    `SUPPORTED_EFFORTS` alone is ACCEPTED and silently missing from the list -
+    something the `sorted(SUPPORTED_EFFORTS)` this replaced could not do
+    (review round 32). Cheap to pin, and the failure it prevents is a user
+    being told a value they just used successfully is not one of the options.
+    """
+    assert set(CHAIN_EFFORT_LADDER) == SUPPORTED_EFFORTS
+    # And it is a ladder, stated LITERALLY. Re-deriving it as
+    # `[e for e in EFFORT_ORDER if e in SUPPORTED_EFFORTS]` re-runs the
+    # implementation's own comprehension against the same source, so reversing
+    # `EFFORT_ORDER` reversed the ladder and the assertion still passed - it
+    # could only ever restate the code (review round 33). Written out, it is a
+    # decision about what the user reads, and a reordering upstream has to come
+    # here and be agreed to.
+    assert list(CHAIN_EFFORT_LADDER) == ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+def test_effort_survives_an_unknown_sibling_key(caplog) -> None:
+    """`effort` is honoured, so an unrelated `note:` must not cost the user
+    their routing - and the warning must not list `effort` among the keys it
+    is ignoring while claiming in the same breath that effort is supported.
+
+    Both halves are asserted. The routing is the damage; the self-contradicting
+    sentence is what would send the reader looking in the wrong place for it.
+    """
+    chain = [{"provider": "openai", "model": "gpt-5", "effort": "low", "note": "cheap hop"}]
+    with caplog.at_level("WARNING"):
+        settings = RetrySettings.from_settings(
+            {"retry": {"fallbackChains": {"anthropic/claude": chain}}}
+        )
+
+    # The NORMALIZED chain, for the reason above: asserting against `chain`
+    # passes even when `_normalize_chain_entry` flattens the effort away, which
+    # is the exact bug this test is named for (review round 30).
+    normalized = settings.fallback_chains["anthropic/claude"]
+    assert [
+        (t.selector, t.effort) for t in expand_fallback_targets("anthropic/claude", normalized)
+    ] == [("openai/gpt-5", "low")]
+
+    ignored = [
+        r.getMessage() for r in caplog.records if "ignoring unsupported key" in r.getMessage()
+    ]
+    assert len(ignored) == 1 and "note" in ignored[0]
+    # The sentence claims effort is honoured; it must not also list it as ignored.
+    key_list = ignored[0].split("key(s) ", 1)[1].split(" on entry", 1)[0]
+    assert "effort" not in key_list
 
 
 def test_retry_settings_from_config() -> None:
@@ -705,3 +803,768 @@ async def test_abort_interrupts_backoff_sleep() -> None:
         ):
             pass
     await task
+
+
+class TestChainsAreNormalizedAtTheBoundary:
+    """A config that is wrong in a way YAML cannot catch must not kill turns.
+
+    ``fallbackChains`` declares ``Sequence[str]``, and the parser used to check
+    only that the outer value was a mapping. A config written with structured
+    entries therefore parsed, resolved, and died in
+    ``expand_fallback_candidates`` with ``'dict' object has no attribute
+    'endswith'`` — on EVERY turn, because the selector list is built eagerly at
+    the top of ``stream_with_failover`` before any provider is called.
+    """
+
+    def test_the_mapping_form_is_accepted_not_merely_survived(self) -> None:
+        """The exact config that reproduced the crash, from a real machine."""
+        settings = RetrySettings.from_settings(
+            {
+                "retry": {
+                    "fallbackChains": {
+                        "anthropic/claude-opus-5": [
+                            {"effort": "low", "model": "claude-opus-5", "provider": "anthropic"},
+                            {"effort": "high", "model": "gpt-5.4", "provider": "openai"},
+                        ]
+                    }
+                }
+            }
+        )
+        # The structured form is PRESERVED, not flattened: the `effort` key is
+        # what makes the entry mean something, so collapsing it to a selector
+        # would silently answer a different question. Main's per-attempt effort
+        # (quota-aware failover) is what this test predates and now pins.
+        assert settings.fallback_chains == {
+            "anthropic/claude-opus-5": [
+                {"effort": "low", "model": "claude-opus-5", "provider": "anthropic"},
+                {"effort": "high", "model": "gpt-5.4", "provider": "openai"},
+            ]
+        }
+        # And it reaches the wire as the user plainly intended, effort and all.
+        chain = resolve_chain("anthropic/claude-opus-5", settings.fallback_chains)
+        assert chain is not None
+        # The first entry IS the current model at a LOWER effort, so it is a
+        # real fallback route (retry cheaper) rather than a self-reference, and
+        # the expansion keeps it. The second is the provider hop.
+        targets = expand_fallback_targets("anthropic/claude-opus-5", chain)
+        assert [(t.selector, t.effort) for t in targets] == [
+            ("anthropic/claude-opus-5", "low"),
+            ("openai/gpt-5.4", "high"),
+        ]
+
+    def test_an_unsupported_key_is_reported_rather_than_swallowed(self, caplog) -> None:
+        """``effort`` is now honoured on a chain entry - quota-aware failover
+        made the chain's shape (selector, effort) real, which retired the
+        reason this key used to be dropped. What must still be named is a key
+        that ISN'T understood: a chain that quietly drops half of what the
+        user wrote is the next bug report."""
+        with caplog.at_level("WARNING"):
+            RetrySettings.from_settings(
+                {
+                    "retry": {
+                        "fallbackChains": {
+                            "a/b": [{"provider": "x", "model": "y", "urgency": "low"}]
+                        }
+                    }
+                }
+            )
+        assert any("urgency" in record.getMessage() for record in caplog.records)
+
+    def test_a_string_chain_is_untouched(self) -> None:
+        """The declared form keeps working, byte for byte."""
+        settings = RetrySettings.from_settings(
+            {"retry": {"fallbackChains": {"default": ["a/b", "c/*"]}}}
+        )
+        assert settings.fallback_chains == {"default": ["a/b", "c/*"]}
+
+    def test_junk_degrades_instead_of_raising(self) -> None:
+        """A preference about what to do when a model fails must not be more
+        disruptive than the failure it was written to handle."""
+        settings = RetrySettings.from_settings(
+            {
+                "retry": {
+                    "fallbackChains": {
+                        "a/b": [None, 42, {"provider": "x"}, {"model": "y"}, "", "  "],
+                        "c/d": "not-a-list",
+                        "e/f": ["ok/one"],
+                    }
+                }
+            }
+        )
+        # Every unreadable entry dropped, the readable chain kept, nothing raised.
+        assert settings.fallback_chains == {"e/f": ["ok/one"]}
+
+    def test_a_wholly_bad_chain_cannot_reach_the_wire(self) -> None:
+        """The regression that mattered: whatever the config says, the selectors
+        handed to ``expand_fallback_candidates`` are strings."""
+        settings = RetrySettings.from_settings(
+            {"retry": {"fallbackChains": {"a/b": [{"nonsense": True}]}}}
+        )
+        chain = resolve_chain("a/b", settings.fallback_chains)
+        assert chain is None  # dropped entirely rather than half-formed
+        for entries in settings.fallback_chains.values():
+            assert all(isinstance(entry, str) for entry in entries)
+
+
+class TestEffortDoesNotOutliveItsModelAcrossAHop:
+    """A fallback swaps the model; the level chosen for the old one may not fit.
+
+    ``spec_for_selector`` carries every other knob over unchanged, which is
+    right for context windows and cache flags and wrong for exactly this one:
+    the valid values are a property of the MODEL, so a carried-over level is
+    either rejected outright or discarded while the band goes on claiming it.
+    """
+
+    def test_a_level_both_models_accept_survives_the_hop(self) -> None:
+        """A user who dropped to `low` for cost still gets cheap thinking on
+        whichever model answers."""
+        base = build_model_spec("anthropic", "claude-opus-5").model_copy(
+            update={"reasoning_effort": "low"}
+        )
+        swapped = spec_for_selector(base, "openai/gpt-5.4")
+        assert swapped.reasoning_effort == "low"
+        assert swapped.reasoning_efforts == ("none", "low", "medium", "high", "xhigh")
+
+    def test_a_level_the_fallback_lacks_becomes_that_models_default(self) -> None:
+        """`xhigh` reaching a 4.5-generation model is a 400 on the request that
+        was supposed to rescue the turn."""
+        base = build_model_spec("anthropic", "claude-opus-5").model_copy(
+            update={"reasoning_effort": "xhigh"}
+        )
+        swapped = spec_for_selector(base, "anthropic/claude-opus-4-5-20251101")
+        assert swapped.reasoning_effort == "high"
+
+    def test_falling_back_to_a_model_without_the_knob_drops_it(self) -> None:
+        base = build_model_spec("anthropic", "claude-opus-5").model_copy(
+            update={"reasoning_effort": "max"}
+        )
+        swapped = spec_for_selector(base, "openai/gpt-4.1")
+        assert swapped.reasoning_effort is None
+        assert swapped.reasoning_efforts == ()
+
+
+# ---------------------------------------------------------------------------
+# Error kinds, and who owns the reported-error slot
+# ---------------------------------------------------------------------------
+
+
+class TestProviderErrorKinds:
+    """The reported defect: a quota exhaustion surfaced as ``✕ HTTP 404:``.
+
+    A status is not a diagnosis and an empty message is not an error, so both
+    the classification and the rendered line are pinned here. Retryability is
+    asserted alongside the kind on purpose — the two decisions are the same
+    decision, and a kind that reads "transient" while ``is_transient_error``
+    says otherwise would send the driver and the user different stories.
+    """
+
+    @pytest.mark.parametrize(
+        ("error", "kind", "transient"),
+        [
+            # quota: the reported case, plus the shapes providers actually use.
+            (ProviderError(429, "Too many requests", retryable=True), "quota", False),
+            (ProviderError(402, "Insufficient credits"), "quota", False),
+            (ProviderError(403, "Quota exceeded for model"), "quota", False),
+            (ProviderError(None, "Usage limit reached"), "quota", False),
+            # auth: a 401 is always the bearer, even when its body says
+            # "insufficient permissions" — which the quota matcher would claim.
+            (ProviderError(401, "insufficient permissions", auth_error=True), "auth", False),
+            (ProviderError(403, "Forbidden"), "auth", False),
+            # timeout ahead of transient: both retry, one names the cause.
+            (ProviderError(408, "Request Timeout", retryable=True), "timeout", True),
+            (ProviderError(504, "Gateway Timeout", retryable=True), "timeout", True),
+            (ProviderError(None, "ReadTimeout: stream stalled", retryable=True), "timeout", True),
+            # transient
+            (ProviderError(500, "Internal Server Error", retryable=True), "transient", True),
+            (ProviderError(529, "Overloaded", retryable=True), "transient", True),
+            (
+                ProviderError(None, "ConnectError: connection reset", retryable=True),
+                "transient",
+                True,
+            ),
+            # a request the provider READ and refused
+            (ProviderError(400, "`temperature` is deprecated"), "request", False),
+            (ProviderError(404, "model not found"), "request", False),
+            (ProviderError(422, "input too long"), "request", False),
+        ],
+    )
+    def test_each_kind_is_named_and_its_retryability_agrees(
+        self, error: ProviderError, kind: str, transient: bool
+    ) -> None:
+        assert error.kind == kind
+        assert classify_provider_error(error) == kind
+        assert is_transient_error(error) is transient
+
+    def test_the_three_kinds_that_must_never_be_retried(self) -> None:
+        """Retrying these burns quota and delays the honest answer: a quota
+        reset needs a wait, no retry mints a valid bearer, and the same bytes
+        get the same 400."""
+        for error in (
+            ProviderError(429, "rate limited", retryable=True),
+            ProviderError(401, "invalid api key", auth_error=True),
+            ProviderError(400, "bad request"),
+        ):
+            assert is_transient_error(error) is False
+
+    def test_a_bare_exception_gets_the_same_vocabulary(self) -> None:
+        """Not every path wraps: the embedding backend and the TUI hold raw
+        exceptions and need the same answer."""
+        assert classify_provider_error(TimeoutError()) == "timeout"
+        assert classify_provider_error(ValueError("malformed payload")) == "unknown"
+        assert is_transient_error(ValueError("malformed payload")) is False
+
+    def test_an_unwrapped_exception_never_reads_as_the_users_quota(self) -> None:
+        """The harness must not diagnose its OWN bugs as an exhausted account.
+
+        ``wrap_transport_error`` was taught to state its kind outright for this,
+        but ``classify_provider_error`` is the entry point every caller holding
+        an unwrapped exception uses, and it still ran the exception's text
+        through the quota markers: a client's ``KeyError('usage')`` came back
+        ``quota``, which renders as ``rate limit or quota exceeded`` and sends
+        the user to check a billing page over a defect in this repo.
+
+        A class name is legitimate evidence of a timeout, so that stays.
+        """
+        for exc in (
+            KeyError("usage"),
+            ValueError("insufficient data in chunk"),
+            RuntimeError("quota bookkeeping failed"),
+            AttributeError("'NoneType' object has no attribute 'rate limit'"),
+        ):
+            assert classify_provider_error(exc) == "unknown", exc
+            assert is_transient_error(exc) is False
+        # The class name still carries the one thing it honestly knows.
+        assert classify_provider_error(httpx.ReadTimeout("")) == "timeout"
+        # And a real ProviderError keeps the kind it was classified with.
+        assert classify_provider_error(ProviderError(429, "rate limited")) == "quota"
+
+    def test_no_5xx_is_ever_read_as_a_quota_exhaustion(self) -> None:
+        """Found by enumerating every ``HTTPStatus`` phrase against the quota
+        markers: an empty-bodied 507 was classified ``quota``, because the
+        empty-message floor fills the text from the status phrase and
+        "Insufficient Storage" contains ``insufficient`` — the harness's own
+        words classifying the harness's own error, and a retryable server fault
+        turned into "your quota is gone".
+
+        The general rule this pins: a 5xx is the server failing, so a 5xx that
+        MENTIONS a limit is still the server failing and still worth retrying.
+        """
+        for status in HTTPStatus:
+            if int(status) < 500:
+                continue
+            error = ProviderError(int(status), "", retryable=True)
+            assert error.kind in ("transient", "timeout"), (int(status), status.phrase, error.kind)
+        assert ProviderError(507, "").kind == "transient"
+        assert ProviderError(503, "rate limit on the upstream pool", retryable=True).kind == (
+            "transient"
+        )
+        # And the bound does not cost the real quota shapes, which are all 4xx
+        # or carry no status at all.
+        assert ProviderError(403, "Quota exceeded for model").kind == "quota"
+        assert ProviderError(None, "Usage limit reached").kind == "quota"
+
+    def test_a_403_about_permissions_is_auth_not_quota(self) -> None:
+        """Google's real 403 PERMISSION_DENIED text is "Request had insufficient
+        authentication scopes." — which the combined marker set read as a quota
+        exhaustion and rendered `rate limit or quota exceeded (HTTP 403)`, sending
+        the user to wait out a problem only a re-login or scope grant clears.
+        This commit's own failure mode, inverted, so it is pinned both ways."""
+        for message in (
+            "Request had insufficient authentication scopes.",
+            "insufficient permissions for this model",
+            "The caller does not have permission; usage of this API is restricted",
+        ):
+            error = ProviderError(403, message)
+            assert error.kind == "auth", message
+            assert "quota" not in str(error)
+        # A 403 that really IS exhaustion still says so — google and openrouter
+        # both report quota this way, which is why the branch exists at all.
+        for message in ("Quota exceeded for model", "RESOURCE_EXHAUSTED", "rate limit reached"):
+            assert ProviderError(403, message).kind == "quota", message
+        # Rotation is unchanged either way: a denied 403 must still rotate.
+        assert is_auth_error(ProviderError(403, "insufficient authentication scopes"))
+        assert is_direct_credential_rotation_error(ProviderError(403, "whatever"))
+
+    def test_the_harness_never_diagnoses_its_own_bug_as_a_quota_problem(self) -> None:
+        """`wrap_transport_error` used to hand its own synthesized text to the
+        text classifier, so a `KeyError('usage')` raised while a client parsed a
+        usage block rendered as `rate limit or quota exceeded`. Nothing in an
+        exception's text is evidence about the user's quota."""
+        for exc in (
+            KeyError("usage"),
+            ValueError("insufficient data in chunk"),
+            RuntimeError("rate limit bookkeeping failed"),
+        ):
+            wrapped = wrap_transport_error(exc)
+            assert wrapped.kind == "transient", (exc, wrapped.kind)
+            assert wrapped.retryable is True
+        # The exception CLASS is still legitimate evidence of a timeout.
+        assert wrap_transport_error(httpx.ConnectTimeout("")).kind == "timeout"
+        assert wrap_transport_error(TimeoutError()).kind == "timeout"
+
+    def test_402_is_named_as_quota_without_claiming_its_credential_is_worth_keeping(
+        self,
+    ) -> None:
+        """A spent balance IS a quota problem to the user and a refresh cannot fix
+        it, so it reads as quota and skips the refresh step. But it must not be a
+        ``usage_limit`` to ``AuthStore.rotate_sibling``, which PRESERVES the
+        sticky credential on the reasoning that the window reopens — a balance of
+        zero does not reopen in sixty seconds."""
+        error = ProviderError(402, "Your credit balance is too low")
+        assert error.kind == "quota"
+        assert is_direct_credential_rotation_error(error) is True
+        assert is_usage_limit_error(error) is False
+        assert is_transient_error(error) is False
+
+    @pytest.mark.parametrize(
+        ("error", "rendered"),
+        [
+            (
+                ProviderError(
+                    429, "Limit: 200000 tokens/min.", retryable=True, retry_after_ms=41600
+                ),
+                "rate limit or quota exceeded (HTTP 429, retry in 42s): Limit: 200000 tokens/min.",
+            ),
+            (
+                ProviderError(503, "upstream reset", retryable=True),
+                "transient provider error (HTTP 503): upstream reset",
+            ),
+            (
+                ProviderError(408, "request timed out", retryable=True),
+                "provider timeout (HTTP 408): request timed out",
+            ),
+            (
+                ProviderError(401, "invalid x-api-key", auth_error=True),
+                "authentication failed (HTTP 401): invalid x-api-key",
+            ),
+            (
+                ProviderError(400, "`temperature` is deprecated"),
+                "invalid request (HTTP 400): `temperature` is deprecated",
+            ),
+            (
+                ProviderError(None, "ConnectError: refused", retryable=True),
+                "transient provider error: ConnectError: refused",
+            ),
+        ],
+    )
+    def test_the_rendered_line_leads_with_the_kind(
+        self, error: ProviderError, rendered: str
+    ) -> None:
+        """This string IS the error frame — ``RenderedStreamError`` tells the
+        loop that ``str()`` is the whole diagnosis, and the TUI prints it
+        verbatim into a ``NoticeBlock``. The wait rides in the parenthetical so
+        it survives a long provider message being wrapped."""
+        assert str(error) == rendered
+
+    def test_an_abort_is_not_dressed_up_as_a_diagnosis(self) -> None:
+        """The user pressed the key; prefixing their own reason with a label
+        states the obvious twice."""
+        assert str(ProviderError(None, "user cancelled", kind="aborted")) == "user cancelled"
+
+    @pytest.mark.parametrize("status", [None, 404, 429, 599])
+    def test_no_provider_error_can_print_nothing(self, status: int | None) -> None:
+        """The other half of the reported frame. ``__str__`` would happily render
+        ``HTTP 404:`` forever, and no downstream care can recover text that was
+        never captured — so the floor is set at construction."""
+        for blank in ("", "   ", "\n"):
+            error = ProviderError(status, blank)
+            assert error.message.strip()
+            assert str(error).rstrip().endswith(error.message)
+            assert not str(error).rstrip().endswith(":")
+
+    def test_the_provider_own_words_are_never_editorialised(self) -> None:
+        """``message`` stays the provider's text: the classifiers read it, and
+        it is the half that says WHICH limit and WHEN it clears. Composition
+        happens only in ``__str__``."""
+        error = ProviderError(429, "  Quota exceeded. Retry after 41.6s.  ", retryable=True)
+        assert error.message == "Quota exceeded. Retry after 41.6s."
+
+
+class TestTheReportedErrorIsTheMostDiagnosticOne:
+    """The reported ``✕ HTTP 404:`` frame was a real 429 on the requested model,
+    overwritten by a bare 404 from a fallback selector the account cannot serve.
+
+    ``last_error`` was last-wins, so a longer failover walk reported the LEAST
+    informative failure of the set. The primary selector owns the slot: the user
+    asked for that model, so its failure is the news of the turn.
+    """
+
+    def _settings(self, chain: list[str]) -> dict[str, Any]:
+        return {"retry": {"baseDelayMs": 1, "maxRetries": 1, "fallbackChains": {"default": chain}}}
+
+    async def _run(self, errors: dict[str, ProviderError]) -> ProviderError:
+        async def client_for(spec: ModelSpec) -> Any:
+            return ScriptedClient(errors[spec.model_id])
+
+        auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(), auth, self._settings(["anthropic/claude-x"]), client_for
+            ):
+                pass
+        return excinfo.value
+
+    async def test_a_fallbacks_bare_404_cannot_mask_the_primarys_quota_error(self) -> None:
+        """The reproduction, at the driver level."""
+        error = await self._run(
+            {
+                "gpt-4o": ProviderError(
+                    429, "You exceeded your current quota.", retryable=True, retry_after_ms=42_000
+                ),
+                "claude-x": ProviderError(404, ""),
+            }
+        )
+        assert error.status == 429
+        assert str(error) == (
+            "rate limit or quota exceeded (HTTP 429, retry in 42s): "
+            "You exceeded your current quota."
+        )
+
+    async def test_the_primary_wins_even_when_it_is_the_duller_failure(self) -> None:
+        """Not "highest rank overall": the requested model's 500 is the answer to
+        "why did my turn fail", and the fallback's 401 is a broken chain entry."""
+        error = await self._run(
+            {
+                "gpt-4o": ProviderError(500, "boom", retryable=True),
+                "claude-x": ProviderError(401, "no key for anthropic", auth_error=True),
+            }
+        )
+        assert error.status == 500
+
+    async def test_a_fallback_failure_is_logged_rather_than_lost(self, caplog) -> None:
+        """It can no longer reach the frame, so a chain entry the account cannot
+        serve would otherwise fail invisibly forever."""
+        with caplog.at_level("WARNING", logger="local_operator.providers.failover"):
+            await self._run(
+                {
+                    "gpt-4o": ProviderError(429, "quota", retryable=True),
+                    "claude-x": ProviderError(404, ""),
+                }
+            )
+        assert any(
+            "fallback selector failed" in record.getMessage() and "404" in record.getMessage()
+            for record in caplog.records
+        )
+
+    async def test_the_primary_owns_the_slot_even_when_it_never_reached_a_client(self) -> None:
+        """Named for what it actually pins, which is not what it first claimed.
+
+        A provider with no key configured breaks BEFORE calling anyone, and that
+        "No API key configured" still records against the primary — so it beats
+        the fallback's 500, and the frame names the missing key rather than a
+        model the user did not ask for. That is right: the missing key is the
+        thing to fix.
+
+        It also means the primary records on every path it can take, which makes
+        "a fallback wins the slot" unreachable in practice and the terminal
+        ``Failover exhausted`` line defensive rather than live. Recorded here so
+        the next reader does not go looking for a test of either.
+        """
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return ScriptedClient(ProviderError(500, "fallback is down", retryable=True))
+
+        auth = FakeAuth({"anthropic": ["k2"]})
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(), auth, self._settings(["anthropic/claude-x"]), client_for
+            ):
+                pass
+        assert "No API key configured" in excinfo.value.message
+        assert "fallback is down" not in excinfo.value.message
+        # And it renders without a `provider error:` stutter in front of a
+        # sentence that already names itself.
+        assert str(excinfo.value) == "No API key configured for provider 'openai'"
+
+
+class TestTransientFailuresAreRetriedOnEveryCallPath:
+    """ "Transient errors are automatically retried on any invocation."
+
+    A turn, a subagent, an aside and the one-shot errands all reach the provider
+    through ``stream_with_failover``, so the first test covers the shared floor.
+    The one-shot path had a REAL gap: it collects the whole stream before
+    returning a string, but the driver forwarded events as they arrived, so a
+    stall part-way through was permanent — and the compaction summary is one of
+    those calls, which means the context it was meant to shrink kept growing.
+    """
+
+    async def _drive(
+        self, script: list[Any], *, replayable: bool = False, max_retries: int = 3
+    ) -> tuple[list[Any], int]:
+        """Run one request whose client raises ``script`` in order, then
+        succeeds. Returns the events seen and the number of attempts made."""
+        attempts = {"n": 0}
+
+        def flaky(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            index = attempts["n"]
+            attempts["n"] += 1
+
+            async def gen() -> AsyncIterator[Any]:
+                if index < len(script):
+                    step = script[index]
+                    if isinstance(step, tuple):
+                        # (partial events, then the failure) — a mid-stream death.
+                        for event in step[0]:
+                            yield event
+                        raise step[1]
+                    raise step
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(flaky)
+
+        request = _request().model_copy(update={"replayable": replayable})
+        settings = {"retry": {"baseDelayMs": 1, "maxRetries": max_retries, "fallbackChains": {}}}
+        events = [
+            event
+            async for event in stream_with_failover(
+                request, FakeAuth({"openai": ["k"]}), settings, client_for
+            )
+        ]
+        return events, attempts["n"]
+
+    async def test_a_turn_retries_a_transient_failure_before_it_streams(self) -> None:
+        events, attempts = await self._drive(
+            [ProviderError(503, "overloaded", retryable=True), httpx.ConnectError("refused")]
+        )
+        assert attempts == 3
+        assert [e.delta for e in events if isinstance(e, StreamTextDelta)] == ["done"]
+
+    async def test_a_one_shot_errand_retries_a_stall_MID_stream(self) -> None:
+        """The gap this closes. ``replayable`` buffers instead of forwarding, so
+        a half-finished attempt can be discarded whole; the caller sees exactly
+        one clean stream and no duplicated text."""
+        events, attempts = await self._drive(
+            [
+                ([StreamTextDelta(delta="half a summ")], httpx.ReadTimeout("stream stalled")),
+                ([StreamTextDelta(delta="half a summ")], httpx.ReadTimeout("stream stalled")),
+            ],
+            replayable=True,
+        )
+        assert attempts == 3
+        assert [e.delta for e in events if isinstance(e, StreamTextDelta)] == ["done"]
+
+    async def test_a_turn_does_NOT_replay_output_the_user_already_read(self) -> None:
+        """The default, and it must stay the default: those deltas are already in
+        the transcript, and re-streaming them would write the answer twice. It
+        arrives NAMED all the same — re-raised raw, a mid-stream
+        ``httpx.ReadTimeout("")`` painted an empty frame and a traceback."""
+        with pytest.raises(ProviderError) as excinfo:
+            await self._drive(
+                [([StreamTextDelta(delta="partial")], httpx.ReadTimeout(""))],
+                replayable=False,
+            )
+        assert excinfo.value.kind == "timeout"
+        assert str(excinfo.value) == "provider timeout: ReadTimeout"
+
+    async def test_the_one_shot_call_the_session_makes_is_marked_replayable(self) -> None:
+        """Wiring, not policy: ``_one_shot_complete`` is the compaction summary
+        and the auto-naming call, and the flag is what buys them the retry
+        above. Asserted on the request the session actually builds so the two
+        cannot drift apart."""
+        from local_operator.session.session import Session
+
+        seen: list[ChatRequest] = []
+
+        async def stream_fn(request: ChatRequest, signal: Any) -> AsyncIterator[Any]:
+            seen.append(request)
+            yield StreamTextDelta(delta="summary")
+
+        # `__new__` plus the two attributes `_one_shot_complete` reads. Brittle by
+        # nature — it is coupled to the private attrs that method happens to touch
+        # — but the alternative is standing a whole Session up to assert one flag.
+        session = Session.__new__(Session)
+        spec = ModelSpec(provider="openai", model_id="gpt-4o")
+        session._model = spec  # type: ignore[attr-defined]
+        session._stream_fn = stream_fn  # type: ignore[attr-defined]
+        assert await session._one_shot_complete("sys", "prompt") == "summary"
+        assert seen[0].replayable is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ProviderError(400, "`temperature` is deprecated"),
+            ProviderError(404, "no such model"),
+        ],
+    )
+    async def test_a_refused_request_is_never_retried(self, error: ProviderError) -> None:
+        """One call, one answer. The same bytes get the same refusal, so a retry
+        only delays it."""
+        attempts = {"n": 0}
+
+        def refuse(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts["n"] += 1
+            raise error
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(refuse)
+
+        with pytest.raises(ProviderError):
+            async for _ in stream_with_failover(
+                _request(),
+                FakeAuth({"openai": ["k1", "k2"]}),
+                {"retry": {"baseDelayMs": 1, "maxRetries": 5, "fallbackChains": {}}},
+                client_for,
+            ):
+                pass
+        assert attempts["n"] == 1, "a refused request must not be re-sent, nor rotated onto"
+
+    async def test_an_auth_failure_rotates_but_never_re_sends_the_same_key(self) -> None:
+        """Auth is the one failure a retry cannot fix and a DIFFERENT credential
+        can, so the budget must not be spent on the rejected one."""
+        used: list[str | None] = []
+
+        def denied(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            used.append(api_key)
+            raise ProviderError(401, "invalid api key", auth_error=True)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(denied)
+
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(),
+                FakeAuth({"openai": ["k1", "k2"]}),
+                {"retry": {"baseDelayMs": 1, "maxRetries": 5, "fallbackChains": {}}},
+                client_for,
+            ):
+                pass
+        assert excinfo.value.kind == "auth"
+        # Each key tried once. Five same-key retries would have been five
+        # guaranteed 401s before the sibling that might have worked.
+        #
+        # ``api_key`` is optional on the wire (an OAuth provider sends none), so
+        # the real keys are separated out first: a ``None`` reaching the client
+        # under a keyed provider would be its own bug, and it would otherwise
+        # crash ``sorted`` here instead of naming itself.
+        keys = [key for key in used if key is not None]
+        assert keys == used, "every rotation must carry a real credential"
+        assert sorted(set(keys)) == keys == ["k1", "k2"]
+
+    async def test_a_long_quota_reset_surfaces_instead_of_sleeping_through_it(self) -> None:
+        """A quota exhaustion with a long reset is not transient. The user gets
+        the named error and the wait, immediately, instead of a frozen UI."""
+        attempts = {"n": 0}
+
+        def limited(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts["n"] += 1
+            raise ProviderError(429, "quota exhausted", retryable=True, retry_after_ms=3_600_000)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(limited)
+
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(),
+                FakeAuth({"openai": ["k1"]}),
+                {"retry": {"baseDelayMs": 1, "maxRetries": 10, "fallbackChains": {}}},
+                client_for,
+            ):
+                pass
+        assert attempts["n"] == 1
+        assert "retry in 1h" in str(excinfo.value)
+
+
+class TestTransportErrorsKeepTheirIdentity:
+    """``ProviderError(None, str(exc))`` printed NOTHING for the whole httpx
+    family that raises with no arguments, which is most of it."""
+
+    @pytest.mark.parametrize(
+        ("exc", "kind"),
+        [
+            (httpx.ConnectTimeout(""), "timeout"),
+            (httpx.ReadTimeout(""), "timeout"),
+            (httpx.RemoteProtocolError(""), "transient"),
+            (httpx.ConnectError("[Errno 61] Connection refused"), "transient"),
+        ],
+    )
+    async def test_an_argumentless_transport_error_still_says_what_it_was(
+        self, exc: Exception, kind: str
+    ) -> None:
+        def boom(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            raise exc
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(boom)
+
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(),
+                FakeAuth({"openai": ["k"]}),
+                {"retry": {"baseDelayMs": 1, "maxRetries": 1, "fallbackChains": {}}},
+                client_for,
+            ):
+                pass
+        assert type(exc).__name__ in excinfo.value.message
+        assert excinfo.value.kind == kind
+        assert excinfo.value.retryable is True
+
+
+def test_an_image_rejection_is_recognised_in_both_the_raised_and_rendered_forms() -> None:
+    """The predicate has two callers holding two different things.
+
+    The client layer catches a ``ProviderError``; ``AgentEndEvent.error``
+    carries the already-rendered string the UI shows. Both must agree, because
+    what they drive is a STICKY degrade — a session that stops sending images
+    for the rest of its life.
+    """
+    raised = ProviderError(400, "Could not process image")
+    assert is_image_rejection(raised)
+    # The rendered form is what the session actually receives.
+    assert str(raised) == "invalid request (HTTP 400): Could not process image"
+    assert is_image_rejection(str(raised))
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Could not process image",
+        "Image could not be processed",
+        "messages.31.content.4.image.source.base64.data: Image does not match "
+        "the provided media type image/jpeg",
+        "Unsupported image format",
+    ],
+)
+def test_the_wordings_providers_actually_use_are_all_recognised(message: str) -> None:
+    """Sampled from the reports this degrade exists for, not invented:
+    anthropics/claude-code#12009, #13594, #31142, #50708."""
+    assert is_image_rejection(ProviderError(400, message))
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (503, "Could not process image"),  # weather, not a bad block
+        (500, "Could not process image"),
+        (400, "max_tokens: must be less than the model's context window"),
+        (400, "credit balance is too low"),
+        (429, "rate limit exceeded"),
+    ],
+)
+def test_only_a_client_side_image_refusal_degrades_the_session(status: int, message: str) -> None:
+    """The cost of a false positive is silent and permanent — every image
+    stripped from the rest of the session — so a 5xx that merely mentions an
+    image must not trip it, and neither may any other 4xx."""
+    assert not is_image_rejection(ProviderError(status, message))
+
+
+def test_the_rendered_form_is_gated_on_the_kind_not_on_a_guessed_status() -> None:
+    """The string carries no parseable status, so the gate is the kind's own
+    label. A transient error whose body mentions an image renders as
+    ``transient provider error (...)`` and must not match."""
+    transient = ProviderError(503, "Could not process image")
+    assert str(transient).startswith("transient provider error")
+    assert not is_image_rejection(str(transient))

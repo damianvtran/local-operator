@@ -1685,8 +1685,12 @@ def main() -> int:
                 # ``args`` object untouched (``--resume`` is read once, at
                 # startup; mutating the original here would confuse the exit
                 # hint's "resume with:" line).
-                async def resume_factory(resume_id: str):
+                async def resume_factory(resume_id: str | None):
                     resume_args = copy.copy(args)
+                    # ``None`` is meaningful, not absent: ``create_session``
+                    # branches on ``resume is not None``, so passing it through
+                    # verbatim is what makes ``/new`` a genuine cold-launch
+                    # session rather than a special case beside one.
                     resume_args.resume = resume_id
                     return await create_session(
                         resume_args,
