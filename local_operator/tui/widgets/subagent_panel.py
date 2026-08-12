@@ -954,7 +954,17 @@ class SubagentPanel(Container):
                 self._stats.pop(job_id, None)
         # The manager hands jobs back in start order; keep the DOM in the
         # same order so a stable ledger paints a stable list.
-        children = [self._rows[job_id] for job_id in order]
+        #
+        # Only rows the list ALREADY owns: `mount` and `remove` are deferred in
+        # Textual, so between two syncs closer together than the DOM's apply
+        # tick, `self._rows` can name a widget that is not a child yet - and
+        # `move_child` raises `WidgetError` on it rather than ignoring it. That
+        # surfaced as a hard crash in the band refresh, roughly one full-suite
+        # run in ten and never reproducibly in isolation. A row that misses
+        # this pass is ordered by the next one, which is already how a row that
+        # arrives between syncs gets placed.
+        mounted = set(self._list.children)
+        children = [self._rows[job_id] for job_id in order if self._rows.get(job_id) in mounted]
         if list(self._list.children) != children:
             for index, row in enumerate(children):
                 self._list.move_child(row, before=index)

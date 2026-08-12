@@ -14,6 +14,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import pytest
+from textual.app import App, ComposeResult
 
 from local_operator.harness.types import ImageContent
 from local_operator.session.protocol import CompactionOutcome
@@ -349,3 +350,39 @@ async def test_subagent_band_does_not_crush_the_transcript() -> None:
         # And the row's text is actually rendered (not blanked).
         row = sub.query("SubagentRow")[0]
         assert "summarize workspace" in str(getattr(row, "content", ""))
+
+
+@pytest.mark.asyncio
+async def test_reordering_skips_a_row_the_list_does_not_own_yet() -> None:
+    """`mount` and `remove` are deferred in Textual, so between two syncs closer
+    together than the DOM's apply tick `_rows` can name a widget that is not a
+    child yet - and `move_child` raises `WidgetError` on it rather than
+    ignoring it.
+
+    Observed as a hard crash in the band refresh, roughly one full-suite run in
+    ten and never reproducibly in isolation, so the state is constructed
+    directly here rather than raced for.
+    """
+    from local_operator.tui.widgets.subagent_panel import SubagentPanel, SubagentRow
+
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            yield SubagentPanel(lambda *a: None)
+
+    app = Host()
+    async with app.run_test() as pilot:
+        panel = app.query_one(SubagentPanel)
+        await pilot.pause()
+        panel._sync_rows([_Job("b", "Second")])
+        await pilot.pause()
+        assert list(panel._list.children), "the fixture never mounted a row"
+
+        # Exactly the state a deferred mount leaves: named in `_rows`, absent
+        # from the DOM, and sorted BEFORE the row that is mounted.
+        orphan = SubagentRow("a", panel._on_open)
+        panel._rows = {"a": orphan, **panel._rows}
+
+        panel._sync_rows([_Job("a", "First"), _Job("b", "Second")])
+
+        assert orphan not in panel._list.children
+        assert [row for row in panel._list.children] == [panel._rows["b"]]

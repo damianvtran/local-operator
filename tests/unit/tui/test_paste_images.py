@@ -20,6 +20,7 @@ import base64
 import io
 import os
 import signal
+import time
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,35 @@ class Host(App[None]):
 class BareHost(App[None]):
     def compose(self) -> ComposeResult:
         yield TextArea()
+
+
+async def _settle(pilot, done, timeout: float = 10.0) -> None:
+    """Pump the event loop until ``done()`` or a wall-clock deadline.
+
+    A fixed turn count (`for _ in range(40)`) is a race: it passes in isolation
+    and loses under full-suite load, which costs an afternoon every time
+    someone reads the failure as a product bug. A deadline cannot silently
+    become too small when the app grows one more boot step.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        await pilot.pause()
+        if done():
+            return
+
+
+async def _booted(app, pilot) -> None:
+    """Wait for the session to EXIST before submitting anything.
+
+    Not a nicety: `_submit_prompt` refuses outright when `_session is None`,
+    appending "session is still starting…" and returning, so a prompt sent one
+    tick early is never delivered and no amount of waiting afterwards recovers
+    it. A fixed `pilot.pause(0.25)` here lost roughly one full-suite run in
+    four and always looked like a product bug at the assert (review round 24
+    measured the intermittency; this is why it was never a timing race).
+    """
+    await _settle(pilot, lambda: app._session is not None)
+    assert app._session is not None, "the session never booted"
 
 
 async def _paste(app: App[None], pilot, text: str) -> None:
@@ -408,17 +438,18 @@ async def test_a_pasted_image_reaches_the_session_with_the_prompt(tmp_path) -> N
 
     app = OperatorApp(lambda: _factory(Recording()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _booted(app, pilot)
         editor = app.query_one(Editor)
         editor.focus()
         await pilot.pause()
         await _paste(app, pilot, path)
         editor.insert("what is this")
         await pilot.press("enter")
-        for _ in range(40):
-            await pilot.pause()
-            if sent:
-                break
+        # A DEADLINE, not a turn budget. Forty event-loop turns is a race
+        # against `OperatorApp` boot: under full-suite load it lost 2 runs in 8
+        # and never once in isolation, which reads as a product bug and is not
+        # (review round 24 measured it on both this commit and its parent).
+        await _settle(pilot, lambda: bool(sent))
 
     assert sent, "the prompt never reached the session"
     text, images = sent[0]
@@ -450,16 +481,13 @@ async def test_a_screenshot_with_no_words_is_a_prompt_in_itself(tmp_path) -> Non
 
     app = OperatorApp(lambda: _factory(Recording()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _booted(app, pilot)
         editor = app.query_one(Editor)
         editor.focus()
         await pilot.pause()
         await _paste(app, pilot, path)
         await pilot.press("enter")
-        for _ in range(40):
-            await pilot.pause()
-            if sent:
-                break
+        await _settle(pilot, lambda: bool(sent))
 
     assert sent, "a screenshot-only prompt was swallowed"
     assert sent[0][0] == "[Image #1, 11x22]"
@@ -808,7 +836,7 @@ async def test_the_aside_gives_the_draft_back_with_its_attachments(tmp_path) -> 
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _booted(app, pilot)
         editor = app.query_one(Editor)
         editor.focus()
         await pilot.pause()
@@ -940,7 +968,7 @@ async def test_an_unresolvable_marker_does_not_shift_the_others(tmp_path) -> Non
     ]
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _booted(app, pilot)
         editor = app.query_one(Editor)
         editor.focus()
         await pilot.pause()
@@ -1535,3 +1563,231 @@ async def test_backspace_past_a_marker_s_space_still_takes_the_space(tmp_path) -
 
         assert editor.text == marker, "backspace ate more than the trailing space"
         assert len(editor.referenced_images()) == 1, "backspace released a cited image"
+
+
+@pytest.mark.asyncio
+async def test_a_delete_elsewhere_cannot_destroy_a_marker_being_repaired(tmp_path) -> None:
+    """Review round 24, P0 - a regression the previous commit introduced.
+
+    A marker is transiently unparseable while the user repairs it: type a stray
+    `[` into the tail and it stops matching. The first sweep released on that,
+    so one backspace thirty columns away destroyed the image - and removing the
+    stray `[` then restored a perfectly-formed `[Image #1, 10x20]` citing
+    nothing, with the picture unrecoverable.
+
+    The sweep asks whether the number is MENTIONED, not whether it parses.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        editor.insert("what is this")
+        await pilot.pause()
+
+        # Break the marker mid-repair, then delete unrelated text far away.
+        editor.selection = Selection.cursor((0, len("[Image #1, 1")))
+        editor.insert("[")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "the fixture did not break the marker"
+
+        editor.selection = Selection.cursor((0, len(editor.text)))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        # Repair it. The image must come back with the text.
+        editor.selection = Selection.cursor((0, len("[Image #1, 1[")))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert editor.text.startswith("[Image #1, 10x20]"), f"repair failed: {editor.text!r}"
+        assert len(editor.referenced_images()) == 1, "a delete elsewhere destroyed the image"
+
+
+@pytest.mark.asyncio
+async def test_cutting_a_clicked_marker_releases_it(tmp_path) -> None:
+    """Review round 24, P1. Clicking a chip selects the whole marker - this
+    branch's own feature - so ctrl+x on it is a more natural gesture than the
+    backspace the previous round closed, and it reached neither the atomic gate
+    nor the sweep. The sweep now hangs off every edit that REMOVES a range,
+    which is all eight text-removing bindings rather than three.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        marker = editor.text.rstrip()
+
+        editor.selection = Selection((0, 0), (0, len(marker)))
+        await pilot.press("ctrl+x")
+        await pilot.pause()
+
+        assert marker not in editor.text, "the cut did not remove the marker"
+        assert editor._attachments == {}, "ctrl+x orphaned the attachment"
+
+        editor.insert("[Image #1]")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "a typed marker revived the cut image"
+
+
+@pytest.mark.asyncio
+async def test_typing_over_a_selected_marker_releases_it(tmp_path) -> None:
+    """Same rule from the other common gesture: select the marker and type."""
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        marker = editor.text.rstrip()
+
+        editor.selection = Selection((0, 0), (0, len(marker)))
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert editor._attachments == {}, "typing over a marker orphaned the attachment"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_w_takes_the_spaces_it_crossed(tmp_path) -> None:
+    """Review round 24, P3. `ctrl+w` removes the word AND the run it crossed -
+    asserted, because the previous test only checked the marker had gone, which
+    a leftover run of spaces also satisfies."""
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.insert("before ")
+        await _paste(app, pilot, path)
+        await pilot.pause()
+        assert editor.text.endswith("] "), "the fixture lost the trailing space"
+
+        await pilot.press("ctrl+w")
+        await pilot.pause()
+
+        assert editor.text == "before ", f"ctrl+w left the crossed spaces: {editor.text!r}"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_w_with_a_selection_takes_the_selection(tmp_path) -> None:
+    """Review round 24, P3. The whitespace-crossing path must stand aside for a
+    real selection, or ctrl+w would discard the user's range and eat a marker
+    sitting behind the spaces instead."""
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        marker = editor.text.rstrip()
+        editor.insert("tail")
+        await pilot.pause()
+
+        start = len(marker) + 1
+        editor.selection = Selection((0, start), (0, start + 4))
+        await pilot.press("ctrl+w")
+        await pilot.pause()
+
+        assert marker in editor.text, "ctrl+w ate the marker instead of the selection"
+        assert len(editor.referenced_images()) == 1, "the marker's image was released"
+
+
+@pytest.mark.asyncio
+async def test_an_insertion_never_releases_an_attachment(tmp_path) -> None:
+    """The sweep is gated on a REMOVAL, and that gate is load-bearing.
+
+    Design round 23 measured it: all 96 printable characters break citeability
+    when inserted into the marker's prefix. A typo there stops `[Image #1` from
+    appearing at all, so the mention guard cannot save it - only the gate can.
+    Sweeping on every edit would destroy a real attachment on one stray
+    keystroke, with retyping the marker forbidden by design round 16's D1.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        # Inside the PREFIX, not the tail: this breaks the mention as well as
+        # the parse, so nothing but the removal gate is holding the image.
+        editor.selection = Selection.cursor((0, len("[Ima")))
+        await pilot.press("x")
+        await pilot.pause()
+        assert "[Image #1" not in editor.text, "the fixture did not break the prefix"
+        assert editor._attachments, "an insertion destroyed the attachment"
+
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert editor.text.startswith("[Image #1, 10x20]"), f"repair failed: {editor.text!r}"
+        assert len(editor.referenced_images()) == 1, "the repaired marker lost its image"
+
+
+@pytest.mark.asyncio
+async def test_a_higher_numbered_marker_does_not_hold_a_lower_one_alive(tmp_path) -> None:
+    """The mention guard's negative lookahead: `#1` must not be kept alive by
+    `#10`. Without it, deleting #1 entirely leaves its image held - and a typed
+    `[Image #1]` then revives a picture the buffer never mentions."""
+    first = _png(tmp_path / "a.png", 10, 20)
+    second = _png(tmp_path / "b.png", 30, 40)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, first)
+        mine = editor.text.rstrip()
+
+        # Force the next issued number to #10 so both are in one draft.
+        editor.insert("[Image #9, 1x1] ")
+        await pilot.pause()
+        await _paste(app, pilot, second)
+        await pilot.pause()
+        assert "[Image #10," in editor.text, f"the fixture did not reach #10: {editor.text!r}"
+
+        editor.selection = Selection((0, 0), (0, len(mine)))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert 1 not in editor._attachments, "#10 held #1's image alive"
+        assert 10 in editor._attachments, "#10 lost its own image"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_w_over_a_selection_ending_in_spaces_takes_only_it(tmp_path) -> None:
+    """The whitespace-crossing path stands aside for a real selection.
+
+    The earlier guard test selects a word, where the crossing code declines
+    anyway. This one selects the run of spaces itself, so the crossing code
+    WOULD reach the marker behind them - and must not, because a real selection
+    is the user's own range.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        marker = editor.text.rstrip()
+        editor.selection = Selection.cursor((0, len(editor.text)))
+        editor.insert("  tail")
+        await pilot.pause()
+
+        # Select exactly the run of spaces after the marker.
+        editor.selection = Selection((0, len(marker)), (0, len(marker) + 3))
+        await pilot.press("ctrl+w")
+        await pilot.pause()
+
+        assert marker in editor.text, "ctrl+w crossed into the marker instead of the selection"
+        assert len(editor.referenced_images()) == 1, "the marker's image was released"

@@ -1078,35 +1078,44 @@ class Editor(TextArea):
         return True
 
     def _release_uncited(self) -> None:
-        """Drop attachments the buffer can no longer cite at all.
+        """Drop attachments the buffer no longer mentions in any form.
 
-        For the delete keys ONLY, and only when :meth:`_delete_marker` stood
-        aside. A real selection is the user's own range, so the atomic path
-        refuses to widen it - which meant selecting a marker and pressing
-        backspace removed the text without ever asking the release question,
-        leaving the image held and resurrectable by a typed `[Image #1]`
-        (review round 23). Same D1 violation as the atomic path had, through a
-        different door.
+        Called from :meth:`edit` whenever an edit REMOVED a range, which is the
+        complete set of "the user said take this away" gestures - backspace,
+        delete, ctrl+w, ctrl+k, ctrl+u, alt+delete, cut, and typing or pasting
+        over a selection. Enumerating the bindings instead covered three of
+        eight, so clicking a chip (which this branch makes select the whole
+        marker) and pressing ctrl+x still orphaned the image and let a typed
+        `[Image #1]` revive it (review round 24).
 
-        Deliberately NOT called from :meth:`edit`, where every buffer mutation
-        funnels: a marker is momentarily unparseable while the user types
-        through it, and releasing there would make an ordinary keystroke
-        destroy an attachment that the next keystroke restores the text for.
-        Delete keys are the one place the user has said "remove this".
+        Two deliberate narrowings, and both are load-bearing:
+
+        - Only on a REMOVAL. A pure insertion cannot uncite anything, and
+          sweeping there would adjudicate a marker the user is typing through.
+        - Only when the number is not mentioned AT ALL, not merely when it
+          fails to parse. A marker is transiently unparseable while it is being
+          repaired - type a stray `[` into the tail and it stops matching - and
+          the first version of this released on that, so a backspace thirty
+          columns away destroyed an image whose marker the next keystroke
+          restored perfectly (review round 24). A fragment still naming `#1`
+          keeps its image; only text that has stopped mentioning it releases.
+
+        The negative lookahead matters: `#1` must not hold `#10` alive.
         """
+        text = self.text
         for index, attachment in list(self._attachments.items()):
-            if cite(self.text, index, attachment) == -1:
+            if cite(text, index, attachment) == -1 and not re.search(
+                rf"\[Image #{index}(?![0-9])", text
+            ):
                 del self._attachments[index]
 
     def action_delete_left(self) -> None:
         if not self._delete_marker(before=True):
             super().action_delete_left()
-            self._release_uncited()
 
     def action_delete_right(self) -> None:
         if not self._delete_marker(before=False):
             super().action_delete_right()
-            self._release_uncited()
 
     def action_delete_word_left(self) -> None:
         # A marker is ONE word for this purpose too: ctrl+w stopping inside it
@@ -1114,7 +1123,6 @@ class Editor(TextArea):
         if self._delete_marker(before=True) or self._delete_marker_past_spaces(before=True):
             return
         super().action_delete_word_left()
-        self._release_uncited()
 
     # -- attachment markers as painted objects --------------------------------
     def _first_citation_columns(self, line_index: int) -> set[int]:
@@ -1444,8 +1452,14 @@ class Editor(TextArea):
         the picker one message-loop tick behind the buffer, which is the tick
         in which Enter decides whether to complete.
         """
+        removed = edit.from_location != edit.to_location
         result = super().edit(edit)
         self._sync_picker()
+        if removed:
+            # Text went away, so an attachment may have lost its last mention.
+            # See :meth:`_release_uncited` for why only removals sweep, and why
+            # it asks whether the number is MENTIONED rather than parseable.
+            self._release_uncited()
         return result
 
     def load_text(self, text: str) -> None:
