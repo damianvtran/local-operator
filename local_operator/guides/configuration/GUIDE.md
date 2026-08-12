@@ -1,6 +1,6 @@
 ---
 name: configuration
-description: Configure Local Operator providers, default models, credentials, runtime settings, and file locations for pip and desktop installs.
+description: Set Local Operator custom instructions, system prompt, standing rules and AGENTS.md-style defaults; configure providers, models, credentials, and config file locations.
 ---
 
 # Local Operator configuration
@@ -25,10 +25,44 @@ local-operator config list
 `config create` and `config open` print the resolved backend path. Main files under that root include:
 
 - `config.yml`: provider, model, compaction, retries, variables, TUI, and retention settings
+- `system_prompt.md`: the user's custom instructions, added to every session's system prompt
 - `credentials.env` and the credential database: secrets managed by credential/login commands
 - `mcp.json`: user-scoped MCP servers
 - `agents/<id>/agent.yml`: persistent agent profiles
 - `sessions/`: ephemeral transcripts
+
+## Custom instructions (the system prompt)
+
+Standing user preferences — commit conventions, review gates, where projects live, how to address the user — go in one file:
+
+```
+<config root>/system_prompt.md
+```
+
+That single file is what the desktop UI's Settings → **Instructions** box edits and what `GET`/`PATCH /v1/config/system-prompt` reads and writes, so the CLI, TUI, server, and desktop app all share one definition of "custom instructions". There is no `AGENTS.md` mechanism and no `custom_instructions` key in `config.yml`; writing either does nothing.
+
+To install or update them, write the file directly:
+
+```bash
+mkdir -p ~/.local-operator
+$EDITOR ~/.local-operator/system_prompt.md
+```
+
+Copying instructions in from another agent harness is a plain file copy — the format is just markdown, most commonly a bulleted list of standing rules:
+
+```bash
+cp ~/.some-other-agent/AGENTS.md ~/.local-operator/system_prompt.md
+```
+
+How the content is used:
+
+- It is appended to the packaged persona inside the **first** system block, wrapped in a `<user_instructions>` tag, under a "User's custom instructions" heading. Framing is "the operator's default expectations"; an explicit instruction in the live conversation still wins.
+- It is read **once, at session start**, and closed over for the whole session. That block is byte-stable for prompt caching, so re-reading it per turn would invalidate the cached prefix. **An edit takes effect in the next session, not the running one** — restart to pick it up.
+- Subagents inherit it, for the same reason they inherit `/goal`: a machine-wide preference must not depend on the parent remembering to restate it in a task prompt.
+- An agent profile's own `agents/<id>/system_prompt.md` is **appended to** the global file, not a replacement — a profile specializes behaviour without discarding machine-wide preferences. Set it with `agent_registry.set_agent_system_prompt` or the agent system-prompt endpoint.
+- An unreadable file degrades to "no custom instructions" rather than failing the session, and undecodable bytes are replaced rather than discarding the file, so a bad edit never costs a startup or the rest of your preferences.
+
+Keep the file free of secrets and of absolute home paths (prefer `~/`) when it may be shared. For task-specific knowledge that should load only when relevant, prefer a skill (`extensions` guide) over adding bulk here: this file is in context for every single turn.
 
 ## Set the default provider and model
 

@@ -602,7 +602,7 @@ async def _build_child_session(
     from local_operator.prompts_api import build_system_blocks
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
-    from local_operator.session_factory import _env_details
+    from local_operator.session_factory import _env_details, load_user_instructions
     from local_operator.tools.registry import create_tools
 
     # A resumed child is built on the STOPPED child's directory, and that is
@@ -614,6 +614,13 @@ async def _build_child_session(
         resume_dir if resume_dir is not None else config_dir() / "sessions" / uuid.uuid4().hex[:12]
     )
     transcript = Transcript(session_dir)
+    # The operator's standing instructions are machine-wide, so a delegated
+    # slice inherits them for the same reason it inherits the goal: the parent
+    # authoring a task prompt is not a reliable channel for a preference the
+    # operator meant to apply everywhere. Re-read here rather than plumbed off
+    # the parent — children are built outside the factory, and this keeps the
+    # one source of truth in one function.
+    user_instructions = load_user_instructions()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
     mcp = _child_mcp_wiring(parent_session)
@@ -687,6 +694,7 @@ async def _build_child_session(
             _env_details(cwd),
             datetime.now().strftime("%Y-%m-%d"),
             goal=parent_session.goal,
+            user_instructions=user_instructions,
         )
 
     child = Session(

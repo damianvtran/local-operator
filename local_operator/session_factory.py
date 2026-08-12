@@ -390,6 +390,43 @@ def _env_details(cwd: str | None = None) -> str:
     )
 
 
+def load_user_instructions(agent_prompt: str = "") -> str:
+    """Read the operator's standing custom instructions for the system prompt.
+
+    Source of truth is ``<config_dir>/system_prompt.md`` — the same file the
+    desktop UI's Settings "Instructions" box and the
+    ``/v1/config/system-prompt`` endpoint write, so the three surfaces cannot
+    drift into separate notions of "custom instructions".
+
+    ``agent_prompt`` is the selected agent profile's own ``system_prompt.md``.
+    It is appended rather than allowed to replace the global file: an agent is
+    a specialization ("you review Python"), not a reason to forget the
+    operator's machine-wide preferences, and a profile that genuinely must
+    override one can say so in its own text.
+
+    Failures degrade instead of breaking startup: an unreadable file is
+    skipped, and undecodable bytes are REPLACED rather than dropping the whole
+    file, because a stray bad byte in a long instructions file should cost the
+    operator one glyph and not every preference they wrote. Either way a bad
+    edit never costs a session.
+    """
+    # Imported as an alias: ``config_dir`` is a local parameter name in two
+    # other functions here, and a module-level import of the same spelling
+    # would read like one of them.
+    from local_operator.paths import config_dir as app_config_dir
+
+    parts: list[str] = []
+    path = app_config_dir() / "system_prompt.md"
+    try:
+        if path.is_file():
+            parts.append(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        pass
+    if agent_prompt.strip():
+        parts.append(agent_prompt)
+    return "\n\n".join(part.strip() for part in parts if part.strip())
+
+
 def _build_variable_store(cwd: str, config_manager: ConfigManager) -> VariableStore:
     """Construct the session's VariableStore for the list/read variable
     tools. Config ``variables`` ride above the project file and environment;
@@ -640,6 +677,7 @@ def _make_system_blocks_provider(
     hooks: _KnowledgeHooks,
     cwd: str | None = None,
     goal_state: "GoalState | None" = None,
+    user_instructions: str = "",
 ) -> Callable[[], Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
@@ -652,6 +690,12 @@ def _make_system_blocks_provider(
     ``goal_state`` is the SAME holder the session facade exposes through
     ``set_goal``, which is how a ``/goal`` edit reaches the next turn's
     prompt without rebuilding the session.
+
+    ``user_instructions`` is captured once by the caller and closed over
+    rather than re-read here: it lands in the byte-stable head block, so
+    re-reading the file per turn would let a mid-session edit silently
+    invalidate the whole cached prefix. Editing the file takes effect on the
+    next session, which is also what makes a session's prompt reproducible.
     """
 
     async def provider() -> list[str]:
@@ -664,7 +708,14 @@ def _make_system_blocks_provider(
             knowledge_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
         goal = goal_state.text if goal_state is not None else ""
-        return build_system_blocks(tools, knowledge_block, _env_details(cwd), date_str, goal=goal)
+        return build_system_blocks(
+            tools,
+            knowledge_block,
+            _env_details(cwd),
+            date_str,
+            goal=goal,
+            user_instructions=user_instructions,
+        )
 
     return provider
 
@@ -827,8 +878,24 @@ async def _prepare(
     # One holder shared by the prompt provider and the session facade, so a
     # ``/goal`` change lands in the next turn without a session rebuild.
     goal_state = GoalState()
+    # Read once, at session construction: see the provider's docstring for why
+    # this must not be re-read per turn. A profile's own prompt is layered on
+    # top of the global file rather than replacing it.
+    agent_prompt = ""
+    if agent is not None:
+        try:
+            agent_prompt = agent_registry.get_agent_system_prompt(str(agent.id))
+        except (KeyError, OSError):
+            agent_prompt = ""
+    user_instructions = load_user_instructions(agent_prompt)
+
     system_blocks_provider = _make_system_blocks_provider(
-        tools, transcript, hooks, cwd=effective_cwd, goal_state=goal_state
+        tools,
+        transcript,
+        hooks,
+        cwd=effective_cwd,
+        goal_state=goal_state,
+        user_instructions=user_instructions,
     )
 
     session_kwargs: dict[str, Any] = dict(

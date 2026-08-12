@@ -1101,3 +1101,81 @@ async def test_configured_variables_reach_a_real_tool_call(
         assert "MY_CONFIG_VAR" in text, text
     finally:
         await session.dispose()
+
+
+# --- User custom instructions ----------------------------------------------
+
+
+def test_user_instructions_read_from_the_config_dir_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One source of truth: the same ``system_prompt.md`` the desktop UI and
+    the ``/v1/config/system-prompt`` endpoint write."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "system_prompt.md").write_text("- Use conventional commits.", encoding="utf-8")
+
+    assert session_factory.load_user_instructions() == "- Use conventional commits."
+
+
+def test_missing_instructions_file_is_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert session_factory.load_user_instructions() == ""
+
+
+def test_agent_prompt_appends_to_global_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An agent specializes behaviour; it must not silently discard the
+    # operator's machine-wide preferences.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "system_prompt.md").write_text("- Global rule.", encoding="utf-8")
+
+    combined = session_factory.load_user_instructions("- Agent rule.")
+
+    assert combined == "- Global rule.\n\n- Agent rule."
+
+
+def test_agent_prompt_alone_still_reaches_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert session_factory.load_user_instructions("- Agent rule.") == "- Agent rule."
+
+
+def test_unreadable_instructions_degrade_instead_of_breaking_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A bad file must never cost the operator their session.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "system_prompt.md").mkdir()  # a directory, not a readable file
+
+    assert session_factory.load_user_instructions() == ""
+
+
+@pytest.mark.asyncio
+async def test_instructions_are_frozen_for_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The head block is byte-stable for prompt caching, so a mid-session
+    edit must NOT change the running session's prompt."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    path = tmp_path / "system_prompt.md"
+    path.write_text("- Original rule.", encoding="utf-8")
+
+    provider = session_factory._make_system_blocks_provider(
+        [],
+        cast(Any, SimpleNamespace(records=[])),
+        session_factory._KnowledgeHooks(),
+        cwd=str(tmp_path),
+        user_instructions=session_factory.load_user_instructions(),
+    )
+    before = (await provider())[0]
+    path.write_text("- Edited mid-session.", encoding="utf-8")
+    after = (await provider())[0]
+
+    assert "- Original rule." in before
+    assert after == before
