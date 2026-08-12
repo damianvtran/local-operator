@@ -1202,15 +1202,12 @@ async def test_the_app_s_own_marker_stays_the_atomic_token(tmp_path) -> None:
 
         assert mine not in editor.text, "the app's marker was not atomic"
         assert "[Image #1, 10x2" not in editor.text, f"left a fragment: {editor.text!r}"
-        # The image SURVIVES, held by the copy that is still standing. That is
-        # D4's documented residual and it is the same rule D11 asked for from
-        # the other side: a citation of the number that the buffer still
-        # carries keeps the attachment alive. Releasing here would mean a
-        # delete silently drops an image while text citing it remains on
-        # screen, which is the worse failure direction. The chip moves with it,
-        # so what is chipped is still what is sent.
-        assert len(editor.referenced_images()) == 1, "the surviving citation lost the image"
-        assert editor._first_citation_columns(0) == {0}, "the surviving citation lost its chip"
+        # The image goes with it. Prose the user pasted must not become a live
+        # chipped attachment because something ELSE was deleted - reorder the
+        # two keystrokes and that is a typed marker resurrecting an image,
+        # which is the same D1 violation one door over (review round 23).
+        assert editor.referenced_images() == [], "a foreign citation inherited the image"
+        assert editor._first_citation_columns(0) == set(), "a foreign citation was chipped"
 
 
 @pytest.mark.asyncio
@@ -1223,8 +1220,9 @@ async def test_deleting_a_foreign_citation_leaves_the_live_image_alone(tmp_path)
     it was still standing in the buffer. The parent commit recovered from this
     state; guarding the pop on the marker text alone did not.
 
-    Both halves are needed: the token deleted must have BEEN the app's marker,
-    and no copy of it may survive.
+    The release is a union of two rules, and this is the case the second one
+    must NOT fire on: the token deleted was not the app's marker, and the app's
+    marker still resolves, so the image stays.
     """
     path = _png(tmp_path / "a.png", 10, 20)
     app = Host()
@@ -1402,3 +1400,138 @@ async def test_a_crlf_buffer_puts_the_chip_on_the_marker(tmp_path) -> None:
         assert editor._first_citation_columns(2) == {4}, "the chip is off the marker"
         assert editor._first_citation_columns(0) == set()
         assert editor._first_citation_columns(1) == set()
+
+
+@pytest.mark.asyncio
+async def test_a_typed_marker_cannot_inherit_an_image_by_deleting_the_real_one(tmp_path) -> None:
+    """Review round 23, P1 - the reorder that exposed an over-wide release.
+
+    `cite()` falls back to any citation of the number, so using it alone as the
+    release rule handed the image, the chip and the send to whatever else
+    mentioned that number when the app's own marker was deleted. Typed first
+    and deleted second, that is a bare `[Image #1]` the user wrote acquiring a
+    picture - the same resurrection the atomic path forbids, two keystrokes
+    apart.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        mine = editor.text.strip()
+
+        editor.selection = Selection.cursor((0, 0))
+        editor.insert("[Image #1] ")
+        await pilot.pause()
+        assert editor.text.startswith("[Image #1] "), "the fixture did not type a bare marker"
+
+        end = editor.text.index(mine) + len(mine)
+        editor.selection = Selection.cursor((0, end))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert mine not in editor.text, "the app's marker was not deleted"
+        assert editor.referenced_images() == [], "the typed marker inherited the image"
+        assert editor._first_citation_columns(0) == set(), "the typed marker was chipped"
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_selected_marker_releases_it_too(tmp_path) -> None:
+    """Review round 23, P3. The atomic path stands aside for a real selection,
+    so a selected marker was removed without the release ever being asked -
+    leaving the image held and resurrectable by typing `[Image #1]`. Same D1
+    violation as the atomic path had, through the door the selection guard
+    deliberately leaves open.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        mine = editor.text.strip()
+
+        editor.selection = Selection((0, 0), (0, len(mine)))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert mine not in editor.text, "the selection was not deleted"
+        assert editor._attachments == {}, "a selected marker left its image held"
+
+        editor.insert("[Image #1]")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "a typed marker resurrected the image"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_w_at_the_caret_a_paste_leaves_takes_the_whole_marker(tmp_path) -> None:
+    """Design round 22, D13 - the third door into round 16's D1.
+
+    A paste inserts `[Image #1, 10x20] ` WITH a trailing space, so the caret it
+    leaves is one column past the marker and the atomic check correctly finds
+    nothing there. Textual's word-delete then ate `] ` and stopped: the hanging
+    fragment this mechanism exists to prevent, plus an orphaned attachment that
+    any later `[Image #1]` revived, chipped and sent and receipted.
+
+    Pre-existing rather than a regression, and it never reaches
+    `_delete_marker`, so the release guard alone could not close it.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        assert editor.text.endswith(" "), "the fixture lost the trailing space"
+
+        await pilot.press("ctrl+w")
+        await pilot.pause()
+
+        assert "[Image #" not in editor.text, f"left a fragment: {editor.text!r}"
+        assert editor._attachments == {}, "ctrl+w orphaned the attachment"
+
+        editor.insert("what is in [Image #1] please")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "a typed marker revived the image"
+        assert editor._first_citation_columns(0) == set(), "a typed marker was chipped"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_w_still_takes_a_word_when_no_marker_is_behind_it(tmp_path) -> None:
+    """The whitespace-crossing rule is for ctrl+w only, and only when a marker
+    is actually what it would reach. Ordinary prose must delete a word."""
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.insert("hello world ")
+        await pilot.pause()
+        await pilot.press("ctrl+w")
+        await pilot.pause()
+        assert editor.text == "hello ", f"ctrl+w did not take one word: {editor.text!r}"
+
+
+@pytest.mark.asyncio
+async def test_backspace_past_a_marker_s_space_still_takes_the_space(tmp_path) -> None:
+    """Backspace does NOT cross whitespace. At the caret a paste leaves, the
+    character before really is a space, and eating the whole marker instead
+    would be a surprise - only a word-delete has said it will cross a run."""
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        marker = editor.text.rstrip()
+
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert editor.text == marker, "backspace ate more than the trailing space"
+        assert len(editor.referenced_images()) == 1, "backspace released a cited image"

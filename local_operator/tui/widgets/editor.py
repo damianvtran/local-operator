@@ -1006,10 +1006,9 @@ class Editor(TextArea):
         # what the text no longer cites is no longer sent, so removing the
         # reference has to remove the payload rather than orphan it.
         #
-        # Measured AFTER the delete, by the SAME predicate that decides the chip,
-        # the atomic gate and the send: what the buffer can no longer cite is no
-        # longer held. Three narrower guards were tried here and each was wrong
-        # in a way the next round found:
+        # Measured AFTER the delete, and the guard is a UNION because the two
+        # halves answer different questions. Four narrower rules were tried and
+        # each was wrong in a way the next round found:
         #
         # - On the NUMBER: a foreign citation - a copy of a different prompt's
         #   marker - inherited an attachment it never named (design round 19).
@@ -1019,32 +1018,103 @@ class Editor(TextArea):
         # - On the deleted TOKEN matching the marker: editing the tail first
         #   made the token differ, so the pop was skipped and the attachment
         #   leaked - then hand-typing any `[Image #1...]` resurrected it, which
-        #   is exactly what design round 16's D1 forbids (round 22).
+        #   design round 16's D1 forbids (round 22).
+        # - On `cite` ALONE: its fallback resolves any citation of the number,
+        #   so deleting the app's own marker handed the image, the chip and the
+        #   send to whatever else mentioned that number - reachable by typing a
+        #   bare `[Image #1]` and then deleting the real marker, which is the
+        #   previous bullet's forbidden state two keystrokes apart (round 23).
         #
-        # `cite` answers all three at once because it is the same question:
-        # D6's exact duplicate still resolves and keeps the image, D11's app
-        # marker still resolves and keeps it, and a tail-edited marker deleted
-        # with nothing else citing the number resolves to nothing and releases.
+        # So: release when the buffer can no longer cite this attachment AT ALL,
+        # OR when the token just deleted was the app's own marker and no copy of
+        # it survives. D6's exact duplicate fails both and keeps the image.
         if match is not None:
-            index = int(match.group(1))
-            attachment = self._attachments.get(index)
-            if attachment is not None and cite(self.text, index, attachment) == -1:
-                del self._attachments[index]
+            self._release_deleted(int(match.group(1)), match.group(0))
         return True
+
+    def _release_deleted(self, index: int, token: str) -> None:
+        """Apply the release rule to a marker that was just removed as a token."""
+        attachment = self._attachments.get(index)
+        if attachment is not None and (
+            cite(self.text, index, attachment) == -1
+            or (token == attachment.marker and attachment.marker not in self.text)
+        ):
+            del self._attachments[index]
+
+    def _delete_marker_past_spaces(self, *, before: bool) -> bool:
+        """Delete the marker separated from the caret only by spaces.
+
+        For ctrl+w, and only for ctrl+w. A paste inserts ``[Image #1, 10x20] ``
+        WITH a trailing space, so the caret it leaves is one column past the
+        marker's end and :meth:`_marker_span` - which asks about the character
+        the caret is touching - correctly finds nothing. Textual's word-delete
+        then ate ``] `` and stopped, rebuilding the hanging fragment this whole
+        mechanism exists to prevent AND orphaning the attachment, which any
+        later ``[Image #1]`` revived (design round 22, D13).
+
+        Backspace and delete deliberately do NOT come through here: at that
+        caret the character before really is a space, and eating a whole marker
+        instead of it would be a surprise. A word-delete has already said it
+        will cross whitespace to find the thing it removes.
+        """
+        if self.selection.start != self.selection.end:
+            return False
+        row, column = self.selection.end
+        line = self.document.get_line(row)
+        edge = column
+        while edge > 0 and line[edge - 1] == " ":
+            edge -= 1
+        if edge == column:
+            return False  # no whitespace to cross; the plain check already ran
+        span = self._marker_span(row, edge, before=before)
+        if span is None:
+            return False
+        start, end = span
+        match = IMAGE_MARKER.match(line[start:end])
+        # The spaces go with it: ctrl+w removes the word AND the run it crossed.
+        self.delete((row, start), (row, column), maintain_selection_offset=False)
+        if match is not None:
+            self._release_deleted(int(match.group(1)), match.group(0))
+        return True
+
+    def _release_uncited(self) -> None:
+        """Drop attachments the buffer can no longer cite at all.
+
+        For the delete keys ONLY, and only when :meth:`_delete_marker` stood
+        aside. A real selection is the user's own range, so the atomic path
+        refuses to widen it - which meant selecting a marker and pressing
+        backspace removed the text without ever asking the release question,
+        leaving the image held and resurrectable by a typed `[Image #1]`
+        (review round 23). Same D1 violation as the atomic path had, through a
+        different door.
+
+        Deliberately NOT called from :meth:`edit`, where every buffer mutation
+        funnels: a marker is momentarily unparseable while the user types
+        through it, and releasing there would make an ordinary keystroke
+        destroy an attachment that the next keystroke restores the text for.
+        Delete keys are the one place the user has said "remove this".
+        """
+        for index, attachment in list(self._attachments.items()):
+            if cite(self.text, index, attachment) == -1:
+                del self._attachments[index]
 
     def action_delete_left(self) -> None:
         if not self._delete_marker(before=True):
             super().action_delete_left()
+            self._release_uncited()
 
     def action_delete_right(self) -> None:
         if not self._delete_marker(before=False):
             super().action_delete_right()
+            self._release_uncited()
 
     def action_delete_word_left(self) -> None:
         # A marker is ONE word for this purpose too: ctrl+w stopping inside it
         # leaves the same broken fragment backspace used to.
-        if not self._delete_marker(before=True):
-            super().action_delete_word_left()
+        if self._delete_marker(before=True) or self._delete_marker_past_spaces(before=True):
+            return
+        super().action_delete_word_left()
+        self._release_uncited()
 
     # -- attachment markers as painted objects --------------------------------
     def _first_citation_columns(self, line_index: int) -> set[int]:
