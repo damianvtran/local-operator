@@ -33,7 +33,7 @@ from local_operator.harness.types import (
     RenderedStreamError,
     StreamEvent,
 )
-from local_operator.model.effort import resolve_effort, supported_efforts
+from local_operator.model.effort import resolve_effort
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess
@@ -730,37 +730,28 @@ def _same_credential_retry_allowed(
     return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_USAGE_RETRIES)
 
 
-def _normalize_chain_entry(entry: Any, chain_key: str) -> str | None:
-    """One fallback-chain entry as a ``provider/model`` selector, or ``None``.
+def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
+    """One fallback-chain entry, checked and returned in its own shape.
 
-    The declared shape is a list of selector STRINGS, and until this existed
-    that shape was assumed rather than checked: ``from_settings`` validated
-    that ``fallbackChains`` was a mapping and then trusted everything inside
-    it. A config written with structured entries —
+    The declared shape is a list of ``provider/model`` selector strings, and
+    until this existed that shape was assumed rather than checked: a config
+    written with structured entries parsed cleanly, resolved cleanly, and then
+    died in the expansion with ``'dict' object has no attribute 'endswith'``.
+    Not at startup, where a config error belongs: on EVERY turn, because that
+    is the first moment a fallback chain is walked.
 
-    .. code-block:: yaml
+    So a mapping is accepted rather than rejected. Two forms are honoured:
 
-        fallbackChains:
-          anthropic/claude-opus-5:
-            - provider: anthropic
-              model: claude-opus-5
-            - provider: openai
-              model: gpt-5.4
+    - ``{provider, model}`` becomes the selector string, which is all it ever
+      meant;
+    - a mapping that ALSO carries ``effort`` - the "retry cheaper on failure"
+      form - is a real routing decision the chain's (selector, effort) shape
+      now supports, so it is passed through untouched for :func:`_fallback_target`
+      to validate. Flattening it to a selector would silently discard the one
+      key that makes the entry mean something different.
 
-    — parsed cleanly, resolved cleanly, and then died in
-    :func:`expand_fallback_candidates` with ``'dict' object has no attribute
-    'endswith'``. Not at startup, where a config error belongs: on EVERY turn,
-    because that is the first moment a fallback chain is walked. The user sees
-    one red line naming a string method and no way to connect it to a YAML
-    block they wrote weeks ago.
-
-    So the mapping form is accepted and normalized rather than rejected. It
-    carries exactly the information the selector does, the intent is
-    unambiguous, and refusing it would turn a crash into silence — the same
-    config, still not doing what it says, just quietly.
-
-    ``None`` means "not something this can turn into a selector"; the caller
-    warns and drops that entry rather than letting it reach the wire.
+    ``None`` means "not something this can turn into an entry"; the caller
+    warns and drops it rather than letting it reach the wire.
     """
     if isinstance(entry, str):
         return entry.strip() or None
@@ -769,30 +760,14 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> str | None:
         model = str(entry.get("model", entry.get("model_id", "")) or "").strip()
         if provider and model:
             extra = sorted(set(entry) - {"provider", "model", "model_id"})
+            if extra == ["effort"]:
+                return dict(entry)
             if extra:
-                # Named rather than swallowed. A chain entry that silently
-                # drops half of what the user wrote is the next bug report,
-                # and `effort` in particular reads like it should re-tier the
-                # fallback.
-                #
-                # It is STILL not honoured now that ``ModelSpec`` has a
-                # ``reasoning_effort``, and the reason is the chain's SHAPE
-                # rather than the missing field. A chain is a flat list of
-                # selector strings deduped by selector, so there is nowhere to
-                # attach a per-attempt level: the config that motivated the key
-                # lists the same model twice at two efforts, and honouring that
-                # needs the dedupe key to become (selector, effort). That is a
-                # fallback-policy feature — "retry cheaper on failure" — with a
-                # design of its own, not a spare field on this one.
-                #
-                # Validation is NOT the obstacle, and an earlier version of this
-                # comment wrongly said it was: a level would be clamped at hop
-                # time by :func:`spec_for_selector`, after a wildcard has been
-                # materialised into a concrete model, exactly as the user's own
-                # chosen level already is.
+                # Named rather than swallowed: a chain entry that silently
+                # drops half of what the user wrote is the next bug report.
                 logger.warning(
                     "retry.fallbackChains[%s]: ignoring unsupported key(s) %s on entry %s/%s"
-                    " — only provider/model are honoured",
+                    " - only provider, model and effort are honoured",
                     chain_key,
                     ", ".join(extra),
                     provider,
@@ -802,8 +777,10 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> str | None:
     return None
 
 
-def _normalize_chains(chains: Mapping[str, Any]) -> dict[str, list[str]]:
-    """Coerce the configured chains to ``{selector: [selector, ...]}``.
+def _normalize_chains(chains: Mapping[str, Any]) -> dict[str, list[Any]]:
+    """Coerce the configured chains to ``{key: [entry, ...]}``, selector strings
+    where that is what was written and structured entries where an ``effort``
+    made the mapping load-bearing.
 
     Follows the convention the session factory uses for its compaction block:
     a malformed value degrades with a warning and never blocks. A bad chain is
@@ -820,11 +797,11 @@ def _normalize_chains(chains: Mapping[str, Any]) -> dict[str, list[str]]:
             continue
         entries = []
         for entry in raw:
-            selector = _normalize_chain_entry(entry, key)
-            if selector is None:
+            kept = _normalize_chain_entry(entry, key)
+            if kept is None:
                 logger.warning("retry.fallbackChains[%s]: ignoring unreadable entry %r", key, entry)
                 continue
-            entries.append(selector)
+            entries.append(kept)
         if entries:
             normalized[key] = entries
     return normalized
@@ -963,7 +940,14 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
         update={
             "temperature": base.temperature,
             "top_p": base.top_p,
-            "reasoning_effort": target.effort or resolve_effort(model_id, base.reasoning_effort),
+            "reasoning_effort": (
+                target.effort
+                if target.effort is not None
+                # Clamped to the nearest rung rather than dropped or defaulted: see
+                # `resolve_effort` for why "the model's default" silently inverts
+                # a `none`, and why clamping preserves the direction of the ask.
+                else resolve_effort(model_id, base.reasoning_effort or target_spec.reasoning_effort)
+            ),
         }
     )
 
@@ -1224,7 +1208,8 @@ async def stream_with_failover(
                     yield event
                 if route_state is not None and target == primary_target:
                     route_state.clear()
-                return  # clean completion
+                if buffered is None:
+                    return  # clean completion; a buffered stream flushes below
             except asyncio.CancelledError:
                 raise
             except ProviderError as exc:

@@ -47,6 +47,7 @@ ECHO_POLICY = {
     # is now in force and the band carries it from then on.
     "effort": False,
     "provider": False,
+    "search": False,
     "accounts": False,
     "usage": False,
     "goal": True,

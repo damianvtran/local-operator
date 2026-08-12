@@ -1093,11 +1093,15 @@ def test_openai_compat_markers_gate_on_cache_support():
 
 
 def test_reasoning_effort_reaches_openai_and_anthropic_wires() -> None:
+    # The ladder is declared on both specs: `_reasoning_effort` refuses a level
+    # the model does not accept, so a spec that names one but never lists it is
+    # sent no key at all.
     openai_spec = ModelSpec(
         provider="openai",
         model_id="gpt-5.3-codex",
         reasoning=True,
         reasoning_effort="high",
+        reasoning_efforts=("low", "medium", "high", "xhigh"),
         supports_sampling_params=False,
     )
     request = ChatRequest(model=openai_spec, messages=[Message.user("hi")])
@@ -1110,6 +1114,7 @@ def test_reasoning_effort_reaches_openai_and_anthropic_wires() -> None:
         model_id="claude-opus-5",
         reasoning=True,
         reasoning_effort="max",
+        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
         supports_sampling_params=False,
     )
     anthropic = AnthropicClient()

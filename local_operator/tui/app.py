@@ -974,16 +974,6 @@ class OperatorApp(App[None]):
         session.set_approval_handler(self.request_tool_approval)
         self._controller = EventController(session, self)
         self._controller.subscribe()
-        # The app is already painted and subscribed, so quota I/O cannot delay
-        # first paint and any warning lands in the transcript. This is an
-        # optional session capability so lightweight hosts do not need to fake
-        # network preflight; failure must never become another startup gate.
-        usage_preflight = getattr(session, "preflight_usage", None)
-        if callable(usage_preflight):
-            try:
-                await cast(Callable[[], Awaitable[None]], usage_preflight)()
-            except Exception:
-                pass
         assert self._status is not None
         self._status.update(
             model_label=session.model_label,
@@ -997,6 +987,27 @@ class OperatorApp(App[None]):
         self._render_resumed_history(session)
         self._measure_preloaded_context(session)
 
+    async def _preflight_usage(self, session: Any) -> None:
+        """Warm the provider's quota reading once the app is already painted.
+
+        Runs AFTER :meth:`_adopt_session`, which is subscribed and on screen, so
+        quota I/O cannot delay first paint and any warning lands in the
+        transcript. An optional session capability, so lightweight hosts need
+        not fake network preflight; failure must never become another startup
+        gate, hence the bare catch.
+
+        Separate from ``_adopt_session`` because that one is SYNCHRONOUS and is
+        also called from the swap path — awaiting inside it is what the merge of
+        this feature first tried, and it does not compile.
+        """
+        usage_preflight = getattr(session, "preflight_usage", None)
+        if not callable(usage_preflight):
+            return
+        try:
+            await cast(Callable[[], Awaitable[None]], usage_preflight)()
+        except Exception:
+            pass
+
     async def _boot_session(self) -> None:
         """Await the session factory; on failure surface + offer /reload."""
         try:
@@ -1005,6 +1016,7 @@ class OperatorApp(App[None]):
             self._on_boot_failed(error)
             return
         self._adopt_session(session)
+        await self._preflight_usage(session)
 
     def _measure_preloaded_context(self, session: Any) -> None:
         """Fill the context segment before the first turn, off the boot path.
@@ -1361,6 +1373,7 @@ class OperatorApp(App[None]):
             else:
                 carried_spend = self._reset_ledger_for_swap()
                 self._adopt_session(session)
+                await self._preflight_usage(session)
         finally:
             self._swapping_session = False
             if self._welcome_pending:
@@ -4293,7 +4306,7 @@ class OperatorApp(App[None]):
                         ),
                     ]
                 )
-                self._append_block(RichBlock(_tree_listing(items)))
+                self._append_block(RichBlock(_tree_listing(items, "web search")))
                 return
 
             command = words[0].lower()
