@@ -98,7 +98,17 @@ _PATH_SEGMENT = re.compile(r"^(?:~|\.{0,2}/|/)")
 #: Also the ATOMIC unit for editing: backspace and delete take the whole marker
 #: rather than a bracket, because a half-eaten ``[Image #2, 1568x20`` is neither
 #: text the user meant nor a reference anything can resolve.
-IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n]*)?\]")
+#:
+#: The tail excludes ``[`` as well as ``]``: the app only ever writes ``WxH``
+#: there, so a bracket inside one can only mean the tail ran past its own
+#: marker into the next. Without that, deleting the closing bracket of a stale
+#: marker sitting in front of a live one merged the pair into a single match
+#: whose start is not where the live marker begins - the chip vanished for ten
+#: keystrokes of an ordinary cleanup while the image stayed attached and sent,
+#: and the live marker dropped out of the atomic set (design round 20, D12).
+#: It also states the assumption `cite`'s ``str.find`` already relies on: a
+#: marker cannot contain another marker.
+IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n\[]*)?\]")
 
 
 def _marker_indices(text: str) -> list[int]:
@@ -922,17 +932,36 @@ class Editor(TextArea):
         Standing INSIDE counts for both. A caret in the middle of
         ``[Image #2, 15|68x200]`` is not editing text the user typed — there is
         nothing meaningful to change one character of — so either key takes the
-        whole token. That is the reported bug: backspace there removed the
-        closing bracket and left ``[Image #2, 1568x20`` hanging, which is
-        neither prose nor a resolvable reference.
+        whole token.
 
-        Only markers the painter CHIPS are atomic. A marker rendered as prose —
-        a number that resolves to nothing, or a second citation of one that
-        does — is text as far as the frame is concerned, and a click that
-        selected all nineteen characters of it, or a backspace that swallowed
-        them whole, made the gesture disagree with the paint (design round 18,
-        D7). One predicate now drives all three: what is chipped is what is
-        atomic, and what is chipped is what is sent.
+        Which markers get that treatment is the whole subtlety, and the two
+        rules below read like a contradiction until you see what separates
+        them: **the fragment is forbidden for text the app wrote, and permitted
+        for text that merely looks like it.**
+
+        - The app's own marker is ATOMIC. Backspace inside it used to remove
+          the closing bracket and leave ``[Image #2, 1568x20`` hanging, which
+          is neither prose nor a resolvable reference — the originally reported
+          bug, and still the reason this method exists.
+        - Anything else is PROSE, and editable one character at a time, even
+          though it matches the same grammar. A number that resolves to
+          nothing, or a second citation of one that does, is text as far as the
+          frame is concerned; a click that selected all nineteen characters of
+          it made the gesture disagree with the paint (design round 18, D7).
+          Leaving a fragment there is not a defect: the user is editing their
+          own text and we have no claim on it.
+
+        So the chip, this gate and :func:`resolve_markers` are one predicate —
+        what is chipped is what is atomic is what is sent — and ``cite()``
+        decides it in one place.
+
+        The honest caveat, because a reader will otherwise find it from a
+        frame: the app's marker leaves the protected set whenever ``cite()``
+        falls back. Edit the tail of the app's own marker while a copy of that
+        number is also in the draft and the fallback hands the chip, and this
+        gate, to the copy — so the app's marker becomes prose and CAN be
+        fragmented (design round 20, D4 residual, ``d4w``). That is the known
+        cost of keeping the tail loosely matched; see :func:`cite`.
         """
         line = self.document.get_line(row)
         if "[" not in line:
@@ -987,11 +1016,21 @@ class Editor(TextArea):
         # - But a FOREIGN citation of the same number - a copy of a different
         #   prompt's marker, pasted in - is not the user keeping this image.
         #   Guarding on the number let it inherit an attachment it never named
-        #   (design round 19). Guarding on the text does not.
+        #   (design round 19).
+        #
+        # Hence BOTH halves: the token just deleted has to have been the app's
+        # own marker, AND no copy of it may survive. Guarding on the text alone
+        # was worse than the bug it fixed - deleting the stale copy that
+        # `cite`'s fallback had chipped took the live image with it, while the
+        # marker naming it was still standing in the buffer (round 20, D11).
         if match is not None:
             index = int(match.group(1))
             attachment = self._attachments.get(index)
-            if attachment is not None and attachment.marker not in self.text:
+            if (
+                attachment is not None
+                and match.group(0) == attachment.marker
+                and attachment.marker not in self.text
+            ):
                 del self._attachments[index]
         return True
 

@@ -1203,3 +1203,126 @@ async def test_the_app_s_own_marker_stays_the_atomic_token(tmp_path) -> None:
         assert mine not in editor.text, "the app's marker was not atomic"
         assert "[Image #1, 10x2" not in editor.text, f"left a fragment: {editor.text!r}"
         assert editor.referenced_images() == [], "the image outlived its marker"
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_foreign_citation_leaves_the_live_image_alone(tmp_path) -> None:
+    """Design round 20, D11 - a regression the previous commit introduced.
+
+    When `cite()` falls back it can chip a copy of another prompt's marker, and
+    the atomic gate follows the chip - so one backspace deleted that stale
+    reference and took THIS turn's screenshot with it, while the marker naming
+    it was still standing in the buffer. The parent commit recovered from this
+    state; guarding the pop on the marker text alone did not.
+
+    Both halves are needed: the token deleted must have BEEN the app's marker,
+    and no copy of it may survive.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        editor.selection = Selection.cursor((0, 0))
+        await _paste(app, pilot, "look at [Image #1, 1568x200] ")
+        await pilot.pause()
+
+        # Edit the tail of the app's OWN marker, so cite() falls back and the
+        # stale copy takes the chip.
+        own = editor.text.rindex("[Image #1")
+        editor.selection = Selection.cursor((0, own + len("[Image #1, 1")))
+        await pilot.press("9")
+        await pilot.pause()
+        stale_end = editor.text.index("]") + 1
+        editor.selection = Selection.cursor((0, stale_end))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert "1568x200" not in editor.text, "the stale reference was not deleted"
+        assert len(editor.referenced_images()) == 1, "deleting stale text dropped the live image"
+
+
+@pytest.mark.asyncio
+async def test_a_half_deleted_stale_marker_cannot_swallow_a_live_one(tmp_path) -> None:
+    """Design round 20, D12. A marker's tail cannot contain another marker.
+
+    The stale copy is prose, so backspace takes one character - and the first
+    character is its closing bracket. With `[` allowed in the tail, the
+    unterminated `[Image #1, 1568x200` then matched all the way through the
+    LIVE marker's bracket as one token, whose start is nowhere `cite()` points:
+    the chip vanished for ten keystrokes of an ordinary cleanup while the image
+    stayed attached and on the wire, and the live marker left the atomic set.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        editor.selection = Selection.cursor((0, 0))
+        await _paste(app, pilot, "look at [Image #1, 1568x200] ")
+        await pilot.pause()
+
+        # Sweep the whole cleanup. The chip must never disappear while the
+        # image is still being sent - that is the commit's headline invariant.
+        stale = "[Image #1, 1568x200]"
+        editor.selection = Selection.cursor((0, editor.text.index(stale) + len(stale)))
+        await pilot.pause()
+        for keystroke in range(1, len(stale) + 1):
+            # The caret walks left on its own; re-seeking `]` would find the
+            # LIVE marker's bracket once the stale one is gone.
+            await pilot.press("backspace")
+            await pilot.pause()
+            painted = [span for y in range(3) for span in editor._marker_cells(y)]
+            sent = len(editor.referenced_images())
+            assert bool(painted) == bool(sent), (
+                f"after {keystroke} backspaces: chipped {bool(painted)}, sent {sent} "
+                f"- {editor.text!r}"
+            )
+
+
+@pytest.mark.asyncio
+async def test_editing_the_dimensions_does_not_orphan_the_draft(tmp_path) -> None:
+    """`cite()` falls back to the number on purpose: the tail is a label for the
+    user, matched loosely so retyping it cannot strand the attachment. Keying
+    only on the exact text would reverse that, and nothing else notices -
+    reducing `cite()` to `find` left all 1285 TUI tests green (review round 21).
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        editor.text = "[Image #1, 10x21] edited by hand"
+        await pilot.pause()
+
+        assert len(editor.referenced_images()) == 1, "an edited tail orphaned the attachment"
+        assert editor._first_citation_columns(0) == {0}, "an edited tail lost its chip"
+
+
+@pytest.mark.asyncio
+async def test_the_chip_lands_on_the_row_and_column_that_carries_it(tmp_path) -> None:
+    """`cite()` answers in whole-buffer offsets and the painter wants columns,
+    so `_first_citation_columns` converts. Every other marker test sits on
+    line 0, where that conversion is the identity - so both terms of the
+    arithmetic were unpinned (review round 21).
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        mine = editor.text.strip()
+        editor.text = f"line one\nline two\nabc {mine} here"
+        await pilot.pause()
+
+        assert editor._first_citation_columns(0) == set(), "a chip leaked onto an earlier row"
+        assert editor._first_citation_columns(1) == set(), "a chip leaked onto an earlier row"
+        assert editor._first_citation_columns(2) == {4}, "the chip landed on the wrong column"
