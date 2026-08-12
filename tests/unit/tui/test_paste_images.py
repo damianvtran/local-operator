@@ -1202,7 +1202,15 @@ async def test_the_app_s_own_marker_stays_the_atomic_token(tmp_path) -> None:
 
         assert mine not in editor.text, "the app's marker was not atomic"
         assert "[Image #1, 10x2" not in editor.text, f"left a fragment: {editor.text!r}"
-        assert editor.referenced_images() == [], "the image outlived its marker"
+        # The image SURVIVES, held by the copy that is still standing. That is
+        # D4's documented residual and it is the same rule D11 asked for from
+        # the other side: a citation of the number that the buffer still
+        # carries keeps the attachment alive. Releasing here would mean a
+        # delete silently drops an image while text citing it remains on
+        # screen, which is the worse failure direction. The chip moves with it,
+        # so what is chipped is still what is sent.
+        assert len(editor.referenced_images()) == 1, "the surviving citation lost the image"
+        assert editor._first_citation_columns(0) == {0}, "the surviving citation lost its chip"
 
 
 @pytest.mark.asyncio
@@ -1326,3 +1334,71 @@ async def test_the_chip_lands_on_the_row_and_column_that_carries_it(tmp_path) ->
         assert editor._first_citation_columns(0) == set(), "a chip leaked onto an earlier row"
         assert editor._first_citation_columns(1) == set(), "a chip leaked onto an earlier row"
         assert editor._first_citation_columns(2) == {4}, "the chip landed on the wrong column"
+
+
+@pytest.mark.asyncio
+async def test_an_edited_marker_deleted_cannot_be_resurrected_by_typing(tmp_path) -> None:
+    """Review round 22 - a regression the previous commit introduced.
+
+    Guarding the pop on the deleted TOKEN matching the app's marker meant a
+    tail edit first made the token differ, so the pop was skipped: the marker
+    went, the attachment stayed in the map, and hand-typing any `[Image #1]`
+    afterwards brought the picture back - chipped, sent, receipted. That is
+    precisely what design round 16's D1 exists to forbid, since the user typed
+    that marker and nothing was ever attached to it.
+
+    The release now asks the one question the chip and the send ask: can the
+    buffer still cite this attachment?
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        # Type inside the tail - insertion is not gated, so this is reachable.
+        editor.selection = Selection.cursor((0, len("[Image #1, 10x2")))
+        await pilot.press("9")
+        await pilot.pause()
+        assert "10x290" in editor.text, "the fixture did not edit the tail"
+
+        editor.selection = Selection.cursor((0, editor.text.index("]") + 1))
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert "[Image #" not in editor.text, "the marker was not deleted"
+        assert editor._attachments == {}, "the attachment leaked past its marker"
+
+        editor.insert("[Image #1]")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "a typed marker resurrected the image"
+        assert editor._first_citation_columns(0) == set(), "a typed marker was chipped"
+
+
+@pytest.mark.asyncio
+async def test_a_crlf_buffer_puts_the_chip_on_the_marker(tmp_path) -> None:
+    """Review round 22. `self.text` joins with the DOCUMENT's separator.
+
+    The offset-to-column conversion assumed one character per line break, so a
+    CRLF buffer - which a paste can carry in - shifted the chip one cell per
+    preceding line. Two lines above the marker put it two cells off, painting
+    the prose beside it and leaving the marker's own opening bracket bare.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        mine = editor.text.strip()
+        saved = editor.attachments()
+        editor.load_text(f"line one\r\nline two\r\nabc {mine} here")
+        editor.adopt_attachments(saved)
+        await pilot.pause()
+
+        assert editor.document.newline == "\r\n", "the fixture did not produce a CRLF buffer"
+        assert editor._first_citation_columns(2) == {4}, "the chip is off the marker"
+        assert editor._first_citation_columns(0) == set()
+        assert editor._first_citation_columns(1) == set()

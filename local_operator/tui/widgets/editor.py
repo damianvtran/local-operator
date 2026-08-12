@@ -1006,31 +1006,29 @@ class Editor(TextArea):
         # what the text no longer cites is no longer sent, so removing the
         # reference has to remove the payload rather than orphan it.
         #
-        # Measured AFTER the delete, against the whole buffer, and against the
-        # APP'S OWN marker text rather than the number. Two reasons, and they
-        # pull in opposite directions:
+        # Measured AFTER the delete, by the SAME predicate that decides the chip,
+        # the atomic gate and the send: what the buffer can no longer cite is no
+        # longer held. Three narrower guards were tried here and each was wrong
+        # in a way the next round found:
         #
-        # - A number can be written twice, so dropping the image because one
-        #   citation went detached the picture the other still named (design
-        #   round 18, D6). An exact duplicate of the app's marker keeps it.
-        # - But a FOREIGN citation of the same number - a copy of a different
-        #   prompt's marker, pasted in - is not the user keeping this image.
-        #   Guarding on the number let it inherit an attachment it never named
-        #   (design round 19).
+        # - On the NUMBER: a foreign citation - a copy of a different prompt's
+        #   marker - inherited an attachment it never named (design round 19).
+        # - On the marker TEXT: deleting the stale copy that `cite`'s fallback
+        #   had chipped took the live image with it, while the marker naming it
+        #   was still in the buffer (round 20, D11).
+        # - On the deleted TOKEN matching the marker: editing the tail first
+        #   made the token differ, so the pop was skipped and the attachment
+        #   leaked - then hand-typing any `[Image #1...]` resurrected it, which
+        #   is exactly what design round 16's D1 forbids (round 22).
         #
-        # Hence BOTH halves: the token just deleted has to have been the app's
-        # own marker, AND no copy of it may survive. Guarding on the text alone
-        # was worse than the bug it fixed - deleting the stale copy that
-        # `cite`'s fallback had chipped took the live image with it, while the
-        # marker naming it was still standing in the buffer (round 20, D11).
+        # `cite` answers all three at once because it is the same question:
+        # D6's exact duplicate still resolves and keeps the image, D11's app
+        # marker still resolves and keeps it, and a tail-edited marker deleted
+        # with nothing else citing the number resolves to nothing and releases.
         if match is not None:
             index = int(match.group(1))
             attachment = self._attachments.get(index)
-            if (
-                attachment is not None
-                and match.group(0) == attachment.marker
-                and attachment.marker not in self.text
-            ):
+            if attachment is not None and cite(self.text, index, attachment) == -1:
                 del self._attachments[index]
         return True
 
@@ -1064,7 +1062,12 @@ class Editor(TextArea):
         line = self.document.get_line(line_index)
         # Document offset of this line's first column, so a citation found in
         # whole-buffer coordinates can be tested against this row.
-        base = sum(len(self.document.get_line(row)) + 1 for row in range(line_index))
+        # `+ len(newline)`, not `+ 1`: `self.text` joins with the document's OWN
+        # separator, and a CRLF buffer - which a paste can carry in - shifted
+        # every offset by one per preceding line, putting the chip two cells off
+        # the marker it belongs to (review round 22).
+        separator = len(self.document.newline)
+        base = sum(len(self.document.get_line(row)) + separator for row in range(line_index))
         text = self.text
         columns: set[int] = set()
         for index, attachment in self._attachments.items():
