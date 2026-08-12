@@ -26,6 +26,7 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol
 
 from rich.console import Group
@@ -2024,7 +2025,7 @@ class OperatorApp(App[None]):
             # ``/usage`` panel over a screen with no splash and no ledger.
             self._run_slash_command(text)
             return
-        self._submit_prompt(text, images)
+        self._submit_prompt(text, images, message.attachments)
 
     def on_editor_quit(self, message: EditorQuit) -> None:
         self.exit()
@@ -2725,7 +2726,12 @@ class OperatorApp(App[None]):
         if self._session is not None:
             await self._session.dispose()
 
-    def _submit_prompt(self, text: str, images: list[ImageContent] | None = None) -> None:
+    def _submit_prompt(
+        self,
+        text: str,
+        images: list[ImageContent] | None = None,
+        attachments: Mapping[int, ImageContent] | None = None,
+    ) -> None:
         images = images or []
         self._append_block(UserBlock(text, len(images)))
         if self._session is None:
@@ -2770,7 +2776,11 @@ class OperatorApp(App[None]):
             # minutes and then sent the words without the screenshot would be
             # worse than not queueing at all.
             self._prompt_held_for_compaction = text
-            self._images_held_for_compaction = self._editor().attachments()
+            # From the MESSAGE, not from the widget: the composer clears itself
+            # synchronously after posting and Textual delivers on a later tick,
+            # so re-reading it here saw an empty map and queued the prompt
+            # without its screenshot (review round 19).
+            self._images_held_for_compaction = dict(attachments or {})
             self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
             self._maybe_name_conversation(text)
             return

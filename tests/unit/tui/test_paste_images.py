@@ -999,3 +999,121 @@ async def test_clearing_the_buffer_releases_the_stashed_draft_images(tmp_path) -
 
         assert editor._attachments == {}
         assert editor._draft_attachments == {}, "a stashed draft image outlived its draft"
+
+
+@pytest.mark.asyncio
+async def test_a_marker_arriving_as_text_does_not_get_its_number_reissued(tmp_path) -> None:
+    """Design round 18 D4 / review round 19. Markers arrive as TEXT.
+
+    Drag-copying a prompt out of the transcript and pasting it back to re-run
+    it is a gesture this branch built, and the copy carries `[Image #1, ...]`
+    verbatim. No replacement seam sees that text, so issuance was the one
+    consumer of the counter that could hand out a number already on screen: the
+    chip landed on last turn's marker and the real attachment rendered as prose
+    advertising the wrong dimensions.
+    """
+    path = _png(tmp_path / "a.png", 30, 40)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        # Exactly what the transcript copy puts on the clipboard.
+        await _paste(app, pilot, "[Image #1, 10x20] rerun this")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "pasted text attached something"
+        await _paste(app, pilot, path)
+
+        numbers = [int(m.group(1)) for m in IMAGE_MARKER.finditer(editor.text)]
+        assert numbers == [1, 2], f"the number was re-issued: {editor.text}"
+        images = editor.referenced_images()
+        assert len(images) == 1
+        assert Image.open(io.BytesIO(base64.b64decode(images[0].data))).size == (30, 40)
+
+
+@pytest.mark.asyncio
+async def test_a_paste_during_a_compaction_is_queued_with_its_image(tmp_path) -> None:
+    """Review round 19, P1, introduced by the previous commit.
+
+    `Editor._submit` clears the buffer synchronously right after posting, and
+    Textual delivers on a later tick — so the handler that held the prompt for
+    a compaction re-read an already-empty widget and queued the text alone.
+    The app announced "sends when compaction finishes" and then sent it without
+    the screenshot, which the code's own comment calls worse than not queueing.
+    """
+    path = _png(tmp_path / "a.png", 30, 40)
+    submitted: list[EditorSubmitted] = []
+
+    class Capturing(Host):
+        def on_editor_submitted(self, message: EditorSubmitted) -> None:
+            # Read on the DELIVERY tick, which is where the app reads it and
+            # where the composer has already cleared itself.
+            submitted.append(message)
+
+    app = Capturing()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        editor.insert("hold this")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert editor.referenced_images() == [], "the fixture did not clear the composer"
+
+    message = submitted[0]
+    assert list(message.attachments) == [1], "the hand-back map was empty at delivery"
+    assert len(message.images) == 1
+
+
+@pytest.mark.asyncio
+async def test_deleting_one_citation_keeps_the_image_the_other_still_names(tmp_path) -> None:
+    """Design round 18, D6. "No longer cites" is a question about the BUFFER.
+
+    A number can be written twice. Dropping the image because one citation went
+    detached the picture the surviving citation still named — and after D4 the
+    surviving one is the chipped one, so the frame showed an attachment that
+    was no longer attached.
+    """
+    path = _png(tmp_path / "a.png", 30, 40)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        marker = editor.text.strip()
+        editor.text = f"{marker} and {marker} twice"
+        await pilot.pause()
+
+        # The FIRST citation is the chipped one, so it is the atomic token.
+        # Deleting it leaves the duplicate behind, still naming #1.
+        editor.selection = Selection.cursor((0, editor.text.index("]") + 1))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert editor.text.count("[Image #1") == 1, "the atomic delete did not fire"
+        assert len(editor.referenced_images()) == 1, "the surviving citation lost its image"
+
+
+@pytest.mark.asyncio
+async def test_a_marker_painted_as_prose_is_edited_as_prose(tmp_path) -> None:
+    """Design round 18, D7. Gesture follows paint.
+
+    A marker the painter renders as prose is text as far as the frame is
+    concerned, so backspace must take one character of it rather than
+    swallowing all nineteen as an atomic token.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.text = "[Image #9, 900x900]"
+        editor.selection = Selection.cursor((0, len(editor.text)))
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert editor.text == "[Image #9, 900x900", "an unresolvable marker deleted atomically"

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from textual import events
 
 from local_operator.harness.types import CompactionEndEvent, CompactionStartEvent
 from local_operator.session.protocol import CompactionOutcome
@@ -27,6 +28,7 @@ from local_operator.tui.events import (
     TurnEnded,
     TurnStarted,
 )
+from local_operator.tui.widgets.editor import resolve_markers
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -562,3 +564,42 @@ async def test_a_second_press_is_refused_by_the_session_not_by_cancelling_the_fi
 
     assert session.compactions == 2
     assert notices.count("a compaction is already running") == 2
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_held_for_a_pass_keeps_its_attachments(tmp_path) -> None:
+    """Review round 19, P1. The hold has to capture the images, not re-read them.
+
+    `Editor._submit` clears the composer synchronously right after posting and
+    Textual delivers on a later tick, so a handler that asked the widget for
+    its attachments got an empty map. The app announced "queued - sends when
+    compaction finishes" and then sent the words alone - which the comment at
+    that very branch calls worse than not queueing at all.
+    """
+    from PIL import Image
+
+    from local_operator.tui.widgets.editor import Editor
+
+    path = tmp_path / "a.png"
+    Image.new("RGB", (30, 40), "red").save(path)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.25)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        app.post_message(events.Paste(str(path)))
+        await pilot.pause()
+        await pilot.pause()
+        assert len(editor.referenced_images()) == 1, "the fixture never attached"
+
+        editor.insert("look at this")
+        app._compacting = True
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app._prompt_held_for_compaction, "the prompt was not held"
+        assert app._images_held_for_compaction, "the hold dropped the screenshot"
+        held = resolve_markers(app._prompt_held_for_compaction, app._images_held_for_compaction)
+        assert len(held) == 1, "the held prompt would have sent no image"

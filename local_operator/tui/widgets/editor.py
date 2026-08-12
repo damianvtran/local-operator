@@ -199,13 +199,26 @@ def _pasted_paths(pasted: str) -> list[str]:
 class EditorSubmitted(Message):
     """Posted when the user submits the editor (Enter without Shift)."""
 
-    def __init__(self, text: str, images: list[ImageContent] | None = None) -> None:
+    def __init__(
+        self,
+        text: str,
+        images: list[ImageContent] | None = None,
+        attachments: Mapping[int, ImageContent] | None = None,
+    ) -> None:
         super().__init__()
         self.text = text
         #: Attachments pasted into this prompt, in marker order. Defaulted so
         #: every existing construction site (and every test) keeps working
         #: unchanged — a submit with nothing attached is still the common case.
         self.images = images or []
+        #: The same attachments as an index→image MAP, for a handler that may
+        #: have to hand this prompt BACK to the composer — held through a
+        #: compaction, or restored by `/reload`. It has to ride the message:
+        #: `Editor._submit` clears the buffer synchronously right after posting,
+        #: and Textual delivers on a later tick, so a handler that re-reads the
+        #: widget sees an empty map and silently drops the images (review round
+        #: 19). Restores need the numbers, which the ordered list has lost.
+        self.attachments = dict(attachments or {})
 
 
 class InterruptRequested(Message):
@@ -782,7 +795,7 @@ class Editor(TextArea):
         # authority: pasting three screenshots and deleting two must send one,
         # because the deleted markers are the user saying they changed their
         # mind, and silently sending all three is both surprising and expensive.
-        self.post_message(EditorSubmitted(text, self.referenced_images()))
+        self.post_message(EditorSubmitted(text, self.referenced_images(), self._attachments))
         self.clear_content()
 
     def referenced_images(self) -> list[ImageContent]:
@@ -830,7 +843,9 @@ class Editor(TextArea):
         attachment was dropped but whose text survives — delete then undo — is
         invisible to the map, and numbering over it revived the dead marker
         onto the next pasted image (review round 18). Called at every seam that
-        replaces the text wholesale.
+        replaces the text wholesale AND immediately before issuing a number:
+        markers can arrive as ordinary text — a prompt copied out of the
+        transcript and pasted back — which no replacement seam ever sees.
         """
         self._next_marker = max(_marker_indices(self.text), default=0) + 1
 
@@ -848,10 +863,21 @@ class Editor(TextArea):
         whole token. That is the reported bug: backspace there removed the
         closing bracket and left ``[Image #2, 1568x20`` hanging, which is
         neither prose nor a resolvable reference.
+
+        Only markers the painter CHIPS are atomic. A marker rendered as prose —
+        a number that resolves to nothing, or a second citation of one that
+        does — is text as far as the frame is concerned, and a click that
+        selected all nineteen characters of it, or a backspace that swallowed
+        them whole, made the gesture disagree with the paint (design round 18,
+        D7). One predicate now drives all three: what is chipped is what is
+        atomic, and what is chipped is what is sent.
         """
+        chipped = self._first_citation_columns(row)
         line = self.document.get_line(row)
         for match in IMAGE_MARKER.finditer(line):
             start, end = match.span()
+            if start not in chipped:
+                continue
             if start < column < end:
                 return start, end
             if before and column == end:
@@ -870,13 +896,21 @@ class Editor(TextArea):
         if span is None:
             return False
         start, end = span
+        match = IMAGE_MARKER.match(self.document.get_line(row)[start:end])
+        self.delete((row, start), (row, end), maintain_selection_offset=False)
         # The attachment goes with its marker. This is the whole contract:
         # what the text no longer cites is no longer sent, so removing the
         # reference has to remove the payload rather than orphan it.
-        match = IMAGE_MARKER.match(self.document.get_line(row)[start:end])
+        #
+        # Measured AFTER the delete, and against the whole buffer: a number can
+        # be written twice, and dropping the image because one citation went
+        # detached the picture the OTHER citation still named — the text did
+        # still cite it (design round 18, D6). "No longer cites" is a question
+        # about the buffer, not about the token just removed.
         if match is not None:
-            self._attachments.pop(int(match.group(1)), None)
-        self.delete((row, start), (row, end), maintain_selection_offset=False)
+            index = int(match.group(1))
+            if index not in _marker_indices(self.text):
+                self._attachments.pop(index, None)
         return True
 
     def action_delete_left(self) -> None:
@@ -1179,6 +1213,15 @@ class Editor(TextArea):
                 )
             )
 
+        # From the BUFFER, immediately before issuing. Every OTHER seam derives
+        # the counter, but issuance read it blind, so text carrying a marker
+        # that arrived as TEXT — a prompt drag-copied out of the transcript and
+        # pasted back to re-run it, which is a gesture this branch built — was
+        # invisible to the counter, and the next paste re-issued a number
+        # already on screen. The chip then landed on last turn's marker while
+        # the real attachment rendered as prose (design round 18, D4). Deriving
+        # here as well means a draft can never hold the same number twice.
+        self._sync_next_marker()
         markers = []
         for image, dimensions in loaded:
             index = self._next_marker
