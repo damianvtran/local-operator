@@ -20,7 +20,6 @@ from local_operator.harness.types import (
     StreamTextDelta,
 )
 from local_operator.model.configure import build_model_spec
-from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers import failover as failover_module
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
@@ -268,8 +267,14 @@ def test_the_advertised_ladder_is_exactly_what_is_accepted() -> None:
     being told a value they just used successfully is not one of the options.
     """
     assert set(CHAIN_EFFORT_LADDER) == SUPPORTED_EFFORTS
-    # And it is a ladder, not a set that happens to be ordered today.
-    assert list(CHAIN_EFFORT_LADDER) == [e for e in EFFORT_ORDER if e in SUPPORTED_EFFORTS]
+    # And it is a ladder, stated LITERALLY. Re-deriving it as
+    # `[e for e in EFFORT_ORDER if e in SUPPORTED_EFFORTS]` re-runs the
+    # implementation's own comprehension against the same source, so reversing
+    # `EFFORT_ORDER` reversed the ladder and the assertion still passed - it
+    # could only ever restate the code (review round 33). Written out, it is a
+    # decision about what the user reads, and a reordering upstream has to come
+    # here and be agreed to.
+    assert list(CHAIN_EFFORT_LADDER) == ["minimal", "low", "medium", "high", "xhigh", "max"]
 
 
 def test_effort_survives_an_unknown_sibling_key(caplog) -> None:

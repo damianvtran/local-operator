@@ -53,6 +53,7 @@ Copying instructions in from another agent harness is a plain file copy — the 
 
 ```bash
 CONFIG_ROOT="${LOCAL_OPERATOR_CONFIG_DIR:-$HOME/.local-operator}"
+mkdir -p "$CONFIG_ROOT"
 cp ~/.some-other-agent/AGENTS.md "$CONFIG_ROOT/system_prompt.md"
 ```
 

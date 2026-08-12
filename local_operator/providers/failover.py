@@ -605,12 +605,19 @@ SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max
 #:
 #: ``none`` is absent because :data:`SUPPORTED_EFFORTS` predates this and does
 #: not admit it. An earlier version of this comment justified that as "no
-#: reasoning is a property of the model, not a rung to fall back to", which is
-#: not true of the set as written: ``minimal`` is admitted and
-#: :func:`resolve_effort` maps it to ``none`` on any model without that rung
-#: (design round 29). So the boundary here is the set's, not a semantic line -
+#: reasoning is a property of the model, not a rung to fall back to", which the
+#: set itself refutes: ``minimal`` is admitted, and no shipped model has a
+#: ``minimal`` rung either, so that is the same kind of value being treated the
+#: opposite way. (:func:`resolve_effort` clamps it to ``none`` on the gpt-5
+#: family - the only tables carrying a ``none`` rung - and UP to ``low``
+#: everywhere else.) So the boundary is the set's, not a semantic line:
 #: recorded rather than rationalised, because the next person to move it should
 #: know there is no principle holding it in place.
+#:
+#: What it costs, which is the part worth knowing before moving it: on the
+#: Anthropic and o-series tables there is no way to say "retry with reasoning
+#: off" in a chain hop at all. ``none`` is refused here, and ``minimal`` is not
+#: a substitute because it clamps upward to ``low`` (design round 30).
 CHAIN_EFFORT_LADDER = tuple(e for e in EFFORT_ORDER if e in SUPPORTED_EFFORTS)
 
 
