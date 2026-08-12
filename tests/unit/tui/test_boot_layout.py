@@ -54,6 +54,7 @@ from local_operator.tui.widgets.welcome import (
     TIPS,
     WORDMARK_SPACED,
     WelcomeView,
+    app_version,
 )
 from tests.unit.tui.conftest import caret_cells, composer_cells
 
@@ -564,7 +565,16 @@ async def test_notices_spend_the_mark_before_existing_information() -> None:
         frame = "\n".join(_rows(app))
         assert "l o c a l   o p e r a t o r" in frame
         assert "▄█████▄" not in frame
-        assert "v0.16.1" in frame
+        # Derived, not pinned: the boot frame prints the INSTALLED version, so a
+        # literal here turns every release into a failing test and teaches the
+        # next person to edit the assertion rather than read it.
+        #
+        # Two assertions because the derived one alone is a tautology - it
+        # compares the frame against the same function that rendered it, and
+        # would still pass if `app_version()` started returning junk. The regex
+        # is the independent half: whatever is shown has to LOOK like a version.
+        assert re.search(r"v\d+\.\d+\.\d+", frame), frame
+        assert f"v{app_version()}" in frame
         assert "/help" in frame
         assert "/resume picks up a recent session where you left off" in frame
         assert frame.count("failed: command not found") == 2
