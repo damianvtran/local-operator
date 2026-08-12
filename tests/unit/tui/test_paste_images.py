@@ -1084,7 +1084,11 @@ async def test_deleting_one_citation_keeps_the_image_the_other_still_names(tmp_p
         await pilot.pause()
         await _paste(app, pilot, path)
         marker = editor.text.strip()
-        editor.text = f"{marker} and {marker} twice"
+        # On a SECOND LINE deliberately: with both citations on one line the
+        # test cannot tell the shipped whole-buffer predicate from a
+        # line-scoped one, and the line-scoped version is a real defect
+        # that left the whole TUI suite green (review round 20).
+        editor.text = f"{marker} and\nsee {marker} twice"
         await pilot.pause()
 
         # The FIRST citation is the chipped one, so it is the atomic token.
@@ -1117,3 +1121,85 @@ async def test_a_marker_painted_as_prose_is_edited_as_prose(tmp_path) -> None:
         await pilot.pause()
 
         assert editor.text == "[Image #9, 900x900", "an unresolvable marker deleted atomically"
+
+        # And from INSIDE it. That is a different branch of `_marker_span` -
+        # the one that makes a LIVE marker atomic - and prose has to lose it
+        # too, or the paint and the gesture disagree at that caret position.
+        # Reordering the filter past this branch left the suite green.
+        editor.text = "[Image #9, 900x900]"
+        editor.selection = Selection.cursor((0, 12))
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert editor.text == "[Image #9, 00x900]", "a caret inside prose ate the whole token"
+
+
+@pytest.mark.asyncio
+async def test_text_pasted_above_the_marker_cannot_steal_its_chip(tmp_path) -> None:
+    """Design round 19, D4 residual. Uniqueness at issuance is not enough.
+
+    The counter stops a number being ISSUED twice, but a copy of the app's
+    marker can still arrive as text afterwards - paste an image, press Home,
+    paste a prompt drag-copied out of the transcript - and picking the chip by
+    document order then hands it to whatever landed first. The impostor got the
+    chip, the dimensions affordance named last turn's screenshot, and through
+    the atomic-token gate it took the editing behaviour with it.
+
+    `cite()` prefers the marker text the app actually wrote, so position in the
+    draft cannot decide which citation is the app's.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        mine = editor.text.strip()
+        editor.selection = Selection.cursor((0, 0))
+        await _paste(app, pilot, "[Image #1, 1568x200] rerun this")
+        await pilot.pause()
+
+        assert editor.text.startswith("[Image #1, 1568x200]"), "the fixture did not paste above"
+        painted = {
+            column
+            for y in range(3)
+            for start, end, _ in editor._marker_cells(y)
+            for column in range(start - editor.gutter_width, end - editor.gutter_width)
+        }
+        impostor = set(range(0, len("[Image #1, 1568x200]")))
+        real = editor.text.index(mine)
+        assert painted & set(range(real, real + len(mine))), "the app's own marker lost its chip"
+        assert not painted & impostor, "the pasted text stole the chip"
+
+
+@pytest.mark.asyncio
+async def test_the_app_s_own_marker_stays_the_atomic_token(tmp_path) -> None:
+    """Design round 19, D4k. A stolen chip stole editability with it.
+
+    `_marker_span` gates on the same citation the painter uses, so when the
+    impostor won, backspace at the end of the app's OWN marker took one
+    character and left `[Image #1, 10x20` - verbatim the fragment the
+    docstring calls the reported bug.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        mine = editor.text.strip()
+        editor.selection = Selection.cursor((0, 0))
+        await _paste(app, pilot, "[Image #1, 1568x200] ")
+        await pilot.pause()
+
+        end = editor.text.index(mine) + len(mine)
+        editor.selection = Selection.cursor((0, end))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert mine not in editor.text, "the app's marker was not atomic"
+        assert "[Image #1, 10x2" not in editor.text, f"left a fragment: {editor.text!r}"
+        assert editor.referenced_images() == [], "the image outlived its marker"

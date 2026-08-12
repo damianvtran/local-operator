@@ -49,6 +49,7 @@ import re
 import shlex
 from bisect import bisect_right
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISREG
 from typing import Callable
@@ -115,7 +116,51 @@ def _marker_indices(text: str) -> list[int]:
     return indices
 
 
-def resolve_markers(text: str, attachments: Mapping[int, ImageContent]) -> list[ImageContent]:
+@dataclass(frozen=True)
+class Attachment:
+    """An image, and the marker text the app wrote to cite it.
+
+    The marker is kept because the NUMBER alone cannot say which citation is
+    the app's. A prompt drag-copied out of the transcript and pasted back
+    carries `[Image #1, 1568x200]` verbatim, so a draft can hold two citations
+    of one number where only one of them is the app's own claim; picking by
+    document order gave the chip - and, through the atomic-token gate, the
+    editing behaviour - to whichever landed first, which is the impostor as
+    soon as the user pastes at the top of the draft (design round 19, D4).
+
+    Kept ON the attachment rather than in a parallel dict so it rides every
+    round trip the images already make: the aside stash, the compaction hold,
+    `EditorSubmitted`, and the `/reload` hand-back. A parallel dict is the
+    thing this feature has repeatedly got wrong.
+    """
+
+    image: ImageContent
+    #: Exactly the text issued at :meth:`_attach_pasted_images`, e.g.
+    #: ``[Image #1, 1568x200]``.
+    marker: str
+
+
+def cite(text: str, index: int, attachment: Attachment) -> int:
+    """Where ``index`` is cited by the APP in ``text``, or ``-1``.
+
+    Prefers the citation whose text matches the marker byte for byte, and only
+    falls back to the first citation of the number when no exact match
+    survives. That fallback is deliberate: the marker's tail is matched loosely
+    on purpose so that editing `1568x200` cannot orphan a draft, and keying
+    only on an exact match would reverse that decision. Degrading to document
+    order needs BOTH an impostor and an edited tail, and lands on the previous
+    behaviour rather than on something worse.
+    """
+    exact = text.find(attachment.marker)
+    if exact != -1:
+        return exact
+    for match in IMAGE_MARKER.finditer(text):
+        if int(match.group(1)) == index:
+            return match.start()
+    return -1
+
+
+def resolve_markers(text: str, attachments: Mapping[int, Attachment]) -> list[ImageContent]:
     """The attachments ``text`` cites, in the order it cites them.
 
     THE one place a marker becomes an image, shared by the composer and by any
@@ -123,10 +168,16 @@ def resolve_markers(text: str, attachments: Mapping[int, ImageContent]) -> list[
     what let a restore bind images to the wrong markers (review round 18), so
     there is deliberately only one.
 
-    A number that was never issued resolves to nothing: the marker names an
-    attachment, and text that names nothing sends nothing.
+    Ordered by where the APP's citation sits, which is the same order and the
+    same set the chip paints - "what is chipped is what is sent" is one
+    predicate, not two that happen to agree.
     """
-    return [attachments[index] for index in _marker_indices(text) if index in attachments]
+    cited = [
+        (position, index)
+        for index, attachment in attachments.items()
+        if (position := cite(text, index, attachment)) != -1
+    ]
+    return [attachments[index].image for _, index in sorted(cited)]
 
 
 def _marker_runs(
@@ -203,7 +254,7 @@ class EditorSubmitted(Message):
         self,
         text: str,
         images: list[ImageContent] | None = None,
-        attachments: Mapping[int, ImageContent] | None = None,
+        attachments: Mapping[int, Attachment] | None = None,
     ) -> None:
         super().__init__()
         self.text = text
@@ -389,18 +440,29 @@ class Editor(TextArea):
         #: and its attachments, saved with it. Kept together because they are
         #: one unsent message: restoring the text without these resolves its
         #: markers to nothing, and restoring neither loses the user's work.
-        self._draft_attachments: dict[int, ImageContent] = {}
+        self._draft_attachments: dict[int, Attachment] = {}
         self._on_model_chosen: Callable[[ModelRow], None] | None = None
         #: Attachments pasted into the current draft, keyed by the number in
         #: their ``[Image #N, WxH]`` marker. A DICT rather than a list because
         #: the marker in the text is the authority on what gets sent: deleting
         #: it deletes the attachment, so the two cannot be kept in step by
-        #: position. Keys are never reused within a draft, so a marker that
-        #: survives keeps its number and nothing renumbers under the cursor.
-        self._attachments: dict[int, ImageContent] = {}
-        #: Next marker number to hand out. Monotonic within a draft, so a
-        #: deleted #2 leaves a gap rather than renaming #3 to #2 — the visible
-        #: text stays still while the user is editing it.
+        #: position. A number in use is never handed out twice, so nothing
+        #: renumbers under the cursor; a number the draft has stopped citing
+        #: IS reused, which the next comment explains.
+        self._attachments: dict[int, Attachment] = {}
+        #: Next marker number to hand out. Fully DERIVED — `_sync_next_marker`
+        #: recomputes it from the buffer immediately before every issuance, so
+        #: the field only carries the value between those two lines and the
+        #: other writes to it cannot affect any number actually issued.
+        #:
+        #: A consequence worth stating because it reverses what this comment
+        #: used to claim: numbers are no longer monotonic. Paste, paste, delete
+        #: #2, paste now yields #1 and #2 rather than #1 and #3. Nothing
+        #: renumbers — the surviving markers do not move, which is the property
+        #: the old monotonic rule existed to protect — the freed label is
+        #: simply available again. Safe by construction: the sync returns
+        #: `max(cited) + 1`, which cannot collide with a number the text still
+        #: cites (review round 20).
         self._next_marker = 1
         #: The marker a mouse press landed inside, as ``(row, start, end)``,
         #: held until the button comes back up. The press alone cannot decide:
@@ -813,7 +875,7 @@ class Editor(TextArea):
         """
         return resolve_markers(self.text, self._attachments)
 
-    def attachments(self) -> dict[int, ImageContent]:
+    def attachments(self) -> dict[int, Attachment]:
         """The index→image map, for a caller that will hand the draft back.
 
         A COPY of the mapping, not a list, because identity is the thing that
@@ -824,7 +886,7 @@ class Editor(TextArea):
         """
         return dict(self._attachments)
 
-    def adopt_attachments(self, attachments: Mapping[int, ImageContent]) -> None:
+    def adopt_attachments(self, attachments: Mapping[int, Attachment]) -> None:
         """Restore an index→image map onto the buffer's markers.
 
         For handing a prompt BACK — a draft the aside borrowed, or one restored
@@ -872,18 +934,31 @@ class Editor(TextArea):
         D7). One predicate now drives all three: what is chipped is what is
         atomic, and what is chipped is what is sent.
         """
-        chipped = self._first_citation_columns(row)
         line = self.document.get_line(row)
+        if "[" not in line:
+            # Every keystroke lands here, and a marker always opens with a
+            # bracket. `_marker_cells` keeps the same guard for the same reason.
+            return None
         for match in IMAGE_MARKER.finditer(line):
             start, end = match.span()
-            if start not in chipped:
+            if not (
+                start < column < end
+                or (before and column == end)
+                or (not before and column == start)
+            ):
                 continue
-            if start < column < end:
-                return start, end
-            if before and column == end:
-                return start, end
-            if not before and column == start:
-                return start, end
+            # Resolved only once a candidate EXISTS. `_first_citation_columns`
+            # walks the document prefix, and this runs on backspace, delete,
+            # ctrl+w and every mouse-down: asking it unconditionally took the
+            # common keystroke from O(line) to O(document), measured at 0.34 ms
+            # on a 2000-line paste, which is exactly the draft a user then
+            # holds backspace through (review round 20).
+            #
+            # Markers cannot overlap, so this candidate is the only one the
+            # caret can be touching - not chipped means not atomic, full stop.
+            if start not in self._first_citation_columns(row):
+                return None
+            return start, end
         return None
 
     def _delete_marker(self, *, before: bool) -> bool:
@@ -902,15 +977,22 @@ class Editor(TextArea):
         # what the text no longer cites is no longer sent, so removing the
         # reference has to remove the payload rather than orphan it.
         #
-        # Measured AFTER the delete, and against the whole buffer: a number can
-        # be written twice, and dropping the image because one citation went
-        # detached the picture the OTHER citation still named — the text did
-        # still cite it (design round 18, D6). "No longer cites" is a question
-        # about the buffer, not about the token just removed.
+        # Measured AFTER the delete, against the whole buffer, and against the
+        # APP'S OWN marker text rather than the number. Two reasons, and they
+        # pull in opposite directions:
+        #
+        # - A number can be written twice, so dropping the image because one
+        #   citation went detached the picture the other still named (design
+        #   round 18, D6). An exact duplicate of the app's marker keeps it.
+        # - But a FOREIGN citation of the same number - a copy of a different
+        #   prompt's marker, pasted in - is not the user keeping this image.
+        #   Guarding on the number let it inherit an attachment it never named
+        #   (design round 19). Guarding on the text does not.
         if match is not None:
             index = int(match.group(1))
-            if index not in _marker_indices(self.text):
-                self._attachments.pop(index, None)
+            attachment = self._attachments.get(index)
+            if attachment is not None and attachment.marker not in self.text:
+                del self._attachments[index]
         return True
 
     def action_delete_left(self) -> None:
@@ -929,26 +1011,27 @@ class Editor(TextArea):
 
     # -- attachment markers as painted objects --------------------------------
     def _first_citation_columns(self, line_index: int) -> set[int]:
-        """Columns on ``line_index`` that open the FIRST citation of a live marker.
+        """Columns on ``line_index`` that open the APP's own citation of a marker.
 
-        The chip has to agree with :meth:`referenced_images`, which sends each
-        attachment once no matter how many times its number is written. Both
-        therefore key on the first citation in document order, which is why
-        this walks from line 0 rather than looking at one row in isolation.
+        The chip, the atomic-token gate and the send all have to name the same
+        citation, so all three go through :func:`cite`. Keying on "first in
+        document order" instead handed the chip to an impostor pasted above the
+        real one (design round 19, D4); keying on the number alone chipped a
+        hand-typed duplicate (round 18, D4).
 
         Only called for rows that contain a bracket, so ordinary prose never
         pays for it, and a composer draft is a handful of lines.
         """
-        seen: set[int] = set()
+        line = self.document.get_line(line_index)
+        # Document offset of this line's first column, so a citation found in
+        # whole-buffer coordinates can be tested against this row.
+        base = sum(len(self.document.get_line(row)) + 1 for row in range(line_index))
+        text = self.text
         columns: set[int] = set()
-        for row in range(line_index + 1):
-            for match in IMAGE_MARKER.finditer(self.document.get_line(row)):
-                index = int(match.group(1))
-                if index in seen or index not in self._attachments:
-                    continue
-                seen.add(index)
-                if row == line_index:
-                    columns.add(match.start())
+        for index, attachment in self._attachments.items():
+            position = cite(text, index, attachment)
+            if base <= position < base + len(line):
+                columns.add(position - base)
         return columns
 
     def _marker_cells(self, y: int) -> list[tuple[int, int, bool]]:
@@ -1226,13 +1309,16 @@ class Editor(TextArea):
         for image, dimensions in loaded:
             index = self._next_marker
             self._next_marker += 1
-            self._attachments[index] = image
             # The dimensions are for the USER, not the model — the model gets
             # the pixels. They are what makes the marker checkable at a glance:
             # "1568x200" is recognisably the screenshot just taken, where a
             # bare "[Image #3]" could be anything. Omitted rather than faked
             # when the header did not carry them.
-            markers.append(f"[Image #{index}, {dimensions}]" if dimensions else f"[Image #{index}]")
+            marker = f"[Image #{index}, {dimensions}]" if dimensions else f"[Image #{index}]"
+            # Recorded with the image, not derived later: this exact string is
+            # what tells the app's own citation apart from a copy of it.
+            self._attachments[index] = Attachment(image, marker)
+            markers.append(marker)
         return " ".join(markers) + " "
 
     # -- command completion -------------------------------------------------

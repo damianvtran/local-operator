@@ -102,6 +102,7 @@ from local_operator.tui.widgets.editor import (
     DEFAULT_PLACEHOLDER,
     READ_ONLY_PLACEHOLDER,
     ArgumentQueryOpened,
+    Attachment,
     Editor,
     EditorQuit,
     EditorSubmitted,
@@ -658,7 +659,7 @@ class OperatorApp(App[None]):
         #: `""` as its sentinel — that field's emptiness is load-bearing and
         #: mutation-tested (round 13), and widening it to a tuple would move
         #: the check every one of those tests makes.
-        self._images_held_for_compaction: dict[int, ImageContent] = {}
+        self._images_held_for_compaction: dict[int, Attachment] = {}
         #: This session's OWN spend, accumulated per turn. The number the band
         #: shows is this plus every child's — see :meth:`_spend_total`.
         self._total_cost: float = 0.0
@@ -750,7 +751,7 @@ class OperatorApp(App[None]):
         #: nothing, and Enter sent the words alone. Worse, an image pasted
         #: INSIDE the aside took number 1, so the restored marker resolved to
         #: the aside's image instead (review round 17).
-        self._aside_draft_images: dict[int, ImageContent] = {}
+        self._aside_draft_images: dict[int, Attachment] = {}
         # The reasoning-effort level the USER picked, or None while the model's
         # own default stands. Held on the app rather than only on the session
         # spec because the session is replaceable — `/new`, `/reload` and
@@ -2730,7 +2731,7 @@ class OperatorApp(App[None]):
         self,
         text: str,
         images: list[ImageContent] | None = None,
-        attachments: Mapping[int, ImageContent] | None = None,
+        attachments: Mapping[int, Attachment] | None = None,
     ) -> None:
         images = images or []
         self._append_block(UserBlock(text, len(images)))

@@ -603,3 +603,64 @@ async def test_a_prompt_held_for_a_pass_keeps_its_attachments(tmp_path) -> None:
         assert app._images_held_for_compaction, "the hold dropped the screenshot"
         held = resolve_markers(app._prompt_held_for_compaction, app._images_held_for_compaction)
         assert len(held) == 1, "the held prompt would have sent no image"
+
+
+@pytest.mark.asyncio
+async def test_the_pass_ends_and_the_held_prompt_is_sent_with_its_image(tmp_path) -> None:
+    """The last link: the screenshot has to reach the SESSION, not just the hold.
+
+    The sibling test above stops at `_images_held_for_compaction` and resolves
+    the markers itself, so `_start_turn(held, [])` on the release path left the
+    whole TUI suite green (review round 20) - and that mutant is precisely the
+    outcome the P1 was filed about: "queued, sends when compaction finishes",
+    then the words arrive alone.
+
+    `FakeSession.prompt` accepts `images` and discards them, so observing a
+    send's attachments needs a recording subclass.
+    """
+    from PIL import Image
+
+    from local_operator.tui.widgets.editor import Editor
+
+    path = tmp_path / "a.png"
+    Image.new("RGB", (30, 40), "red").save(path)
+    sent: list[tuple[str, list[object]]] = []
+
+    class Recording(SlowCompaction):
+        async def prompt(self, text: str, images=None) -> None:  # type: ignore[override]
+            sent.append((text, list(images or [])))
+            await super().prompt(text)
+
+    session = Recording()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        app.post_message(events.Paste(str(path)))
+        await pilot.pause()
+        await pilot.pause()
+        assert len(editor.referenced_images()) == 1, "the fixture never attached"
+
+        app._cmd_compact()
+        for _ in range(30):
+            await pilot.pause()
+            if app._compacting:
+                break
+        assert app._compacting, "the pass never started, so this proves nothing"
+
+        editor.insert("what changed")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._prompt_held_for_compaction, "the prompt was not held"
+        assert sent == [], "the hold did not intercept it"
+
+        session.release.set()
+        for _ in range(40):
+            await pilot.pause()
+            if sent:
+                break
+
+    assert sent, "the pass ended without sending the held prompt"
+    assert len(sent[0][1]) == 1, "the pass ended and sent the words without the screenshot"
