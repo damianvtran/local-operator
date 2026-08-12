@@ -48,7 +48,7 @@ import base64
 import re
 import shlex
 from bisect import bisect_right
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISREG
@@ -1077,36 +1077,41 @@ class Editor(TextArea):
             self._release_deleted(int(match.group(1)), match.group(0))
         return True
 
-    def _release_uncited(self) -> None:
-        """Drop attachments the buffer no longer mentions in any form.
+    def _offset_at(self, row: int, column: int) -> int:
+        """``(row, column)`` as an offset into :attr:`text`.
 
-        Called from :meth:`edit` whenever an edit REMOVED a range, which is the
-        complete set of "the user said take this away" gestures - backspace,
-        delete, ctrl+w, ctrl+k, ctrl+u, alt+delete, cut, and typing or pasting
-        over a selection. Enumerating the bindings instead covered three of
-        eight, so clicking a chip (which this branch makes select the whole
-        marker) and pressing ctrl+x still orphaned the image and let a typed
-        `[Image #1]` revive it (review round 24).
+        `+ len(newline)`, not `+ 1`: `self.text` joins with the document's OWN
+        separator, and a CRLF buffer - which a paste can carry in - shifted
+        every offset by one per preceding line, putting the chip two cells off
+        the marker it belongs to (review round 22).
+        """
+        separator = len(self.document.newline)
+        return sum(len(self.document.get_line(r)) + separator for r in range(row)) + column
 
-        Two deliberate narrowings, and both are load-bearing:
+    def _release_uncited(self, indices: Iterable[int]) -> None:
+        """Drop the named attachments if the buffer no longer cites them.
 
-        - Only on a REMOVAL. A pure insertion cannot uncite anything, and
-          sweeping there would adjudicate a marker the user is typing through.
-        - Only when the number is not mentioned AT ALL, not merely when it
-          fails to parse. A marker is transiently unparseable while it is being
-          repaired - type a stray `[` into the tail and it stops matching - and
-          the first version of this released on that, so a backspace thirty
-          columns away destroyed an image whose marker the next keystroke
-          restored perfectly (review round 24). A fragment still naming `#1`
-          keeps its image; only text that has stopped mentioning it releases.
+        ``indices`` is the whole guard. :meth:`edit` passes only the
+        attachments the removal actually TOUCHED, so an edit elsewhere in the
+        draft cannot adjudicate a marker it never went near. Two earlier rules
+        both failed by asking a question about the buffer as a whole:
 
-        The negative lookahead matters: `#1` must not hold `#10` alive.
+        - "does it still parse" released a marker the user was mid-way through
+          repairing, so a backspace thirty columns away destroyed an image
+          whose next keystroke restored the text perfectly (round 24);
+        - "is the number mentioned anywhere" fixed that only for damage AFTER
+          `#N` - damage inside the `[Image #` prefix breaks the mention too -
+          while letting an unrelated bare `[Image #1` fragment elsewhere in the
+          draft keep a properly deleted image alive for a typed marker to
+          revive (round 25).
+
+        Scoping to the touched range answers both, and needs no threshold for
+        how damaged a marker may be before it stops counting.
         """
         text = self.text
-        for index, attachment in list(self._attachments.items()):
-            if cite(text, index, attachment) == -1 and not re.search(
-                rf"\[Image #{index}(?![0-9])", text
-            ):
+        for index in indices:
+            attachment = self._attachments.get(index)
+            if attachment is not None and cite(text, index, attachment) == -1:
                 del self._attachments[index]
 
     def action_delete_left(self) -> None:
@@ -1140,12 +1145,7 @@ class Editor(TextArea):
         line = self.document.get_line(line_index)
         # Document offset of this line's first column, so a citation found in
         # whole-buffer coordinates can be tested against this row.
-        # `+ len(newline)`, not `+ 1`: `self.text` joins with the document's OWN
-        # separator, and a CRLF buffer - which a paste can carry in - shifted
-        # every offset by one per preceding line, putting the chip two cells off
-        # the marker it belongs to (review round 22).
-        separator = len(self.document.newline)
-        base = sum(len(self.document.get_line(row)) + separator for row in range(line_index))
+        base = self._offset_at(line_index, 0)
         text = self.text
         columns: set[int] = set()
         for index, attachment in self._attachments.items():
@@ -1452,15 +1452,58 @@ class Editor(TextArea):
         the picker one message-loop tick behind the buffer, which is the tick
         in which Enter decides whether to complete.
         """
-        removed = edit.from_location != edit.to_location
+        # Only a REMOVAL can uncite an attachment, and only the attachments it
+        # touched. Both halves are measured BEFORE the edit, because afterwards
+        # the range is gone and the citation positions have moved.
+        touched = self._attachments_touched_by(edit)
         result = super().edit(edit)
         self._sync_picker()
-        if removed:
-            # Text went away, so an attachment may have lost its last mention.
-            # See :meth:`_release_uncited` for why only removals sweep, and why
-            # it asks whether the number is MENTIONED rather than parseable.
-            self._release_uncited()
+        if touched:
+            self._release_uncited(touched)
         return result
+
+    def _attachments_touched_by(self, edit: Edit) -> list[int]:
+        """Which attachments a pending edit could plausibly uncite.
+
+        Empty for a pure insertion: adding text cannot remove a citation, and
+        sweeping there would adjudicate a marker the user is typing through -
+        every printable character breaks the marker's grammar while it is being
+        typed into.
+
+        For a removal, an attachment qualifies when either
+
+        - its citation lies inside the range being cut, which is the ordinary
+          "the user deleted this marker" case; or
+        - it is ALREADY uncitable and the cut text names its number, which is
+          the user clearing away a marker they had damaged earlier. Without
+          this the map would keep an image no text can reach.
+
+        An attachment that is uncitable for some unrelated reason is in neither
+        set, which is exactly the repair window that must stay open.
+        """
+        if edit.from_location == edit.to_location or not self._attachments:
+            return []
+        top, bottom = sorted((edit.from_location, edit.to_location))
+        cut = self.get_text_range(top, bottom)
+        if not cut:
+            return []
+        start = self._offset_at(*top)
+        end = start + len(cut)
+        text = self.text
+        touched: list[int] = []
+        for index, attachment in self._attachments.items():
+            position = cite(text, index, attachment)
+            if position == -1:
+                if re.search(rf"#{index}(?![0-9])", cut):
+                    touched.append(index)
+            elif start < position + len(attachment.marker) and position < end:
+                # SPAN overlap, not "the cut contains the first cell". Dragging
+                # over a marker's tail and pressing backspace leaves its head at
+                # an offset outside the cut, so a containment test never watched
+                # it: the image stayed held with no chip, and a typed
+                # `[Image #1]` then chipped and sent it (design round 20, D16).
+                touched.append(index)
+        return touched
 
     def load_text(self, text: str) -> None:
         super().load_text(text)

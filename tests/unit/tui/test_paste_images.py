@@ -1677,10 +1677,16 @@ async def test_ctrl_w_takes_the_spaces_it_crossed(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ctrl_w_with_a_selection_takes_the_selection(tmp_path) -> None:
-    """Review round 24, P3. The whitespace-crossing path must stand aside for a
-    real selection, or ctrl+w would discard the user's range and eat a marker
-    sitting behind the spaces instead."""
+async def test_ctrl_w_over_a_word_selection_takes_the_word(tmp_path) -> None:
+    """ctrl+w with an ordinary word selected takes the selection and leaves the
+    marker alone.
+
+    Retitled after review round 25: this does NOT defend the crossing path's
+    selection guard - the selected word sits where that code declines anyway,
+    and the mutation survives here. `test_ctrl_w_over_a_selection_ending_in_
+    spaces_takes_only_it` is the one that pins it. Kept because the ordinary
+    gesture is worth holding still, not because it guards anything.
+    """
     path = _png(tmp_path / "a.png", 10, 20)
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -1791,3 +1797,179 @@ async def test_ctrl_w_over_a_selection_ending_in_spaces_takes_only_it(tmp_path) 
 
         assert marker in editor.text, "ctrl+w crossed into the marker instead of the selection"
         assert len(editor.referenced_images()) == 1, "the marker's image was released"
+
+
+@pytest.mark.asyncio
+async def test_prefix_damage_survives_a_delete_elsewhere(tmp_path) -> None:
+    """Review round 25, P1. The repair window has to cover the whole marker.
+
+    The mention guard protected damage AFTER `#N`, but a stray character inside
+    the `[Image #` prefix breaks the mention as well as the parse - so a delete
+    twenty-six columns away still destroyed the image, and removing the stray
+    character left a perfectly formed marker citing nothing, unrecoverable
+    because a retyped marker is forbidden from reviving it.
+
+    The sweep now only adjudicates attachments the removal actually touched, so
+    how the marker is damaged stops mattering.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        editor.insert("what is this")
+        await pilot.pause()
+
+        editor.selection = Selection.cursor((0, 4))
+        await pilot.press("x")
+        await pilot.pause()
+        assert "[Image #1" not in editor.text, "the fixture did not damage the prefix"
+
+        editor.selection = Selection.cursor((0, len(editor.text)))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        editor.selection = Selection.cursor((0, 5))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert editor.text.startswith("[Image #1, 10x20]"), f"repair failed: {editor.text!r}"
+        assert len(editor.referenced_images()) == 1, "a delete elsewhere destroyed the image"
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_fragment_cannot_keep_a_deleted_image_alive(tmp_path) -> None:
+    """Review round 25, P2 - the cost of the whole-buffer mention guard.
+
+    Any text containing `[Image #1` kept the attachment alive after its real
+    marker was removed, so a later typed marker bound to a picture the user had
+    deleted. Prose explaining the syntax is enough to do it.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        marker = editor.text.rstrip()
+        editor.selection = Selection.cursor((0, len(editor.text)))
+        editor.insert("to cite one you type [Image #1 and close it")
+        await pilot.pause()
+
+        editor.selection = Selection((0, 0), (0, len(marker)))
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert editor._attachments == {}, "an unrelated fragment held the deleted image"
+
+        editor.insert(" [Image #1]")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "a typed marker revived the deleted image"
+
+
+@pytest.mark.asyncio
+async def test_clearing_away_a_damaged_marker_releases_its_image(tmp_path) -> None:
+    """The other half of the touched-range rule: an attachment that is ALREADY
+    uncitable is released when the cut text names its number, or the map would
+    keep an image no text in the buffer can reach."""
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        editor.selection = Selection.cursor((0, 4))
+        await pilot.press("x")
+        await pilot.pause()
+        assert editor._attachments, "the fixture released too early"
+
+        damaged = editor.text.rstrip()
+        editor.selection = Selection((0, 0), (0, len(damaged)))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert editor._attachments == {}, "the damaged marker's image was kept"
+        editor.insert("[Image #1]")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "a typed marker revived it"
+
+
+@pytest.mark.asyncio
+async def test_cutting_a_higher_number_does_not_release_a_damaged_lower_one(tmp_path) -> None:
+    """The lookahead on the CUT text, not just on the buffer.
+
+    The "already uncitable, and the cut names its number" clause asks whether
+    the removed text mentions `#N`. Without `(?![0-9])`, deleting `[Image #10,
+    30x40]` reads as a mention of `#1`, so a damaged `#1` elsewhere is released
+    - and its image is unrecoverable, because a retyped marker may not revive
+    it.
+    """
+    first = _png(tmp_path / "a.png", 10, 20)
+    second = _png(tmp_path / "b.png", 30, 40)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, first)
+
+        # Damage #1 so it is uncitable but repairable.
+        editor.selection = Selection.cursor((0, 4))
+        await pilot.press("x")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "the fixture did not damage #1"
+
+        editor.selection = Selection.cursor((0, len(editor.text)))
+        editor.insert("[Image #9, 1x1] ")
+        await pilot.pause()
+        await _paste(app, pilot, second)
+        await pilot.pause()
+        tenth = "[Image #10, 30x40]"
+        assert tenth in editor.text, f"the fixture did not reach #10: {editor.text!r}"
+
+        start = editor.text.index(tenth)
+        editor.selection = Selection((0, start), (0, start + len(tenth)))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert 1 in editor._attachments, "cutting #10 released the damaged #1"
+        editor.selection = Selection.cursor((0, 5))
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert len(editor.referenced_images()) == 1, "#1 could not be repaired"
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_marker_s_tail_releases_it(tmp_path) -> None:
+    """Design round 24, D16. The cut has to OVERLAP the citation, not contain
+    its first cell.
+
+    Dragging over the tail and pressing backspace leaves `[Image #1` - which
+    still mentions the number and still starts at offset 0, outside the cut -
+    so the attachment was never adjudicated. It stayed held with no chip, and a
+    typed `[Image #1]` then chipped and sent a picture the buffer no longer
+    describes.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        # A real range over the tail only: from the comma to the bracket.
+        marker = editor.text.rstrip()
+        editor.selection = Selection((0, marker.index(",")), (0, len(marker)))
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert editor.text.startswith("[Image #1"), f"the fixture cut too much: {editor.text!r}"
+
+        assert editor._attachments == {}, "a tail delete left the image held"
+        editor.insert("] see [Image #1] please")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "a typed marker revived the image"
