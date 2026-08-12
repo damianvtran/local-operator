@@ -601,9 +601,16 @@ SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max
 #: ``sorted()`` puts ``max`` between ``low`` and ``medium`` and sits ``minimal``
 #: next to it - the two opposite ends of the scale, adjacent - which reads as
 #: noise to someone who already knows the ladder from ``/effort`` (design round
-#: 28). ``none`` is deliberately absent: it is a real effort everywhere else,
-#: but a chain hop exists to retry at a DIFFERENT level, and "no reasoning" is
-#: a property of the model, not a rung to fall back to.
+#: 28).
+#:
+#: ``none`` is absent because :data:`SUPPORTED_EFFORTS` predates this and does
+#: not admit it. An earlier version of this comment justified that as "no
+#: reasoning is a property of the model, not a rung to fall back to", which is
+#: not true of the set as written: ``minimal`` is admitted and
+#: :func:`resolve_effort` maps it to ``none`` on any model without that rung
+#: (design round 29). So the boundary here is the set's, not a semantic line -
+#: recorded rather than rationalised, because the next person to move it should
+#: know there is no principle holding it in place.
 CHAIN_EFFORT_LADDER = tuple(e for e in EFFORT_ORDER if e in SUPPORTED_EFFORTS)
 
 
@@ -801,8 +808,8 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
                 return f"{provider}/{model}"
             if str(raw_effort).strip().lower() not in SUPPORTED_EFFORTS:
                 logger.warning(
-                    "retry.fallbackChains[%s]: dropping entry %s/%s - %r is not a fallback"
-                    " effort; expected one of %s",
+                    "retry.fallbackChains[%s]: dropping entry %s/%s - %r is not accepted in"
+                    " a fallback chain hop; expected one of %s",
                     chain_key,
                     provider,
                     model,

@@ -20,9 +20,12 @@ from local_operator.harness.types import (
     StreamTextDelta,
 )
 from local_operator.model.configure import build_model_spec
+from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers import failover as failover_module
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
+    CHAIN_EFFORT_LADDER,
+    SUPPORTED_EFFORTS,
     AuthRetryKeyState,
     FailoverRouteState,
     FallbackTarget,
@@ -238,13 +241,35 @@ def test_invalid_structured_effort_is_not_silently_dropped(caplog) -> None:
     # and name it as the LADDER it is - `sorted()` puts `max` between `low` and
     # `medium`, which reads as noise to anyone who knows the scale from
     # `/effort` (design round 28).
-    assert "minimal, low, medium, high, xhigh, max" in messages
+    # Anchored on the prefix, not a bare substring: a SUPERSET satisfies
+    # `"minimal, low, ..." in messages`, so re-admitting `none` to the
+    # advertised list would pass while making the sentence contradict itself
+    # (`'none' is not accepted ...; expected one of none, ...`) - review round 32
+    # built exactly that mutant and it survived.
+    assert "expected one of minimal, low, medium, high, xhigh, max" in messages
     # And the claim must be true: `none` IS an effort - `/effort` offers it -
-    # it is just not a fallback hop. Copy that overreaches sends the reader to
-    # check the wrong thing.
+    # it is just not accepted in a chain hop. Copy that overreaches sends the
+    # reader to check the wrong thing.
     assert "is not an effort" not in messages
-    assert "is not a fallback effort" in messages
+    assert "is not accepted in a fallback chain hop" in messages
+    # The chain itself survives: one bad hop is not a reason to lose the rest.
     assert settings.fallback_chains["anthropic/claude"]
+
+
+def test_the_advertised_ladder_is_exactly_what_is_accepted() -> None:
+    """The message's list and the gate that refuses a value must be one set.
+
+    `CHAIN_EFFORT_LADDER` filters `EFFORT_ORDER` by `SUPPORTED_EFFORTS`, so the
+    drift is asymmetric: a rung added to `EFFORT_ORDER` alone is filtered out
+    and can never be advertised while refused (safe), but a rung added to
+    `SUPPORTED_EFFORTS` alone is ACCEPTED and silently missing from the list -
+    something the `sorted(SUPPORTED_EFFORTS)` this replaced could not do
+    (review round 32). Cheap to pin, and the failure it prevents is a user
+    being told a value they just used successfully is not one of the options.
+    """
+    assert set(CHAIN_EFFORT_LADDER) == SUPPORTED_EFFORTS
+    # And it is a ladder, not a set that happens to be ordered today.
+    assert list(CHAIN_EFFORT_LADDER) == [e for e in EFFORT_ORDER if e in SUPPORTED_EFFORTS]
 
 
 def test_effort_survives_an_unknown_sibling_key(caplog) -> None:
