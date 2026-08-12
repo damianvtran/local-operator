@@ -671,13 +671,20 @@ class UserBlock(TranscriptBlock):
         gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
         rows = self._rows(body)
         self.styles.height = len(rows)
+        # The receipt is the app talking, so it wears the app's receipt ink -
+        # the same `muted` the notice tier uses - not the prose ink of the
+        # prompt it sits inside. In the user's own colour it read as a second
+        # sentence they had written, which made its exclusion from a copy look
+        # like a bug rather than a rule: the drag lit three rows and the toast
+        # said two (design round 17, D5).
+        receipt_style = Style(color=theme_mod.semantic_color("muted"))
         line = Text(no_wrap=True, overflow="ellipsis")
         for index, row in enumerate(rows):
             if index:
                 line.append("\n")
             line.append(gutter, style=rule_style)
             if row:
-                line.append(row, style=text_style)
+                line.append(row, style=receipt_style if index == self._receipt_row else text_style)
         return line
 
 

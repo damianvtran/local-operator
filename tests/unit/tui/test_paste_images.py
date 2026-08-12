@@ -31,6 +31,7 @@ from textual.widgets.text_area import Selection
 
 from local_operator.harness.types import ImageContent
 from local_operator.tui.widgets.editor import (
+    IMAGE_MARKER,
     MAX_ATTACHMENT_BYTES,
     Editor,
     EditorSubmitted,
@@ -876,3 +877,125 @@ async def test_the_attachment_receipt_never_reaches_the_clipboard(tmp_path) -> N
     assert copied is not None
     assert "image attached" not in copied[0], copied[0]
     assert "look at this" in copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_paste_after_recall_cannot_steal_a_recalled_marker_s_number(tmp_path) -> None:
+    """Review round 18, P1, reproduced with keystrokes only.
+
+    Marker numbers restart at #1 per prompt AND every history entry numbers
+    from #1, so recalling one and then pasting issued a number already standing
+    in the recalled text: two chips, one image, and the recalled marker
+    advertising 10x20 while resolving to the freshly pasted 30x40.
+
+    The counter is derived from the BUFFER at every seam that replaces the text
+    wholesale, which is the only source that knows what numbers are on screen.
+    """
+    first = _png(tmp_path / "a.png", 10, 20)
+    second = _png(tmp_path / "b.png", 30, 40)
+    submitted: list[EditorSubmitted] = []
+
+    class Capturing(Host):
+        def on_editor_submitted(self, message: EditorSubmitted) -> None:
+            submitted.append(message)
+
+    app = Capturing()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, first)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        await pilot.press("up")
+        await pilot.pause()
+        await _paste(app, pilot, second)
+
+        numbers = [int(m.group(1)) for m in IMAGE_MARKER.finditer(editor.text)]
+        assert len(numbers) == len(set(numbers)), f"a number was issued twice: {editor.text}"
+        # The recalled marker resolves to nothing; only the new paste is sent.
+        images = editor.referenced_images()
+        assert len(images) == 1
+        assert Image.open(io.BytesIO(base64.b64decode(images[0].data))).size == (30, 40)
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_marker_does_not_shift_the_others(tmp_path) -> None:
+    """Review round 18, P1. Restores carry IDENTITY, not position.
+
+    `referenced_images()` skips markers that do not resolve; re-keying that
+    list positionally against every marker in the text therefore shifted each
+    image one marker left as soon as one marker was dead — so every marker sent
+    a picture it did not name. Reproduced through the aside, which is an
+    ordinary keystroke away, via delete-then-undo to strand a marker.
+    """
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    paths = [
+        _png(tmp_path / "a.png", 10, 20),
+        _png(tmp_path / "b.png", 30, 40),
+        _png(tmp_path / "c.png", 50, 60),
+    ]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.25)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        for path in paths:
+            await _paste(app, pilot, path)
+
+        # Strand marker #1: its text survives, its attachment does not.
+        editor.selection = Selection.cursor((0, 17))
+        await pilot.press("backspace")
+        await pilot.pause()
+        editor.text = "[Image #1, 10x20] [Image #2, 30x40] [Image #3, 50x60]"
+        await pilot.pause()
+        assert 1 not in editor._attachments, "the fixture stopped stranding #1"
+
+        app._open_aside()
+        await pilot.pause()
+        app._close_aside()
+        await pilot.pause()
+
+        # Per MARKER, not as a list: a positional re-key shifts every image one
+        # marker left, which leaves the resolved LIST identical and only the
+        # bindings wrong. Asserting the list cannot see that (it did not).
+        def cited(text: str) -> list[tuple[int, int]]:
+            editor.text = text
+            return [
+                Image.open(io.BytesIO(base64.b64decode(image.data))).size
+                for image in editor.referenced_images()
+            ]
+
+        assert cited("[Image #3, 50x60]") == [(50, 60)], "#3 names the wrong picture"
+        assert cited("[Image #2, 30x40]") == [(30, 40)], "#2 names the wrong picture"
+        assert cited("[Image #1, 10x20]") == [], "#1 was resurrected by the restore"
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_buffer_releases_the_stashed_draft_images(tmp_path) -> None:
+    """Review round 18, P3. `_draft_attachments` outlived the draft it belonged
+    to and pinned a multi-megabyte screenshot for the session. Not reachable as
+    a wrong send, but the repo holds itself to this one seam over."""
+    path = _png(tmp_path / "a.png")
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        await pilot.press("enter")
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        await pilot.press("up")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert editor._attachments == {}
+        assert editor._draft_attachments == {}, "a stashed draft image outlived its draft"

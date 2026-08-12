@@ -107,6 +107,7 @@ from local_operator.tui.widgets.editor import (
     InterruptRequested,
     ModelQueryOpened,
     StopRequested,
+    resolve_markers,
 )
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
@@ -656,7 +657,7 @@ class OperatorApp(App[None]):
         #: `""` as its sentinel — that field's emptiness is load-bearing and
         #: mutation-tested (round 13), and widening it to a tuple would move
         #: the check every one of those tests makes.
-        self._images_held_for_compaction: list[ImageContent] = []
+        self._images_held_for_compaction: dict[int, ImageContent] = {}
         #: This session's OWN spend, accumulated per turn. The number the band
         #: shows is this plus every child's — see :meth:`_spend_total`.
         self._total_cost: float = 0.0
@@ -748,7 +749,7 @@ class OperatorApp(App[None]):
         #: nothing, and Enter sent the words alone. Worse, an image pasted
         #: INSIDE the aside took number 1, so the restored marker resolved to
         #: the aside's image instead (review round 17).
-        self._aside_draft_images: list[ImageContent] = []
+        self._aside_draft_images: dict[int, ImageContent] = {}
         # The reasoning-effort level the USER picked, or None while the model's
         # own default stands. Held on the app rather than only on the session
         # spec because the session is replaceable — `/new`, `/reload` and
@@ -1303,7 +1304,7 @@ class OperatorApp(App[None]):
         # hold took it.
         self._compacting = False
         held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
-        held_images, self._images_held_for_compaction = self._images_held_for_compaction, []
+        held_images, self._images_held_for_compaction = self._images_held_for_compaction, {}
         if held:
             editor = self._editor()
             # Never clobber something typed since: the draft in the box is
@@ -2769,7 +2770,7 @@ class OperatorApp(App[None]):
             # minutes and then sent the words without the screenshot would be
             # worse than not queueing at all.
             self._prompt_held_for_compaction = text
-            self._images_held_for_compaction = images
+            self._images_held_for_compaction = self._editor().attachments()
             self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
             self._maybe_name_conversation(text)
             return
@@ -4480,7 +4481,7 @@ class OperatorApp(App[None]):
         editor = self._editor()
         self._aside_draft = editor.text
         # Taken BEFORE `clear_content`, which drops them.
-        self._aside_draft_images = editor.referenced_images()
+        self._aside_draft_images = editor.attachments()
         editor.clear_content()
         editor.placeholder = ASIDE_PLACEHOLDER
         # The command list is borrowed too, and returned in `_close_aside`.
@@ -4576,7 +4577,7 @@ class OperatorApp(App[None]):
         draft = self._aside_draft
         images = self._aside_draft_images
         self._aside_draft = None
-        self._aside_draft_images = []
+        self._aside_draft_images = {}
         editor = self._editor()
         editor.placeholder = DEFAULT_PLACEHOLDER
         editor.load_text(draft or "")
@@ -5789,9 +5790,9 @@ class OperatorApp(App[None]):
         # A prompt typed DURING the pass was held rather than sent into a
         # history being rewritten; now the history is settled, it goes.
         held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
-        held_images, self._images_held_for_compaction = self._images_held_for_compaction, []
+        held_images, self._images_held_for_compaction = self._images_held_for_compaction, {}
         if held or held_images:
-            self._start_turn(held, held_images)
+            self._start_turn(held, resolve_markers(held, held_images))
 
     def on_retry_started(self, message: RetryStarted) -> None:
         body = f"retry {message.attempt}: {message.error}"

@@ -48,7 +48,7 @@ import base64
 import re
 import shlex
 from bisect import bisect_right
-from collections.abc import Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from stat import S_ISREG
 from typing import Callable
@@ -98,6 +98,35 @@ _PATH_SEGMENT = re.compile(r"^(?:~|\.{0,2}/|/)")
 #: rather than a bracket, because a half-eaten ``[Image #2, 1568x20`` is neither
 #: text the user meant nor a reference anything can resolve.
 IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n]*)?\]")
+
+
+def _marker_indices(text: str) -> list[int]:
+    """Every marker number in ``text``, in order, without duplicates.
+
+    One walk of the buffer, shared by everything that has to agree about which
+    markers exist. Two implementations of "the markers in this text" is exactly
+    what let a restore rebind images one marker left (review round 18).
+    """
+    indices: list[int] = []
+    for match in IMAGE_MARKER.finditer(text):
+        index = int(match.group(1))
+        if index not in indices:
+            indices.append(index)
+    return indices
+
+
+def resolve_markers(text: str, attachments: Mapping[int, ImageContent]) -> list[ImageContent]:
+    """The attachments ``text`` cites, in the order it cites them.
+
+    THE one place a marker becomes an image, shared by the composer and by any
+    caller holding a stashed prompt. A second implementation of this walk is
+    what let a restore bind images to the wrong markers (review round 18), so
+    there is deliberately only one.
+
+    A number that was never issued resolves to nothing: the marker names an
+    attachment, and text that names nothing sends nothing.
+    """
+    return [attachments[index] for index in _marker_indices(text) if index in attachments]
 
 
 def _marker_runs(
@@ -539,6 +568,7 @@ class Editor(TextArea):
         # each prompt numbers from #1 rather than carrying a running total the
         # user never sees the start of.
         self._attachments.clear()
+        self._draft_attachments.clear()
         self._next_marker = 1
 
     def begin_model_query(self) -> None:
@@ -768,37 +798,41 @@ class Editor(TextArea):
         the same rule — the number names an attachment, and text that names
         nothing sends nothing.
         """
-        seen: set[int] = set()
-        images: list[ImageContent] = []
-        for match in IMAGE_MARKER.finditer(self.text):
-            index = int(match.group(1))
-            image = self._attachments.get(index)
-            if image is None or index in seen:
-                continue
-            seen.add(index)
-            images.append(image)
-        return images
+        return resolve_markers(self.text, self._attachments)
 
-    def adopt_attachments(self, images: Sequence[ImageContent]) -> None:
-        """Re-key ``images`` onto the markers already in the buffer.
+    def attachments(self) -> dict[int, ImageContent]:
+        """The index→image map, for a caller that will hand the draft back.
 
-        For handing a prompt BACK — a draft held through a compaction, or one
-        restored after a reload. The text arrives with its markers intact and
-        the images arrive in the order the text cited them, so walking the
-        markers in order re-establishes exactly the mapping that produced them.
-        Without this the restored text would cite attachments the composer no
-        longer holds, and pressing Enter would send the words alone.
+        A COPY of the mapping, not a list, because identity is the thing that
+        has to survive the round trip. Handing back a list and re-keying it by
+        position is how the aside came to rebind every image one marker left
+        when a single marker did not resolve (review round 18): two walks of
+        the buffer under different rules cannot be relied on to agree.
         """
-        self._attachments.clear()
-        indices: list[int] = []
-        for match in IMAGE_MARKER.finditer(self.text):
-            index = int(match.group(1))
-            if index not in indices:
-                indices.append(index)
-        for index, image in zip(indices, images):
-            self._attachments[index] = image
-        # Never hand out a number already standing in the text.
-        self._next_marker = max(indices, default=0) + 1
+        return dict(self._attachments)
+
+    def adopt_attachments(self, attachments: Mapping[int, ImageContent]) -> None:
+        """Restore an index→image map onto the buffer's markers.
+
+        For handing a prompt BACK — a draft the aside borrowed, or one restored
+        after a reload. Only the numbers the text actually cites are kept, so a
+        stash that outlived an edit cannot resurrect an attachment the text no
+        longer mentions.
+        """
+        cited = _marker_indices(self.text)
+        self._attachments = {index: attachments[index] for index in cited if index in attachments}
+        self._sync_next_marker()
+
+    def _sync_next_marker(self) -> None:
+        """Never hand out a number already standing in the text.
+
+        Derived from the BUFFER, never from ``_attachments``: a marker whose
+        attachment was dropped but whose text survives — delete then undo — is
+        invisible to the map, and numbering over it revived the dead marker
+        onto the next pasted image (review round 18). Called at every seam that
+        replaces the text wholesale.
+        """
+        self._next_marker = max(_marker_indices(self.text), default=0) + 1
 
     # -- attachment markers as atomic tokens ----------------------------------
     def _marker_span(self, row: int, column: int, *, before: bool) -> tuple[int, int] | None:
@@ -860,6 +894,29 @@ class Editor(TextArea):
             super().action_delete_word_left()
 
     # -- attachment markers as painted objects --------------------------------
+    def _first_citation_columns(self, line_index: int) -> set[int]:
+        """Columns on ``line_index`` that open the FIRST citation of a live marker.
+
+        The chip has to agree with :meth:`referenced_images`, which sends each
+        attachment once no matter how many times its number is written. Both
+        therefore key on the first citation in document order, which is why
+        this walks from line 0 rather than looking at one row in isolation.
+
+        Only called for rows that contain a bracket, so ordinary prose never
+        pays for it, and a composer draft is a handful of lines.
+        """
+        seen: set[int] = set()
+        columns: set[int] = set()
+        for row in range(line_index + 1):
+            for match in IMAGE_MARKER.finditer(self.document.get_line(row)):
+                index = int(match.group(1))
+                if index in seen or index not in self._attachments:
+                    continue
+                seen.add(index)
+                if row == line_index:
+                    columns.add(match.start())
+        return columns
+
     def _marker_cells(self, y: int) -> list[tuple[int, int, bool]]:
         """``(x_start, x_end, selected)`` for marker cells drawn on screen row ``y``.
 
@@ -912,15 +969,18 @@ class Editor(TextArea):
         )
         gutter = self.gutter_width
         cells: list[tuple[int, int, bool]] = []
+        chipped = self._first_citation_columns(line_index)
         for match in IMAGE_MARKER.finditer(line):
             # A chip is a claim that an image is attached here, so it is painted
-            # only when the number RESOLVES. Painting from the text pattern
-            # alone drew a full chip for a marker typed by hand, and for one
-            # brought back by undo after its attachment had been dropped —
-            # identical to a real attachment, submitting nothing, with no
-            # receipt row to give it away (design round 16, D1). Same test
-            # `referenced_images` makes, so what is chipped is what is sent.
-            if int(match.group(1)) not in self._attachments:
+            # only when the number RESOLVES, and only at the citation that
+            # actually carries it. Painting from the text pattern alone drew a
+            # full chip for a marker typed by hand, and for one brought back by
+            # undo after its attachment had been dropped (design round 16, D1);
+            # painting every resolving citation then drew a second chip for a
+            # hand-typed duplicate of a live number, advertising dimensions for
+            # an image that `referenced_images` sends once (design round 17,
+            # D4). Same rule both times: what is chipped is what is sent.
+            if match.start() not in chipped:
                 continue
             start = max(match.start(), section_start)
             end = min(match.end(), section_end)
@@ -1441,12 +1501,17 @@ class Editor(TextArea):
             self._history_index = None
             self.text = self._draft
             self._attachments = dict(self._draft_attachments)
-            self._next_marker = max(self._attachments, default=0) + 1
+            self._sync_next_marker()
             self.move_cursor(self._end_of_buffer())
             return
         self._history_index = max(0, self._history_index)
         self.text = self._history[self._history_index]
         self._attachments.clear()
+        # From the BUFFER, not from the now-empty map: history entries number
+        # from #1 too, so leaving the counter alone issued a number already
+        # standing in the recalled text and the next paste stole its marker
+        # (review round 18).
+        self._sync_next_marker()
         self.move_cursor(self._end_of_buffer())
 
     def _end_of_buffer(self) -> tuple[int, int]:

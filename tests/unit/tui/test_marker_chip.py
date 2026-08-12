@@ -17,6 +17,8 @@ from collections.abc import Iterator
 
 import pytest
 from PIL import Image
+from rich.style import Style
+from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.widgets.text_area import Selection
@@ -356,3 +358,71 @@ async def test_a_drag_that_starts_inside_a_marker_stays_a_drag(tmp_path) -> None
         # selected ground, the uncovered half is still resting.
         assert grounds(editor, 0, 8, 12) == {theme_mod.semantic_color("tint-attach")}
         assert grounds(editor, 0, 12, 28) == {theme_mod.semantic_color("tint-attach-hi")}
+
+
+@pytest.mark.asyncio
+async def test_a_hand_typed_duplicate_of_a_live_number_is_not_chipped(tmp_path) -> None:
+    """Design round 17, D4. The chip and the send must agree.
+
+    `referenced_images` sends one image however many times its number is
+    written, so a second `[Image #1]` typed by hand is a reference to something
+    already accounted for - and it carried its own dimensions, which the user
+    can write as anything. Two chips claiming two attachments, one image sent.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = ChipHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        editor.text = f"{editor.text} and again [Image #1, 999x999]"
+        await pilot.pause()
+
+        assert len(editor.referenced_images()) == 1
+        # By SPAN, not by exact start: the chip omits the caret's own cell, so
+        # a marker under the caret is painted in two runs with a hole.
+        gutter = editor.gutter_width
+        painted = {
+            column
+            for y in range(3)
+            for start, end, _ in editor._marker_cells(y)
+            for column in range(start - gutter, end - gutter)
+        }
+        first = editor.text.index("[Image #1")
+        duplicate = editor.text.rindex("[Image #1")
+        live = set(range(first, editor.text.index("]") + 1))
+        stale = set(range(duplicate, len(editor.text)))
+        assert painted & live, "the live marker lost its chip"
+        assert not painted & stale, "the hand-typed duplicate was chipped"
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_row_is_inked_as_chrome_not_as_the_user_s_prose() -> None:
+    """Design round 17, D5. The receipt is excluded from a copy, so it must not
+    look like the sentence above it - the drag lit three rows while the toast
+    said two, and nothing in the frame explained which row was furniture."""
+    from local_operator.tui import theme as theme_mod
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    app = ChipHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        block = UserBlock("look at this", attachments=1)
+        await app.mount(block)
+        await pilot.pause()
+
+        rendered = block._build()
+        assert isinstance(rendered, Text)
+        assert block._receipt_row is not None
+        receipt = rendered.split("\n")[block._receipt_row]
+        assert "image attached" in receipt.plain
+        muted = theme_mod.semantic_color("muted")
+        prose = theme_mod.semantic_color(UserBlock.TEXT_TOKEN)
+        assert muted != prose, "the fixture cannot tell the two inks apart"
+        inks = {
+            span.style.color.name
+            for span in receipt.spans
+            if isinstance(span.style, Style) and span.style.color is not None
+        }
+        assert muted in inks, f"the receipt wears prose ink, not the receipt ink: {inks}"
+        assert prose not in inks, f"the receipt still carries the prompt's ink: {inks}"
