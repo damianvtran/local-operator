@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import base64
 import io
+import os
+import signal
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -607,3 +610,269 @@ async def test_deleting_a_marker_releases_the_image_bytes(tmp_path) -> None:
         await pilot.pause()
 
         assert editor._attachments == {}, "the image bytes outlived the marker"
+
+
+# -- the marker and its image must never disagree -----------------------------
+@pytest.mark.asyncio
+async def test_recalling_a_previous_prompt_does_not_borrow_this_draft_s_image(tmp_path) -> None:
+    """Review round 17, P1, reproduced with real keystrokes only.
+
+    Marker numbers restart at #1 on every submit, so a recalled prompt's
+    ``[Image #1]`` and the live draft's ``[Image #1]`` are different images
+    with the same name. Recalling the text while leaving the attachments alone
+    therefore sent the SECOND screenshot under the FIRST one's label — silent,
+    and the model answers about a picture the user never attached here.
+    """
+    first = _png(tmp_path / "a.png", 10, 20)
+    second = _png(tmp_path / "b.png", 30, 40)
+    submitted: list[EditorSubmitted] = []
+
+    class Capturing(Host):
+        def on_editor_submitted(self, message: EditorSubmitted) -> None:
+            submitted.append(message)
+
+    app = Capturing()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, first)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        await _paste(app, pilot, second)
+        await pilot.press("up")
+        await pilot.pause()
+        assert editor.text.rstrip() == "[Image #1, 10x20]", editor.text
+        await pilot.press("enter")
+        await pilot.pause()
+
+    # The recalled prompt carries NO image: the first one went with the message
+    # that was sent, and the second belongs to the draft that was set aside.
+    assert submitted[1].images == [], "a recalled marker resolved to the wrong image"
+
+
+@pytest.mark.asyncio
+async def test_coming_back_from_history_restores_the_draft_s_own_images(tmp_path) -> None:
+    """Down-arrow past the newest entry returns the unsent draft, which is the
+    same message it was — so its attachments come back with it."""
+    first = _png(tmp_path / "a.png", 10, 20)
+    second = _png(tmp_path / "b.png", 30, 40)
+
+    class Capturing(Host):
+        def on_editor_submitted(self, message: EditorSubmitted) -> None:
+            pass
+
+    app = Capturing()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, first)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        await _paste(app, pilot, second)
+        draft = editor.text
+        await pilot.press("up")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert editor.text == draft
+        sizes = [
+            Image.open(io.BytesIO(base64.b64decode(image.data))).size
+            for image in editor.referenced_images()
+        ]
+        assert sizes == [(30, 40)], "the draft came back without its attachment"
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_path_with_a_nul_byte_is_a_text_paste_not_a_crash(tmp_path) -> None:
+    """Every other malformed path degrades to an ordinary text paste. A NUL in
+    the name raised `ValueError` (not an `OSError`), which escaped onto the
+    keystroke and surfaced as Textual's error screen (review round 17)."""
+    hostile = f"{tmp_path}/a\x00.png"
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, hostile)
+
+        assert editor.text == hostile
+        assert editor.referenced_images() == []
+
+
+@pytest.fixture
+def no_full_reads(monkeypatch):
+    """Record every path whose CONTENTS the composer pulled into memory.
+
+    Instruments ``pathlib.Path.read_bytes`` specifically. An earlier version
+    counted bytes through ``builtins.open`` and was vacuous: ``read_bytes``
+    goes through ``io.open``, so removing the size gate changed nothing the
+    test could see, and both mutations passed.
+    """
+    read: list[str] = []
+    real = Path.read_bytes
+
+    def recording(self):  # noqa: ANN001 - patching a bound method
+        read.append(str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", recording)
+    return read
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_file_is_refused_before_it_is_read(tmp_path, no_full_reads) -> None:
+    """The cap has to bound the READ, not report on it afterwards.
+
+    It ran on ``len(data)``, so a 601 MB file behind a valid PNG header took
+    peak RSS to 618 MB before the cap fired — allocated synchronously on the
+    keystroke that pasted it (review round 17). Asserted on whether the file
+    was opened at all, which is the property, rather than on timing or memory,
+    which are flaky.
+    """
+    big = tmp_path / "huge.png"
+    Image.new("RGB", (64, 64)).save(big)
+    big.write_bytes(big.read_bytes() + b"\x00" * (MAX_ATTACHMENT_BYTES + 1))
+    no_full_reads.clear()  # the fixture setup above is not the composer
+
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, str(big))
+
+        assert editor.referenced_images() == []
+        assert editor.text == str(big)
+    assert no_full_reads == [], f"read a file it was going to refuse: {no_full_reads}"
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="POSIX alarm only")
+@pytest.mark.asyncio
+async def test_a_fifo_is_refused_without_being_opened(tmp_path, no_full_reads) -> None:
+    """``open()`` on a FIFO blocks until a writer appears, and this runs inline
+    on the event loop — so a named pipe was a hung APP, not a failed paste.
+
+    Two mechanisms, because either alone is a bad test:
+
+    - Asserted as "never opened", not "returned quickly". Timing is flaky, and
+      the property under test is that the file is never touched.
+    - Guarded by ``SIGALRM``, because the failure this defends against is an
+      INFINITE BLOCK inside a synchronous ``open`` on the event loop. Without
+      the alarm, deleting the guard does not fail this test — it hangs the
+      whole suite, which reports nothing and cannot be mutation-verified.
+      Confirmed: the mutation run reported ``HUNG >120s`` until this was added.
+    """
+    fifo = tmp_path / "pipe.png"
+    os.mkfifo(fifo)
+
+    def _blocked(signum, frame):  # noqa: ANN001 - signal handler signature
+        raise AssertionError("the composer blocked on a FIFO instead of refusing it")
+
+    previous = signal.signal(signal.SIGALRM, _blocked)
+    signal.alarm(10)
+    try:
+        app = Host()
+        async with app.run_test() as pilot:
+            editor = app.query_one(Editor)
+            editor.focus()
+            await pilot.pause()
+            await _paste(app, pilot, str(fifo))
+
+            assert editor.referenced_images() == []
+            assert editor.text == str(fifo)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert no_full_reads == [], f"opened a FIFO on the event loop: {no_full_reads}"
+
+
+@pytest.mark.asyncio
+async def test_the_aside_gives_the_draft_back_with_its_attachments(tmp_path) -> None:
+    """Review round 17, P1. The aside borrows the composer by clearing it, and
+    `clear_content` drops attachments by design — so the draft came back with
+    its markers resolving to nothing and Enter sent the words alone. Worse, an
+    image pasted INSIDE the aside took number 1, so the restored marker
+    resolved to the aside's image instead.
+    """
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    main_image = _png(tmp_path / "a.png", 10, 20)
+    aside_image = _png(tmp_path / "b.png", 30, 40)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.25)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, main_image)
+        editor.insert("explain this")
+
+        app._open_aside()
+        await pilot.pause()
+        # An image pasted while the aside owns the composer numbers from #1 too.
+        await _paste(app, pilot, aside_image)
+        app._close_aside()
+        await pilot.pause()
+
+        assert editor.text == "[Image #1, 10x20] explain this"
+        sizes = [
+            Image.open(io.BytesIO(base64.b64decode(image.data))).size
+            for image in editor.referenced_images()
+        ]
+        assert sizes == [(10, 20)], "the draft came back citing the wrong image"
+
+
+# -- what the chip claims, and what the clipboard takes ------------------------
+@pytest.mark.asyncio
+async def test_a_marker_with_no_image_behind_it_is_not_painted_as_a_chip(tmp_path) -> None:
+    """Design round 16, D1. The chip is a CLAIM that an image is attached.
+
+    Painted from the text pattern alone it drew a full chip for a marker typed
+    by hand, and for one brought back by undo after its attachment had been
+    dropped — visually identical to a real attachment, submitting nothing.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(80, 10)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        real = editor._marker_cells(0)
+        assert real, "a real attachment should paint"
+
+        editor.text = "[Image #9, 900x900] typed by hand"
+        await pilot.pause()
+        assert editor._marker_cells(0) == [], "an unresolvable marker painted as a chip"
+        assert editor.referenced_images() == []
+
+
+@pytest.mark.asyncio
+async def test_the_attachment_receipt_never_reaches_the_clipboard(tmp_path) -> None:
+    """Design round 16, D3. `↑ 1 image attached` is the app talking.
+
+    Copying a prompt must paste the prompt. The receipt says something the user
+    did not write, so a drag over the block must not carry it into whatever
+    they were quoting into — the same rule `copy_gutter` already applies to the
+    left rule, one dimension over.
+    """
+    from textual.selection import Selection as ScreenSelection
+
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    block = UserBlock("look at this", attachments=1)
+    rows = block._rows(60)
+    assert rows[-1] == "↑ 1 image attached", rows
+
+    whole = ScreenSelection(None, None)
+    copied = block.get_selection(whole)
+    assert copied is not None
+    assert "image attached" not in copied[0], copied[0]
+    assert "look at this" in copied[0]

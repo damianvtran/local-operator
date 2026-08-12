@@ -50,6 +50,7 @@ import shlex
 from bisect import bisect_right
 from collections.abc import Sequence
 from pathlib import Path
+from stat import S_ISREG
 from typing import Callable
 
 from rich.cells import cell_len
@@ -343,6 +344,10 @@ class Editor(TextArea):
         # off for as long as it owns the composer.
         self._records_history = True
         self._draft: str = ""  # buffer text saved when history nav starts
+        #: and its attachments, saved with it. Kept together because they are
+        #: one unsent message: restoring the text without these resolves its
+        #: markers to nothing, and restoring neither loses the user's work.
+        self._draft_attachments: dict[int, ImageContent] = {}
         self._on_model_chosen: Callable[[ModelRow], None] | None = None
         #: Attachments pasted into the current draft, keyed by the number in
         #: their ``[Image #N, WxH]`` marker. A DICT rather than a list because
@@ -908,6 +913,15 @@ class Editor(TextArea):
         gutter = self.gutter_width
         cells: list[tuple[int, int, bool]] = []
         for match in IMAGE_MARKER.finditer(line):
+            # A chip is a claim that an image is attached here, so it is painted
+            # only when the number RESOLVES. Painting from the text pattern
+            # alone drew a full chip for a marker typed by hand, and for one
+            # brought back by undo after its attachment had been dropped —
+            # identical to a real attachment, submitting nothing, with no
+            # receipt row to give it away (design round 16, D1). Same test
+            # `referenced_images` makes, so what is chipped is what is sent.
+            if int(match.group(1)) not in self._attachments:
+                continue
             start = max(match.start(), section_start)
             end = min(match.end(), section_end)
             if start >= end:
@@ -1060,6 +1074,27 @@ class Editor(TextArea):
 
         loaded: list[tuple[ImageContent, str]] = []
         for path in candidates:
+            # STAT FIRST. Two things this closes, both measured in review round
+            # 17 against the previous read-then-check order:
+            #
+            # - The 4 MB cap ran on `len(data)`, i.e. AFTER the cost it exists
+            #   to prevent. A 601 MB file behind a valid 100x100 PNG header
+            #   took peak RSS to 618 MB before the cap fired, allocated
+            #   synchronously on the keystroke that pasted it.
+            # - `open()` on a FIFO blocks forever, and this runs inline on the
+            #   event loop, so a named pipe (or a stalled network mount) is a
+            #   HUNG UI rather than a failed paste.
+            #
+            # `sniff_image_file` cannot help with either: it reads 64 KB, and a
+            # header is not a size bound.
+            try:
+                stat = Path(path).stat()
+            except (OSError, ValueError):
+                # ValueError for a NUL byte in the name, which is not an
+                # OSError and would otherwise escape onto the keystroke.
+                return None
+            if not S_ISREG(stat.st_mode) or stat.st_size > MAX_ATTACHMENT_BYTES:
+                return None
             info = sniff_image_file(path)
             # `sendable` and not merely "recognised": HEIC sniffs fine and no
             # provider will take it, so attaching it would trade a readable
@@ -1068,9 +1103,11 @@ class Editor(TextArea):
                 return None
             try:
                 data = Path(path).read_bytes()
-            except OSError:
+            except (OSError, ValueError):
                 return None
             if len(data) > MAX_ATTACHMENT_BYTES:
+                # The stat above is the real gate; this catches a file that grew
+                # between the two calls.
                 return None
             loaded.append(
                 (
@@ -1371,11 +1408,29 @@ class Editor(TextArea):
         self._history_index = None
 
     def _navigate_history(self, direction: int) -> None:
+        """Recall a previous prompt, WITHOUT carrying this draft's attachments.
+
+        Marker numbers restart at #1 on every submit, so a recalled prompt's
+        ``[Image #1]`` and the current draft's ``[Image #1]`` are different
+        images with the same name. Leaving ``_attachments`` alone while
+        replacing the text therefore resolved the recalled marker against
+        whatever the live draft happened to hold: review round 17 reproduced
+        paste-submit-paste-Up-Enter sending the SECOND screenshot under the
+        first one's label, which is the worst possible failure for this feature
+        — silent, and the model answers about a picture the user did not send.
+
+        Recalled prompts have no attachments at all. The images went with the
+        message when it was submitted, and the transcript owns them now; the
+        text comes back as a starting point, and its markers resolve to nothing
+        until the user pastes again. The DRAFT's attachments are stashed and
+        restored with its text, because that is still the same unsent message.
+        """
         if not self._history:
             return
         if self._history_index is None:
             if direction < 0:
                 self._draft = self.text
+                self._draft_attachments = dict(self._attachments)
                 self._history_index = len(self._history) - 1
             else:
                 return  # Down with no navigation active: nothing to restore
@@ -1385,10 +1440,13 @@ class Editor(TextArea):
             # Past the newest entry: restore the draft and exit navigation.
             self._history_index = None
             self.text = self._draft
+            self._attachments = dict(self._draft_attachments)
+            self._next_marker = max(self._attachments, default=0) + 1
             self.move_cursor(self._end_of_buffer())
             return
         self._history_index = max(0, self._history_index)
         self.text = self._history[self._history_index]
+        self._attachments.clear()
         self.move_cursor(self._end_of_buffer())
 
     def _end_of_buffer(self) -> tuple[int, int]:

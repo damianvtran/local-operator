@@ -389,6 +389,17 @@ class TranscriptBlock(Static):
         """
         return 0
 
+    def copy_row_is_chrome(self, index: int) -> bool:
+        """Is rendered row ``index`` entirely the block's own furniture?
+
+        The row sibling of :meth:`copy_gutter`, and it exists for the same
+        reason: what the block PAINTS is not what the user or the model wrote,
+        so it must not arrive on the clipboard. Columns were the only case
+        until a block grew a whole row of its own — see
+        :meth:`UserBlock._rows`' attachment receipt.
+        """
+        return False
+
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The selected text, gutter-stripped and right-trimmed, or ``None``.
 
@@ -415,7 +426,7 @@ class TranscriptBlock(Static):
         copied: list[str] = []
         for index, row in enumerate(visual.plain.split("\n")):
             span = selection.get_span(index)
-            if span is None:
+            if span is None or self.copy_row_is_chrome(index):
                 continue
             start, end = span
             copied.append(row[max(start, self.copy_gutter(index)) : None if end == -1 else end])
@@ -521,6 +532,10 @@ class UserBlock(TranscriptBlock):
         #: renders a receipt, and keeping the base64 alive per row would hold
         #: the whole conversation's screenshots in the widget tree.
         self._attachments = attachments
+        #: Rendered index of the receipt row, or None when there is none. Set
+        #: by `_build` at the width it actually wrapped at, so `copy_row_is_chrome`
+        #: never has to re-derive it and cannot disagree with the frame.
+        self._receipt_row: int | None = None
         self.set_content(self._build())
         self.finalize()
 
@@ -535,6 +550,20 @@ class UserBlock(TranscriptBlock):
         to the front of every line.
         """
         return self.RULE_COLS
+
+    def copy_row_is_chrome(self, index: int) -> bool:
+        """The attachment receipt is the app talking, not the user.
+
+        It is the last row when present, and it says something the user did not
+        write, so a drag over the prompt must not paste ``↑ 1 image attached``
+        into whatever they were quoting it into (design round 16, D3). The
+        prompt's own text, ``[Image #N]`` markers included, copies as typed.
+
+        Read from the index ``_build`` recorded rather than recomputed here: it
+        is the same wrap at the same width by construction, where a second
+        computation could disagree with the frame after a resize.
+        """
+        return self._receipt_row is not None and index == self._receipt_row
 
     def text(self) -> str:
         """The prompt as submitted, newlines and indentation intact."""
@@ -612,6 +641,9 @@ class UserBlock(TranscriptBlock):
             # that silently attached nothing went unnoticed for so long.
             plural = "s" if self._attachments != 1 else ""
             rows.append(f"↑ {self._attachments} image{plural} attached")
+            self._receipt_row = len(rows) - 1
+        else:
+            self._receipt_row = None
         return rows
 
     def _build(self) -> RenderableType:

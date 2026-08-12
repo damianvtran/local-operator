@@ -182,3 +182,18 @@ def test_the_sendable_set_is_what_providers_actually_take() -> None:
     }
     assert not ImageInfo("image/heic").sendable
     assert ImageInfo("image/png", 1, 1).sendable
+
+
+def test_a_path_with_a_nul_byte_is_declined_not_raised(tmp_path) -> None:
+    """`open()` on a name containing a NUL raises `ValueError: embedded null
+    byte`, which is NOT an `OSError` subclass.
+
+    The contract here is "return None for anything I cannot read", and callers
+    lean on it: the composer runs this on a keystroke and degrades every other
+    unreadable path to an ordinary text paste, so the one shape that escaped
+    took the keypress down with Textual's error screen instead (review round
+    17). Tested at this level because the composer now stats first and catches
+    it earlier — this function still owns the guarantee, and nothing else would
+    notice if it were dropped.
+    """
+    assert sniff_image_file(f"{tmp_path}/a\x00.png") is None

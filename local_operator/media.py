@@ -200,9 +200,16 @@ def sniff_image_file(path: str) -> ImageInfo | None:
 
     Bounded at :data:`_SNIFF_BYTES` so pointing this at a multi-gigabyte file
     costs one short read rather than the file.
+
+    ``None`` for anything unreadable, which has to include the paths that do
+    not raise ``OSError``: a NUL byte in the name raises ``ValueError:
+    embedded null byte``, which is not an ``OSError`` subclass. Callers reach
+    this from a PASTE, where every other malformed input degrades to an
+    ordinary text paste — so the one shape that escaped instead took down the
+    keystroke with Textual's error screen (review round 17).
     """
     try:
         with open(path, "rb") as handle:
             return sniff_image(handle.read(_SNIFF_BYTES))
-    except OSError:
+    except (OSError, ValueError):
         return None

@@ -742,6 +742,13 @@ class OperatorApp(App[None]):
         # to hand it back. `None` means the aside is closed; `""` is a real
         # value (the draft was empty) and must not collapse into it.
         self._aside_draft: str | None = None
+        #: and its attachments. The aside CLEARS the composer to borrow it, and
+        #: `clear_content` drops attachments by design — so without stashing
+        #: these the draft came back with its `[Image #N]` markers resolving to
+        #: nothing, and Enter sent the words alone. Worse, an image pasted
+        #: INSIDE the aside took number 1, so the restored marker resolved to
+        #: the aside's image instead (review round 17).
+        self._aside_draft_images: list[ImageContent] = []
         # The reasoning-effort level the USER picked, or None while the model's
         # own default stands. Held on the app rather than only on the session
         # spec because the session is replaceable — `/new`, `/reload` and
@@ -4472,6 +4479,8 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         editor = self._editor()
         self._aside_draft = editor.text
+        # Taken BEFORE `clear_content`, which drops them.
+        self._aside_draft_images = editor.referenced_images()
         editor.clear_content()
         editor.placeholder = ASIDE_PLACEHOLDER
         # The command list is borrowed too, and returned in `_close_aside`.
@@ -4565,10 +4574,15 @@ class OperatorApp(App[None]):
             transcript.styles.clear_rule("padding")
             transcript.follow_tail()
         draft = self._aside_draft
+        images = self._aside_draft_images
         self._aside_draft = None
+        self._aside_draft_images = []
         editor = self._editor()
         editor.placeholder = DEFAULT_PLACEHOLDER
         editor.load_text(draft or "")
+        # AFTER `load_text`: adoption re-keys onto the markers now in the
+        # buffer, so the text has to be there first.
+        editor.adopt_attachments(images)
         editor.set_commands(SLASH_COMMANDS)
         editor.set_records_history(True)
         self.screen.remove_class(ASIDE_LAYOUT_CLASS)
