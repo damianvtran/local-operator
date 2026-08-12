@@ -225,7 +225,13 @@ def test_invalid_structured_effort_is_not_silently_dropped(caplog) -> None:
             {"retry": {"fallbackChains": {"anthropic/claude": chain}}}
         )
 
-    assert expand_fallback_targets("anthropic/claude", chain) == []
+    # Expand what NORMALIZATION produced, not the raw config: production always
+    # walks the normalized chain, and `_fallback_target` honours a raw mapping
+    # on its own, so expanding `chain` here would bypass the function under test.
+    assert (
+        expand_fallback_targets("anthropic/claude", settings.fallback_chains["anthropic/claude"])
+        == []
+    )
     messages = " ".join(r.getMessage() for r in caplog.records)
     assert "turbo" in messages and "openai/gpt-5" in messages
     # The message has to be actionable: name the vocabulary, not just the typo.
@@ -243,11 +249,17 @@ def test_effort_survives_an_unknown_sibling_key(caplog) -> None:
     """
     chain = [{"provider": "openai", "model": "gpt-5", "effort": "low", "note": "cheap hop"}]
     with caplog.at_level("WARNING"):
-        RetrySettings.from_settings({"retry": {"fallbackChains": {"anthropic/claude": chain}}})
+        settings = RetrySettings.from_settings(
+            {"retry": {"fallbackChains": {"anthropic/claude": chain}}}
+        )
 
-    assert [(t.selector, t.effort) for t in expand_fallback_targets("anthropic/claude", chain)] == [
-        ("openai/gpt-5", "low")
-    ]
+    # The NORMALIZED chain, for the reason above: asserting against `chain`
+    # passes even when `_normalize_chain_entry` flattens the effort away, which
+    # is the exact bug this test is named for (review round 30).
+    normalized = settings.fallback_chains["anthropic/claude"]
+    assert [
+        (t.selector, t.effort) for t in expand_fallback_targets("anthropic/claude", normalized)
+    ] == [("openai/gpt-5", "low")]
 
     ignored = [
         r.getMessage() for r in caplog.records if "ignoring unsupported key" in r.getMessage()

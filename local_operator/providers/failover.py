@@ -755,8 +755,13 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
     unreadable target and cannot say why, so a single typo used to delete a
     whole fallback hop in silence: the operator configured failover, got none
     during an outage, and nothing connected it to the YAML (review round 29).
-    Config is read once; a turn walks the chain constantly - so the diagnostic
-    belongs here, where it is emitted once and names the file's own vocabulary.
+    It belongs here rather than at the point of rejection because this is the
+    only layer that still holds the user's own text - the key it was written
+    under and the value they typed - so the message can name the config rather
+    than an internal target. It is NOT emitted once: ``from_settings`` is not
+    memoized and re-normalizes per model call (review round 30), so a standing
+    typo repeats in the log exactly as the sibling unsupported-key warning
+    beside it always has.
 
     ``None`` means "not something this can turn into an entry"; the caller
     warns and drops it rather than letting it reach the wire.
