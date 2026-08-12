@@ -18,7 +18,9 @@ Key interception happens in :meth:`_on_key`, which runs BEFORE TextArea's
 document-insert path, so a handled key never reaches the buffer. Unhandled
 keys fall through to the stock editor behavior.
 
-The caret is SOLID and never blinks; see ``cursor_blink`` in :meth:`__init__`.
+The caret is SOLID and never blinks, and on an EMPTY composer it gets a cell of
+its own to the left of the placeholder rather than inverting the placeholder's
+first letter; see ``cursor_blink`` in :meth:`__init__` and :meth:`render_line`.
 
 The editor OWNS its :class:`CommandPicker` (built in ``__init__``, mounted by
 the app as a sibling below the input row, since the picker must draw outside
@@ -28,22 +30,46 @@ attached" variant to keep in step.
 
 The picker under the field serves two lists. While the command WORD is open it
 offers commands; once the word is terminated by a space, ``/model`` hands the
-model picker its query and ``/login``/``/logout`` put the SAME command picker
-into argument mode over the provider list. Which one is live is decided by
-parsing the buffer (``slash_context`` versus ``slash_argument``), so two lists
-can never be open at once.
+model picker its query and every command the registry marks as taking a value
+(``SlashCommand.arguments``) puts the SAME command picker into argument mode
+over that command's values — providers for ``/login``, modes for
+``/approvals``, this model's rungs for ``/effort``. Which one is live is
+decided by parsing the buffer (``slash_context`` versus ``slash_argument``), so
+two lists can never be open at once.
+
+Nothing here filters what may be SUBMITTED. The list ranks what is typed and
+offers a completion; a user who knows the value types it and presses Enter, and
+never sees the difference.
 """
 
 from __future__ import annotations
 
+import base64
+import re
+import shlex
+from bisect import bisect_right
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from stat import S_ISREG
 from typing import Callable
 
+from rich.cells import cell_len
+from rich.segment import Segment
+from rich.style import Style as RichStyle
 from textual import events
+from textual.content import Content
+from textual.expand_tabs import expand_tabs_inline
+from textual.geometry import Offset
 from textual.message import Message
+from textual.strip import Strip
+from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
-from textual.widgets.text_area import Edit, EditResult
+from textual.widgets.text_area import Edit, EditResult, Selection
 
-from local_operator.tui.autocomplete import SlashCommand
+from local_operator.harness.types import ImageContent
+from local_operator.media import sniff_image_file
+from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 from local_operator.tui.widgets.command_picker import (
     CommandPicker,
     PickerMode,
@@ -52,13 +78,213 @@ from local_operator.tui.widgets.command_picker import (
 )
 from local_operator.tui.widgets.model_picker import ModelPicker, ModelRow
 
+#: Refused above this, as a plain text paste. Providers cap an image at 5 MB of
+#: base64, which is 3.75 MB of bytes; 4 MB of source is comfortably inside that
+#: after the 4/3 inflation and still holds any screenshot. The point is that
+#: the refusal happens HERE, where it is one visible path in the composer the
+#: user can act on, rather than as a provider 400 mid-turn.
+MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
+
+#: A paste is treated as paths only if EVERY segment looks like one. Requiring
+#: a separator is what keeps prose out: "see screenshot.png" splits into two
+#: segments, one of which has no `/`, so the whole paste stays text.
+_PATH_SEGMENT = re.compile(r"^(?:~|\.{0,2}/|/)")
+
+
+#: One attachment marker. The number is the key into ``Editor._attachments``;
+#: the tail (``, 1568x200``) is a label for the user and is matched loosely so
+#: changing it later cannot orphan every marker already in a draft.
+#:
+#: Also the ATOMIC unit for editing: backspace and delete take the whole marker
+#: rather than a bracket, because a half-eaten ``[Image #2, 1568x20`` is neither
+#: text the user meant nor a reference anything can resolve.
+#:
+#: The tail excludes ``[`` as well as ``]``: the app only ever writes ``WxH``
+#: there, so a bracket inside one can only mean the tail ran past its own
+#: marker into the next. Without that, deleting the closing bracket of a stale
+#: marker sitting in front of a live one merged the pair into a single match
+#: whose start is not where the live marker begins - the chip vanished for ten
+#: keystrokes of an ordinary cleanup while the image stayed attached and sent,
+#: and the live marker dropped out of the atomic set (design round 20, D12).
+#: It also states the assumption `cite`'s ``str.find`` already relies on: a
+#: marker cannot contain another marker.
+IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n\[]*)?\]")
+
+
+def _marker_indices(text: str) -> list[int]:
+    """Every marker number in ``text``, in order, without duplicates.
+
+    One walk of the buffer, shared by everything that has to agree about which
+    markers exist. Two implementations of "the markers in this text" is exactly
+    what let a restore rebind images one marker left (review round 18).
+    """
+    indices: list[int] = []
+    for match in IMAGE_MARKER.finditer(text):
+        index = int(match.group(1))
+        if index not in indices:
+            indices.append(index)
+    return indices
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """An image, and the marker text the app wrote to cite it.
+
+    The marker is kept because the NUMBER alone cannot say which citation is
+    the app's. A prompt drag-copied out of the transcript and pasted back
+    carries `[Image #1, 1568x200]` verbatim, so a draft can hold two citations
+    of one number where only one of them is the app's own claim; picking by
+    document order gave the chip - and, through the atomic-token gate, the
+    editing behaviour - to whichever landed first, which is the impostor as
+    soon as the user pastes at the top of the draft (design round 19, D4).
+
+    Kept ON the attachment rather than in a parallel dict so it rides every
+    round trip the images already make: the aside stash, the compaction hold,
+    `EditorSubmitted`, and the `/reload` hand-back. A parallel dict is the
+    thing this feature has repeatedly got wrong.
+    """
+
+    image: ImageContent
+    #: Exactly the text issued at :meth:`_attach_pasted_images`, e.g.
+    #: ``[Image #1, 1568x200]``.
+    marker: str
+
+
+def cite(text: str, index: int, attachment: Attachment) -> tuple[int, int] | None:
+    """The span of the APP's citation of ``index`` in ``text``, or ``None``.
+
+    A SPAN, not an offset, because the citation in the buffer is not always the
+    recorded marker: the fallback below resolves a differently-tailed one, and
+    a caller that assumed `len(attachment.marker)` measured a marker the user
+    had lengthened as if it were still short (review round 26).
+
+    Prefers the citation whose text matches the marker byte for byte, and only
+    falls back to the first citation of the number when no exact match
+    survives. That fallback is deliberate: the marker's tail is matched loosely
+    on purpose so that editing `1568x200` cannot orphan a draft, and keying
+    only on an exact match would reverse that decision. Degrading to document
+    order needs BOTH an impostor and an edited tail, and lands on the previous
+    behaviour rather than on something worse.
+    """
+    exact = text.find(attachment.marker)
+    if exact != -1:
+        return exact, exact + len(attachment.marker)
+    for match in IMAGE_MARKER.finditer(text):
+        if int(match.group(1)) == index:
+            return match.span()
+    return None
+
+
+def resolve_markers(text: str, attachments: Mapping[int, Attachment]) -> list[ImageContent]:
+    """The attachments ``text`` cites, in the order it cites them.
+
+    THE one place a marker becomes an image, shared by the composer and by any
+    caller holding a stashed prompt. A second implementation of this walk is
+    what let a restore bind images to the wrong markers (review round 18), so
+    there is deliberately only one.
+
+    Ordered by where the APP's citation sits, which is the same order and the
+    same set the chip paints - "what is chipped is what is sent" is one
+    predicate, not two that happen to agree.
+    """
+    cited = [
+        (span[0], index)
+        for index, attachment in attachments.items()
+        if (span := cite(text, index, attachment)) is not None
+    ]
+    return [attachments[index].image for _, index in sorted(cited)]
+
+
+def _marker_runs(
+    start: int,
+    end: int,
+    selected: tuple[int, int],
+    caret: int | None,
+) -> list[tuple[int, int, bool]]:
+    """``[start, end)`` split into painted runs of one style each.
+
+    Three things want a say over the same cells — the chip, the selection over
+    part of it, and the caret standing in it — and they interleave in any
+    order, so this walks the columns rather than trying to do interval algebra
+    on three overlapping ranges. A marker is at most a few dozen characters and
+    a composer at most eight rows, so the walk costs nothing worth optimising
+    and is checkable by reading it.
+
+    ``caret`` is DROPPED rather than given a style: ``TextArea`` has already
+    painted that one cell inverted, and the chip must not paint over it.
+    """
+    runs: list[tuple[int, int, bool]] = []
+    for column in range(start, end):
+        if column == caret:
+            continue
+        is_selected = selected[0] <= column < selected[1]
+        if runs and runs[-1][1] == column and runs[-1][2] is is_selected:
+            runs[-1] = (runs[-1][0], column + 1, is_selected)
+        else:
+            runs.append((column, column + 1, is_selected))
+    return runs
+
+
+def _pasted_paths(pasted: str) -> list[str]:
+    """The paste read as a list of filesystem paths, or ``[]``.
+
+    Terminals deliver a dropped or copied file as its path, shell-quoted:
+    Ghostty writes a clipboard image to a temp file and pastes that name, and a
+    Finder drag arrives with spaces backslash-escaped. ``shlex`` is exactly the
+    grammar they are quoting for, so it is what unpicks it — hand-rolled
+    unescaping is how a path with a space becomes two paths that do not exist.
+
+    Newlines separate multi-file drops on some terminals and are inside a
+    filename on none of them, so they split first.
+    """
+    text = pasted.strip()
+    if not text or len(text) > 4096:
+        # A real path list is short. This bound is what stops a pasted essay
+        # being shlex-parsed on the keystroke that pasted it.
+        return []
+    segments: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = shlex.split(line)
+        except ValueError:
+            # Unbalanced quotes: prose, not a path list.
+            return []
+        if not parsed:
+            return []
+        segments.extend(parsed)
+    if not segments:
+        return []
+    if not all(_PATH_SEGMENT.match(segment) for segment in segments):
+        return []
+    return [str(Path(segment).expanduser()) for segment in segments]
+
 
 class EditorSubmitted(Message):
     """Posted when the user submits the editor (Enter without Shift)."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(
+        self,
+        text: str,
+        images: list[ImageContent] | None = None,
+        attachments: Mapping[int, Attachment] | None = None,
+    ) -> None:
         super().__init__()
         self.text = text
+        #: Attachments pasted into this prompt, in marker order. Defaulted so
+        #: every existing construction site (and every test) keeps working
+        #: unchanged — a submit with nothing attached is still the common case.
+        self.images = images or []
+        #: The same attachments as an index→image MAP, for a handler that may
+        #: have to hand this prompt BACK to the composer — held through a
+        #: compaction, or restored by `/reload`. It has to ride the message:
+        #: `Editor._submit` clears the buffer synchronously right after posting,
+        #: and Textual delivers on a later tick, so a handler that re-reads the
+        #: widget sees an empty map and silently drops the images (review round
+        #: 19). Restores need the numbers, which the ordered list has lost.
+        self.attachments = dict(attachments or {})
 
 
 class InterruptRequested(Message):
@@ -100,20 +326,46 @@ class ModelQueryOpened(Message):
         super().__init__()
 
 
-class ProviderQueryOpened(Message):
-    """Posted when the buffer enters ``/login …`` or ``/logout …``.
+class ArgumentQueryOpened(Message):
+    """Posted when the buffer enters ``/<command> …`` for a list-taking command.
 
-    Carries the command WORD because the two lists are different sets — every
-    loginable provider versus only the ones holding a stored credential — and the
-    app cannot recover which one from the buffer once the message is queued.
+    Carries the command WORD because every list is a different set — every
+    loginable provider, only the ones holding a credential, the two approval
+    modes, the rungs THIS model accepts — and the app cannot recover which one
+    from the buffer once the message is queued.
 
     Like :class:`ModelQueryOpened` it fires on the TRANSITION only, so the app
-    reads the credential store once per opening rather than once per keystroke.
+    builds the rows once per opening rather than once per keystroke. That is
+    what makes a list affordable when filling it costs a credential-store read.
     """
 
     def __init__(self, command: str) -> None:
         super().__init__()
         self.command = command
+
+
+#: The composer's resting prose. Named rather than inlined because the app
+#: swaps it for :data:`READ_ONLY_PLACEHOLDER` while the full-page subagent
+#: view is open and has to be able to put this one back.
+DEFAULT_PLACEHOLDER = "Message Local Operator…"
+
+#: What the composer says while it refuses input. It names the state AND the
+#: consequence, because the only useful thing to tell someone whose keys are
+#: being ignored is how to get a composer that accepts them.
+READ_ONLY_PLACEHOLDER = "Read-only — press esc to reply"
+
+#: What the composer says while the `/btw` aside card owns it — what the FIELD
+#: does, in ``DEFAULT_PLACEHOLDER``'s shape, and nothing about how to leave.
+#:
+#: It used to read "Aside — esc returns to the chat". That was right while the
+#: card floated 88 cells wide four rows away; once the two share a column and
+#: sit one row apart, the card's own pinned footer already says `esc back to
+#: the chat` two rows above, and two nearly consecutive rows both opening with
+#: `esc`, in two different verbs, read as repetition in a unit whose whole
+#: argument is that it is one thing. The card keeps the exit — its footer is
+#: chrome and `esc` is never shed from it — and this says what typing here
+#: will do. Half the cells, so it also survives a narrow terminal.
+ASIDE_PLACEHOLDER = "Ask the aside…"
 
 
 class Editor(TextArea):
@@ -127,25 +379,24 @@ class Editor(TextArea):
     #: the same list.
     MODEL_COMMANDS = ("model", "models")
 
-    #: Command words whose ARGUMENT is a provider id. These drive the SAME picker
-    #: the command word uses, in its argument mode.
-    PROVIDER_COMMANDS = ("login", "logout")
-
-    #: Provider commands that DESTROY something. `/logout` removes a credential
-    #: and an OAuth one costs another browser round trip to get back, so its rows
-    #: are gated harder than the shared ambiguity rule gates the rest: see
-    #: :meth:`_picker_choice_is_unambiguous` and :meth:`_apply_command`.
+    #: Commands that DESTROY what a chosen row names. `/logout` removes a
+    #: credential and an OAuth one costs another browser round trip to get back,
+    #: so its rows are gated harder than the shared ambiguity rule gates the
+    #: rest: see :meth:`_picker_choice_is_unambiguous` and :meth:`_apply_command`.
     DESTRUCTIVE_COMMANDS = ("logout",)
 
-    #: Every command whose argument drives a list. Completing one of these opens
-    #: that list, which IS the outcome of the keystroke — running the bare command
-    #: as well would echo a no-op into the transcript and clear the buffer the
-    #: list was just opened over.
-    LIST_COMMANDS = MODEL_COMMANDS + PROVIDER_COMMANDS
+    #: The attachment chip's two grounds, on top of everything ``TextArea``
+    #: already declares. Component classes rather than hexes in Python so the
+    #: colours sit in the stylesheet beside every other composer colour and
+    #: follow the theme's ``$lo-*`` variables through a theme switch.
+    COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
+        "text-area--image-marker",
+        "text-area--image-marker-selected",
+    }
 
     def __init__(
         self,
-        placeholder: str = "Message Local Operator…",
+        placeholder: str = DEFAULT_PLACEHOLDER,
         commands: list[SlashCommand] | None = None,
     ) -> None:
         # Built BEFORE super().__init__: TextArea's constructor loads its
@@ -153,79 +404,129 @@ class Editor(TextArea):
         # through _sync_picker().
         self._picker = CommandPicker(self._apply_command)
         self._model_picker = ModelPicker(self._apply_model)
-        # Which provider command the argument list is currently open for, or None
-        # when the buffer is not in one. This is the transition edge the
-        # ProviderQueryOpened message rides: without it the app would rebuild the
-        # credential list on every character typed into the query. Assigned here
-        # for the same reason as the pickers — _sync_picker() reads it during
+        # Which list-taking command the argument list is currently open for, or
+        # None when the buffer is not in one. This is the transition edge the
+        # ArgumentQueryOpened message rides: without it the app would rebuild
+        # the rows on every character typed into the query. Assigned here for
+        # the same reason as the pickers — _sync_picker() reads it during
         # super().__init__().
-        self._provider_command: str | None = None
+        self._argument_command: str | None = None
+        # Command words (primaries AND aliases) whose argument opens the value
+        # list, and the subset of those the bare command cannot stand without.
+        # DERIVED from the registry in :meth:`set_commands` rather than listed
+        # here: a hand-kept tuple beside a registry that already states the fact
+        # is a second source of truth, and the way it fails is a command whose
+        # description advertises options the editor never offers.
+        self._argument_commands: tuple[str, ...] = ()
+        self._required_argument_commands: tuple[str, ...] = ()
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
         super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
-        # The caret is SOLID, never blinking, and is NOT DRAWN AT ALL while the
-        # buffer is empty. Two rules, one root cause: Textual has nowhere to put
-        # a caret in a cell grid except ON a character, so with no text the
-        # placeholder branch of `TextArea.render_line` inverts cell 0 of
-        # `Message Local Operator…` whenever `_draw_cursor` is true.
+        # The caret is SOLID and never blinks. Blinking made the caret cell flip
+        # twice a second, and on the boot splash — where nothing else repaints —
+        # that 2 Hz invert beside a static logo WAS the startup animation users
+        # called obnoxious. Blink-off pays a second time: stock blink runs
+        # `refresh_lines` every 500 ms for the life of the app, so a completely
+        # idle session was writing a row down the ssh pipe twice a second for a
+        # caret that had not moved.
         #
-        # Blinking made that cell flip twice a second, and on the boot splash —
-        # where nothing else repaints — that 2 Hz invert beside a static logo
-        # WAS the startup animation users called obnoxious. Turning blink off
-        # alone only froze it: measured on the boot frame, the inverted cell
-        # sits at 13.76:1 against the panel, roughly 2.6x the mark's 3.71-5.35:1,
-        # so the loudest thing on the identity screen became a white block
-        # covering a letter, and the copy read `▉essage Local Operator…` (D-05).
-        # A caret that eats a word is a worse bug than a caret that flickers.
+        # Blink-off is NOT the same lever as whether a caret is drawn at all.
+        # An earlier pass suppressed the caret on an empty buffer, because
+        # Textual has nowhere to put one in a cell grid except ON a character:
+        # the placeholder branch of `TextArea.render_line` inverts cell 0 of
+        # `Message Local Operator…`, so the copy read `▉essage Local Operator…`
+        # with the block measuring 13.76:1 against the panel — the loudest thing
+        # on the identity screen, sitting on a word (D-05).
         #
-        # So: no caret while there is nothing to point at. The placeholder is
-        # PROSE and has to survive as words, and the composer still announces
-        # itself — `#input-dock:focus-within #prompt-chevron` turns the chevron
-        # accent on focus, which is a product affordance rather than a raster
-        # artefact sitting on top of one. The instant the buffer holds anything,
-        # the caret appears and stays put: that is where a caret earns its keep,
-        # marking an insertion point among characters, and a first-time user
-        # meets it on their first keystroke.
-        #
-        # This is NOT the "off while the buffer is empty" that an earlier pass
-        # rejected. That variant was about BLINK — solid while empty, blinking
-        # once you type — which keeps the 500 ms repaint for the whole session
-        # and changes the caret's behaviour mid-typing for a reason the user
-        # cannot see. Here blink is off unconditionally and what is conditional
-        # is whether a caret is DRAWN, in the one state where drawing it
-        # destroys a word. Neither state animates, which is also what keeps the
-        # splash reproducible for the SVG snapshot harness.
-        #
-        # Blink-off pays a second time: stock blink runs `refresh_lines` every
-        # 500 ms for the life of the app, so a completely idle session was
-        # writing a row down the ssh pipe twice a second for a caret that had
-        # not moved.
+        # Suppressing it was the wrong half to give up. It left the composer
+        # with NO focus affordance in the state a first-time user meets it in:
+        # clicking the empty field changed nothing on the frame, so there was no
+        # way to tell whether the next keystroke would land in it. The caret is
+        # back, and the collision is resolved where it actually is — the cell
+        # grid — by giving the caret its OWN cell and starting the placeholder
+        # at column 1 while it is drawn. See :meth:`render_line`.
         self.cursor_blink = False
         self._history: list[str] = []
         self._history_index: int | None = None  # None = not navigating
+        # See :meth:`set_records_history`. On by default; the aside turns it
+        # off for as long as it owns the composer.
+        self._records_history = True
         self._draft: str = ""  # buffer text saved when history nav starts
+        #: and its attachments, saved with it. Kept together because they are
+        #: one unsent message: restoring the text without these resolves its
+        #: markers to nothing, and restoring neither loses the user's work.
+        self._draft_attachments: dict[int, Attachment] = {}
         self._on_model_chosen: Callable[[ModelRow], None] | None = None
+        #: Attachments pasted into the current draft, keyed by the number in
+        #: their ``[Image #N, WxH]`` marker. A DICT rather than a list because
+        #: the marker in the text is the authority on what gets sent: deleting
+        #: it deletes the attachment, so the two cannot be kept in step by
+        #: position. A number in use is never handed out twice, so nothing
+        #: renumbers under the cursor; a number the draft has stopped citing
+        #: IS reused, which the next comment explains.
+        self._attachments: dict[int, Attachment] = {}
+        #: Next marker number to hand out. Fully DERIVED — `_sync_next_marker`
+        #: recomputes it from the buffer immediately before every issuance, so
+        #: the field only carries the value between those two lines and the
+        #: other writes to it cannot affect any number actually issued.
+        #:
+        #: A consequence worth stating because it reverses what this comment
+        #: used to claim: numbers are no longer monotonic. Paste, paste, delete
+        #: #2, paste now yields #1 and #2 rather than #1 and #3. Nothing
+        #: renumbers — the surviving markers do not move, which is the property
+        #: the old monotonic rule existed to protect — the freed label is
+        #: simply available again. Safe by construction: the sync returns
+        #: `max(cited) + 1`, which cannot collide with a number the text still
+        #: cites (review round 20).
+        self._next_marker = 1
+        #: The marker a mouse press landed inside, as ``(row, start, end)``,
+        #: held until the button comes back up. The press alone cannot decide:
+        #: the same press also arms ``TextArea``'s drag-selection, and a drag
+        #: that begins inside a marker has to stay a drag. See
+        #: :meth:`_on_mouse_up`.
+        self._pressed_marker: tuple[int, int, int] | None = None
         self.set_commands(commands or [])
 
-    @property
-    def _draw_cursor(self) -> bool:
-        """Suppress the caret while the placeholder is the only thing on the row.
+    def render_line(self, y: int) -> Strip:
+        """Draw the empty composer's caret in a cell of its OWN.
 
-        The hook is Textual's, and it is the ONLY one that reaches the
-        placeholder: ``render_line`` consults it before inverting cell 0 of the
-        placeholder, and ``_render_line`` consults it for a real document row.
-        With an empty buffer and a placeholder set, the first path is the only
-        one that runs, so gating on emptiness here removes the block from the
-        placeholder and touches nothing else. See :meth:`__init__` for why the
-        caret is unwelcome on prose.
+        Textual's placeholder branch inverts cell 0 of the placeholder when the
+        caret is drawn, which paints the block on top of the ``M`` of
+        ``Message Local Operator…`` — the caret and the copy competing for one
+        cell. Nothing in a cell grid can hold both, so the placeholder moves one
+        cell right while the caret is on screen and the caret takes the column
+        the first typed character will occupy. Both survive: a solid block at
+        the head of the field, and the invitation still readable as words.
 
-        ``document.end`` rather than ``self.text``: this is called once per
-        rendered line, and ``text`` joins the whole buffer to answer a question
-        about its first cell.
+        The shift is conditional on the caret being drawn rather than permanent
+        so the resting (blurred) composer keeps its copy aligned with the column
+        typed text starts in; the one-cell move IS the focus transition, and it
+        happens on the same frame as the chevron going accent.
+
+        This mirrors ``TextArea.render_line``'s own placeholder branch — padding
+        is the only difference — because that branch runs BEFORE any hook a
+        subclass could reach and owns the wrap. Every other row is the base
+        class's, then post-processed by :meth:`_paint_markers` so an attachment
+        marker reads as an object rather than as text the user typed.
         """
-        if self.document.end == (0, 0):
-            return False
-        return bool(super()._draw_cursor)
+        if not self.text and self.placeholder:
+            theme = self._theme
+            cursor_style = theme.cursor_style if theme else None
+            # ONE condition for both the reserved cell and the block painted in
+            # it. Computing them separately would indent the copy by a cell
+            # with nothing in it on any frame where the caret cannot be drawn.
+            caret = bool(self._draw_cursor) and cursor_style is not None
+            placeholder = Content.from_text(self.placeholder)
+            if caret:
+                placeholder = placeholder.pad_left(1)
+            lines = placeholder.wrap(self.content_size.width)
+            if y < len(lines):
+                content = lines[y].stylize(self.get_visual_style("text-area--placeholder"))
+                if caret and y == 0:
+                    assert cursor_style is not None  # narrowed by `caret`
+                    content = content.stylize(ContentStyle.from_rich_style(cursor_style), 0, 1)
+                return Strip(content.render_segments(self.visual_style), content.cell_length)
+        return self._paint_markers(super().render_line(y), y)
 
     # -- public API ---------------------------------------------------------
     @property
@@ -239,17 +540,17 @@ class Editor(TextArea):
         return self._model_picker
 
     @property
-    def provider_command(self) -> str | None:
-        """Which provider command the buffer's argument list is open for, if any.
+    def argument_command(self) -> str | None:
+        """Which command the buffer's argument list is open for, if any.
 
-        Exposed so the app can check that a ``ProviderQueryOpened`` it is handling
-        still describes the buffer. The message is one message-loop tick old, and
-        a tick is enough for the user to have typed over the command — answering a
-        stale one attaches a notice to a command that no longer exists. The buffer
-        stays the single authority; this is how a reader outside the widget asks
-        it, rather than parsing the text a second time.
+        Exposed so the app can check that an ``ArgumentQueryOpened`` it is
+        handling still describes the buffer. The message is one message-loop tick
+        old, and a tick is enough for the user to have typed over the command —
+        answering a stale one attaches rows to a command that no longer exists.
+        The buffer stays the single authority; this is how a reader outside the
+        widget asks it, rather than parsing the text a second time.
         """
-        return self._provider_command
+        return self._argument_command
 
     def set_model_handler(self, handler: Callable[[ModelRow], None] | None) -> None:
         """Install what a chosen model DOES.
@@ -271,14 +572,94 @@ class Editor(TextArea):
         """
         return list(self._history)
 
+    def set_records_history(self, records: bool) -> None:
+        """Whether a submitted line joins the recallable prompt history.
+
+        Off while the `/btw` aside owns the composer, and that is a CONTRACT
+        rather than a preference: the card prints "off the record — nothing
+        here joins the chat, esc discards it", and a question still sitting in
+        the UP history after Esc falsifies it — one press recalls it and the
+        next Enter sends it to the agent as a real turn. It also stops the
+        aside burying the last thing the user actually said to the agent, which
+        is what UP is for.
+
+        Borrowed and returned the same way the placeholder, the draft and the
+        command list are (``OperatorApp._open_aside`` / ``_close_aside``).
+        Suppressed at the RECORD, not unwound afterwards: ``_submit`` records
+        before it posts, so anything that unwinds has to guess how many entries
+        to remove and gets it wrong the moment two asides repeat a question.
+        """
+        self._records_history = records
+
+    def forget_last_prompt(self, text: str) -> None:
+        """Retract the entry ``text`` just recorded, if it is still the newest.
+
+        The one case :meth:`set_records_history` cannot cover: the line that
+        OPENS the aside (``/btw <question>``) is submitted while the aside is
+        still closed, so ``_submit`` has already recorded it by the time the
+        handler runs — and it carries the question verbatim, which the card
+        then promises to discard.
+
+        Exact rather than a blind pop: the caller passes the line it is
+        retracting and nothing happens unless that is still the newest entry,
+        so a race that recorded something else in between cannot silently eat
+        a real prompt. Note ``_record_history`` drops a consecutive duplicate,
+        so re-asking the same question twice leaves nothing to retract the
+        second time and the guard is what makes that a no-op instead of a bug.
+        """
+        stripped = text.strip()
+        if stripped and self._history and self._history[-1] == stripped:
+            self._history.pop()
+        self._history_index = None
+
     def set_commands(self, commands: list[SlashCommand]) -> None:
-        """Slash commands offered to the picker (sync, no I/O)."""
+        """Slash commands offered to the picker (sync, no I/O).
+
+        Also re-derives which words open a VALUE list after their space, and
+        which of those the bare command cannot stand without. Both sets include
+        aliases, because a user who typed the alias must get the same list —
+        that is the bug ``MODEL_COMMANDS`` spells ``models`` out for.
+        """
         self._picker.set_commands(commands)
+        self._argument_commands = tuple(
+            name
+            for command in commands
+            if command.arguments is not ArgumentMode.NONE
+            for name in command.names
+        )
+        self._required_argument_commands = tuple(
+            name
+            for command in commands
+            if command.arguments is ArgumentMode.REQUIRED
+            for name in command.names
+        )
+
+    def opens_a_list(self, name: str) -> bool:
+        """Whether completing the command word ``name`` opens a list INSTEAD of
+        running it.
+
+        True for the model picker's words and for every ``REQUIRED`` argument
+        command: there, opening the list IS the outcome of the keystroke, and
+        submitting as well would run a no-op and clear the buffer the list was
+        just drawn over. An ``OPTIONAL`` one answers something when bare
+        (``/approvals`` reports the mode, ``/effort`` the ladder), so Enter
+        still sends it and the list is left as an offer for the next keystroke.
+        """
+        lowered = name.lower()
+        return lowered in self.MODEL_COMMANDS or lowered in self._required_argument_commands
 
     def clear_content(self) -> None:
         """Empty the buffer and leave history navigation."""
         self.text = ""
         self._history_index = None
+        # Attachments belong to the text that referenced them. A draft cleared
+        # without dropping them would send the previous prompt's screenshots
+        # along with the next unrelated question. The counter resets too, so
+        # each prompt numbers from #1 rather than carrying a running total the
+        # user never sees the start of.
+        self._attachments.clear()
+        self._draft_attachments.clear()
+        self._next_marker = 1
 
     def begin_model_query(self) -> None:
         """Put the buffer into the state that shows the model list.
@@ -348,7 +729,7 @@ class Editor(TextArea):
                     return
         if key == "escape" and self._picker.is_pending():
             # The rows are one message-loop tick behind the keystroke that opened
-            # the list — the app answers ProviderQueryOpened — and for that tick
+            # the list — the app answers ArgumentQueryOpened — and for that tick
             # the picker is in argument mode holding nothing, so an `is_open()`
             # gate DROPPED the Esc: the user dismissed the list and then watched
             # it appear anyway. Dismissing an empty argument list records the
@@ -403,7 +784,7 @@ class Editor(TextArea):
                         # the transcript, cleared the buffer, and made the app put
                         # the query back to reopen a list the keystroke had already
                         # opened. One keystroke, one outcome.
-                        if key == "enter" and name.lower() not in self.LIST_COMMANDS:
+                        if key == "enter" and not self.opens_a_list(name):
                             self._submit()
                     elif key == "tab":
                         # Tab never sends, so it can safely take the highlighted
@@ -481,11 +862,589 @@ class Editor(TextArea):
     # -- submit -------------------------------------------------------------
     def _submit(self) -> None:
         text = self.text
-        if text.strip():
+        # Checked HERE, before the post, because that is the only place the
+        # entry can be prevented rather than removed afterwards — see
+        # :meth:`set_records_history`.
+        if text.strip() and self._records_history:
             self._record_history(text)
         self._picker.close()
-        self.post_message(EditorSubmitted(text))
+        # Only the attachments the text STILL REFERS TO. The marker is the
+        # authority: pasting three screenshots and deleting two must send one,
+        # because the deleted markers are the user saying they changed their
+        # mind, and silently sending all three is both surprising and expensive.
+        self.post_message(EditorSubmitted(text, self.referenced_images(), self._attachments))
         self.clear_content()
+
+    def referenced_images(self) -> list[ImageContent]:
+        """The attachments the buffer still cites, in the order it cites them.
+
+        Reading the TEXT rather than a parallel list is what makes deleting a
+        marker delete the attachment, with no bookkeeping on every keystroke to
+        keep the two in step. Order comes from the text too, so moving a marker
+        moves its image with it.
+
+        A marker the user retyped or duplicated by hand resolves to the same
+        image; one whose number was never issued resolves to nothing. Both are
+        the same rule — the number names an attachment, and text that names
+        nothing sends nothing.
+        """
+        return resolve_markers(self.text, self._attachments)
+
+    def attachments(self) -> dict[int, Attachment]:
+        """The index→image map, for a caller that will hand the draft back.
+
+        A COPY of the mapping, not a list, because identity is the thing that
+        has to survive the round trip. Handing back a list and re-keying it by
+        position is how the aside came to rebind every image one marker left
+        when a single marker did not resolve (review round 18): two walks of
+        the buffer under different rules cannot be relied on to agree.
+        """
+        return dict(self._attachments)
+
+    def adopt_attachments(self, attachments: Mapping[int, Attachment]) -> None:
+        """Restore an index→image map onto the buffer's markers.
+
+        For handing a prompt BACK — a draft the aside borrowed, or one restored
+        after a reload. Only the numbers the text actually cites are kept, so a
+        stash that outlived an edit cannot resurrect an attachment the text no
+        longer mentions.
+        """
+        cited = _marker_indices(self.text)
+        self._attachments = {index: attachments[index] for index in cited if index in attachments}
+        self._sync_next_marker()
+
+    def _sync_next_marker(self) -> None:
+        """Never hand out a number already standing in the text.
+
+        Derived from the BUFFER, never from ``_attachments``: a marker whose
+        attachment was dropped but whose text survives — delete then undo — is
+        invisible to the map, and numbering over it revived the dead marker
+        onto the next pasted image (review round 18). Called at every seam that
+        replaces the text wholesale AND immediately before issuing a number:
+        markers can arrive as ordinary text — a prompt copied out of the
+        transcript and pasted back — which no replacement seam ever sees.
+        """
+        self._next_marker = max(_marker_indices(self.text), default=0) + 1
+
+    # -- attachment markers as atomic tokens ----------------------------------
+    def _marker_span(self, row: int, column: int, *, before: bool) -> tuple[int, int] | None:
+        """The marker the caret is about to eat, as ``(start, end)`` columns.
+
+        ``before`` asks about backspace (the marker ending at the caret, or the
+        one the caret is standing inside); otherwise about delete (the marker
+        starting at the caret, or the one it is inside).
+
+        Standing INSIDE counts for both. A caret in the middle of
+        ``[Image #2, 15|68x200]`` is not editing text the user typed — there is
+        nothing meaningful to change one character of — so either key takes the
+        whole token.
+
+        Which markers get that treatment is the whole subtlety, and the two
+        rules below read like a contradiction until you see what separates
+        them: **the fragment is forbidden for text the app wrote, and permitted
+        for text that merely looks like it.**
+
+        - The app's own marker is ATOMIC. Backspace inside it used to remove
+          the closing bracket and leave ``[Image #2, 1568x20`` hanging, which
+          is neither prose nor a resolvable reference — the originally reported
+          bug, and still the reason this method exists.
+        - Anything else is PROSE, and editable one character at a time, even
+          though it matches the same grammar. A number that resolves to
+          nothing, or a second citation of one that does, is text as far as the
+          frame is concerned; a click that selected all nineteen characters of
+          it made the gesture disagree with the paint (design round 18, D7).
+          Leaving a fragment there is not a defect: the user is editing their
+          own text and we have no claim on it.
+
+        So the chip, this gate and :func:`resolve_markers` are one predicate —
+        what is chipped is what is atomic is what is sent — and ``cite()``
+        decides it in one place.
+
+        The honest caveat, because a reader will otherwise find it from a
+        frame: the app's marker leaves the protected set whenever ``cite()``
+        falls back. Edit the tail of the app's own marker while a copy of that
+        number is also in the draft and the fallback hands the chip, and this
+        gate, to the copy — so the app's marker becomes prose and CAN be
+        fragmented (design round 20, D4 residual, ``d4w``). That is the known
+        cost of keeping the tail loosely matched; see :func:`cite`.
+        """
+        line = self.document.get_line(row)
+        if "[" not in line:
+            # Every keystroke lands here, and a marker always opens with a
+            # bracket. `_marker_cells` keeps the same guard for the same reason.
+            return None
+        for match in IMAGE_MARKER.finditer(line):
+            start, end = match.span()
+            if not (
+                start < column < end
+                or (before and column == end)
+                or (not before and column == start)
+            ):
+                continue
+            # Resolved only once a candidate EXISTS. `_first_citation_columns`
+            # walks the document prefix, and this runs on backspace, delete,
+            # ctrl+w and every mouse-down: asking it unconditionally took the
+            # common keystroke from O(line) to O(document), measured at 0.34 ms
+            # on a 2000-line paste, which is exactly the draft a user then
+            # holds backspace through (review round 20).
+            #
+            # Markers cannot overlap, so this candidate is the only one the
+            # caret can be touching - not chipped means not atomic, full stop.
+            if start not in self._first_citation_columns(row):
+                return None
+            return start, end
+        return None
+
+    def _delete_marker(self, *, before: bool) -> bool:
+        """Delete the marker at the caret, if there is one. Reports whether."""
+        if self.selection.start != self.selection.end:
+            # A real selection is the user's own range; never widen it.
+            return False
+        row, column = self.selection.end
+        span = self._marker_span(row, column, before=before)
+        if span is None:
+            return False
+        start, end = span
+        match = IMAGE_MARKER.match(self.document.get_line(row)[start:end])
+        self.delete((row, start), (row, end), maintain_selection_offset=False)
+        # The attachment goes with its marker. This is the whole contract:
+        # what the text no longer cites is no longer sent, so removing the
+        # reference has to remove the payload rather than orphan it.
+        #
+        # Measured AFTER the delete, and the guard is a UNION because the two
+        # halves answer different questions. Four narrower rules were tried and
+        # each was wrong in a way the next round found:
+        #
+        # - On the NUMBER: a foreign citation - a copy of a different prompt's
+        #   marker - inherited an attachment it never named (design round 19).
+        # - On the marker TEXT: deleting the stale copy that `cite`'s fallback
+        #   had chipped took the live image with it, while the marker naming it
+        #   was still in the buffer (round 20, D11).
+        # - On the deleted TOKEN matching the marker: editing the tail first
+        #   made the token differ, so the pop was skipped and the attachment
+        #   leaked - then hand-typing any `[Image #1...]` resurrected it, which
+        #   design round 16's D1 forbids (round 22).
+        # - On `cite` ALONE: its fallback resolves any citation of the number,
+        #   so deleting the app's own marker handed the image, the chip and the
+        #   send to whatever else mentioned that number - reachable by typing a
+        #   bare `[Image #1]` and then deleting the real marker, which is the
+        #   previous bullet's forbidden state two keystrokes apart (round 23).
+        #
+        # So: release when the buffer can no longer cite this attachment AT ALL,
+        # OR when the token just deleted was the app's own marker and no copy of
+        # it survives. D6's exact duplicate fails both and keeps the image.
+        if match is not None:
+            self._release_deleted(int(match.group(1)), match.group(0))
+        return True
+
+    def _release_deleted(self, index: int, token: str) -> None:
+        """Apply the release rule to a marker that was just removed as a token."""
+        attachment = self._attachments.get(index)
+        if attachment is not None and (
+            cite(self.text, index, attachment) is None
+            or (token == attachment.marker and attachment.marker not in self.text)
+        ):
+            del self._attachments[index]
+
+    def _delete_marker_past_spaces(self, *, before: bool) -> bool:
+        """Delete the marker separated from the caret only by spaces.
+
+        For ctrl+w, and only for ctrl+w. A paste inserts ``[Image #1, 10x20] ``
+        WITH a trailing space, so the caret it leaves is one column past the
+        marker's end and :meth:`_marker_span` - which asks about the character
+        the caret is touching - correctly finds nothing. Textual's word-delete
+        then ate ``] `` and stopped, rebuilding the hanging fragment this whole
+        mechanism exists to prevent AND orphaning the attachment, which any
+        later ``[Image #1]`` revived (design round 22, D13).
+
+        Backspace and delete deliberately do NOT come through here: at that
+        caret the character before really is a space, and eating a whole marker
+        instead of it would be a surprise. A word-delete has already said it
+        will cross whitespace to find the thing it removes.
+        """
+        if self.selection.start != self.selection.end:
+            return False
+        row, column = self.selection.end
+        line = self.document.get_line(row)
+        edge = column
+        while edge > 0 and line[edge - 1] == " ":
+            edge -= 1
+        if edge == column:
+            return False  # no whitespace to cross; the plain check already ran
+        span = self._marker_span(row, edge, before=before)
+        if span is None:
+            return False
+        start, end = span
+        match = IMAGE_MARKER.match(line[start:end])
+        # The spaces go with it: ctrl+w removes the word AND the run it crossed.
+        self.delete((row, start), (row, column), maintain_selection_offset=False)
+        if match is not None:
+            self._release_deleted(int(match.group(1)), match.group(0))
+        return True
+
+    def _offset_at(self, row: int, column: int) -> int:
+        """``(row, column)`` as an offset into :attr:`text`.
+
+        `+ len(newline)`, not `+ 1`: `self.text` joins with the document's OWN
+        separator, and a CRLF buffer - which a paste can carry in - shifted
+        every offset by one per preceding line, putting the chip two cells off
+        the marker it belongs to (review round 22).
+        """
+        separator = len(self.document.newline)
+        return sum(len(self.document.get_line(r)) + separator for r in range(row)) + column
+
+    def _release_uncited(self, indices: Iterable[int]) -> None:
+        """Drop the named attachments if the buffer no longer cites them.
+
+        ``indices`` is the whole guard. :meth:`edit` passes only the
+        attachments the removal actually TOUCHED, so an edit elsewhere in the
+        draft cannot adjudicate a marker it never went near. Two earlier rules
+        both failed by asking a question about the buffer as a whole:
+
+        - "does it still parse" released a marker the user was mid-way through
+          repairing, so a backspace thirty columns away destroyed an image
+          whose next keystroke restored the text perfectly (round 24);
+        - "is the number mentioned anywhere" fixed that only for damage AFTER
+          `#N` - damage inside the `[Image #` prefix breaks the mention too -
+          while letting an unrelated bare `[Image #1` fragment elsewhere in the
+          draft keep a properly deleted image alive for a typed marker to
+          revive (round 25).
+
+        Scoping to the touched range answers both, and needs no threshold for
+        how damaged a marker may be before it stops counting.
+        """
+        text = self.text
+        for index in indices:
+            attachment = self._attachments.get(index)
+            if attachment is not None and cite(text, index, attachment) is None:
+                del self._attachments[index]
+
+    def action_delete_left(self) -> None:
+        if not self._delete_marker(before=True):
+            super().action_delete_left()
+
+    def action_delete_right(self) -> None:
+        if not self._delete_marker(before=False):
+            super().action_delete_right()
+
+    def action_delete_word_left(self) -> None:
+        # A marker is ONE word for this purpose too: ctrl+w stopping inside it
+        # leaves the same broken fragment backspace used to.
+        if self._delete_marker(before=True) or self._delete_marker_past_spaces(before=True):
+            return
+        super().action_delete_word_left()
+
+    # -- attachment markers as painted objects --------------------------------
+    def _first_citation_columns(self, line_index: int) -> set[int]:
+        """Columns on ``line_index`` that open the APP's own citation of a marker.
+
+        The chip, the atomic-token gate and the send all have to name the same
+        citation, so all three go through :func:`cite`. Keying on "first in
+        document order" instead handed the chip to an impostor pasted above the
+        real one (design round 19, D4); keying on the number alone chipped a
+        hand-typed duplicate (round 18, D4).
+
+        Only called for rows that contain a bracket, so ordinary prose never
+        pays for it, and a composer draft is a handful of lines.
+        """
+        line = self.document.get_line(line_index)
+        # Document offset of this line's first column, so a citation found in
+        # whole-buffer coordinates can be tested against this row.
+        base = self._offset_at(line_index, 0)
+        text = self.text
+        columns: set[int] = set()
+        for index, attachment in self._attachments.items():
+            span = cite(text, index, attachment)
+            if span is not None and base <= span[0] < base + len(line):
+                columns.add(span[0] - base)
+        return columns
+
+    def _marker_cells(self, y: int) -> list[tuple[int, int, bool]]:
+        """``(x_start, x_end, selected)`` for marker cells drawn on screen row ``y``.
+
+        SCREEN row, not document line. The composer soft-wraps, so one document
+        line is one-or-more rows and a marker can straddle a break — the wrap
+        lands on the space inside ``[Image #1, 1568x200]`` often enough that
+        assuming row == line would leave half a chip unpainted at 60 columns.
+        ``wrapped_document`` is the only thing that knows where a document
+        column ended up once wrapping moved it.
+
+        Cells are reported per SELECTION state rather than per marker, so a
+        drag that covers half a marker paints half of it. That is deliberate:
+        :meth:`_delete_marker` refuses to widen a real selection, so a
+        half-covered marker really does delete by halves, and painting it whole
+        would promise an atomicity the next keystroke does not honour.
+
+        The caret's own cell is left out entirely. The chip is opaque, so the
+        first version swallowed the caret whole: parking it inside
+        ``[Image #1, 1568x200]`` painted all twenty cells one flat navy and the
+        composer stopped saying where the next keystroke would land.
+        """
+        wrapped = self.wrapped_document
+        absolute_y = self.scroll_offset.y + y
+        if absolute_y >= wrapped.height:
+            return []
+        # x=0 resolves to the first document column drawn on this row, which is
+        # also the wrap offset that opened its section.
+        line_index, section_start = wrapped.offset_to_location(Offset(0, absolute_y))
+        line = self.document.get_line(line_index)
+        if "[" not in line:
+            # The hot path — render_line runs on every frame of every keystroke
+            # and most composer lines are prose. A marker always opens with a
+            # bracket, so this rejects without re-deriving the grammar.
+            return []
+        offsets = wrapped.get_offsets(line_index)
+        section_index = bisect_right(offsets, section_start)
+        wraps_on = section_index < len(offsets)
+        section_end = offsets[section_index] if wraps_on else len(line)
+
+        selection_start, selection_end = self._selected_columns(line_index, len(line))
+        theme = self._theme
+        caret_row, caret_column = self.selection.end
+        caret = (
+            caret_column
+            if self._draw_cursor
+            and caret_row == line_index
+            and theme is not None
+            and theme.cursor_style is not None
+            else None
+        )
+        gutter = self.gutter_width
+        cells: list[tuple[int, int, bool]] = []
+        chipped = self._first_citation_columns(line_index)
+        for match in IMAGE_MARKER.finditer(line):
+            # A chip is a claim that an image is attached here, so it is painted
+            # only when the number RESOLVES, and only at the citation that
+            # actually carries it. Painting from the text pattern alone drew a
+            # full chip for a marker typed by hand, and for one brought back by
+            # undo after its attachment had been dropped (design round 16, D1);
+            # painting every resolving citation then drew a second chip for a
+            # hand-typed duplicate of a live number, advertising dimensions for
+            # an image that `referenced_images` sends once (design round 17,
+            # D4). Same rule both times: what is chipped is what is sent.
+            if match.start() not in chipped:
+                continue
+            start = max(match.start(), section_start)
+            end = min(match.end(), section_end)
+            if start >= end:
+                continue  # this marker lives entirely on another row
+            runs = _marker_runs(start, end, (selection_start, selection_end), caret)
+            for run_start, run_end, selected in runs:
+                x_start = wrapped.location_to_offset((line_index, run_start)).x
+                if wraps_on and run_end >= section_end:
+                    # `run_end` IS the wrap offset, and location_to_offset reads
+                    # that as column 0 of the NEXT row. The chip runs to the end
+                    # of this row's text instead.
+                    x_end = cell_len(
+                        expand_tabs_inline(line[section_start:section_end], self.indent_width)
+                    )
+                else:
+                    x_end = wrapped.location_to_offset((line_index, run_end)).x
+                cells.append((x_start + gutter, x_end + gutter, selected))
+        return cells
+
+    def _selected_columns(self, row: int, line_length: int) -> tuple[int, int]:
+        """The columns of document line ``row`` the selection covers.
+
+        An empty range (``(0, 0)`` when the caret is a point, or when the
+        selection is on other lines entirely) means "nothing on this line".
+        """
+        top, bottom = sorted(self.selection)
+        if top == bottom or not top[0] <= row <= bottom[0]:
+            return 0, 0
+        return (
+            top[1] if row == top[0] else 0,
+            bottom[1] if row == bottom[0] else line_length,
+        )
+
+    def _paint_markers(self, strip: Strip, y: int) -> Strip:
+        """Repaint the marker cells of an already-rendered row.
+
+        Post-processing rather than a hook into ``TextArea._render_line``: that
+        method owns wrapping, tab expansion, the caret and the selection, and
+        the only seam a subclass gets is the finished :class:`Strip`.
+
+        The styles go on as ``post_style``. ``Strip.apply_style`` applies its
+        argument as the BASE, and every segment ``TextArea`` hands back already
+        carries an explicit fg and bg from the theme, so a base style is
+        discarded on arrival and the chip would never appear.
+        """
+        cells = self._marker_cells(y)
+        if not cells:
+            return strip
+        width = strip.cell_length
+        edges = sorted({0, width} | {x for start, end, _ in cells for x in (start, end)})
+        styles = {
+            False: self.get_component_rich_style("text-area--image-marker"),
+            True: self.get_component_rich_style("text-area--image-marker-selected"),
+        }
+        pieces: list[Strip] = []
+        for left, piece in zip(edges, strip.divide(edges[1:])):
+            selected = next((state for start, end, state in cells if start <= left < end), None)
+            if selected is None:
+                pieces.append(piece)
+                continue
+            pieces.append(self._overlay(piece, styles[selected]))
+        return Strip.join(pieces)
+
+    @staticmethod
+    def _overlay(strip: Strip, style: RichStyle) -> Strip:
+        """``strip`` with ``style`` laid ON TOP of each segment's own style."""
+        return Strip(Segment.apply_style(strip, post_style=style), strip.cell_length)
+
+    async def _on_mouse_down(self, event: events.MouseDown) -> None:
+        """Note a press that landed inside a marker; the release decides.
+
+        Neither ``super()`` nor ``prevent_default``: Textual invokes EVERY
+        ``_on_mouse_down`` up the MRO, so ``TextArea``'s still places the caret
+        and arms its drag-selection. This only records.
+        """
+        row, column = self.get_target_document_location(event)
+        # `before=False` reads as "at the start of, or inside", which is exactly
+        # the marker's own cells — clicking the cell one past the closing
+        # bracket is a click on the next character, not on the marker.
+        span = self._marker_span(row, column, before=False)
+        self._pressed_marker = None if span is None else (row, *span)
+
+    async def _on_mouse_up(self, event: events.MouseUp) -> None:
+        """A press and release inside one marker selects the whole marker.
+
+        Selecting it is what makes it removable by the obvious gesture: the
+        selection is a real one, so :meth:`_delete_marker` stands aside and
+        backspace deletes exactly the span — click, backspace, gone.
+
+        Runs BEFORE ``TextArea._on_mouse_up`` (Editor is first on the MRO), so
+        the base class still finalises ``_selecting`` and releases the mouse
+        afterwards; it never touches the selection, so nothing overwrites this.
+        """
+        pressed = self._pressed_marker
+        self._pressed_marker = None
+        if pressed is None:
+            return
+        if self.selection.start != self.selection.end:
+            # The press became a drag — ``_on_mouse_move`` has been extending a
+            # range the whole time, and that range is the user's, not ours.
+            return
+        row, start, end = pressed
+        self.selection = Selection((row, start), (row, end))
+
+    # -- paste ----------------------------------------------------------------
+    async def _on_paste(self, event: events.Paste) -> None:
+        """Attach pasted images instead of pasting the path to them.
+
+        Textual's ``Paste`` carries TEXT only — there is no binary channel at
+        the terminal, so an image never arrives as bytes here. What arrives on
+        the owner's setup is a PATH: Ghostty writes a clipboard image to
+        ``$TMPDIR/clipboard-<stamp>-<hash>.png`` and bracketed-pastes the
+        filename. Finder's Cmd+C and a drag-and-drop both land the same way.
+        That is the hot path, and it is why this hooks paste rather than
+        binding a key to read the system clipboard.
+
+        Anything that is not a readable image path is left alone: this returns
+        without touching the event, and ``TextArea._on_paste`` inserts it as
+        usual.
+
+        NOTE the dispatch rule, which is not obvious and cost a real bug here.
+        Textual calls EVERY ``_on_paste`` up the MRO, so the base handler runs
+        on its own — ``await super()._on_paste(event)`` does not delegate to
+        it, it runs it a second time, and an ordinary text paste came out
+        duplicated. Suppressing the base is ``prevent_default``; letting it run
+        is doing nothing.
+        """
+        attached = self._attach_pasted_images(event.text)
+        if attached is None:
+            return
+        event.prevent_default()
+        event.stop()
+        self.insert(attached)
+
+    def _attach_pasted_images(self, pasted: str) -> str | None:
+        """Load every path in ``pasted`` as an attachment; return the markers.
+
+        ``None`` means "this was not an image paste" — the caller then lets
+        Textual insert the text verbatim. That is the common case and it must
+        stay cheap and lossless.
+
+        ALL-or-nothing across the paste. A multi-file drag where one file is a
+        PDF becomes a plain text paste of every path, rather than silently
+        attaching two of three and leaving the user to notice which. Mixed
+        results are the shape a user cannot see and cannot correct.
+        """
+        candidates = _pasted_paths(pasted)
+        if not candidates:
+            return None
+
+        loaded: list[tuple[ImageContent, str]] = []
+        for path in candidates:
+            # STAT FIRST. Two things this closes, both measured in review round
+            # 17 against the previous read-then-check order:
+            #
+            # - The 4 MB cap ran on `len(data)`, i.e. AFTER the cost it exists
+            #   to prevent. A 601 MB file behind a valid 100x100 PNG header
+            #   took peak RSS to 618 MB before the cap fired, allocated
+            #   synchronously on the keystroke that pasted it.
+            # - `open()` on a FIFO blocks forever, and this runs inline on the
+            #   event loop, so a named pipe (or a stalled network mount) is a
+            #   HUNG UI rather than a failed paste.
+            #
+            # `sniff_image_file` cannot help with either: it reads 64 KB, and a
+            # header is not a size bound.
+            try:
+                stat = Path(path).stat()
+            except (OSError, ValueError):
+                # ValueError for a NUL byte in the name, which is not an
+                # OSError and would otherwise escape onto the keystroke.
+                return None
+            if not S_ISREG(stat.st_mode) or stat.st_size > MAX_ATTACHMENT_BYTES:
+                return None
+            info = sniff_image_file(path)
+            # `sendable` and not merely "recognised": HEIC sniffs fine and no
+            # provider will take it, so attaching it would trade a readable
+            # path in the prompt for a 400 later in the turn.
+            if info is None or not info.sendable:
+                return None
+            try:
+                data = Path(path).read_bytes()
+            except (OSError, ValueError):
+                return None
+            if len(data) > MAX_ATTACHMENT_BYTES:
+                # The stat above is the real gate; this catches a file that grew
+                # between the two calls.
+                return None
+            loaded.append(
+                (
+                    ImageContent(
+                        data=base64.b64encode(data).decode("ascii"),
+                        mime_type=info.mime_type,
+                    ),
+                    info.dimensions,
+                )
+            )
+
+        # From the BUFFER, immediately before issuing. Every OTHER seam derives
+        # the counter, but issuance read it blind, so text carrying a marker
+        # that arrived as TEXT — a prompt drag-copied out of the transcript and
+        # pasted back to re-run it, which is a gesture this branch built — was
+        # invisible to the counter, and the next paste re-issued a number
+        # already on screen. The chip then landed on last turn's marker while
+        # the real attachment rendered as prose (design round 18, D4). Deriving
+        # here as well means a draft can never hold the same number twice.
+        self._sync_next_marker()
+        markers = []
+        for image, dimensions in loaded:
+            index = self._next_marker
+            self._next_marker += 1
+            # The dimensions are for the USER, not the model — the model gets
+            # the pixels. They are what makes the marker checkable at a glance:
+            # "1568x200" is recognisably the screenshot just taken, where a
+            # bare "[Image #3]" could be anything. Omitted rather than faked
+            # when the header did not carry them.
+            marker = f"[Image #{index}, {dimensions}]" if dimensions else f"[Image #{index}]"
+            # Recorded with the image, not derived later: this exact string is
+            # what tells the app's own citation apart from a copy of it.
+            self._attachments[index] = Attachment(image, marker)
+            markers.append(marker)
+        return " ".join(markers) + " "
 
     # -- command completion -------------------------------------------------
     def edit(self, edit: Edit) -> EditResult:
@@ -498,9 +1457,63 @@ class Editor(TextArea):
         the picker one message-loop tick behind the buffer, which is the tick
         in which Enter decides whether to complete.
         """
+        # Only a REMOVAL can uncite an attachment, and only the attachments it
+        # touched. Both halves are measured BEFORE the edit, because afterwards
+        # the range is gone and the citation positions have moved.
+        touched = self._attachments_touched_by(edit)
         result = super().edit(edit)
         self._sync_picker()
+        if touched:
+            self._release_uncited(touched)
         return result
+
+    def _attachments_touched_by(self, edit: Edit) -> list[int]:
+        """Which attachments a pending edit could plausibly uncite.
+
+        ONE rule: the removal's range overlaps the citation's span. Empty for a
+        pure insertion, because adding text cannot remove a citation and
+        sweeping there would adjudicate a marker the user is typing through -
+        every printable character breaks the grammar while it is being typed
+        into.
+
+        There was a second clause - release an ALREADY uncitable attachment
+        when the cut text names its number, so the map could not keep an image
+        no text can reach. It is gone, because a text test cannot tell the
+        damaged marker the user is clearing away from ordinary prose that
+        happens to say `#1`, and in a draft about images that is ordinary prose.
+        Deleting `screenshot #1 from yesterday` destroyed a repairable
+        attachment, irreversibly, since a retyped marker may not revive it
+        (review round 26).
+
+        The cost of dropping it is that an attachment whose marker was damaged
+        and then cleared away stays in the map, uncited and unsent, until the
+        draft is submitted or cleared. It is invisible and it is never sent;
+        the only way to reach it is to type its number, which is `cite`'s
+        documented fallback and the residual already recorded there. Holding an
+        image nobody can see is a smaller wrong than destroying one the user
+        is halfway through repairing.
+        """
+        if edit.from_location == edit.to_location or not self._attachments:
+            return []
+        top, bottom = sorted((edit.from_location, edit.to_location))
+        cut = self.get_text_range(top, bottom)
+        if not cut:
+            return []
+        start = self._offset_at(*top)
+        end = start + len(cut)
+        text = self.text
+        touched: list[int] = []
+        for index, attachment in self._attachments.items():
+            span = cite(text, index, attachment)
+            # SPAN overlap, and the span comes from `cite` rather than from
+            # `len(attachment.marker)`. Two separate lessons: a containment test
+            # missed a tail delete, because the head stays outside the cut
+            # (design round 24, D16); and measuring with the RECORDED marker's
+            # length misjudged a citation the user had lengthened, so a cut past
+            # the old end escaped the test and reopened D16 (round 26).
+            if span is not None and start < span[1] and span[0] < end:
+                touched.append(index)
+        return touched
 
     def load_text(self, text: str) -> None:
         super().load_text(text)
@@ -517,21 +1530,21 @@ class Editor(TextArea):
         provider argument, so the branch below is which LIST it derives, not which
         widget is visible.
         """
-        provider_argument = slash_argument(self.text, self.PROVIDER_COMMANDS)
-        if provider_argument is None:
-            self._provider_command = None
+        list_argument = slash_argument(self.text, self._argument_commands)
+        if list_argument is None:
+            self._argument_command = None
             self._picker.sync(self.text)
         else:
             command = self._command_word()
-            if command != self._provider_command:
-                self._provider_command = command
+            if command != self._argument_command:
+                self._argument_command = command
                 # Drop the previous command's rows before asking for this one's.
                 # `/login` offers every provider and `/logout` only the ones with a
                 # credential, so carrying them across would briefly offer a logout
                 # from an account the user never had.
                 self._picker.set_choices([])
-                self.post_message(ProviderQueryOpened(command or ""))
-            self._picker.sync_argument(provider_argument)
+                self.post_message(ArgumentQueryOpened(command or ""))
+            self._picker.sync_argument(list_argument)
         argument = slash_argument(self.text, self.MODEL_COMMANDS)
         if argument is None:
             if self._model_picker.is_open():
@@ -622,7 +1635,7 @@ class Editor(TextArea):
         """
         return (
             self._picker.mode is PickerMode.ARGUMENT
-            and self._provider_command in self.DESTRUCTIVE_COMMANDS
+            and self._argument_command in self.DESTRUCTIVE_COMMANDS
         )
 
     def _picker_query(self) -> str | None:
@@ -634,7 +1647,7 @@ class Editor(TextArea):
         credential) cannot drift apart.
         """
         if self._picker.mode is PickerMode.ARGUMENT:
-            return slash_argument(self.text, self.PROVIDER_COMMANDS)
+            return slash_argument(self.text, self._argument_commands)
         context = slash_context(self.text)
         return None if context is None else context.query
 
@@ -695,7 +1708,7 @@ class Editor(TextArea):
         space terminates the argument, so the matcher would stop matching and Tab
         would appear to fill the field and abandon it in one keystroke.
         """
-        argument = slash_argument(self.text, self.PROVIDER_COMMANDS)
+        argument = slash_argument(self.text, self._argument_commands)
         if argument is None:
             return
         # The argument is by construction the TAIL of the buffer (everything after
@@ -763,11 +1776,29 @@ class Editor(TextArea):
         self._history_index = None
 
     def _navigate_history(self, direction: int) -> None:
+        """Recall a previous prompt, WITHOUT carrying this draft's attachments.
+
+        Marker numbers restart at #1 on every submit, so a recalled prompt's
+        ``[Image #1]`` and the current draft's ``[Image #1]`` are different
+        images with the same name. Leaving ``_attachments`` alone while
+        replacing the text therefore resolved the recalled marker against
+        whatever the live draft happened to hold: review round 17 reproduced
+        paste-submit-paste-Up-Enter sending the SECOND screenshot under the
+        first one's label, which is the worst possible failure for this feature
+        — silent, and the model answers about a picture the user did not send.
+
+        Recalled prompts have no attachments at all. The images went with the
+        message when it was submitted, and the transcript owns them now; the
+        text comes back as a starting point, and its markers resolve to nothing
+        until the user pastes again. The DRAFT's attachments are stashed and
+        restored with its text, because that is still the same unsent message.
+        """
         if not self._history:
             return
         if self._history_index is None:
             if direction < 0:
                 self._draft = self.text
+                self._draft_attachments = dict(self._attachments)
                 self._history_index = len(self._history) - 1
             else:
                 return  # Down with no navigation active: nothing to restore
@@ -777,10 +1808,18 @@ class Editor(TextArea):
             # Past the newest entry: restore the draft and exit navigation.
             self._history_index = None
             self.text = self._draft
+            self._attachments = dict(self._draft_attachments)
+            self._sync_next_marker()
             self.move_cursor(self._end_of_buffer())
             return
         self._history_index = max(0, self._history_index)
         self.text = self._history[self._history_index]
+        self._attachments.clear()
+        # From the BUFFER, not from the now-empty map: history entries number
+        # from #1 too, so leaving the counter alone issued a number already
+        # standing in the recalled text and the next paste stole its marker
+        # (review round 18).
+        self._sync_next_marker()
         self.move_cursor(self._end_of_buffer())
 
     def _end_of_buffer(self) -> tuple[int, int]:

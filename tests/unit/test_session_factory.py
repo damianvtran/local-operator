@@ -20,6 +20,7 @@ import pytest
 
 from local_operator import resume as resume_mod
 from local_operator import session_factory
+from local_operator.harness.types import TextContent
 from local_operator.session.session import Session
 from local_operator.session_factory import (
     _transcript_dir_and_agent_id,
@@ -1021,3 +1022,187 @@ async def test_lazy_mcp_refresh_keeps_session_capability_tools(monkeypatch) -> N
     assert manager.callback is not None
     manager.callback([late])
     assert set(session.tools) == {builtin, capability}
+
+
+class TestWarmSessionImports:
+    """The prewarm exists so the TUI's boot does not freeze the keyboard.
+
+    ``create_session``'s body is one synchronous stretch of imports, so a
+    caller with a live event loop paints nothing and services no key event for
+    its duration. The warm-up moves that cost to a thread; these tests defend
+    the two properties that make it worth having.
+    """
+
+    def test_it_imports_the_first_party_dependencies(self) -> None:
+        """Every warmed ``local_operator.*`` name is in ``sys.modules`` afterwards.
+
+        A name that silently fails to import warms nothing, and the stall it was
+        supposed to remove comes back on the event loop instead. Scoped to our
+        own modules because that is where the drift risk lives — a renamed or
+        moved module leaves a dead string behind with no other symptom. The
+        third-party entries are deliberately best-effort: ``mcp`` is an optional
+        extra, and asserting its presence would fail the install that omits it.
+        """
+        import sys
+
+        from local_operator.session_factory import _WARM_IMPORTS, warm_session_imports
+
+        warm_session_imports()
+        ours = [name for name in _WARM_IMPORTS if name.startswith("local_operator.")]
+        assert ours, "the warm list has lost every first-party entry"
+        assert [name for name in ours if name not in sys.modules] == []
+
+    def test_a_broken_entry_does_not_raise(self, monkeypatch) -> None:
+        """A warm-up is never worth a failed startup.
+
+        ``mcp`` is an optional extra, so an entry that cannot import is a real
+        deployment rather than a hypothetical.
+        """
+        import local_operator.session_factory as factory
+
+        monkeypatch.setattr(
+            factory, "_WARM_IMPORTS", ("local_operator.no_such_module_at_all", "json")
+        )
+        factory.warm_session_imports()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_configured_variables_reach_a_real_tool_call(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store must reach the context tools EXECUTE against, not just the one
+    that decides they exist.
+
+    ``_prepare`` built a ToolContext carrying a ``VariableStore`` and handed it
+    to ``create_tools``, which is a createIf check — it only decides whether
+    ``list_variables``/``read_variable`` are advertised. The context a tool
+    actually runs against is rebuilt by ``Session._build_tool_context`` on every
+    turn, and it carried no store, so both tools advertised themselves and then
+    read a bare process-environment store. A user's configured variables were
+    unreachable in every session while sitting right there in the factory.
+
+    Asserted through a real ``execute`` rather than by reading the field, because
+    the field being set is not the claim — the claim is that the tool can see
+    the value.
+    """
+    import yaml
+
+    (tmp_config_dir / "config.yml").write_text(
+        yaml.safe_dump(
+            {
+                "version": "0.16.1",
+                "values": {
+                    "hosting": "anthropic",
+                    "model_name": "claude-opus-5",
+                    "variables": {"MY_CONFIG_VAR": "hello"},
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_MCP", "1")
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.session_factory import create_session
+
+    session = await create_session(
+        args=argparse.Namespace(),
+        config_manager=ConfigManager(config_dir=tmp_config_dir),
+        credential_manager=CredentialManager(config_dir=tmp_config_dir),
+        agent_registry=AgentRegistry(config_dir=tmp_config_dir),
+        has_ui=True,
+    )
+    # create_session is typed to the protocol; this test is about the
+    # concrete Session's turn-time wiring, so narrow to it explicitly.
+    assert isinstance(session, Session)
+    try:
+        context = session._build_tool_context()
+        assert context.variables is not None, "the turn-time context has no store"
+        tool = next(t for t in session._tools if t.name == "list_variables")
+        result = await tool.execute("call-1", {}, None, lambda _update: None, context)
+        # A tool result is a union of text and image blocks. isinstance says
+        # which arm this assertion is about; the old getattr guard read the
+        # same rows but left the type a union.
+        text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+        assert "MY_CONFIG_VAR" in text, text
+    finally:
+        await session.dispose()
+
+
+# --- User custom instructions ----------------------------------------------
+
+
+def test_user_instructions_read_from_the_config_dir_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One source of truth: the same ``system_prompt.md`` the desktop UI and
+    the ``/v1/config/system-prompt`` endpoint write."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "system_prompt.md").write_text("- Use conventional commits.", encoding="utf-8")
+
+    assert session_factory.load_user_instructions() == "- Use conventional commits."
+
+
+def test_missing_instructions_file_is_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert session_factory.load_user_instructions() == ""
+
+
+def test_agent_prompt_appends_to_global_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An agent specializes behaviour; it must not silently discard the
+    # operator's machine-wide preferences.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "system_prompt.md").write_text("- Global rule.", encoding="utf-8")
+
+    combined = session_factory.load_user_instructions("- Agent rule.")
+
+    assert combined == "- Global rule.\n\n- Agent rule."
+
+
+def test_agent_prompt_alone_still_reaches_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert session_factory.load_user_instructions("- Agent rule.") == "- Agent rule."
+
+
+def test_unreadable_instructions_degrade_instead_of_breaking_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A bad file must never cost the operator their session.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "system_prompt.md").mkdir()  # a directory, not a readable file
+
+    assert session_factory.load_user_instructions() == ""
+
+
+@pytest.mark.asyncio
+async def test_instructions_are_frozen_for_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The head block is byte-stable for prompt caching, so a mid-session
+    edit must NOT change the running session's prompt."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    path = tmp_path / "system_prompt.md"
+    path.write_text("- Original rule.", encoding="utf-8")
+
+    provider = session_factory._make_system_blocks_provider(
+        [],
+        cast(Any, SimpleNamespace(records=[])),
+        session_factory._KnowledgeHooks(),
+        cwd=str(tmp_path),
+        user_instructions=session_factory.load_user_instructions(),
+    )
+    before = (await provider())[0]
+    path.write_text("- Edited mid-session.", encoding="utf-8")
+    after = (await provider())[0]
+
+    assert "- Original rule." in before
+    assert after == before

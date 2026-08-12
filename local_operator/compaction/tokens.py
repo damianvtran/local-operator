@@ -168,6 +168,50 @@ def count_text_tokens(text: str, model: str | None = None) -> int:
     return len(text) // _CHARS_PER_TOKEN_FALLBACK
 
 
+def approx_text_tokens(text: str) -> int:
+    """Token count for ``text`` that NEVER loads the tokenizer.
+
+    :func:`count_text_tokens` is exact when the ``tokenizer`` extra is present,
+    and reaching for that exactness has a price paid once per process: loading
+    cl100k_base costs ~84 ms and ~43.6 MB RSS (``scripts/bench_base_overhead``),
+    and on a cold cache tiktoken fetches the ranks over the NETWORK — which
+    offline is a connection timeout rather than a slow answer. Both
+    :func:`local_operator.compaction.pruning.prune_transcript` and the session's
+    compaction gate go out of their way to defer that load, precisely so a short
+    run does not buy a 43.6 MB table to be told there is nothing to do.
+
+    This is for callers who want a number NOW and would rather be somewhat out
+    than spend that: a status readout, a progress hint, a size warning.
+
+    **The error is a property of the content, not a bound.** ``chars // 4`` is
+    exactly right only where the text averages four characters per token, and
+    real text does not. Measured against cl100k_base:
+
+    ==========================  ============  ========
+    payload                     chars/token   error
+    ==========================  ============  ========
+    English prose                      5.59    +39.8%
+    Python source                      3.61     -9.8%
+    system prompt + tool JSON          4.30     +7.0%
+    minified JSON                      1.82    -54.4%
+    CJK                                1.36    -65.9%
+    ==========================  ============  ========
+
+    So the honest claim is narrow: on the mix this exists to measure — a Latin
+    system prompt plus JSON tool schemas — it runs roughly +7% to +17% high,
+    which a percentage rendered to one decimal can carry. It is NOT a
+    general-purpose estimator, and a caller measuring CJK or minified payloads
+    would be told they had spent a third of what they actually had. Anything
+    load-bearing wants :func:`count_text_tokens` and should pay for it.
+
+    Deliberately NOT "use the encoder when it is already resident". That would
+    make the same session report different numbers depending on whether
+    compaction happened to have run, and an estimate that moves for reasons the
+    user cannot see is worse than one that is consistently approximate.
+    """
+    return len(text) // _CHARS_PER_TOKEN_FALLBACK if text else 0
+
+
 def truncate_to_tokens(text: str, max_tokens: int) -> str:
     """Prefix of ``text`` that fits within ``max_tokens`` tokens.
 

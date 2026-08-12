@@ -223,6 +223,7 @@ def build_system_blocks(
     env_details: str,
     date_str: str,
     goal: str = "",
+    user_instructions: str = "",
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -240,8 +241,30 @@ def build_system_blocks(
     tail block rather than adding a fifth one: that keeps the arity fixed,
     and an edited goal then invalidates only the tail instead of the whole
     conversation prefix.
+
+    ``user_instructions`` (the operator's standing customization, read once at
+    session start from ``system_prompt.md``) rides the HEAD block instead,
+    appended to the packaged persona. It belongs there because it is exactly
+    as stable as the persona — a file the operator edits between sessions,
+    never within one — so it costs nothing in cache churn, and because it must
+    outrank nothing: standing user preference is part of who the assistant is,
+    not a per-turn instruction competing with the live conversation. Keeping
+    it out of the tail also stops a long instructions file from being re-sent
+    ahead of every volatile change.
     """
     instructions = render_template("system.md", {})
+    if user_instructions.strip():
+        # Tagged, not merged: the model must be able to tell the operator's
+        # standing customization apart from the packaged rules above it, and
+        # a delimiter is what stops a long instructions file from reading as
+        # a continuation of the persona's final bullet.
+        instructions = (
+            f"{instructions}\n\n## User's custom instructions\n\n"
+            "The operator set these standing preferences for every session on "
+            "this machine. Follow them as their default expectations; a "
+            "direct instruction in the conversation still wins.\n\n"
+            f"<user_instructions>\n{user_instructions.strip()}\n</user_instructions>"
+        )
     inventory = f"## Available tools\n\n{_render_tool_inventory(tools)}"
     env_block = f"Today is {date_str}."
     if env_details:

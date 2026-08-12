@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import cast
+from typing import Any, cast
 
 from rich.cells import cell_len
 from textual.widgets import Static
@@ -23,9 +23,12 @@ from textual.widgets import Static
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import (
     _DROP_LADDER,
+    _DROP_LADDER_ESTIMATE,
     _DROP_LADDER_QUIET,
+    _DROP_LADDER_QUIET_ESTIMATE,
     _MIN_GROUP_GAP,
     _SPINNER_FRAMES,
+    _UNBOUNDED_RUNGS,
     ICON_CWD,
     ICON_MCP,
     ICON_MODEL,
@@ -54,14 +57,24 @@ class FakeDock:
     def __init__(self, width: int = 80) -> None:
         self.width = width
         self.painted = None
+        #: The ``layout`` flag of the last paint. The band must never ask for
+        #: a layout pass — its box is fixed by the sheet and the default would
+        #: reflow the whole screen on every spinner frame.
+        self.layout: bool = True
         self.intervals: list[tuple[float, object]] = []
 
     @property
     def size(self):  # noqa: ANN201 - mirrors textual's geometry duck type
         return type("Size", (), {"width": self.width})()
 
-    def update(self, renderable) -> None:  # noqa: ANN001
-        self.painted = renderable
+    def update(self, content=None, *, layout: bool = True) -> None:  # noqa: ANN001
+        """Mirrors ``Static.update`` parameter for parameter.
+
+        Not ``**kwargs``: a double that swallows anything stops standing for
+        the thing it is named after, which is how this one missed ``layout``.
+        """
+        self.painted = content
+        self.layout = layout
 
     def set_interval(self, interval: float, callback):  # noqa: ANN001, ANN201
         self.intervals.append((interval, callback))
@@ -146,6 +159,36 @@ def test_duration_drops_units_that_stop_carrying_information() -> None:
     assert format_duration(3725) == "1h2m"
 
 
+def test_duration_switches_to_days_and_stays_six_cells_wide() -> None:
+    """Callers RESERVE cells for this string, so its width is part of its
+    contract — ``WorkingBlock._CLOCK_COL`` sizes a row against it rather than
+    measuring what comes back.
+
+    It used to end at ``{h}h{m}m`` with an unbounded hours field, so ``100h30m``
+    was seven cells and pushed that row over the terminal (review round 15).
+    A days branch is also simply the better reading at that magnitude, and the
+    ``100d+`` cap is what makes the bound hold by construction instead of holding
+    until someone finds a bigger number.
+    """
+    assert format_duration(86_400) == "1d"
+    assert format_duration(86_400 + 3600 * 5) == "1d5h"
+    assert format_duration(362_400) == "4d4h"
+    assert format_duration(86_400 * 99 + 3600 * 23) == "99d23h"
+    assert format_duration(86_400 * 100) == "100d+"
+    assert format_duration(86_400 * 100_000) == "100d+"
+
+    # The whole contract in one line: no input produces a seventh cell. Stepped
+    # by a prime so the sweep lands off every round boundary, and carried past
+    # 100 days so it spans EVERY branch — an earlier version stopped at 400_000
+    # seconds, which is 4.6 days, and so never reached the day format it was
+    # written to defend, let alone the cap.
+    assert max(cell_len(format_duration(s)) for s in range(0, 8_700_000, 97)) == 6
+    # Negative and fractional inputs are not special-cased anywhere; they must
+    # not be able to slip a wider string past the bound either.
+    assert cell_len(format_duration(-1)) <= 6
+    assert cell_len(format_duration(59.9)) <= 6
+
+
 def test_agents_segment_is_empty_at_zero_and_pluralises() -> None:
     assert format_agents(0) == ""
     assert format_agents(-1) == ""
@@ -164,12 +207,81 @@ def test_cwd_is_home_relative_then_basename() -> None:
     assert format_cwd("/opt/thing", short=True) == "thing"
 
 
-def test_model_label_sheds_only_its_provider_prefixes() -> None:
+def test_an_unnamed_model_sheds_only_its_provider_prefixes() -> None:
+    """The behaviour every model had before display names, and the one an
+    aggregator id nobody has curated still gets: no name exists, so the selector
+    is the honest rendering and ``short`` keeps its last path segment."""
     assert format_model_label("openrouter/moonshotai/kimi-k2", short=False) == (
         "openrouter/moonshotai/kimi-k2"
     )
     assert format_model_label("openrouter/moonshotai/kimi-k2", short=True) == "kimi-k2"
     assert format_model_label("ollama", short=True) == "ollama"
+
+
+def test_a_named_model_renders_its_name_instead_of_its_selector() -> None:
+    """The headline of the change, measured: 23 cells of selector become 13 of
+    name, which is what makes room for the effort segment beside it."""
+    assert format_model_label("anthropic/claude-opus-5", short=False) == "Claude Opus 5"
+    assert cell_len("Claude Opus 5") < cell_len("anthropic/claude-opus-5")
+
+
+def test_a_listing_name_reaches_the_band_for_a_model_no_registry_row_covers() -> None:
+    """``name`` is the route by which a model the registry has not been taught
+    about is named at all — the registry provably lags a direct provider's
+    releases, and that is the case ``ModelSpec.display_name`` exists for."""
+    assert (
+        format_model_label("anthropic/claude-opus-6", short=False, name="Claude Opus 6")
+        == "Claude Opus 6"
+    )
+
+
+def test_a_resold_model_keeps_its_selector_however_the_reseller_names_it() -> None:
+    """Both shipped aggregators list the same models under the same names — 398 of
+    ~400 in their real cached catalogues — so a reseller's name cannot say which
+    route is answering, and the route is what differs in price and quota."""
+    for provider in ("openrouter", "radient"):
+        selector = f"{provider}/moonshotai/kimi-k2"
+        assert (
+            format_model_label(selector, short=False, name="MoonshotAI: Kimi K2 0711") == selector
+        )
+
+
+def test_the_band_refuses_a_name_another_model_already_answers_to() -> None:
+    """A band printing a shared name could not say which model was replying, so
+    the segment stays wide instead. Constructed rather than taken from the
+    registry: the one shipped duplicate was a data defect and has been fixed, and
+    a live listing renaming a model onto a sibling's name is how this reaches a
+    user now."""
+    borrowed = "Claude Opus 5"  # owned by anthropic/claude-opus-5
+    assert format_model_label("openai/some-proxy-id", short=False, name=borrowed) == (
+        "openai/some-proxy-id"
+    )
+
+
+def test_the_bands_name_is_the_string_the_picker_offered() -> None:
+    """One model, one name.
+
+    Crosses the real boundary rather than comparing the band to itself: the
+    picker paints ``CatalogueEntry.label``, so the assertion reads that label off
+    ``ProviderController.static_catalogue()`` and compares it to what this segment
+    renders. Computing both sides from ``naming.model_label`` would have stayed
+    green if either controller call site were changed to ``.compact``, which is
+    precisely the disagreement the test is named for.
+    """
+    from local_operator.providers.controller import ProviderController
+
+    # `static_catalogue` is the one method that reads no credentials, so the
+    # store is genuinely unused here; cast rather than build a stub whose
+    # only job would be to never be called.
+    entries = ProviderController(auth_store=cast(Any, None)).static_catalogue()
+    checked = 0
+    for entry in entries:
+        if entry.provider != "anthropic":
+            continue
+        band = format_model_label(entry.selector, short=False, name=entry.label)
+        assert band == entry.label, f"{entry.selector}: band {band!r} != picker {entry.label!r}"
+        checked += 1
+    assert checked, "no anthropic rows in the static catalogue"
 
 
 def test_cost_keeps_its_precision_ladder() -> None:
@@ -699,23 +811,192 @@ def test_a_healthy_mcp_count_sheds_before_the_cwd_and_the_model_label() -> None:
     assert alarm_alone, "a danger count must survive a width the cwd cannot"
 
 
-def test_the_quiet_ladder_moves_mcp_without_promoting_the_widest_alarm() -> None:
+def test_the_quiet_ladder_moves_mcp_and_leaves_the_alarm_last() -> None:
     """One ordering, two positions for one rung — not two hand-maintained
     ladders that can drift apart on the next reordering.
 
-    With one caveat the first version got wrong: lifting `mcp` out of last place
-    leaves whatever followed it at the end, and that is `approvals` — the 14-cell
-    segment the full ladder sheds FIRST precisely because dropping it buys the
-    most width. Left last, it outlived the context number in the quiet band,
-    inverting the ladder's whole argument. The narrowest survivor goes last.
+    Lifting `mcp` out of last place leaves whatever followed it at the end, and
+    that is `approvals`. An earlier pass treated that as damage and re-seated it
+    behind the context number, on the rule "the narrowest bounded rung goes
+    last". That rule was written against `mcp` — 7 cells, and an alarm — and
+    handing last place to a READING instead is not the same trade: with a
+    healthy MCP the band stopped saying `! auto-approve` at 48 cells in order to
+    keep `▦ 49.6%/1M`. An alarm outranks a reading, so the widest alarm stays
+    last in every ladder where `mcp` is not there to take it.
     """
     assert drop_ladder(McpStatus(configured=2, connected=1, failed=True)) is _DROP_LADDER
     assert drop_ladder(McpStatus(configured=2, connected=2)) is _DROP_LADDER_QUIET
     assert drop_ladder(McpStatus()) is _DROP_LADDER_QUIET
     assert _DROP_LADDER[-1] == "mcp"
     assert _DROP_LADDER_QUIET.index("mcp") == _DROP_LADDER_QUIET.index("cwd") - 1
-    # The quiet band's last survivor is the context number, not the widest alarm.
-    assert _DROP_LADDER_QUIET[-1] == "context"
-    assert _DROP_LADDER_QUIET.index("approvals") < _DROP_LADDER_QUIET.index("context")
+    # With mcp promoted there is no narrower ALARM to take last place, so the
+    # gate's own alarm keeps it — and outlives the context number.
+    assert _DROP_LADDER_QUIET[-1] == "approvals"
+    assert _DROP_LADDER_QUIET.index("context") < _DROP_LADDER_QUIET.index("approvals")
     # Same rungs in both ladders: the reorder moves things, it never drops one.
     assert sorted(_DROP_LADDER) == sorted(_DROP_LADDER_QUIET)
+
+
+def test_an_estimated_context_sheds_before_the_working_directory() -> None:
+    """The ladder ranks by what a segment is worth NOW, not by its slot.
+
+    ``cwd`` sits ahead of ``context`` because the context number "predicts the
+    operator's next action". That is true of a number the model reported and
+    false of the boot estimate: before any turn nothing has been spent and
+    nothing is near compaction, while "where am I" is if anything MORE useful
+    in a session that has just opened.
+    """
+    for ladder in (
+        drop_ladder(McpStatus(configured=2, connected=1, failed=True), context_estimated=True),
+        drop_ladder(McpStatus(), context_estimated=True),
+    ):
+        assert ladder.index("context") < ladder.index("cwd")
+    # Exact readings keep the documented order.
+    for ladder in (
+        drop_ladder(McpStatus(configured=2, connected=1, failed=True)),
+        drop_ladder(McpStatus()),
+    ):
+        assert ladder.index("cwd") < ladder.index("context")
+    # A reorder moves rungs; it never adds or drops one.
+    assert sorted(drop_ladder(McpStatus(), context_estimated=True)) == sorted(_DROP_LADDER_QUIET)
+    assert sorted(
+        drop_ladder(McpStatus(configured=1, failed=True), context_estimated=True)
+    ) == sorted(_DROP_LADDER)
+
+
+def test_a_narrow_band_keeps_the_cwd_over_a_pre_turn_estimate(monkeypatch) -> None:
+    """The rendered consequence, not just the rung order.
+
+    Measured before the fix: between 40 and 48 cells an estimated reading
+    evicted the working directory entirely, so a session that had just opened
+    in the wrong directory rendered `◆ kimi-k2-thinking     ▦ 49.6%/1M` and
+    never said where it was — trading the fact a user checks at boot for a
+    number that cannot yet mean anything.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    status, _clock = _full_band()
+
+    def narrowest_showing_cwd() -> int:
+        widths = [w for w in range(30, 70) if ICON_CWD in status.render_text(w).plain]
+        assert widths, "the cwd must survive somewhere in this range"
+        return min(widths)
+
+    status.update(context_is_estimate=False)
+    exact_floor = narrowest_showing_cwd()
+    status.update(context_is_estimate=True)
+    estimate_floor = narrowest_showing_cwd()
+
+    # The path survives materially narrower once the reading is only a guess:
+    # 37 vs 51 cells as measured, i.e. the whole 40-48 band the review flagged.
+    assert estimate_floor < exact_floor
+    for width in range(estimate_floor, exact_floor):
+        rendered = status.render_text(width).plain
+        assert ICON_CWD in rendered, f"width {width} lost the cwd"
+        assert "49.6%" not in rendered, f"width {width} kept the estimate over the cwd"
+
+
+def test_the_last_surviving_rung_is_always_bounded() -> None:
+    """What the tail rule actually protects, checked on all four variants.
+
+    The render walk is monotone: it sheds down the ladder until the row fits
+    and can never put a segment back. So whatever sits last has to be something
+    that RELIABLY fits — and ``cwd`` does not, because it is as wide as the
+    user's path.
+
+    Ending on ``cwd`` is not merely suboptimal, it is self-defeating: the band
+    sheds the armed ``! auto-approve`` alarm to make room for a path that then
+    does not fit either, and paints neither. Measured on the quiet estimate
+    ladder with a 24-character basename, that cost the alarm across 34-46 cells
+    and paid for it with up to 29 blank ones.
+
+    ``approvals`` is kept off the end only where ``mcp`` can take it. At 14
+    cells it is the widest rung, which is why the authored order sheds it first
+    — but "widest" outranks "is an alarm" only when the rung taking last place
+    is an alarm too, and ``mcp`` is the only one that is. In both quiet ladders
+    it has been promoted away, so the gate's alarm goes last there.
+    """
+    variants = {
+        "full": _DROP_LADDER,
+        "quiet": _DROP_LADDER_QUIET,
+        "full+estimate": _DROP_LADDER_ESTIMATE,
+        "quiet+estimate": _DROP_LADDER_QUIET_ESTIMATE,
+    }
+    for name, ladder in variants.items():
+        assert ladder[-1] not in _UNBOUNDED_RUNGS, f"{name} ends on an unbounded rung"
+        # A promotion reorders; it never adds or loses a rung.
+        assert sorted(ladder) == sorted(_DROP_LADDER), f"{name} changed the rung set"
+
+    # The widest alarm is kept off the end only where the narrower ALARM exists
+    # to take it; a reading never displaces it.
+    assert _DROP_LADDER[-1] == "mcp"
+    assert _DROP_LADDER_QUIET[-1] == "approvals"
+    assert _DROP_LADDER_ESTIMATE[-1] == "mcp"
+    assert _DROP_LADDER_QUIET_ESTIMATE[-1] == "approvals"
+    assert _DROP_LADDER_QUIET_ESTIMATE.index("context") < _DROP_LADDER_QUIET_ESTIMATE.index(
+        "cwd"
+    ), "D21: a pre-turn estimate still sheds before the working directory"
+
+
+def test_an_armed_alarm_outlives_a_path_that_would_not_have_fitted() -> None:
+    """The rendered consequence of the rule above, at the widths it cost.
+
+    Before: the walk shed ``approvals`` to keep an unbounded ``cwd`` that then
+    failed to fit, so a session with the approval gate DISARMED painted no
+    indication of it — a regression against main, where the same terminal keeps
+    the alarm because a band with no estimate uses the quiet ladder.
+    """
+    status, _clock = _full_band()
+    status.update(
+        cwd="/Users/tester/work/customer-identity-service",
+        context_is_estimate=True,
+        approvals_auto=True,
+        mcp=McpStatus(configured=2, connected=2),
+    )
+    armed = [w for w in range(36, 52) if "auto-approve" in status.render_text(w).plain]
+    assert armed, "the disarmed-gate alarm vanished at every narrow width"
+    for width in armed:
+        assert ICON_CWD not in status.render_text(width).plain
+
+    # And it costs nothing in the common case: with the gate armed the rung
+    # paints nothing, so the path still gets the width.
+    status.update(approvals_auto=False)
+    assert ICON_CWD in status.render_text(50).plain
+
+
+# -- repaint vs reflow -------------------------------------------------------
+
+
+def test_the_band_never_asks_for_a_layout_pass() -> None:
+    """The band's box is fixed by the sheet (``#status-band { height: 2 }``)
+    and docked, so nothing it paints can move anything.
+
+    Textual's ``Static.update`` reflows the WHOLE screen by default, and this
+    runs on the 12.5 Hz spinner for the length of every turn. Measured A/B on a
+    161-block transcript: 9.6% of a core with the default against 7.2% without
+    it — about a quarter of the turn's idle burn, spent to animate one glyph.
+    """
+    dock = FakeDock(80)
+    status = StatusLine(cast(Static, dock))
+
+    status.update(model_label="openrouter/moonshotai/kimi-k2-thinking", cwd="/tmp")
+    assert dock.layout is False
+
+    # And on every later repaint, including the spinner's own.
+    dock.layout = True
+    status.update(streaming=True)
+    assert dock.layout is False
+    dock.layout = True
+    status._advance_spinner()
+    assert dock.layout is False
+
+
+def test_the_band_still_paints_what_it_was_told() -> None:
+    """The guard above is only safe while the content still lands: a repaint
+    that skips the layout must not also skip the paint."""
+    dock = FakeDock(200)
+    status = StatusLine(cast(Static, dock))
+
+    status.update(cost="$12.40")
+
+    assert dock.painted is not None
+    assert "$12.40" in dock.painted.plain

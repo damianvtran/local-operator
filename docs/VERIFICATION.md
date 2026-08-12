@@ -1188,13 +1188,14 @@ the whole tree through the CI gates that the rewrite had deferred.
 
 | Surface | What it does | Evidence |
 |---|---|---|
-| Dock band (`#band`) | Todo list + subagent task list collapse in above the composer; zero rows when empty | `tests/unit/tui/test_band_panels.py` (4 mounted-app tests: empty→shown→hidden, todo row rendering, trajectory modal) |
-| Subagent trajectory modal | Click/enter a subagent row → modal replaying the child's retained events | band-panels test drives `_open_subagent_trajectory` and asserts the child's prose renders |
+| Dock band (`#band`) | Todo list + subagent task list collapse in above the composer; zero rows when empty | `tests/unit/tui/test_band_panels.py` (4 mounted-app tests: empty→shown→hidden, todo row rendering, the full-page view opening) |
+| Full-page subagent view | Click/enter a subagent row → the transcript region becomes the child's transcript, rendered with the same `AssistantBlock`/`ToolCard`/`NoticeBlock` vocabulary; the dock stays put and greys, the composer goes read-only, and a hint row states `esc back to conversation`. Live for a running child, honest about a settled/failed/swept one. | `tests/unit/tui/test_subagent_view.py` (14 tests: the pure fold incl. junk and the retention cap, the rendered blocks, the exit hint at every width, the composer refusing keys, leaving restoring the conversation and the draft, live follow, retarget, long-transcript scrolling) |
 | Expanded write/edit diff | The card reveals a colorized unified diff (+ success, − danger, `@@`/headers muted, context dim) | `tests/unit/tui/test_tool_card.py` (4 new diff tests assert hunk-role tinting); engine `_diff_details` test asserts the diff payload + bounded cap |
 | `--resume` render fix | A resumed session shows its prior user/assistant messages on screen instead of a blank welcome | `Session.history()` seam + `_render_resumed_history`; `test_history_accessor*` prove the replay, `test_resume_*` drive the TUI command through a mounted app |
 | `/resume` command | Bare lists recent sessions with age; `/resume <id>` rebinds and reloads | `test_resume_lists_recent_sessions_without_a_boot`, `test_resume_id_rebinds_and_reloads` |
 | `/model default` | Persists provider/model to config so later launches boot on it | `test_app_pilot` covers model switching (persistence write covered by the command path) |
 | task/wait/jobs engine tools | `run_subagent` launcher wired via `Session._launch_subagent`; bounded tools registered | `tests/unit/tools/test_task_wait_jobs.py` (8), `tests/unit/session/test_launch_subagent.py` (3), 407 tools/session/harness tests |
+| `hub` parent↔subagent channel | The parent sends a note to one/several/`"all"` children, asks one a question and gets its answer back, steers one onto a new course, cancels one, and resumes a stopped one against its own transcript; a child answers (or speaks up unprompted) with the child-shaped `hub`. Notes/questions ride `Session.queue_aside`, steers ride `Session.steer`, resume rides transcript replay. | `tests/unit/harness/test_comms.py` (36: receipts and buffering, ask answered by the child's tool and by prose, narration-vs-answer, timeout, ask/cancel/resume failure paths, both tool shapes, plus 4 integration tests running real parent+child sessions through a scripted provider) |
 
 ### Whole-tree gate status (final)
 
@@ -1217,14 +1218,24 @@ untyped.
 
 ### Scope note: pointer cursors (item 4, blocked)
 
-"Text pointer/default cursors" is **not implementable in Textual 8.2.8**:
-the framework exposes no mouse-cursor API (verified — no `set_mouse_cursor`,
-no `cursor:` CSS property in `textual.css._style_properties`). The caret
+**Corrected 2026-08-11.** The original note said Textual 8.2.8 "exposes no
+mouse-cursor API (verified — no `set_mouse_cursor`, no `cursor:` CSS
+property)". Both searches were for the wrong name. The property is
+`pointer:` — `textual.css.constants.VALID_POINTER` carries `pointer`, `text`,
+`not-allowed`, `grab`, `wait`; `Screen.update_pointer_shape` walks
+`styles.pointer` over `ancestors_with_self` on every mouse event, and
+`App._set_pointer_shape` emits it as the Kitty OSC 22 sequence, which ghostty
+implements. The hand pointer is therefore available and is now used, on the
+subagent page's clickable footer hints
+(`.subagent-view-hint.actionable { pointer: pointer }`).
+
+What remains unavailable is the narrower thing: The caret
 request is satisfied (solid caret, visible the instant the buffer has content;
 hidden only over the empty placeholder because Textual's caret physically
 inverts the placeholder's first glyph — a documented D-05 design decision).
-Rich-text cursor over the input and pointer-over-rows requires a Textual
-upgrade and is the one deferred surface, recorded rather than hacked.
+a per-REGION text cursor inside a widget — an I-beam over `TextArea` content
+and a pointer over transcript rows without giving the whole widget one shape —
+which is still per-widget only.
 
 ## The stuck LO-on-LO session: root cause, cap, and recovery (2026-08-09)
 
@@ -1323,3 +1334,238 @@ remained recoverable through its `spill://` handle. Regression:
 Resume recovery measured live on the real stuck session: reloaded (394
 messages, cap 250k), first turn completed in **5.12s**; supersede pruning
 reclaimed **78,272 tokens** (249,636 → 171,364) on load.
+
+## Cost: real prices, cache rates, and the subagent aggregate (2026-08-10)
+
+Reported: "in all views I've seen it to be zero", and "the cost calculation in
+the parent should be the aggregate of cost from subagents".
+
+### Root cause: placeholder prices, and no price source for a direct provider
+
+```
+$ .venv/bin/python -c "
+from local_operator.model.configure import calculate_cost, resolve_model_info
+for l in ('anthropic/claude-opus-5','openai/gpt-5.4','anthropic/claude-sonnet-4'):
+    p,_,m = l.partition('/'); i = resolve_model_info(p,m)
+    print(l, i.input_price, i.output_price, calculate_cost(i,10000,2000))"
+```
+
+| Model | Before | After |
+|---|---|---|
+| `anthropic/claude-opus-5` | `0.0 0.0 0.0` | `5.0 25.0 0.1` |
+| `openai/gpt-5.4` | `0.0 0.0 0.0` | `2.5 15.0 0.055` |
+| `anthropic/claude-sonnet-4` | `3.0 15.0 0.06` | `3.0 15.0 0.06` (unchanged) |
+
+Two independent causes. The ten current-generation Claude rows were added with
+`input_price=0.0` placeholders — `GET /v1/models` quotes no prices, so nothing
+ever filled them in — and 0.0 is this registry's "unknown", so `_cost_for`
+correctly refused to render and the band read "cost unavailable" for the whole
+generation. Separately, `openai/gpt-5.4` has no registry row at all and OpenAI's
+listing is bare ids, so no source could price it: the registry was the ONLY
+price source for a direct provider. Older models routed through the OpenRouter
+catalogue were always fine, which is exactly why it looked like "anthropic and
+openai are broken".
+
+Prices are Anthropic's and OpenAI's own, read 2026-08-10 from
+`platform.claude.com/docs/en/about-claude/pricing` and
+`developers.openai.com/api/docs/pricing`. Nine rows stay at 0.0 because they
+have no published price (seven experimental/preview Gemini ids, two small
+Qwen2.5-Coder); they are enumerated in `UNPRICED_BY_DESIGN` in
+`tests/unit/model/test_pricing.py`, and a new unexplained 0.0 fails that test.
+
+Independent cross-check of the transcribed numbers: every Anthropic registry id
+that the aggregator fallback can also spell resolves to the same figure in the
+live OpenRouter catalogue — `claude-opus-4-8` → `anthropic/claude-opus-4.8`
+5/25, `claude-sonnet-4-6` → 3/15, `claude-opus-4-20250514` → 15/75,
+`claude-3-haiku-20240307` → 0.25/1.25. Ten of ten agree, and none of the nine
+unpriced ids picks up a price from it.
+
+### Cache reads and writes are now priced apart from input
+
+Two real `claude-opus-5` turns, same 7k-token prompt, same app:
+
+| Turn | Band | Why |
+|---|---|---|
+| cache **hit** | `◈ $0.0036` | 7k × $0.50/MTok (0.1x base) |
+| cache **write** | `◈ $0.045` | 7k × $6.25/MTok (1.25x base, 5m TTL) |
+
+Both are correct for their case, and neither was distinguishable before: the old
+arithmetic priced input and output only. Anthropic reports `input_tokens`
+EXCLUDING its cache buckets while OpenAI and Gemini report a total prompt count
+with the cached part as a subset, so the three buckets are made disjoint before
+they are priced — Anthropic's are already disjoint and are billed alongside the
+input count, OpenAI's cached part is subtracted out of it. Pricing them side by
+side without that division would double-charge an OpenAI cached prefix at 11x its
+real rate.
+
+### Making cache prices billable exposed 19 rows of bad cache data
+
+Found in review, and caused by this change rather than merely revealed by it: at
+`32d36ed` `calculate_cost` read only `input_price` and `output_price`, so a
+nonsense `cache_reads_price` was inert data. Pricing the cache buckets made 19
+rows chargeable that had never been charged, all of them in the expensive
+direction — a cache HIT costing at least as much as reading the token fresh,
+which is the inverse of what caching is for.
+
+| Rows | Was | Cause | Now |
+|---|---|---|---|
+| 5 Claude (3.7 Sonnet ×2, 3.5 Sonnet, 3.5 Haiku, 3 Haiku) | `cache_reads_price == input_price` | the "no separate rate known" placeholder | Anthropic's published rate: 0.1x base, or the per-model figure where the page gives one (3.5 Haiku $0.08) |
+| 14 Qwen | `cache_writes_price == input_price`, `cache_reads_price == output_price` | the four price fields filled in the order (input, output, input, output) | `None` — Alibaba publishes no cache rate and all 14 are `supports_prompt_cache=False` |
+
+`qwen-max` was the worst: $9.60/MTok to re-read a token it charges $2.40 to read
+the first time. Corroborated where a second source exists —
+`anthropic/claude-3-haiku` in the OpenRouter catalogue quotes `cr=0.03` against
+the 0.1x rule's 0.025, and `cw=0.3` matching the row exactly.
+
+`test_no_cache_read_costs_as_much_as_a_fresh_input_token` now fails the build and
+names any row that reintroduces it, in the same shape as the zero-price guard.
+The lesson generalises: making a dormant field load-bearing is a data audit, not
+just a code change.
+
+### The aggregate, live
+
+A real delegating turn (`anthropic/claude-opus-5`, one child):
+
+```
+  Subagents
+ • Pinger  ✓ 1s · 0.5%/1M · $0.033  pong
+
+  ◆ anthropic/claude-opus-5 › ⌂ ~/local-operator › ⊙ 1 MCP    ▦ 0.7%/1M ‹ ◈ $0.045 ‹ ◷ 3s
+
+own=$0.012890 children={'84b861124a53': 0.032529} total=$0.045419
+```
+
+The parent burned $0.0129 of its own and the band shows $0.045, because the
+child's $0.0325 is in it. With two children, the band moved on a poll tick with
+no parent turn in between — $0.019 at t+6s (parent's turn settling), $0.031 at
+t+9s once both children reported. That is the case a turn-end-only harvest would
+miss: a delegated child outlives the turn that launched it.
+
+One blended number rather than a split. The cost segment sheds at rung 8 of the
+12-rung `status_line._DROP_LADDER`, so widening it to `$0.42 +$0.19` buys a
+breakdown at the price of the whole segment disappearing sooner on a narrow
+terminal — and the per-child breakdown already has a roomier home in the
+subagent panel, one figure per row, as above.
+
+Frames captured by driving the real `OperatorApp` against a real Anthropic
+session through Textual's Pilot — the production app, band and event pipeline,
+not a stub.
+
+## The seam between the conversation and the composer (2026-08-11)
+
+Reported from the owner's own frame: the last two rows of a turn (`✕ name
+'CompactionOutcome' is not defined` / `✕ interrupted`) sitting directly on the
+composer's fill, so the ledger and the input read as one slab. "There needs to
+be one line of space between the thinking/tool calls/message text and the top
+of the composer."
+
+### Diagnosis: nothing ever reserved it
+
+Not a regression. `TranscriptView` declared `padding: 1 0 0 1` — the bottom was
+the one edge of the transcript that had never been spent, so the seam was
+whatever slack the frame happened to have left, and zero as soon as the
+conversation filled it. Measured on the composed frame at `b992792`, blank rows
+between the last transcript row and `#input-shell`:
+
+| Last block | 120x40 | 60x40 |
+|---|---|---|
+| assistant prose | 0 | 0 |
+| tool card (failed) | 0 | 0 |
+| notice | 0 | 0 |
+| user prompt | 0 | 0 |
+| working line | 0 | 0 |
+
+The aside work is adjacent but innocent: `_reserve_ground_for_aside` drives that
+same padding while the card is up, and the flush card-on-composer seam was its
+own measured decision. The one thing it did own is the close path, which wrote a
+hardcoded `0` back — invisible while the sheet said `0` too, and an eaten row
+the moment it said `1`. It now clears the inline rule and lets the cascade
+answer, which is also what keeps the boot layout at `0`.
+
+### Whose row it is
+
+The transcript's, as a trailing reservation, not the dock's as top padding:
+
+- one owner for one seam — the aside's reservation REPLACES this row rather than
+  stacking with it, which is what keeps its flush seam a single number
+- every floating card is placed off the docked panel's `region.y`
+  (`overlay.rows_above_dock`), so a padding row on `#input-dock` lifts the card
+  off the composer. Measured at 120x40: the aside's footer at row 32, a blank
+  row 33, the panel at 34 — the one join in the stack deliberately chosen flush,
+  broken by the alternative
+- same semantics as the transcript's top row: the conversation's own first and
+  last row of ground, inside the scrollable region, so `scroll_end` lands on it
+
+### Frames (60x40, conversation scrolled to its end)
+
+```
+BEFORE                             AFTER
+32                                 32   ! interrupted
+33   ! interrupted                 33
+34 ❯   Message Local Operator…     34
+                                   35 ❯   Message Local Operator…
+```
+
+```
+BEFORE                             AFTER
+32                                 32 ▌ now do the other one
+33 ▌ now do the other one          33
+34 ❯   Message Local Operator…     34
+                                   35 ❯   Message Local Operator…
+```
+
+### The row does not flicker
+
+40 consecutive appends, one notice per frame, reading the seam off every frame.
+Before, the slack decays 7…1 and then collapses to `0` at the frame that first
+overflows (n=31 at 60x40) and stays there. After, it decays to `1` and holds at
+`1` through the exact-fit frame and every scrolling frame after it:
+
+```
+before  … 3 2 1 0 0 0 0 0 0 0 0 0
+after   … 3 2 1 1 1 1 1 1 1 1 1 1
+```
+
+### States that had to stay right
+
+| State | Before | After |
+|---|---|---|
+| `/btw` aside open | flush (0) | flush (0) |
+| aside closed with Esc | 0 | 1 |
+| boot splash, 60x20 / 80x24 / 60x40 / 120x40 | 1 | 1, frame identical row for row |
+| dock band up (todos) | 1 above the band, 0 above the composer | 1 and 1 |
+| both band slots up (subagent + todos) | — | 1 / 1 / 1 down the whole column |
+| subagent page (full-page child view) | 0 — the exit hint fused with the read-only composer | 1 |
+| `/btw` aside open WITH a band up | 1 row under the card | flush on the band, deliberately |
+| dock grown taller (4-line composer, picker open) | content-dependent — 0 at 120x40 with the picker up | 1 |
+
+The band needed the second half of the change. Its slot carried a padding row
+ABOVE itself, which stacked with the transcript's new trailing row into a
+two-row interval — the widest on screen, the same "both halves pushed a padding
+row into the join" failure the aside card's missing bottom row was fixed for.
+`.band-slot` now owns the ground BELOW itself, so every join between the
+column's own stacked children is one row from exactly one owner.
+
+The last row of that table is the review's one finding (S1), and it is the flip
+working rather than failing. The aside is placed on the dock (`stack_on_dock`,
+gap 0), so it rests on whatever the dock puts at its top: the composer with no
+band, the band's slab with one. Before the flip the card had a stray ground row
+under it in that one state, so the same card read as seated on the composer and
+loose above the band. Flush is legible here because the card is `$lo-overlay`
+over the band's `$lo-surface` — one elevation step, which is this kit's
+separator — where the band's own join with the composer was two identical fills
+touching and needed the row. Pinned deliberately, fills asserted, so the next
+reader does not "fix" it.
+
+Evidence: `tests/unit/tui/test_composer_seam.py` (26 tests — every last-block
+kind at both widths, the growth sequence, the aside open, closed and over a
+band, the boot splash at four sizes, the band, the subagent page). 16 of the
+first 22 fail at `b992792`; the ones that pass both ways are the invariants the
+fix had to preserve (aside flush, boot). Frames captured from the real
+`OperatorApp` through Textual's Pilot, rendered from
+`Screen._compositor.render_strips()` under `TERM=xterm-256color`.
+
+Reviewed by `Round11Reviewer` over the two commits: approve, no blocker, no
+major, two nits. S1 above; S2 was that a suite count taken in the shared
+worktree measures eleven agents' uncommitted work as well as this change, so the
+reproducible figure is the one from a detached worktree at the commit.

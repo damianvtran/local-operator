@@ -114,13 +114,32 @@ any image viewer. The point is that a human or a vision-capable agent
 
 ### 3. Always capture before AND after
 
-Stash the change, capture `before.svg`, restore, capture `after.svg`:
+**Capture `before.svg` FIRST, before you touch a file.** The before-frame is
+the cheapest artifact in this recipe and it only stays cheap while the tree is
+still clean — write the shot script, capture, then start editing:
 
 ```sh
-git stash push -q -m visual <changed files>
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py /tmp/before.svg
-git stash pop -q
+#   ... now make the change ...
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py /tmp/after.svg
+```
+
+**Never `git stash` to get a before-frame.** Assume you are not alone in this
+checkout: several agents routinely hold uncommitted work in it at the same
+time, and a whole-tree operation is not a local undo — `stash` pockets every
+peer's uncommitted work along with yours and hands it all back only if nothing
+goes wrong in between. Nothing about the command tells you it did that. The
+same applies to `git checkout -- <path>`, `restore`, `reset --hard` and
+`clean`, and to any whole-file overwrite of a tracked file (`cp` over it, a
+`>` redirect, an editor "revert"). Already edited and need a before-frame
+anyway? Take it from a throwaway worktree, which cannot reach anyone's work
+but yours:
+
+```sh
+git worktree add --detach /tmp/lo-before HEAD
+ln -s ~/local-operator/.venv /tmp/lo-before/.venv
+cd /tmp/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py /tmp/before.svg
+git worktree remove --force /tmp/lo-before
 ```
 
 Two stills side by side catch what a single "looks fine" never does. The

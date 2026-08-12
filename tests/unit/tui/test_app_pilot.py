@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,22 +17,27 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.harness.types import NoticeEvent
+from local_operator.harness.types import ImageContent, NoticeEvent, TextContent
 from local_operator.session.mcp_status import McpStartupOutcome
+from local_operator.session.protocol import CompactionOutcome
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_LAYOUT_CLASS,
+    COMPOSER_FOCUSED_CLASS,
     PERSIST_HINT,
     SLASH_COMMANDS,
     OperatorApp,
 )
 from local_operator.tui.autocomplete import ArgumentChoice
+from local_operator.tui.events import TurnEnded
 from local_operator.tui.widgets.assistant import AssistantBlock
-from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.editor import ASIDE_PLACEHOLDER, Editor
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from local_operator.tui.widgets.welcome import WelcomeView
+from tests.unit.tui.conftest import caret_cells, chevron_colour, composer_cells
 
 
 class FakeSession:
@@ -41,9 +47,21 @@ class FakeSession:
         self.prompts: list[str] = []
         self.aborts: list[str] = []
         self.completions: list[tuple[str, str]] = []
+        self.asides: list[list[Any]] = []
+        self.adopted: list[list[Any]] = []
         self.disposed = False
         self._handlers: list[Any] = []
         self._history: list[Any] = []
+        #: `/compact` requests this fake was asked for, and the answer it gives.
+        #: A fake carries no history, so the honest default is the refusal a
+        #: real session returns for an empty conversation; tests that want a
+        #: successful pass stage their own outcome.
+        self.compactions = 0
+        self.compact_outcome = CompactionOutcome(
+            ran=False,
+            reason="nothing_to_compact",
+            detail="nothing to compact: the whole conversation is ~0 tokens",
+        )
         self.preflight_calls = 0
         self.preflight_notice: str | None = None
 
@@ -86,10 +104,10 @@ class FakeSession:
         if self.preflight_notice is not None:
             self.emit(NoticeEvent(text=self.preflight_notice, kind="warning"))
 
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
     def set_approval_handler(self, handler: object | None) -> None:
@@ -126,6 +144,35 @@ class FakeSession:
 
     async def dispose(self) -> None:
         self.disposed = True
+
+    async def complete_aside(
+        self,
+        turns: list[Any],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> str:
+        # Recorded, not answered. The aside's own suites drive the real
+        # Session; here the only contract that matters is that the app can
+        # call it, so a fake that returned prose would invite pilot tests to
+        # assert on words no model produced.
+        self.asides.append(list(turns))
+        return ""
+
+    async def adopt_aside(self, messages: list[Any]) -> None:
+        self.adopted.append(list(messages))
+
+    async def compact_now(self) -> CompactionOutcome:
+        return self._answer_compaction()
+
+    def _answer_compaction(self) -> CompactionOutcome:
+        """Count the request and answer with the staged outcome.
+
+        Split out so subclasses can override :meth:`compact_now` (to raise, or
+        to block) without losing the count every test reads.
+        """
+        self.compactions += 1
+        return self.compact_outcome
 
     def history(self) -> list[Any]:
         return getattr(self, "_history", [])
@@ -1401,7 +1448,8 @@ async def test_a_failed_fetch_is_reported_inside_the_panel() -> None:
     assert "r refresh" in text
 
 
-def test_all_three_usage_surfaces_agree_for_an_api_key_only_install(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_all_three_usage_surfaces_agree_for_an_api_key_only_install(monkeypatch) -> None:
     """`/provider`'s "report quota" list, bare `/usage`'s targets and
     `/usage <provider>`'s up-front warning are three surfaces answering one
     question, and they used to give three answers: with only `ANTHROPIC_API_KEY`
@@ -1426,9 +1474,24 @@ def test_all_three_usage_surfaces_agree_for_an_api_key_only_install(monkeypatch)
     # Surface 2: the bare `/usage` target list is the same list.
     assert controller.usage_reportable_providers() == []
     # Surface 3: `/usage anthropic` refuses up front, with the actionable reason.
-    notices: list[tuple[str, str]] = []
-    app._cmd_usage("anthropic", lambda body, kind="info": notices.append((body, kind)))
+    #
+    # Run under `run_test` rather than with an injected notice callback: the
+    # REFUSING branches go through `_system_notice`, so they keep the boot
+    # composition a rejected command never earned the right to collapse (see
+    # `_cmd_usage`), and that method writes to the transcript rather than to the
+    # `notice` parameter.
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._cmd_usage("anthropic", app._notice)
+        await pilot.pause()
+        notices = [
+            (block._text, block._token)
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+        welcome_kept = app.query_one(WelcomeView).display
     assert notices == [("anthropic reports usage only after /login anthropic", "warning")]
+    assert welcome_kept is True
 
 
 @pytest.mark.asyncio
@@ -1520,7 +1583,7 @@ class GoalSession(FakeSession):
         self._goal = (text or "").strip()
         return self._goal
 
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         if self.fail_on_prompt:
             raise RuntimeError("boom")
         self.prompts.append(text)
@@ -1839,8 +1902,18 @@ async def test_mcp_command_puts_the_status_in_a_column() -> None:
         with patch("local_operator.mcp.config.load_all_mcp_configs", return_value=(configs, {})):
             block = app._mcp_block()
         assert block is not None
-        rows = [row for row in _renderable_plain(block.renderable).split("\n") if row.strip()]
+        # Branch rows only: the listing now leads with a dim caption naming what
+        # it lists (the block is its own receipt, so it has to say what it is),
+        # and this test is about the SERVER rows' column alignment.
+        rows = [
+            row
+            for row in _renderable_plain(block.renderable).split("\n")
+            if row.lstrip().startswith(("├─", "└─"))
+        ]
         assert len(rows) == 2
+        # The caption is what makes the block its own receipt now that `/mcp`
+        # no longer echoes; the filter above discards it, so it is pinned here.
+        assert _renderable_plain(block.renderable).splitlines()[0] == "MCP servers"
         # `connected` is a substring of `disconnected`, so each row is located by
         # its own status word and the two start columns compared directly. Before
         # the fix the SHORTER name pushed the LONGER status four cells left.
@@ -2212,7 +2285,7 @@ async def test_a_failing_turn_shows_the_providers_own_error() -> None:
     the provider's own words tell the user what to change."""
     session = FakeSession()
 
-    async def prompt(text, attachments=None):
+    async def prompt(text, images=None):
         raise RuntimeError("HTTP 400: `temperature` is deprecated for this model.")
 
     session.prompt = prompt  # type: ignore[assignment]
@@ -2230,13 +2303,17 @@ async def test_a_failing_turn_shows_the_providers_own_error() -> None:
 
 
 def _resume_factory(
-    boots: list[str],
+    boots: list[str | None],
     history_text: str = "resumed history",
     assistant_text: str = "resumed answer",
 ):
-    """A resume factory that records the id it was asked to boot."""
+    """A resume factory that records the id it was asked to boot.
 
-    async def resume_factory(resume_id: str):
+    ``None`` is a real value here, not a missing one: it is what ``/new`` asks
+    for, and ``create_session`` reads it as "start a fresh conversation".
+    """
+
+    async def resume_factory(resume_id: str | None):
         boots.append(resume_id)
         session = FakeSession()
         session._history = [
@@ -2295,7 +2372,7 @@ async def test_a_bare_resume_opens_the_picker_naming_each_session(tmp_path, monk
     _seed_session(tmp_path, "aabbcc", prompt="Make an asteroids game")
 
     session = FakeSession()
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
@@ -2323,7 +2400,7 @@ async def test_choosing_in_the_picker_resumes_that_session(tmp_path, monkeypatch
     _seed_session(tmp_path, "aabbcc", prompt="the only session")
 
     session = FakeSession()
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
@@ -2346,7 +2423,7 @@ async def test_escaping_the_picker_resumes_nothing(tmp_path, monkeypatch) -> Non
     _seed_session(tmp_path, "aabbcc", prompt="the only session")
 
     session = FakeSession()
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
@@ -2369,7 +2446,7 @@ async def test_resume_id_rebinds_and_reloads(tmp_path, monkeypatch) -> None:
     _seed_session(tmp_path, "cafe01")
 
     session = FakeSession()
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
@@ -2405,7 +2482,7 @@ async def test_resume_replaces_the_visible_transcript(tmp_path, monkeypatch) -> 
         session.disposed = True
 
     session.dispose = dispose_with_terminal_event  # type: ignore[method-assign]
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots, "history from the resumed session"),
@@ -2436,12 +2513,160 @@ async def test_resume_replaces_the_visible_transcript(tmp_path, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_session_swap_never_shows_the_splash(tmp_path, monkeypatch) -> None:
+    """Conversation A goes straight to conversation B — no logo in between.
+
+    The splash is the transcript's EMPTY STATE, and a swap clears the ledger
+    before repopulating it, so for a while "the transcript has no content" was
+    true of a screen that was only mid-substitution. It was true for the whole
+    of the session factory too, because the clear used to happen BEFORE the
+    await: the user watched conversation A, then the centred logo, then
+    conversation B.
+
+    Asserted at every frame Textual paints rather than at the end, which is the
+    only way to catch a state that exists only in the middle: ``post_display_hook``
+    is Textual's own after-a-frame callback. The factory is made slow on purpose,
+    because a free one hides the very window this is about.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "swap01")
+
+    current = FakeSession()
+    current._history = [
+        SimpleNamespace(role="user", text="the conversation being left", tool_calls=None)
+    ]
+
+    async def slow_resume_factory(_resume_id: str | None):
+        await asyncio.sleep(0.05)  # a real factory is not free
+        resumed = FakeSession()
+        resumed._history = [
+            SimpleNamespace(role="user", text="the conversation arrived at", tool_calls=None)
+        ]
+        return resumed
+
+    app = OperatorApp(lambda: _factory(current), resume_factory=slow_resume_factory)
+    splash_frames: list[bool] = []
+    watching = False
+    original_hook = type(app).post_display_hook
+
+    def hook(self) -> None:
+        original_hook(self)
+        if watching:
+            splash_frames.append(self.query_one(WelcomeView).display)
+
+    monkeypatch.setattr(type(app), "post_display_hook", hook)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert app.query_one(TranscriptView).blocks(), "the session being left never rendered"
+        assert app.query_one(WelcomeView).display is False
+
+        watching = True
+        # Exactly what `_resume_session` does before running the worker.
+        app._session_factory = lambda: slow_resume_factory("swap01")  # type: ignore[assignment]
+        await app._reload_session()
+        for _ in range(6):
+            await pilot.pause()
+        watching = False
+
+        assert splash_frames, "no frame was painted across the swap"
+        assert not any(splash_frames), (
+            f"the splash was painted on {sum(splash_frames)} of "
+            f"{len(splash_frames)} frames across the swap"
+        )
+        assert "the conversation arrived at" in _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_a_swap_onto_an_empty_session_still_lands_on_the_splash(tmp_path) -> None:
+    """The suppression is about the TRANSITION, not about the destination.
+
+    ``/new`` swaps onto a conversation with no history, and that is a genuinely
+    empty app: the splash is right for it. A fix that simply stopped the swap
+    from ever showing the splash would leave the fresh session on a blank
+    screen with no boot card and no hints.
+    """
+    current = FakeSession()
+    current._history = [SimpleNamespace(role="user", text="something", tool_calls=None)]
+
+    async def new_factory(_resume_id: str | None):
+        return FakeSession()  # no history: this is what /new asks for
+
+    app = OperatorApp(lambda: _factory(current), resume_factory=new_factory)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert app.query_one(WelcomeView).display is False
+
+        app._session_factory = lambda: new_factory(None)  # type: ignore[assignment]
+        await app._reload_session()
+        await pilot.pause()
+
+        assert app.query_one(WelcomeView).display is True
+        assert app.screen.has_class(BOOT_LAYOUT_CLASS)
+        assert app.query_one(TranscriptView).blocks() == []
+
+
+@pytest.mark.asyncio
+async def test_a_swap_leaves_the_ledger_matching_the_new_sessions_history() -> None:
+    """The screen is a PROJECTION of the model's context, after the reorder too.
+
+    The swap now builds the replacement session BEFORE clearing the ledger, so
+    that the substitution paints in one frame. That reordering must not weaken
+    the rule it moved around: what is on screen at the end is the new session's
+    ``history()``, all of it and nothing else — including on the path where the
+    replacement fails to construct, which leaves no conversation at all rather
+    than the previous one under an error saying there is no session.
+    """
+    first = FakeSession()
+    first._history = [
+        SimpleNamespace(role="user", text="first-session prompt", tool_calls=None),
+        SimpleNamespace(role="assistant", text="first-session answer", tool_calls=[]),
+    ]
+    second = FakeSession()
+    second._history = [
+        SimpleNamespace(role="user", text="second-session prompt", tool_calls=None),
+        SimpleNamespace(role="assistant", text="second-session answer", tool_calls=[]),
+        SimpleNamespace(role="user", text="second-session follow-up", tool_calls=None),
+    ]
+
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert len(app.query_one(TranscriptView).blocks()) == 2
+
+        app._session_factory = lambda: _factory(second)  # type: ignore[assignment]
+        await app._reload_session()
+        await pilot.pause()
+
+        text = _transcript_text(app)
+        assert len(app.query_one(TranscriptView).blocks()) == 3
+        assert "first-session prompt" not in text, text
+        assert "first-session answer" not in text, text
+        for line in ("second-session prompt", "second-session answer", "second-session follow-up"):
+            assert line in text, text
+
+        # And the failure path clears too: a swap that lands on nothing must
+        # not leave the previous conversation standing under the error.
+        async def broken_factory():
+            raise RuntimeError("factory exploded")
+
+        app._session_factory = broken_factory  # type: ignore[assignment]
+        await app._reload_session()
+        await pilot.pause()
+
+        after = _transcript_text(app)
+        assert "second-session prompt" not in after, after
+        assert "factory exploded" in after, after
+        assert app.query_one(WelcomeView).display is True
+
+
+@pytest.mark.asyncio
 async def test_resume_long_history_opens_at_the_latest_turn(tmp_path, monkeypatch) -> None:
     """A replay batch settles with the resumed conversation's tail in view."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     _seed_session(tmp_path, "long01")
 
-    async def resume_factory(_resume_id: str):
+    async def resume_factory(_resume_id: str | None):
         resumed = FakeSession()
         resumed._history = [
             SimpleNamespace(
@@ -2483,7 +2708,7 @@ async def test_resume_at_latest_passes_the_sentinel_verbatim(tmp_path, monkeypat
     _seed_session(tmp_path, "aabbcc")
 
     session = FakeSession()
-    boots: list[str] = []
+    boots: list[str | None] = []
     app = OperatorApp(
         lambda: _factory(session),
         resume_factory=_resume_factory(boots),
@@ -2589,9 +2814,18 @@ async def test_rejected_model_commands_keep_the_boot_composition() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_entered_rejected_model_command_dismisses_the_boot_splash() -> None:
-    """The real submit path echoes the command into the transcript, so the
-    splash must yield even when the command handler rejects the model."""
+async def test_an_entered_rejected_model_command_keeps_the_boot_composition() -> None:
+    """The SAME rule as the direct-call test above, now that the submit path
+    agrees with it.
+
+    This test used to assert the opposite — that entering the command dismissed
+    the splash — because the submit handler echoed every slash command and
+    retired the splash on its own. Two paths into one command answering "has the
+    session started?" differently was the bug underneath: the echo, not the
+    command, was deciding. With the echo on the registry (`SlashCommand.echo`)
+    and the empty-state edge back on `_append_block`, a rejected selector is a
+    rejected selector however it was typed.
+    """
     session = _SwitchableSession()
     ctrl = _AccessController()
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
@@ -2606,9 +2840,11 @@ async def test_an_entered_rejected_model_command_dismisses_the_boot_splash() -> 
         welcome_display = app.query_one(WelcomeView).display
         boot = app.screen.has_class("boot")
 
-    assert "/model missing-slash" in painted, painted
-    assert welcome_display is False
-    assert not boot
+    # The rejection is still ON SCREEN, under the surviving splash: keeping the
+    # boot composition must not cost the user the answer to what went wrong.
+    assert "usage: /model <provider>/<model-id>" in painted, painted
+    assert welcome_display is True
+    assert boot
 
 
 def test_help_uses_one_column_wider_than_every_command_name() -> None:
@@ -2767,3 +3003,694 @@ async def test_model_default_hint_survives_every_supported_narrow_footer() -> No
             await pilot.pause()
             painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
         assert PERSIST_HINT in painted, (size, painted)
+
+
+@pytest.mark.asyncio
+async def test_boot_warms_session_imports_before_awaiting_the_factory() -> None:
+    """The import cost must be paid in a thread, ahead of the factory await.
+
+    ``create_session`` does not yield until it has imported the engine, the
+    provider stack and the MCP SDK — measured at ~700 ms — so awaiting it
+    directly from the boot worker freezes the compositor and the key handler
+    for that whole window: the user's first keystrokes land in a dead screen
+    and appear in a burst afterwards. Ordering is the contract (warm, THEN
+    build) and the thread hop is what makes the warm-up non-blocking, so both
+    are asserted here.
+    """
+    import threading
+
+    calls: list[str] = []
+    warm_thread: list[int] = []
+
+    def fake_warm() -> None:
+        warm_thread.append(threading.get_ident())
+        calls.append("warm")
+
+    async def factory() -> FakeSession:
+        calls.append("factory")
+        return FakeSession()
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("local_operator.session_factory.warm_session_imports", fake_warm)
+    try:
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(50):
+                if calls.count("factory"):
+                    break
+                await pilot.pause()
+            loop_thread = threading.get_ident()
+    finally:
+        monkeypatch.undo()
+
+    assert calls[:2] == ["warm", "factory"], calls
+    assert warm_thread and warm_thread[0] != loop_thread
+
+
+class _MeasuredSession(FakeSession):
+    """A session that can report what it is already carrying."""
+
+    def __init__(self, tokens: int = 42_318) -> None:
+        super().__init__()
+        self.tokens = tokens
+        self.measure_calls = 0
+
+    @property
+    def model(self) -> Any:
+        return SimpleNamespace(context_window=1_000_000, reasoning_effort="", reasoning=False)
+
+    async def measure_preloaded_context(self) -> int:
+        self.measure_calls += 1
+        return self.tokens
+
+
+def _ctx_estimate(app: OperatorApp) -> bool:
+    """Whether the band's reading is a local estimate rather than the wire."""
+    status = app._status
+    assert status is not None
+    return status.context_is_estimate
+
+
+def _ctx_tokens(app: OperatorApp) -> int:
+    """The band's context reading, with the ``_status is None`` case ruled out.
+
+    The attribute is Optional until compose runs; every caller here is inside
+    ``run_test``, where it never is.
+    """
+    status = app._status
+    assert status is not None
+    return status.context_tokens
+
+
+async def _settle(pilot, predicate, tries: int = 60) -> bool:
+    for _ in range(tries):
+        if predicate():
+            return True
+        await pilot.pause()
+    return predicate()
+
+
+@pytest.mark.asyncio
+async def test_context_reads_before_the_first_message() -> None:
+    """The band must not claim an empty context while the prompt is loaded.
+
+    The provider's exact ``prompt_tokens`` only exists after a turn, so without
+    a boot measurement the one number a user checks before deciding what to ask
+    is blank precisely when the system prompt, skills index and every tool
+    schema are already spent.
+    """
+    session = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+        assert _ctx_estimate(app) is True
+        assert session.prompts == [], "measuring must not send anything"
+
+
+@pytest.mark.asyncio
+async def test_a_real_turn_supersedes_the_estimate() -> None:
+    """An estimate is a stand-in, not a competitor: the wire number wins."""
+    session = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=51_007))
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 51_007)
+        assert _ctx_estimate(app) is False
+
+        # And a later re-measure (an MCP server connecting) must not walk it back.
+        session.tokens = 9_999
+        app._measure_preloaded_context(session)
+        for _ in range(10):
+            await pilot.pause()
+        assert _ctx_tokens(app) == 51_007
+
+
+@pytest.mark.asyncio
+async def test_a_turn_landing_mid_measurement_still_wins() -> None:
+    """The race the cheap outer check cannot cover.
+
+    A measurement that started while the context was unknown can finish AFTER
+    a turn has reported the provider's exact count. Deciding only at dispatch
+    would let the stale estimate overwrite the better number, so the result is
+    re-checked against the state at the moment it lands.
+    """
+    session = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        # Park a second measurement mid-flight, with the reading still an
+        # estimate so the dispatch-time check lets it through.
+        release = asyncio.Event()
+
+        async def slow_measure() -> int:
+            await release.wait()
+            return 9_999
+
+        session.measure_preloaded_context = slow_measure  # type: ignore[method-assign]
+        app._measure_preloaded_context(session)
+        await pilot.pause()
+
+        # The turn lands while that is parked...
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=51_007))
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 51_007)
+
+        # ...and the late estimate must not undo it.
+        release.set()
+        for _ in range(15):
+            await pilot.pause()
+        assert _ctx_tokens(app) == 51_007
+        assert _ctx_estimate(app) is False
+
+
+@pytest.mark.asyncio
+async def test_a_growing_tool_inventory_re_measures() -> None:
+    """MCP schemas are the biggest term, and they land after boot."""
+    session = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        session.tokens = 88_000
+        app._measure_preloaded_context(session)
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 88_000)
+        assert _ctx_estimate(app) is True
+
+
+@pytest.mark.asyncio
+async def test_a_session_without_the_capability_is_not_a_crash() -> None:
+    """Reduced hosts (embedders, these fakes) have no measurement to offer."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(10):
+            await pilot.pause()
+        assert _ctx_tokens(app) == 0
+        assert _ctx_estimate(app) is False
+
+
+@pytest.mark.asyncio
+async def test_reload_drops_the_dead_sessions_context() -> None:
+    """An exact count belongs to one conversation, and dies with it.
+
+    The dispatch guard reads "a non-zero reading that is not an estimate" as
+    "the band already knows better than you". Left standing across a reload
+    that is a lie about a session that no longer exists, and it also suppresses
+    the replacement session's own measurement.
+    """
+    first = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=51_007))
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 51_007)
+
+        second = _MeasuredSession(tokens=20_000)
+        app._session_factory = lambda: _factory(second)  # type: ignore[assignment]
+        await app._reload_session()
+
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 20_000)
+        assert second.measure_calls >= 1, "the new session must be measured"
+
+
+@pytest.mark.asyncio
+async def test_the_newest_measurement_wins_not_the_slowest() -> None:
+    """Several measurements can be in flight; they finish out of order.
+
+    Neither precedence guard can break that tie — both only ask whether the
+    reading is exact, which is false for every estimate — so without
+    cancellation the LAST to land wins rather than the newest, and the band
+    settles on a smaller inventory than the session actually has.
+    """
+    session = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        slow_release = asyncio.Event()
+
+        async def slow() -> int:
+            await slow_release.wait()
+            return 30_000
+
+        async def fast() -> int:
+            return 90_000
+
+        session.measure_preloaded_context = slow  # type: ignore[method-assign]
+        app._measure_preloaded_context(session)
+        await pilot.pause()
+
+        session.measure_preloaded_context = fast  # type: ignore[method-assign]
+        app._measure_preloaded_context(session)
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 90_000)
+
+        # Releasing the superseded measurement must not walk the band back.
+        slow_release.set()
+        for _ in range(15):
+            await pilot.pause()
+        assert _ctx_tokens(app) == 90_000
+
+
+@pytest.mark.asyncio
+async def test_a_dead_sessions_turn_cannot_restore_its_context() -> None:
+    """The race the reload reset alone does not close.
+
+    A plain ``/reload`` deliberately keeps the controller SUBSCRIBED across
+    ``dispose()`` so the dying session's ``agent_end`` can settle its live tool
+    cards. That same event carries a ``context_tokens``, and it is posted to
+    the message pump — so whether it arrives before or after the reload's reset
+    is scheduling. Arriving after, it reinstates an exact reading for a
+    conversation that no longer exists, and the exact-count guard then
+    suppresses the replacement session's own measurement: the reset undone.
+    """
+    first = _MeasuredSession()
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 42_318)
+
+        second = _MeasuredSession(tokens=20_000)
+        app._session_factory = lambda: _factory(second)  # type: ignore[assignment]
+        await app._reload_session()
+        assert await _settle(pilot, lambda: _ctx_tokens(app) == 20_000)
+
+        # The dying session's turn lands late, carrying its own exact count.
+        app._session = None
+        app.post_message(TurnEnded(aborted=True, error=None, context_tokens=51_007))
+        for _ in range(15):
+            await pilot.pause()
+
+        assert _ctx_tokens(app) == 20_000, "a dead session's count was adopted"
+        assert _ctx_estimate(app) is True
+
+
+def _resumed(*messages: Any) -> Any:
+    """A session whose ``history()`` is the given messages."""
+
+    class _Resumed(FakeSession):
+        def history(self) -> list[Any]:
+            return list(messages)
+
+    return _Resumed()
+
+
+def _blocks_by_type(app: OperatorApp) -> dict[str, int]:
+    from local_operator.tui.widgets.assistant import AssistantBlock as _AB
+    from local_operator.tui.widgets.tool_card import ToolCard as _TC
+    from local_operator.tui.widgets.transcript import NoticeBlock as _NB
+    from local_operator.tui.widgets.transcript import UserBlock as _UB
+
+    counts = {"user": 0, "assistant": 0, "tool": 0, "notice": 0}
+    for block in app.query_one(TranscriptView).blocks():
+        if isinstance(block, _UB):
+            counts["user"] += 1
+        elif isinstance(block, _AB):
+            counts["assistant"] += 1
+        elif isinstance(block, _TC):
+            counts["tool"] += 1
+        elif isinstance(block, _NB):
+            counts["notice"] += 1
+    return counts
+
+
+class TestResumeReplaysTheWholeConversation:
+    """What ``--resume`` puts back on screen.
+
+    The old rule was "prompts, plus assistant messages carrying no tool calls".
+    An agent turn is text AND tool_calls in ONE message, so that excluded the
+    prose too: on a real 396-message session it mounted 6 blocks and dropped 74
+    assistant messages, 215 calls and 215 results. The screen read as a list of
+    questions nobody had answered.
+    """
+
+    @pytest.mark.asyncio
+    async def test_prose_that_accompanies_a_tool_call_is_kept(self) -> None:
+        from local_operator.harness.types import Message, ToolCall
+
+        session = _resumed(
+            Message.user("find the bug"),
+            Message(
+                role="assistant",
+                content=[TextContent(text="Reading the file first.")],
+                tool_calls=[ToolCall(id="c1", name="read", arguments={"path": "a.py"})],
+            ),
+            Message(
+                role="tool",
+                content=[TextContent(text="file contents")],
+                tool_call_id="c1",
+                tool_name="read",
+            ),
+            Message.assistant("Found it."),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["tool"] == 1)
+            counts = _blocks_by_type(app)
+        # The old rule scored assistant=1 here; the turn's own sentence was lost.
+        assert counts == {"user": 1, "assistant": 2, "tool": 1, "notice": 0}
+
+    @pytest.mark.asyncio
+    async def test_a_tool_call_is_paired_with_its_result(self) -> None:
+        """Results can arrive several messages after the call that asked for
+        them, so they are indexed rather than matched positionally."""
+        from local_operator.harness.types import Message, ToolCall
+        from local_operator.tui.widgets.tool_card import ToolCard
+
+        session = _resumed(
+            Message(
+                role="assistant",
+                tool_calls=[
+                    ToolCall(id="a", name="read", arguments={"path": "x"}),
+                    ToolCall(id="b", name="bash", arguments={"command": "ls"}),
+                ],
+            ),
+            Message(
+                role="tool",
+                content=[TextContent(text="boom")],
+                tool_call_id="b",
+                tool_name="bash",
+                is_error=True,
+            ),
+            Message(
+                role="tool", content=[TextContent(text="ok")], tool_call_id="a", tool_name="read"
+            ),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["tool"] == 2)
+            cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+        assert [c.tool_name for c in cards] == ["read", "bash"], "call order, not result order"
+        assert [c._state for c in cards] == ["success", "error"]
+
+    @pytest.mark.asyncio
+    async def test_a_call_with_no_result_is_interrupted_not_complete(self) -> None:
+        """A session killed mid-turn leaves a call with no answer. Rendering it
+        as done would invent an outcome that never happened."""
+        from local_operator.harness.types import Message, ToolCall
+        from local_operator.tui.widgets.tool_card import ToolCard
+
+        session = _resumed(
+            Message(
+                role="assistant",
+                tool_calls=[ToolCall(id="orphan", name="bash", arguments={"command": "sleep 99"})],
+            ),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["tool"] == 1)
+            card = next(
+                b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)
+            )
+        assert card._state == "interrupted"
+
+    @pytest.mark.asyncio
+    async def test_a_replayed_card_reports_no_duration(self) -> None:
+        """The transcript records what a tool did, never how long it took.
+        ``0.0s`` on every row is a wrong number, not a missing one."""
+        from local_operator.harness.types import Message, ToolCall
+        from local_operator.tui.widgets.tool_card import ToolCard
+
+        session = _resumed(
+            Message(role="assistant", tool_calls=[ToolCall(id="c", name="read", arguments={})]),
+            Message(role="tool", content=[TextContent(text="ok")], tool_call_id="c"),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["tool"] == 1)
+            card = next(
+                b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)
+            )
+            rendered = card._build_row(100).plain
+        assert card._duration is None
+        assert "0.0s" not in rendered, rendered
+
+    @pytest.mark.asyncio
+    async def test_a_failed_turn_says_so_instead_of_vanishing(self) -> None:
+        """The reported symptom: two identical prompts and nothing between them.
+
+        The turn had errored, and an assistant message with neither prose nor a
+        call was skipped — so the screen implied the second prompt was a
+        duplicate rather than a retry.
+        """
+        from local_operator.harness.types import Message
+
+        session = _resumed(
+            Message.user("do the thing"),
+            Message(role="assistant", stop_reason="error"),
+            Message.user("do the thing"),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["notice"] == 1)
+            counts = _blocks_by_type(app)
+        assert counts["user"] == 2 and counts["notice"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_session_still_replays_nothing(self) -> None:
+        """The splash must not be retired by an empty history."""
+        app = OperatorApp(lambda: _factory(_resumed()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(10):
+                await pilot.pause()
+            assert _blocks_by_type(app) == {"user": 0, "assistant": 0, "tool": 0, "notice": 0}
+
+
+@pytest.mark.asyncio
+async def test_new_starts_a_fresh_conversation() -> None:
+    """``/new`` had no equivalent: ``/clear`` keeps the conversation the model
+    sees, ``/reload`` reboots the same one, ``/resume`` moves to another
+    existing one. Starting fresh meant quitting the app."""
+    boots: list[str | None] = []
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_resume_factory(boots))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/new")
+        assert await _settle(pilot, lambda: boots == [None])
+    # None, not "" and not a sentinel id: create_session branches on
+    # `resume is not None`, so this is the cold-launch path.
+    assert boots == [None]
+
+
+@pytest.mark.asyncio
+async def test_new_replaces_the_visible_ledger() -> None:
+    """The transcript must not outlive the conversation it describes."""
+    boots: list[str | None] = []
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_resume_factory(boots))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._append_block(NoticeBlock("from the old conversation", "info"))
+        assert any(
+            "old conversation" in _renderable_plain(getattr(b, "renderable", ""))
+            for b in app.query_one(TranscriptView).blocks()
+        )
+        app._run_slash_command("/new")
+        assert await _settle(pilot, lambda: boots == [None])
+        for _ in range(10):
+            await pilot.pause()
+        assert not any(
+            "old conversation" in _renderable_plain(getattr(b, "renderable", ""))
+            for b in app.query_one(TranscriptView).blocks()
+        )
+
+
+@pytest.mark.asyncio
+async def test_new_without_a_capable_launcher_says_so() -> None:
+    """Embedders may supply no session factory beyond the first."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/new")
+        for _ in range(6):
+            await pilot.pause()
+        text = "\n".join(
+            _renderable_plain(getattr(b, "renderable", ""))
+            for b in app.query_one(TranscriptView).blocks()
+        )
+    assert "unavailable" in text
+
+
+# --- "am I focused?", both sides of it ----------------------------------------
+#
+# The composer answered neither side. It drew no caret at all while the buffer
+# was empty, so clicking into it changed nothing on the frame; and its bright
+# chevron — the affordance meant to carry focus (D23) — was driven by
+# `#input-dock:focus-within`, which Textual never re-applied on blur, so once
+# lit it stayed lit for the life of the process. Both directions are pinned
+# here, off a real composed frame rather than off widget state: what the user
+# was missing is what the terminal was SENT.
+
+
+@pytest.mark.asyncio
+async def test_the_focused_composer_shows_a_caret_and_the_blurred_one_shows_none() -> None:
+    """The reported case exactly: an EMPTY composer, clicked into.
+
+    A caret on an empty field has nowhere to go but the placeholder's first
+    cell, so the placeholder starts one column later while the caret is drawn
+    and both survive — the block is on a blank cell, and the copy is unbroken.
+    Blurring takes the caret away again, which is the half that makes the
+    presence of one mean anything.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        assert editor.text == "", "premise: the reported state is an EMPTY composer"
+        focused = composer_cells(app)
+        assert caret_cells(focused) == [" "], "the focused composer drew no caret"
+        placeholder = [text for text, _, _ in focused if "Message Local Operator" in text]
+        assert placeholder, f"the caret broke the placeholder up: {focused}"
+
+        app.set_focus(None)
+        await pilot.pause()
+        assert not caret_cells(composer_cells(app)), "the caret survived the blur"
+
+        editor.focus()
+        await pilot.pause()
+        assert caret_cells(composer_cells(app)) == [" "], "the caret did not come back"
+
+
+@pytest.mark.asyncio
+async def test_the_caret_holds_still_across_consecutive_frames() -> None:
+    """A caret that is absent from half the frames is not a focus signal.
+
+    Sampled across four stock blink periods (500 ms each), empty and with text:
+    the empty state is new, and it is the one where a reintroduced blink would
+    strobe against a static splash.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        assert editor.cursor_blink is False
+
+        for text in ("", "hello"):
+            editor.load_text(text)
+            await pilot.pause()
+            samples = set()
+            for _ in range(8):
+                await asyncio.sleep(0.25)
+                await pilot.pause()
+                samples.add(tuple(composer_cells(app)))
+            assert len(samples) == 1, f"the composer row changed between frames: {text!r}"
+            assert caret_cells(next(iter(samples))), f"no caret at all with text={text!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_chevron_brightens_on_focus_and_never_spends_the_accent() -> None:
+    """The second affordance, in both directions — it used to only go on.
+
+    And it used to go on GREEN. The accent means "a turn is live" and the
+    composer is focused in nearly every frame, so the chevron sat permanently
+    accent two rows above the band's streaming spinner, which is accent for a
+    different reason (D5). Focus is a brightness step in the same neutral ramp
+    now: `fg` focused, `dim` blurred, a 3.86x luminance move where the accent
+    was 2.15x. The accent assertion is the load-bearing one — a future pass
+    reaching for green here reintroduces the collision, and the two-meanings
+    bug is invisible in any frame where no turn is running.
+
+    The class is asserted alongside the painted colour because the class is the
+    mechanism the stylesheet reads: a bright chevron with the class off would be
+    a stale frame, and the class on with a dim chevron would be a broken rule.
+    The blur is a tool card taking focus — a real product surface, the one a
+    user reaches by clicking or tabbing to a tool row, and it leaves the
+    composer on screen, which is exactly when "are my keys still going to the
+    composer?" is a live question.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        dock = app.query_one("#input-dock")
+        focused_ink = theme_mod.semantic_color("fg").lower()
+        accent = theme_mod.semantic_color("accent").lower()
+        dim = theme_mod.semantic_color("dim").lower()
+
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        assert dock.has_class(COMPOSER_FOCUSED_CLASS)
+        assert chevron_colour(composer_cells(app)) == focused_ink
+        assert chevron_colour(composer_cells(app)) != accent, "focus spent the accent"
+
+        card = ToolCard("t1", "bash", {"command": "ls"})
+        app._append_block(card)
+        await pilot.pause()
+        card.focus()
+        await pilot.pause()
+        assert not dock.has_class(COMPOSER_FOCUSED_CLASS)
+        assert chevron_colour(composer_cells(app)) == dim, "the chevron stayed lit"
+
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        assert dock.has_class(COMPOSER_FOCUSED_CLASS)
+        assert chevron_colour(composer_cells(app)) == focused_ink
+
+
+@pytest.mark.asyncio
+async def test_the_read_only_composer_shows_neither_caret_nor_bright_chevron() -> None:
+    """The subagent page's composer refuses every key, and looks it.
+
+    Today this holds because `_set_composer_read_only` drops `can_focus` and
+    pushes focus off the widget, so `TextArea._draw_cursor`'s read-only branch
+    (`show_cursor and has_focus`, a DIFFERENT expression from the one every
+    other state takes) resolves False. That is a chain of three decisions in
+    two files, and restoring focusability at either end would put a caret in a
+    field that ignores it — the most misleading thing this mode could paint.
+    Pinned on the frame so it goes red there rather than in a bug report.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        assert caret_cells(composer_cells(app)) == [" "], "premise: it starts focused"
+
+        app._set_composer_read_only(True)
+        await pilot.pause()
+        assert editor.read_only is True
+        cells = composer_cells(app)
+        assert not caret_cells(cells), "a caret is pointing into a field that refuses keys"
+        assert chevron_colour(cells) == theme_mod.semantic_color("dim").lower()
+
+        app._set_composer_read_only(False)
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        assert caret_cells(composer_cells(app)) == [" "], "the composer never came back"
+
+
+@pytest.mark.asyncio
+async def test_the_aside_keeps_the_caret_because_it_keeps_the_composer() -> None:
+    """`/btw` opens a card the composer types INTO, so focus never moves.
+
+    It is the one mode where the two affordances have to stay ON while the
+    conversation's own surface has visibly stepped aside, and the placeholder
+    is a sentence about the mode rather than an invitation — so this is also
+    the proof that the caret's cell is taken from the field, not from the copy,
+    whatever the copy happens to say.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+
+        assert app._open_aside() is not None
+        await pilot.pause()
+        assert app.query_one(Editor).placeholder == ASIDE_PLACEHOLDER
+        cells = composer_cells(app)
+        assert caret_cells(cells) == [" "], "the aside took the caret with it"
+        assert chevron_colour(cells) == theme_mod.semantic_color("fg").lower()
+        # The CONSTANT, not a copy literal: the claim is that the caret takes
+        # its cell from the field rather than out of the placeholder, which is
+        # true whatever the placeholder says. Spelling the sentence out here
+        # made this test fail on a wording change that did not touch the caret.
+        assert [
+            text for text, _, _ in cells if ASIDE_PLACEHOLDER in text
+        ], f"the caret broke the aside's own placeholder up: {cells}"

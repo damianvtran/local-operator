@@ -11,14 +11,14 @@ import argparse
 import logging
 import sys
 
+from local_operator.logger import configure_console_logging
 from local_operator.server.app import app
 from local_operator.server.openapi import get_openapi_schema_path, save_openapi_schema
 
-# No logging configuration here. `server.app`, imported two lines above,
-# configures the root logger — which made this `basicConfig` a no-op from the
-# day it was written (basicConfig defers when handlers already exist). Calling
-# the real configure function instead would silently CHANGE this script's
-# output rather than preserve it, so the dead call is simply gone.
+# This script is its own entry point, so it configures its own logging — in
+# `main`, never at import. It used to rely on `server.app` doing it as an
+# import side effect, which is exactly the coupling that made a stale
+# `basicConfig` here dead code for years without anyone noticing.
 logger = logging.getLogger("local_operator.server.generate_openapi")
 
 
@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     """Main entry point for the script."""
     args = parse_args()
+    configure_console_logging()
 
     output_path = args.output
     if not output_path:

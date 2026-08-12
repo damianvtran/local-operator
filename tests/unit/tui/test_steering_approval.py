@@ -18,7 +18,7 @@ routes messages internally.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -27,6 +27,7 @@ from rich.cells import cell_len
 from textual.binding import Binding
 
 from local_operator.harness.types import (
+    ImageContent,
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -55,7 +56,11 @@ from local_operator.tui.widgets.approval import (
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
+    TranscriptView,
+    WorkingBlock,
+)
 
 from .test_app_pilot import FakeSession, _factory
 
@@ -73,7 +78,7 @@ class SteerableSession(FakeSession):
     def is_streaming(self) -> bool:
         return self.streaming
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.steers.append(text)
 
     def set_approval_handler(self, handler: object | None) -> None:
@@ -165,7 +170,7 @@ async def test_empty_assistant_message_mounts_no_block() -> None:
     Every Anthropic tool turn opens a message and goes straight to the calls;
     mounting the block eagerly cost two rows (the empty block plus the blank row
     the spacing rule opens above a new kind), which read as a hole between the
-    working line and the tool ledger.
+    lead-in and the tool ledger.
     """
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
@@ -185,9 +190,21 @@ async def test_empty_assistant_message_mounts_no_block() -> None:
 
         assert not app.query(AssistantBlock)
         painted = rows(app)
-        working = next(index for index, row in enumerate(painted) if "working" in row)
-        first_tool = next(index for index, row in enumerate(painted) if "bash" in row)
-        assert first_tool - working - 1 == 1  # exactly one blank row of air
+        # The working line TRAILS the row it reports on — it is pinned to the
+        # foot of the transcript — with exactly ONE blank row between them: the
+        # air that says "this is the live status, not another ledger entry".
+        # An eagerly mounted empty prose block would open a second hole.
+        # Found by its spinner head rather than by its words, because the
+        # ledger row above it also carries the tool's name.
+        working = next(
+            index
+            for index, row in enumerate(painted)
+            if row.strip()[:1] in set(WorkingBlock._SPINNER)
+        )
+        tool = next(
+            index for index, row in enumerate(painted) if "bash" in row and index != working
+        )
+        assert working - tool == 2
 
 
 @pytest.mark.asyncio
@@ -1262,3 +1279,43 @@ async def test_the_verbose_threshold_measures_this_row_s_own_clause() -> None:
     # clause. Measuring the longer clause instead sheds `allow` from 64 down,
     # so a single missing width here is that threshold returning.
     assert kept == list(range(66, 61, -1)), kept
+
+
+@pytest.mark.asyncio
+async def test_a_background_jobs_approval_survives_the_parents_stop_latch() -> None:
+    """The deny latch is TURN-scoped; a background job is not.
+
+    ``_turn_epoch`` advances on a parent ``TurnStarted`` and nothing else, so a
+    subagent still running after its parent's turn ended carried that turn's
+    dead epoch. Any stop latched during that turn then denied the child's
+    write/exec tools — with no card mounted, so the user saw a tool that simply
+    did not work rather than a decision anyone made.
+
+    Refusing the latch for a job costs no stop that exists: ``Session.abort``
+    aborts only the parent's turn signal and never touches ``self.jobs``, and
+    ``action_stop`` is gated on the parent streaming, so Esc could not reach a
+    background child either way.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(12):
+            await pilot.pause()
+        # Arm the latch exactly as a stop during the parent's turn does.
+        app._turn_epoch = 1
+        app._approvals_denied_epoch = 1
+
+        # The parent's own ask is still refused, and silently — that is the
+        # behaviour the latch exists for and it must not change.
+        assert await app.request_tool_approval("bash", "rm -rf /tmp/x") is False
+
+        # The child's ask reaches the user instead of vanishing.
+        task = asyncio.create_task(app.request_tool_approval("bash", "echo hi", job_id="job-7"))
+        for _ in range(10):
+            await pilot.pause()
+        assert not task.done(), "a job's approval was denied without asking"
+        assert app._approval is not None, "no card was mounted for the job"
+        # `resolve` takes the DECISION, not the keystroke: passing "y" happened
+        # to be truthy, so this asserted the right outcome for the wrong reason.
+        app._approval.resolve(True)
+        assert await task, "the answered job approval did not resolve truthy"

@@ -55,6 +55,24 @@ BRAND_TOKENS: dict[str, dict[str, str]] = {
         # highlighted row has to read as MORE than selection alone; reusing a
         # plain elevation step there erased the selection instead.
         "tint-select-hi": "#1b2a1f",
+        # The attachment chip's ground — `[Image #1, 1568x200]` in the
+        # composer. Cool because `signal` is already the ramp's file/reference
+        # hue, and because green and warm are both spoken for one row apart
+        # (the accent chevron, and `edge` behind selected prose).
+        #
+        # This one is NOT iso-luminant like `tint-select`, and could not be:
+        # the chip is ~20 cells inside a text field, not a full-width row, and
+        # downward is not available — pure black against `surface` tops out at
+        # 1.21:1, so there is no well to recess into. 1.37:1 up is the same
+        # visible step `edge` makes at 1.42:1, and `signal` still reads 4.98:1
+        # on it.
+        "tint-attach": "#233448",
+        # The same chip while the selection covers it — 1.61:1 above the
+        # resting chip, a bigger jump than resting-vs-field, so "selected" is
+        # never the weaker of the two reads. `signal` would drop to 3.28:1
+        # here, so the selected chip takes `fg` (6.63:1) and the brighten
+        # lands in both the ground and the ink.
+        "tint-attach-hi": "#325070",
     },
     # Warm paper ramp (D22: real kit semantics; danger is NEVER the green).
     "light": {
@@ -79,6 +97,13 @@ BRAND_TOKENS: dict[str, dict[str, str]] = {
         "tint-danger": "#f6e2dd",
         "tint-select": "#dfeadf",
         "tint-select-hi": "#d2e3d2",
+        # Paper's attachment chip. The direction FLIPS: `signal` only manages
+        # 4.49:1 on `surface` here, so a darker chip ground would push the
+        # marker's own ink below AA. The chip goes UP toward `paper` instead
+        # — a cool card lifted out of the warm field (4.69:1) — and the
+        # selected step goes down and saturated, where `ink` reads 11.22:1.
+        "tint-attach": "#e9f0f8",
+        "tint-attach-hi": "#c3d6ee",
     },
 }
 
@@ -108,6 +133,8 @@ _SEMANTIC_ALIASES: dict[str, dict[str, str]] = {
         "tint-danger": "tint-danger",
         "tint-select": "tint-select",
         "tint-select-hi": "tint-select-hi",
+        "tint-attach": "tint-attach",
+        "tint-attach-hi": "tint-attach-hi",
     },
     "light": {
         "bg": "paper",
@@ -131,6 +158,8 @@ _SEMANTIC_ALIASES: dict[str, dict[str, str]] = {
         "tint-danger": "tint-danger",
         "tint-select": "tint-select",
         "tint-select-hi": "tint-select-hi",
+        "tint-attach": "tint-attach",
+        "tint-attach-hi": "tint-attach-hi",
     },
 }
 

@@ -22,7 +22,41 @@ Scoring contract:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Protocol, Sequence, TypeVar, runtime_checkable
+
+
+class ArgumentMode(Enum):
+    """What a command's ARGUMENT is, from the completion's point of view.
+
+    The registry's one statement about argument completion, read by the editor
+    to decide two different things with one fact:
+
+    * whether a space after the command word opens the value list at all
+      (:attr:`NONE` never does); and
+    * whether Enter on the command ROW may also SEND it. ``/login`` with no
+      provider does nothing, so Enter there opens the list and stops —
+      submitting as well would run a no-op and clear the buffer the list was
+      just drawn over. ``/approvals`` and ``/effort`` answer "what am I on"
+      when bare, so Enter still sends them and the list is an OFFER for the
+      next keystroke rather than a gate in front of a command that works.
+
+    Deliberately NOT a tuple of :class:`ArgumentChoice` on the registry entry.
+    Every list this app offers carries live state — which provider holds a
+    credential, which mode is in force and which one is saved, which rungs THIS
+    model accepts — so a frozen tuple beside the description would be a second
+    copy of state with no way to refresh, and the first thing it would get
+    wrong is the marker saying where the user already is. The registry declares
+    that a list exists; the app fills it at the moment it opens.
+    """
+
+    #: No value list. The command takes free text or nothing.
+    NONE = "none"
+    #: The list is an offer; the bare command does something useful too.
+    OPTIONAL = "optional"
+    #: The list IS the command; bare, there is nothing to run.
+    REQUIRED = "required"
+
 
 #: Exact / prefix tiers, with registry-order tie-break.
 SCORE_EXACT = 1000
@@ -37,6 +71,40 @@ class SlashCommand:
     name: str
     description: str = ""
     aliases: tuple[str, ...] = field(default_factory=tuple)
+    #: Whether running the command may write what was typed into the visible
+    #: ledger as a user row.
+    #:
+    #: Keyword-only and defaulting to FALSE because the transcript is a
+    #: reading record, not a keystroke log: every handler in
+    #: ``local_operator.tui.app`` already reports what it did — a panel, a
+    #: listing, a notice naming the new state — so an echo above that receipt
+    #: is a second row saying the same thing. ``True`` is for the one case the
+    #: receipt cannot cover: an argument that becomes something the MODEL is
+    #: told (``/goal <text>`` rides the system prompt's volatile tail), where
+    #: the ledger's job is to show what the model was given, attributed to the
+    #: user who gave it.
+    #:
+    #: The registry decides WHETHER; the handler decides WHEN, by calling
+    #: ``OperatorApp._echo_user_command`` at the point its effect has actually
+    #: landed. Splitting it that way is what keeps the row honest: written
+    #: before dispatch, ``/goal`` claimed the model had been given words for
+    #: its read-only form, for ``/goal clear``, and for a set REJECTED because
+    #: the session had not started yet.
+    #:
+    #: The flag lives on the registry entry, not in the submit handler, so the
+    #: policy is read next to the command it governs; ``SLASH_COMMANDS`` is
+    #: pinned entry-by-entry in ``tests/unit/tui/test_slash_echo.py`` so a new
+    #: command cannot be added without stating its choice.
+    echo: bool = field(default=False, kw_only=True)
+    #: Whether this command's ARGUMENT is offered as a list, and how hard the
+    #: offer is. See :class:`ArgumentMode`; the app fills the rows when the list
+    #: opens (``OperatorApp.on_argument_query_opened``).
+    #:
+    #: Keyword-only and defaulting to :attr:`ArgumentMode.NONE` for the reason
+    #: ``echo`` is: a command that has not thought about it gets the behaviour
+    #: that changes nothing. Free typing is unaffected in every mode — the list
+    #: ranks what is typed, it never filters what may be submitted.
+    arguments: ArgumentMode = field(default=ArgumentMode.NONE, kw_only=True)
 
     @property
     def names(self) -> tuple[str, ...]:

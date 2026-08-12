@@ -763,3 +763,32 @@ async def test_open_usage_reflows_when_the_bottom_band_grows(monkeypatch) -> Non
     assert after.height < before.height, (before, after)
     assert not after.overlaps(editor_region), (after, editor_region)
     assert after.bottom <= editor_region.y
+
+
+@pytest.mark.asyncio
+async def test_a_scrolled_footer_keeps_the_affordance_over_the_tally() -> None:
+    """When both cannot fit, the way OUT beats the summary of what is hidden.
+
+    The tally describes what the report contains; ``↑↓ scroll`` is the only
+    thing on screen saying the remainder is reachable at all. Dropping the
+    affordance and keeping the tally leaves a footer that reports a total the
+    reader has no stated way to get to.
+
+    Multi-account reports are what made this bite rather than theorise: the
+    body grew from 16 rows to 23, so the hidden remainder at a normal terminal
+    height became whole providers instead of a short tail.
+    """
+    # 56 cells fits both; 52 is the first width at which one must go.
+    async with _panel_app(size=(56, 20)) as panel:
+        panel.show_reports(_many_reports())
+        both = panel.render_lines_for_test()[-1]
+    assert "windows" in both and "↑↓ scroll" in both, both
+
+    async with _panel_app(size=(52, 20)) as panel:
+        panel.show_reports(_many_reports())
+        footer = panel.render_lines_for_test()[-1]
+
+    assert "↑↓ scroll" in footer, footer
+    assert "esc close" in footer, footer
+    # The tally is what yields, not the way out.
+    assert "windows" not in footer, footer

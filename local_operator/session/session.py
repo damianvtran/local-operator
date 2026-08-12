@@ -32,11 +32,16 @@ import asyncio
 import base64
 import contextlib
 import inspect
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from local_operator.compaction.tokens import approx_text_tokens
+from local_operator.harness.approval import ApprovalGate
+from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
 from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.subagent import run_subagent
@@ -64,6 +69,7 @@ from local_operator.harness.types import (
     StaleAside,
     StreamEvent,
     StreamTextDelta,
+    StreamUsageEvent,
     TextContent,
     ToolContext,
     Usage,
@@ -79,6 +85,7 @@ from local_operator.harness.wake import (
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
+from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.transcript import Transcript
 
 if TYPE_CHECKING:
@@ -99,6 +106,37 @@ _CONTINUATION_PROMPT = (
 #: MAX_PAUSED_TURN_CONTINUATIONS): a compaction pass that keeps clearing the
 #: recovery band must not re-prompt forever.
 _MAX_CONTINUATIONS = 8
+
+
+@dataclass(frozen=True, slots=True)
+class _CompactionPlan:
+    """One compaction pass, decided but not yet committed.
+
+    Exists so the automatic gate and the manual ``/compact`` share a single
+    decision AND a single commit (:meth:`Session._plan_compaction` /
+    :meth:`Session._run_compaction`) instead of two entry points that would be
+    free to disagree about the strategy, the cut point or the events.
+
+    ``compaction_api`` is the lazily imported module, carried on the plan
+    because the import is the first thing the decision does and the commit
+    needs the same one (a missing package degrades to no compaction, so it can
+    never be a module-level import).
+    """
+
+    compaction_api: Any
+    settings: Any
+    strategy: str
+    #: The CONVERTED, wire-legal history (``_convert_to_llm`` output), not the
+    #: transcript vocabulary: the commit slices it into ``to_summarize`` for
+    #: ``_produce_summary`` and re-seats ``kept`` behind a fresh
+    #: ``CustomMessage`` marker, so ``CustomMessage`` entries are already gone
+    #: by the time a plan exists.
+    llm_history: list[Message]
+    cut: int
+    #: Context size for the transcript entry: ``max(provider-reported, local)``.
+    context_tokens: int
+    #: Local estimate over the pre-pass history — the receipt's "before".
+    tokens_before: int
 
 
 def _coerce_compaction_settings(settings: Any) -> Any:
@@ -154,7 +192,12 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # compaction cut landing on a rendered marker can still locate
             # ``first_kept_entry_id`` on replay.
             out.append(_render_compaction_marker(message, entry_id=message.id))
-        elif message.custom_type == WAKE_PROMPT_MESSAGE_TYPE:
+        elif message.custom_type in (WAKE_PROMPT_MESSAGE_TYPE, HUB_MESSAGE_TYPE):
+            # A hub message renders exactly like a wake delivery: the sender
+            # already formatted ``details["text"]``, and it must reach the
+            # model as a user turn or the agent it was addressed to never
+            # sees it. Unlisted custom types are dropped (bookkeeping), which
+            # is precisely the trap a new aside type falls into.
             out.append(
                 Message(
                     role="user",
@@ -177,6 +220,42 @@ def _replayed_user_message(content: list[Content], entry_id: str | None) -> Mess
     if entry_id:
         message.id = entry_id
     return message
+
+
+#: Stands in for an image the provider refused, so the turn that follows it
+#: still makes sense. A silently shortened message would leave the model
+#: reading a summary whose "the screenshots below" no longer has any below.
+IMAGE_DROPPED_NOTICE = "[image omitted: the provider rejected it and it has been dropped]"
+
+
+def _without_images(messages: list[Message]) -> list[Message]:
+    """Every message with its image blocks replaced by a one-line notice.
+
+    Used after a provider has refused an image (see
+    :func:`~local_operator.providers.failover.is_image_rejection`). Applied to
+    the RENDERED history rather than to the transcript, so nothing is destroyed:
+    the archive keeps its frames, ``/export`` still has them, and a later
+    session on a provider that accepts them is unaffected.
+
+    Consecutive images collapse to ONE notice. A snapcompact archive replays as
+    fifty-odd frames between two text edges, and fifty identical apology lines
+    would cost more context than the summary they are standing in for.
+    """
+    out: list[Message] = []
+    for message in messages:
+        if not any(isinstance(block, ImageContent) for block in message.content):
+            out.append(message)
+            continue
+        content: list[Content] = []
+        for block in message.content:
+            if isinstance(block, ImageContent):
+                if content and getattr(content[-1], "text", None) == IMAGE_DROPPED_NOTICE:
+                    continue
+                content.append(TextContent(text=IMAGE_DROPPED_NOTICE))
+            else:
+                content.append(block)
+        out.append(message.model_copy(update={"content": content}))
+    return out
 
 
 def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
@@ -249,8 +328,29 @@ class Session:
         has_ui: bool = False,
         cwd: str | None = None,
         skill_resolver: Callable[[str], str | None] | None = None,
-        request_approval: Callable[[str, str], Awaitable[bool]] | None = None,
+        request_approval: "ApprovalGate | None" = None,
         goal_state: GoalState | None = None,
+        #: The variables surface behind list_variables/read_variable. Held by
+        #: the SESSION because ``_build_tool_context`` is rebuilt every turn:
+        #: a store passed only to the factory's context reached the createIf
+        #: check that decides the tools exist, and never the context they run
+        #: against, so both tools read a bare process-env store in every
+        #: session while a configured store sat unused beside them.
+        variables: Any | None = None,
+        #: Which background job this session IS, when it is a subagent run.
+        #: Carried so a host can tell a delegated call's approval request apart
+        #: from the parent turn's — a denial latched during the parent's turn
+        #: must not silently kill the tools of a child still running after it.
+        #: Same reason ``variables`` is held here: ``_build_tool_context`` is
+        #: rebuilt every turn, so anything set only on the construction-time
+        #: context reaches the createIf check and never the executor.
+        job_id: str | None = None,
+        #: The parent↔child messaging surface (``harness.comms.SubagentComms``).
+        #: A top-level session mints its own; a CHILD is handed its parent's,
+        #: which is what makes ``hub`` inside a subagent talk to the agent that
+        #: delegated to it. Held here for the ``_build_tool_context`` reason
+        #: above: a rebuilt context must keep pointing at the same instance.
+        subagent_comms: Any | None = None,
         conversation_name: ConversationName | None = None,
         system_blocks_provider: Callable[[], list[str]] | Callable[[], Awaitable[list[str]]],
     ) -> None:
@@ -269,6 +369,9 @@ class Session:
         # The goal rides the prompt's volatile tail; the holder is shared with
         # the system-blocks provider so an edit applies from the next turn.
         self._goal_state = goal_state if goal_state is not None else GoalState()
+        self._variables = variables
+        self._job_id = job_id
+        self._subagent_comms = subagent_comms
         # The conversation's title. A holder rather than a plain string for
         # the same reason the goal is one: the title arrives on a DETACHED
         # naming task after the host already built its status chrome, and
@@ -278,6 +381,13 @@ class Session:
         )
         self._system_blocks_provider = system_blocks_provider
         self._convert_to_llm = convert_to_llm or _default_convert_to_llm
+        #: Set once a provider refuses a request because of an image block, and
+        #: never cleared: from then on this session renders its history without
+        #: images. See :func:`~local_operator.providers.failover.is_image_rejection`
+        #: for why recovery has to be sticky rather than per-request — the
+        #: offending block is IN the history, so an un-degraded retry sends it
+        #: again, and the session is otherwise unusable for good.
+        self._images_rejected = False
         self._compaction_settings = _coerce_compaction_settings(compaction_settings)
         self._yolo = yolo
         self._has_ui = has_ui
@@ -339,6 +449,11 @@ class Session:
         self._signal: AbortSignal | None = None
         self._is_streaming = False
         self._turn_lock = asyncio.Lock()  # serializes prompt() and wake deliveries
+        # True only while an ON-DEMAND compaction holds ``_turn_lock``. The
+        # automatic pass runs inside a turn and is covered by ``_is_streaming``;
+        # this one runs between turns, so a caller that finds the lock held
+        # needs a way to tell WHICH holder it is looking at (see `prompt`).
+        self._compacting = False
         self._turn_task: asyncio.Task[None] | None = None  # in-flight turn (wake deliveries)
 
         self.jobs = AsyncJobManager()
@@ -367,6 +482,61 @@ class Session:
         # session's own context exists.
         self._merge_capability_tools()
 
+    def _render_history(self, messages: list[AgentMessage]) -> list[Message]:
+        """The configured transcript→LLM conversion, minus anything a provider
+        has already refused.
+
+        Every path that builds wire history goes through here rather than
+        calling ``_convert_to_llm`` directly, because the degrade has to hold
+        for ALL of them. Compaction is the one that matters most: it has to
+        send the history to summarise it, so a poisoned block makes even the
+        escape hatch fail (anthropics/claude-code#50708).
+        """
+        rendered = self._convert_to_llm(messages)
+        return _without_images(rendered) if self._images_rejected else rendered
+
+    async def _degrade_if_image_rejected(self, error: BaseException | str) -> None:
+        """Stop sending images if that is what the provider just refused.
+
+        Idempotent and one-way. The block is in the HISTORY, so without this
+        every later request re-sends it and fails identically — reload replays
+        it, and ``/compact`` cannot run either because summarising means
+        sending the history first. That is the reported symptom: a session that
+        answers every prompt, forever, with the same 400.
+
+        Not a preventable condition on our side. Anthropic accept the same
+        bytes for hours and then start refusing them
+        (anthropics/claude-code#50708), so validating on the way in cannot
+        close it; the only defence is to notice and stop.
+
+        The turn that discovered this still fails — the request is already
+        spent, and retrying it here would mean re-entering the loop from inside
+        its own end event, past the boundary bookkeeping this branch has
+        already had to repair twice. The next turn, and ``/reload``, both
+        succeed, which is the difference between a session that recovers and
+        one that is finished.
+        """
+        # Imported HERE, not at module scope: this module is the CLI's
+        # composition root and docs/REWRITE.md forbids module-level provider
+        # imports, because they are what makes importing a session expensive
+        # (and, done at the top of this file, cyclic).
+        from local_operator.providers.failover import is_image_rejection
+
+        if self._images_rejected or not is_image_rejection(error):
+            return
+        self._images_rejected = True
+        logger.warning("provider rejected an image; dropping images from this session's context")
+        await self._emit(
+            NoticeEvent(
+                text=(
+                    "The provider rejected an image in this conversation's history. "
+                    "Images have been dropped from the context so the session keeps "
+                    "working — send your message again."
+                ),
+                kind="warning",
+            )
+        )
+
     def _merge_capability_tools(self) -> None:
         """Add the tools gated on this session's own capabilities.
 
@@ -384,7 +554,7 @@ class Session:
 
             capability = create_tools(
                 self._build_tool_context(),
-                enabled=("task", "wait", "jobs", "wake"),
+                enabled=("task", "wait", "jobs", "wake", "hub"),
             )
         except Exception:  # tooling must never break session construction
             return
@@ -430,6 +600,19 @@ class Session:
     @property
     def agent_id(self) -> str:
         return self._agent_id
+
+    @property
+    def subagent_comms(self) -> Any:
+        """This session's channel to the subagents it launches.
+
+        Minted on first use rather than in ``__init__`` so a child — handed
+        its PARENT's instance at construction — never creates a second one
+        that nobody is listening to, and so a session that never delegates
+        pays nothing for the capability.
+        """
+        if self._subagent_comms is None:
+            self._subagent_comms = SubagentComms(self)
+        return self._subagent_comms
 
     @property
     def is_streaming(self) -> bool:
@@ -522,26 +705,39 @@ class Session:
             await result
 
     # -- driving turns --------------------------------------------------------
-    async def prompt(self, text: str) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         """Run one user turn to completion (awaitable) or raise.
+
+        ``images`` are attachments the user pasted into their prompt; they
+        ride the same message as the text so the model sees them as one
+        turn rather than as a separate observation.
 
         Reentrancy: ``_turn_lock`` is consulted FIRST — if a live turn (user
         prompt or wake delivery) holds it, a concurrent ``prompt`` is
-        rejected outright instead of queueing behind it. ``_is_streaming`` is
-        then re-checked under the lock to close the race where streaming was
+        rejected outright instead of queueing behind it — including the lock an
+        on-demand compaction holds, which the rejection names. ``_is_streaming``
+        is then re-checked under the lock to close the race where streaming was
         set between the lock probe and the acquire.
         """
         if self._disposed:
             raise RuntimeError("session is disposed")
         if self._turn_lock.locked():
-            raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
+            # An on-demand compaction holds the same lock a turn does, and for
+            # the same reason — it is rewriting the history a request would be
+            # built from. Saying "already streaming" for it would send the user
+            # looking for a turn that is not there.
+            raise RuntimeError(
+                "context compaction is running; the prompt can be sent once it finishes"
+                if self._compacting
+                else "session is already streaming; use steer() to inject mid-turn"
+            )
         await self._turn_lock.acquire()
         try:
             # A fresh user prompt supersedes any earlier interrupt request.
             self._abort_requested = False
             if self._is_streaming:
                 raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
-            await self._run_turn_pipeline([Message.user(text)])
+            await self._run_turn_pipeline([Message.user(text, images)])
         finally:
             self._turn_lock.release()
 
@@ -567,18 +763,30 @@ class Session:
             await self._transcript.append_message(message)
             self._context.messages.append(message)
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         """Inject a steering message into the running turn (interrupts tool
-        batches at the next boundary)."""
-        self._steering_queue.put_nowait(Message.user(text))
+        batches at the next boundary).
 
-    def set_approval_handler(self, handler: Callable[[str, str], Awaitable[bool]] | None) -> None:
+        Attachments ride along for the same reason they do on ``prompt``:
+        steering mid-turn with a screenshot is the case where the picture
+        IS the correction."""
+        self._steering_queue.put_nowait(Message.user(text, images))
+
+    def set_approval_handler(self, handler: "ApprovalGate | None") -> None:
         """Install the host's tool-approval gate (see SessionProtocol).
 
         Read when the per-turn tool context is built rather than captured once,
         so a front end that installs its own gate after the session is already
         constructed (the TUI resolves its session in a worker, well after the
         factory ran) governs every tool call from the next one onward.
+
+        ``ApprovalGate`` is a UNION of the two accepted shapes —
+        ``(tool_name, description)`` and the same plus ``job_id`` — so a host
+        that wants to know WHICH background job is asking can say so without
+        every existing host having to change. Narrowing this back to the
+        two-argument callable is what would silently drop the provenance at the
+        last hop: the gate is installed here, so this annotation is what a host
+        type-checks its own handler against.
         """
         self._request_approval = handler
 
@@ -618,6 +826,67 @@ class Session:
         loop can dispatch calls to tools not yet materialized. ``None`` clears
         it."""
         self._fallback_tool_resolver = resolver
+
+    # -- context accounting ---------------------------------------------------
+
+    async def measure_preloaded_context(self) -> int:
+        """Tokens the NEXT request carries before the user has typed anything.
+
+        The status line's context reading used to come from one place only:
+        ``prompt_tokens`` on a provider's usage response. That is exact, and it
+        is unavailable at the one moment a reader most wants it — a session
+        opens claiming an empty context when the system prompt, the environment
+        block, the skills index and every tool schema are already loaded and
+        already spent. On a large tool inventory that is tens of thousands of
+        tokens rendered as nothing at all, so the first turn appears to jump
+        from 0% to 15% because of a short question.
+
+        What is counted is exactly what :class:`~local_operator.harness.loop`
+        puts in a ``ChatRequest`` with an empty transcript: the system blocks
+        and the serialized tool schemas.
+
+        Two costs are deliberately refused, because a status readout must not
+        be the most expensive thing a session does before the user speaks:
+
+        - **The tokenizer.** :func:`approx_text_tokens` never loads
+          cl100k_base. The exact ruler costs ~43.6 MB RSS and, on a cold cache,
+          a NETWORK fetch of the ranks — a cost ``prune_transcript`` and the
+          compaction gate both restructure themselves to defer. Paying it in
+          every session so the band can read 0.3% would undo that. The ratio
+          runs +7% to +17% high depending on how much of the payload is JSON
+          punctuation, and the first turn replaces the whole figure with the
+          provider's exact count anyway.
+        - **The event loop.** Everything that scales with the inventory —
+          ``json.dumps`` of each schema as much as the arithmetic over the
+          result — happens in the thread. Serializing on the loop and crossing
+          only to add up ``len(text) // 4`` was measurably backwards: at 500
+          tools the on-loop half cost 3.9 ms against 0.09 ms carried, less than
+          the ~0.15 ms the hop itself takes. This runs on the boot path a
+          sibling commit cleared of exactly this kind of stall.
+        """
+        blocks = self._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        resolved = list(blocks)
+        # Bind the inventory here, not in the thread. ``refresh_tools`` REBINDS
+        # ``self._tools`` rather than mutating it, so this reference stays a
+        # coherent snapshot even if an MCP refresh swaps the list mid-count.
+        tools = self._tools
+
+        def count() -> int:
+            total = sum(approx_text_tokens(text) for text in resolved)
+            for tool in tools:
+                # Name/description/schema is what a provider serializes per
+                # tool. The JSON separators do not match any one vendor's wire
+                # format exactly, and no estimate could: this is the same order
+                # of magnitude, which is what a percentage needs.
+                total += approx_text_tokens(tool.name)
+                total += approx_text_tokens(tool.description)
+                if tool.parameters:
+                    total += approx_text_tokens(json.dumps(tool.parameters, separators=(",", ":")))
+            return total
+
+        return await asyncio.to_thread(count)
 
     # -- events ---------------------------------------------------------------
 
@@ -728,7 +997,7 @@ class Session:
 
             config = LoopConfig(
                 model=self._model,
-                convert_to_llm=self._convert_to_llm,
+                convert_to_llm=self._render_history,
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
@@ -759,6 +1028,8 @@ class Session:
                         # the pair), and the continuation queue is dropped so
                         # no further run can open a second boundary inside the
                         # same prompt (§B).
+                        if event.error is not None:
+                            await self._degrade_if_image_rejected(event.error)
                         self._abort_requested = True
                         self._continuation_queue.clear()
                         self._held_end = None
@@ -879,6 +1150,9 @@ class Session:
             browser=self._browser,
             subagent_launcher=self._launch_subagent,
             jobs=self.jobs,
+            subagent_comms=self.subagent_comms,
+            variables=self._variables,
+            job_id=self._job_id,
             delegated_tools={
                 tool.name: tool for tool in self._tools if tool.name.startswith("mcp__")
             },
@@ -967,10 +1241,12 @@ class Session:
             logger.warning("could not journal pruned tool outputs: %s", exc)
 
     async def _maybe_compact(self) -> None:
-        """Post-turn compaction check; lazy-imports the compaction API so a
-        missing module degrades to no-compaction.
+        """Post-turn compaction check — the AUTOMATIC trigger.
 
-        Order (binding orchestrator decisions):
+        Everything except the trigger itself is shared with the manual one
+        (:meth:`compact_now`): :meth:`_plan_compaction` decides, and
+        :meth:`_run_compaction` commits. Order (binding orchestrator
+        decisions):
 
         1. ``prune_tool_outputs`` over the LLM history (in-place blanking of
            superseded/useless tool outputs) BEFORE the trigger math.
@@ -984,18 +1260,114 @@ class Session:
         5. After a successful pass, schedule auto-continue only when the
            residual cleared the recovery band (``residual <= 0.8 * threshold``).
         """
+        planned = await self._plan_compaction(respect_threshold=True)
+        if isinstance(planned, CompactionOutcome):
+            # Refused: below threshold, disabled, nothing worth summarizing.
+            # The automatic path has nobody to tell — a turn that did not need
+            # compacting must not narrate that fact every time.
+            return
+        outcome = await self._run_compaction(planned, reason="context-window")
+        if not outcome.ran:
+            return
+
+        # (5) Recovery band: only schedule a continuation when the pass
+        # actually created headroom (an anti-thrash guard).
+        if getattr(planned.settings, "auto_continue", False):
+            compaction_api = planned.compaction_api
+            threshold = compaction_api.resolve_threshold_tokens(
+                self._model.context_window, planned.settings
+            )
+            if outcome.tokens_after <= compaction_api.RECOVERY_BAND * threshold:
+                self._continuation_queue.append(Message.user(_CONTINUATION_PROMPT))
+
+    async def compact_now(self) -> CompactionOutcome:
+        """Compact the context NOW, on the user's explicit request (``/compact``).
+
+        The manual trigger runs THE SAME PASS as the automatic one — one
+        :meth:`_plan_compaction`, one :meth:`_run_compaction`, one strategy
+        resolver, one pair of ``compaction_start``/``compaction_end`` events —
+        with the threshold gate skipped, because the user asking IS the
+        trigger. A second entry point would be free to drift: the manual pass
+        would keep summarizing with a text model long after the automatic one
+        had moved a vision model onto snapcompact.
+
+        Every state a manual trigger can be pressed in that the automatic gate
+        never sees comes back as a REFUSAL with a reason, never as silence: the
+        bug this method fixes was a ``/compact`` that changed nothing, and a
+        refusal nobody can see is the same frame.
+        """
+        if self._compacting:
+            return CompactionOutcome(
+                ran=False,
+                reason="already_running",
+                detail="a compaction is already running",
+            )
+        if self._is_streaming or self._turn_lock.locked():
+            # A running turn owns the message list — the loop holds it across
+            # tool batches — and rebuilding it under the loop is how a tool
+            # call loses the result it is waiting for. The turn LOCK is
+            # consulted as well as the streaming flag for the reason
+            # :meth:`adopt_aside` spells out: the flag covers ``_run_turn``
+            # alone, while the lock is held across the whole pipeline including
+            # a post-compaction auto-continuation, and the gap between them is
+            # a window a manual pass must not splice into.
+            return CompactionOutcome(
+                ran=False,
+                reason="turn_running",
+                detail=(
+                    "a turn is still running — compaction rewrites the history the turn is "
+                    "holding, so it has to wait for the turn to finish"
+                ),
+            )
+        # HELD for the whole pass, exactly as a turn holds it: the pass replaces
+        # ``_context.messages``, and a prompt or a wake delivery that started in
+        # the middle would build its request from a history being rewritten
+        # underneath it. `_compacting` is what lets `prompt` say WHY it is
+        # refusing while this is in flight.
+        await self._turn_lock.acquire()
+        self._compacting = True
+        try:
+            planned = await self._plan_compaction(respect_threshold=False)
+            if isinstance(planned, CompactionOutcome):
+                return planned
+            return await self._run_compaction(planned, reason="manual")
+        finally:
+            self._compacting = False
+            self._turn_lock.release()
+
+    async def _plan_compaction(
+        self, *, respect_threshold: bool
+    ) -> _CompactionPlan | CompactionOutcome:
+        """Everything decided BEFORE a pass commits, for both triggers.
+
+        Returns a plan when a compaction should run, or the
+        :class:`CompactionOutcome` explaining why it must not. ``respect_threshold``
+        is the ONLY difference between the two callers: the automatic gate fires
+        on the context size, the manual one fires because it was asked.
+
+        Side effects happen here on purpose: pruning (in-place blanking of
+        superseded tool outputs) runs before the trigger math, so a context the
+        prune alone brought back under the line never buys a summary. It also
+        means a manual ``/compact`` on a context with nothing to summarize has
+        still reclaimed whatever the prune found.
+        """
         try:
             from local_operator.compaction import api as compaction_api
         except ImportError:
-            return
+            return CompactionOutcome(
+                ran=False,
+                reason="unavailable",
+                detail="compaction is not available in this build",
+            )
 
         settings = self._compaction_settings or compaction_api.CompactionSettings()
-        if not settings.enabled:
-            return
-
         strategy = self._resolve_strategy(settings)
-        if strategy == "off":
-            return
+        if not settings.enabled or strategy == "off":
+            return CompactionOutcome(
+                ran=False,
+                reason="disabled",
+                detail="compaction is switched off in config (values.compaction)",
+            )
         if settings.threshold_tokens <= 0 and settings.threshold_percent <= 0:
             # Resolve through the API so the §C default, the 600k absolute cap
             # AND the max_threshold_tokens defensive ceiling stay in ONE
@@ -1010,7 +1382,13 @@ class Session:
                 }
             )
 
-        llm_history = self._convert_to_llm(list(self._context.messages))
+        llm_history = self._render_history(list(self._context.messages))
+        if not llm_history:
+            return CompactionOutcome(
+                ran=False,
+                reason="nothing_to_compact",
+                detail="the conversation is empty — there is nothing to compact",
+            )
 
         # (1) Prune before deciding: blanked outputs shrink the estimate and
         # may avoid a compaction pass entirely. Mutates messages in place.
@@ -1029,32 +1407,61 @@ class Session:
             self._last_usage.context_tokens if self._last_usage is not None else None
         )
 
-        # Cheap proof first. ``should_compact`` is strictly monotonic in
-        # context_tokens and ``compaction_context_tokens`` is monotonic in the
-        # local estimate, so a rigorous UPPER bound that already fails the
-        # threshold test proves the exact estimate fails it too — same early
-        # return, same observable behaviour. This matters because the first
-        # exact estimate in a process loads tiktoken's cl100k_base table
-        # (~84 ms, ~43.6 MB RSS, measured with scripts/bench_base_overhead.py),
-        # and compaction runs on EVERY turn while the typical session never
-        # comes near its threshold — so every short run was buying a 43.6 MB
-        # tokenizer to be told "no".
-        bound = compaction_api.messages_tokens_upper_bound(llm_history)
-        if not compaction_api.should_compact(
-            compaction_api.compaction_context_tokens(provider_reported, bound),
-            self._model.context_window,
-            settings,
-        ):
-            return
+        if respect_threshold:
+            # Cheap proof first. ``should_compact`` is strictly monotonic in
+            # context_tokens and ``compaction_context_tokens`` is monotonic in
+            # the local estimate, so a rigorous UPPER bound that already fails
+            # the threshold test proves the exact estimate fails it too — same
+            # early return, same observable behaviour. This matters because the
+            # first exact estimate in a process loads tiktoken's cl100k_base
+            # table (~84 ms, ~43.6 MB RSS, measured with
+            # scripts/bench_base_overhead.py), and compaction runs on EVERY
+            # turn while the typical session never comes near its threshold —
+            # so every short run was buying a 43.6 MB tokenizer to be told
+            # "no". A MANUAL pass is going to load it anyway, so it skips
+            # straight to the exact figure it has to report.
+            bound = compaction_api.messages_tokens_upper_bound(llm_history)
+            if not compaction_api.should_compact(
+                compaction_api.compaction_context_tokens(provider_reported, bound),
+                self._model.context_window,
+                settings,
+            ):
+                return CompactionOutcome(ran=False, reason="below_threshold")
 
         local_estimate = compaction_api.estimate_messages_tokens(llm_history)
         context_tokens = compaction_api.compaction_context_tokens(provider_reported, local_estimate)
-        if not compaction_api.should_compact(context_tokens, self._model.context_window, settings):
-            return
+        if respect_threshold and not compaction_api.should_compact(
+            context_tokens, self._model.context_window, settings
+        ):
+            return CompactionOutcome(ran=False, reason="below_threshold")
 
         cut = compaction_api.find_cut_point(llm_history, settings.keep_recent_tokens)
         if cut is None or cut <= 0:
-            return
+            # ``find_cut_point`` is the ONE definition of "worth summarizing":
+            # the kept window has to reach ``keep_recent_tokens`` and at least
+            # two real messages have to fall outside it. Both states a manual
+            # trigger runs into land here — a context too small to have older
+            # history, and a context whose older history a previous pass has
+            # already summarized — so the refusal names which one it is rather
+            # than guessing.
+            keep_recent = settings.keep_recent_tokens
+            if local_estimate <= keep_recent:
+                detail = (
+                    f"nothing to compact: the whole conversation is ~{local_estimate:,} tokens "
+                    f"and the most recent {keep_recent:,} are kept verbatim"
+                )
+            else:
+                detail = (
+                    "nothing left to compact: everything older than the recent window is "
+                    "already summarized"
+                )
+            return CompactionOutcome(
+                ran=False,
+                reason="nothing_to_compact",
+                detail=detail,
+                tokens_before=local_estimate,
+                tokens_after=local_estimate,
+            )
 
         # The kept window must start at an entry the transcript can replay:
         # first_kept_entry_id is persisted and matched on resume, and a cut
@@ -1066,18 +1473,45 @@ class Session:
                 "compaction cut rejected: kept[0].id %s is not a transcript entry",
                 llm_history[cut].id,
             )
-            return
+            return CompactionOutcome(
+                ran=False,
+                reason="cut_not_replayable",
+                detail=(
+                    "the history has no replayable cut point yet — compaction would drop the "
+                    "messages it keeps on the next resume"
+                ),
+                tokens_before=local_estimate,
+                tokens_after=local_estimate,
+            )
 
-        await self._emit(CompactionStartEvent(reason="context-window"))
+        return _CompactionPlan(
+            compaction_api=compaction_api,
+            settings=settings,
+            strategy=strategy,
+            llm_history=llm_history,
+            cut=cut,
+            context_tokens=context_tokens,
+            tokens_before=local_estimate,
+        )
+
+    async def _run_compaction(self, plan: _CompactionPlan, *, reason: str) -> CompactionOutcome:
+        """Commit one compaction pass — THE pass, for both triggers.
+
+        ``reason`` rides the two events so a host can tell an automatic pass
+        from one the user asked for while keeping one vocabulary for both
+        (``compacting context…`` / ``context compacted``).
+        """
+        compaction_api = plan.compaction_api
+        await self._emit(CompactionStartEvent(reason=reason))
         try:
-            to_summarize = llm_history[:cut]
-            kept = llm_history[cut:]
+            to_summarize = plan.llm_history[: plan.cut]
+            kept = plan.llm_history[plan.cut :]
             summary, preserve_data = await self._produce_summary(
-                compaction_api, to_summarize, strategy
+                compaction_api, to_summarize, plan.strategy
             )
             first_kept_entry_id = kept[0].id
             await self._transcript.append_compaction(
-                summary, first_kept_entry_id, context_tokens, preserve_data=preserve_data
+                summary, first_kept_entry_id, plan.context_tokens, preserve_data=preserve_data
             )
             marker_details: dict[str, Any] = {"summary": summary}
             if preserve_data is not None:
@@ -1088,22 +1522,33 @@ class Session:
                 details=marker_details,
             )
             self._context.messages = [marker, *kept]
-            await self._emit(CompactionEndEvent(reason="context-window", success=True))
-
-            # (5) Recovery band: only schedule a continuation when the pass
-            # actually created headroom (an anti-thrash guard).
-            if getattr(settings, "auto_continue", False):
-                threshold = compaction_api.resolve_threshold_tokens(
-                    self._model.context_window, settings
+            # Measured with the SAME ruler as ``plan.tokens_before`` (the local
+            # estimate over the converted history), so the difference is a real
+            # saving a receipt can quote and the recovery band below compares
+            # like with like. The provider's own figure is not available until
+            # the next request.
+            tokens_after = compaction_api.estimate_messages_tokens(
+                self._render_history(list(self._context.messages))
+            )
+            await self._emit(
+                CompactionEndEvent(
+                    reason=reason,
+                    success=True,
+                    strategy=plan.strategy,
+                    tokens_before=plan.tokens_before,
+                    tokens_after=tokens_after,
                 )
-                residual = compaction_api.estimate_messages_tokens(
-                    self._convert_to_llm(list(self._context.messages))
-                )
-                if residual <= compaction_api.RECOVERY_BAND * threshold:
-                    self._continuation_queue.append(Message.user(_CONTINUATION_PROMPT))
-        except Exception:
+            )
+            return CompactionOutcome(
+                ran=True,
+                strategy=plan.strategy,
+                tokens_before=plan.tokens_before,
+                tokens_after=tokens_after,
+            )
+        except Exception as exc:
             logger.warning("compaction failed", exc_info=True)
-            await self._emit(CompactionEndEvent(reason="context-window", success=False))
+            await self._emit(CompactionEndEvent(reason=reason, success=False))
+            return CompactionOutcome(ran=False, reason="failed", detail=f"compaction failed: {exc}")
 
     def _resolve_strategy(self, settings: Any) -> str:
         """'auto' | 'context-full' | 'snapcompact' | 'off'.
@@ -1190,11 +1635,73 @@ class Session:
         return await self._one_shot_complete(system, prompt)
 
     async def _one_shot_complete(self, system: str, prompt: str) -> str:
-        """One non-tool provider call used to produce the compaction summary."""
+        """One non-tool provider call used to produce the compaction summary.
+
+        ``replayable``: nothing here reaches a screen until the whole string is
+        assembled, so a transient failure part-way through the stream can be
+        discarded and retried. Without it a single stalled read failed the
+        compaction outright and the context it was meant to shrink kept growing.
+        """
         request = ChatRequest(
             model=self._model,
             system_blocks=[system],
             messages=[Message.user(prompt)],
+            tools=[],
+            tool_choice="none",
+            replayable=True,
+        )
+        parts: list[str] = []
+        async for event in self._stream_fn(request, None):
+            if isinstance(event, StreamTextDelta):
+                parts.append(event.delta)
+        return "".join(parts)
+
+    async def complete_aside(
+        self,
+        turns: Sequence[AgentMessage],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Usage], None] | None = None,
+    ) -> str:
+        """Answer a side question against the live context WITHOUT joining it.
+
+        This is ``complete_once``'s opposite number. ``complete_once`` is for
+        errands that need the provider but not the conversation (auto-naming);
+        this is for questions that need the CONVERSATION — "why did you pick
+        that", "are the subagents stuck" — and must not become part of it.
+
+        So it READS everything a real turn reads (the live system blocks, so
+        the goal's volatile tail matches what the agent is actually running
+        under, and the live message list) and WRITES nothing: no transcript
+        entry, no append to ``_context.messages``, no event fan-out. The
+        caller's ``turns`` are appended for this request only. That is what
+        makes the TUI's ``/btw`` overlay an aside rather than a hidden prompt —
+        pressing Esc has to leave the conversation exactly as it was found.
+
+        Nothing to do with the loop's ``Aside`` message channel a few hundred
+        lines up (``queue_aside``/``_drain_asides``), which injects messages
+        INTO a running turn. This is the opposite: one request that reads the
+        turn and adds nothing to it.
+
+        It does spend real tokens, and nothing here records that. The request
+        carries the whole conversation, so an aside is not free; the host is
+        what owns cost accounting, so ``on_usage`` hands the provider's own
+        figures back rather than this method guessing at them.
+
+        No tools, and ``tool_choice="none"``: an aside that could edit a file
+        would be a turn wearing a popup, and the answer is meant to come from
+        context the agent already has.
+
+        Safe to call mid-turn, and the pairing below is what makes that true —
+        see :meth:`_wire_legal_snapshot`.
+        """
+        blocks = self._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        request = ChatRequest(
+            model=self._model,
+            system_blocks=list(blocks),
+            messages=self._render_history([*self._wire_legal_snapshot(), *turns]),
             tools=[],
             tool_choice="none",
         )
@@ -1202,7 +1709,75 @@ class Session:
         async for event in self._stream_fn(request, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
+                if on_delta is not None:
+                    on_delta(event.delta)
+            elif isinstance(event, StreamUsageEvent) and on_usage is not None:
+                on_usage(event.usage)
         return "".join(parts)
+
+    def _wire_legal_snapshot(self) -> list[AgentMessage]:
+        """A copy of the live message list that a provider will actually accept.
+
+        The live list is NOT always legal. ``AgentLoop`` appends the assistant
+        message the moment the model turn ends (``loop._run`` → ``context
+        .messages.append(assistant)``) and appends the tool results only once
+        ``_execute_tool_calls`` returns — so for the whole duration of every
+        tool batch, which is the longest part of a turn, the list ends in an
+        assistant message whose ``tool_calls`` have no answers. Sending that
+        is a 400 on both wires ("must be followed by tool messages responding
+        to each tool_call_id"; ``tool_use`` without ``tool_result``), and
+        mid-batch is exactly when someone asks "what are you doing?".
+
+        So the dangling calls are paired HERE, in a request-scoped copy, the
+        same way the loop pairs them on its abort path. The placeholder text
+        is also the honest answer to the question being asked.
+        """
+        snapshot = list(self._context.messages)
+        tail = snapshot[-1] if snapshot else None
+        if isinstance(tail, Message) and tail.role == "assistant" and tail.tool_calls:
+            snapshot.extend(
+                Message(
+                    role="tool",
+                    content=[TextContent(text="(still running)")],
+                    tool_call_id=call.id,
+                    tool_name=call.name,
+                )
+                for call in tail.tool_calls
+            )
+        return snapshot
+
+    async def adopt_aside(self, messages: Sequence[Message]) -> None:
+        """Promote an off-the-record aside exchange into the conversation.
+
+        The one door out of :meth:`complete_aside`'s no-trace contract, and it
+        is the USER's to open: an aside the user decides was worth keeping is
+        appended as ordinary user/assistant turns, to the live context and the
+        transcript both, so the next real turn sees it and a resume replays it.
+
+        Refused while a turn is running, and not as caution. The loop owns
+        ``_context.messages`` for the duration and pairs every tool call with
+        its result; splicing a user message between an assistant tool-call
+        message and the results it is waiting for produces a message list no
+        provider will accept.
+
+        The turn LOCK is consulted as well as the streaming flag, for the
+        reason :meth:`prompt` spells out: ``_is_streaming`` covers only
+        ``_run_turn`` itself, while the lock is held across the whole pipeline
+        including a post-compaction auto-continuation. A fork landing in that
+        gap would be swept into a continuation the user never saw.
+        """
+        if self._is_streaming or self._turn_lock.locked():
+            raise RuntimeError("cannot adopt an aside while a turn is running")
+        # Persist first, then adopt — the order ``seed_history`` uses, and for
+        # the same reason: a failed transcript write must not leave the live
+        # context carrying messages a resume will not replay.
+        for message in messages:
+            await self._transcript.append_message(message)
+        # One synchronous extend, not an append per await. ``_deliver_wake``
+        # spawns a turn precisely when nothing is streaming, so an await
+        # between the pair's two messages is a window for a wake's turn to
+        # splice its own messages through the middle of them.
+        self._context.messages.extend(messages)
 
     # -- wakes -------------------------------------------------------------------
 

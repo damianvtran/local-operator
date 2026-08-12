@@ -28,34 +28,57 @@ if TYPE_CHECKING:
 
 
 @functools.lru_cache(maxsize=1)
-def _heif_image_module() -> Optional[Any]:
-    """Return Pillow's ``Image`` module with the HEIF opener registered, or
-    ``None`` when the ``images`` extra is unusable.
+def pillow_image_module() -> Optional[Any]:
+    """Return Pillow's ``Image`` module, or ``None`` when Pillow is unusable.
 
     Deliberately a cached FUNCTION rather than a module-level probe. ``helpers``
     is on the core import path (``cli.py`` imports it for
-    ``setup_cross_platform_environment``), and importing Pillow + pillow-heif
-    eagerly costs ~23 ms and ~7.6 MB RSS on every single invocation — including
-    ``--version``, shell completion and every scheduler tick — to support HEIC
-    attachments, an input the vast majority of runs never see. Measured with
+    ``setup_cross_platform_environment``), and importing Pillow eagerly costs
+    ~23 ms and ~7.6 MB RSS on every single invocation — including
+    ``--version``, shell completion and every scheduler tick — to support image
+    inputs, which the vast majority of runs never see. Measured with
     ``scripts/bench_base_overhead.py``; ``tests/unit/test_import_graph.py``
     pins it so a future module-level ``from PIL import Image`` cannot creep
     back in.
 
-    The except is NOT just ImportError. ``register_heif_opener()`` EXECUTES
-    here, and these wheels are the platform-fragile ones: a partially-built or
-    ABI-mismatched pillow-heif raises OSError/RuntimeError/AttributeError while
-    loading libheif. A narrower except would turn a broken optional wheel into
-    a dead CLI with an unrelated traceback — exactly what the extras split
-    exists to prevent. lru_cache means the failing import is attempted once per
-    process, not once per attachment.
+    Pillow arrives as a pillow-heif dependency rather than a direct one, so a
+    broken or absent ``images`` extra takes it with them; every caller must
+    handle ``None`` instead of assuming the import.
     """
     try:
         from PIL import Image
+
+        return Image
+    except Exception:  # noqa: BLE001 — see the docstring; this must never break the CLI
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def heif_image_module() -> Optional[Any]:
+    """Return Pillow's ``Image`` module with the HEIF opener registered, or
+    ``None`` when the ``images`` extra is unusable.
+
+    Separate from :func:`pillow_image_module` so the two degrade INDEPENDENTLY:
+    ``register_heif_opener()`` EXECUTES here, and pillow-heif is the
+    platform-fragile half of the pair (a partially-built or ABI-mismatched
+    wheel raises OSError/RuntimeError/AttributeError while loading libheif).
+    Folding both into one probe would let a broken libheif also disable PNG and
+    JPEG reading, which have nothing to do with HEIC.
+
+    The except is NOT just ImportError, for the same reason: a narrower except
+    would turn a broken optional wheel into a dead CLI with an unrelated
+    traceback — exactly what the extras split exists to prevent. lru_cache
+    means the failing import is attempted once per process, not once per
+    attachment.
+    """
+    image = pillow_image_module()
+    if image is None:
+        return None
+    try:
         from pillow_heif import register_heif_opener
 
         register_heif_opener()
-        return Image
+        return image
     except Exception:  # noqa: BLE001 — see the docstring; this must never break the CLI
         return None
 
@@ -719,7 +742,7 @@ def convert_heic_to_png_data_url(file_path: Union[str, Path]) -> Tuple[str, str]
     # The support flag and the module handle are now ONE memoized lookup: a
     # separate boolean would have to be recomputed here anyway, and two sources
     # of truth is how "HEIF_SUPPORT is True but Image is None" bugs happen.
-    image = _heif_image_module()
+    image = heif_image_module()
     if image is None:
         raise Exception(missing_extra_error("images", "HEIC/HEIF conversion"))
 
@@ -757,7 +780,7 @@ def convert_heic_to_png_file(heic_path: Union[str, Path]) -> Path:
     Raises:
         Exception: If conversion fails or HEIF support is not available
     """
-    image = _heif_image_module()
+    image = heif_image_module()
     if image is None:
         raise Exception(missing_extra_error("images", "HEIC/HEIF conversion"))
 

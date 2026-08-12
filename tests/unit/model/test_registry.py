@@ -111,9 +111,15 @@ def test_the_five_series_ships_the_window_the_provider_reports() -> None:
     assert (opus5.context_window, opus5.max_tokens) == (1_000_000, 128_000)
     assert opus5.supports_images is True
     assert opus5.supports_prompt_cache is True
-    # Unknown, not free: this registry spells an unsourced price as zero, and the
-    # status band renders a price as fact.
-    assert (opus5.input_price, opus5.output_price) == (0.0, 0.0)
+    # Anthropic's own published rate, per MILLION tokens, from the "Model
+    # pricing" table read 2026-08-10. These were 0.0 placeholders — `/v1/models`
+    # quotes no prices, so nothing ever filled them in — and the status band read
+    # "cost unavailable" for the whole generation as a result.
+    assert (opus5.input_price, opus5.output_price) == (5.0, 25.0)
+    # The 5m cache write (1.25x base) and the cache hit (0.1x base): this agent
+    # runs with prompt caching on, so a cached turn billed at the full input rate
+    # is wrong by an order of magnitude on the priciest model in the catalogue.
+    assert (opus5.cache_writes_price, opus5.cache_reads_price) == (6.25, 0.50)
     # The generation where the tiers stopped agreeing, so neither may be inferred
     # from the other.
     assert anthropic_models["claude-sonnet-4-5-20250929"].context_window == 1_000_000

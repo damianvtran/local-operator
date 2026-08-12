@@ -58,6 +58,13 @@ class _FakeJobsForBlocks:
         return False
 
 
+class _FakeCommsForBlocks:
+    """Minimal comms so create_tools includes hub for ordering checks."""
+
+    def is_child(self, job_id: str | None) -> bool:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # render_string / render_template engine
 # ---------------------------------------------------------------------------
@@ -242,6 +249,7 @@ def test_inventory_block_matches_default_tool_order() -> None:
             wake_scheduler=_FakeSchedulerForBlocks(),
             subagent_launcher=lambda label, prompt: "job-x",
             jobs=_FakeJobsForBlocks(),
+            subagent_comms=_FakeCommsForBlocks(),
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)
@@ -253,3 +261,52 @@ def test_inventory_block_matches_default_tool_order() -> None:
 def test_env_block_handles_empty_env_details() -> None:
     blocks = build_system_blocks(TOOLS, "", "", DATE)
     assert blocks[2] == f"Today is {DATE}."
+
+
+# ---------------------------------------------------------------------------
+# user custom instructions
+# ---------------------------------------------------------------------------
+
+
+def test_user_instructions_ride_the_stable_head_block() -> None:
+    """Custom instructions are as stable as the persona, so they belong in
+    block 0 — not the volatile tail, where a long file would be re-sent
+    ahead of every skills/goal change."""
+    blocks = build_system_blocks(
+        TOOLS, SKILLS, ENV, DATE, user_instructions="- Use conventional commits."
+    )
+
+    assert len(blocks) == 4
+    assert "- Use conventional commits." in blocks[0]
+    assert "<user_instructions>" in blocks[0]
+    for block in blocks[1:]:
+        assert "conventional commits" not in block
+
+
+def test_user_instructions_are_delimited_from_the_packaged_persona() -> None:
+    # The model must be able to tell operator preference apart from the
+    # packaged rules; without the tag a long file reads as a continuation.
+    blocks = build_system_blocks(TOOLS, "", ENV, DATE, user_instructions="- Prefer tabs.")
+
+    head = blocks[0]
+    assert "## User's custom instructions" in head
+    assert head.index("You are Local Operator") < head.index("<user_instructions>")
+    assert "</user_instructions>" in head
+
+
+def test_absent_user_instructions_leave_the_head_byte_identical() -> None:
+    # Nobody who has not set the file may pay for the feature.
+    baseline = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[0]
+
+    assert build_system_blocks(TOOLS, SKILLS, ENV, DATE, user_instructions="")[0] == baseline
+    assert build_system_blocks(TOOLS, SKILLS, ENV, DATE, user_instructions="   \n ")[0] == baseline
+
+
+def test_user_instructions_keep_the_head_stable_across_turns() -> None:
+    instructions = "- Always ask before force-pushing."
+    first = build_system_blocks(TOOLS, SKILLS, ENV, DATE, user_instructions=instructions)[0]
+    second = build_system_blocks(
+        TOOLS, "other skills", "other env", "2027-01-01", user_instructions=instructions
+    )[0]
+
+    assert first == second

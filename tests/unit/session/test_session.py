@@ -20,6 +20,7 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     CustomMessage,
+    ImageContent,
     Message,
     ModelSpec,
     NoticeEvent,
@@ -30,7 +31,8 @@ from local_operator.harness.types import (
     TextContent,
     ToolResult,
 )
-from local_operator.session.session import Session
+from local_operator.providers.failover import ProviderError
+from local_operator.session.session import IMAGE_DROPPED_NOTICE, Session
 from local_operator.session.transcript import Transcript
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
@@ -796,4 +798,306 @@ async def test_session_merges_capability_tools_into_inventory(tmp_path):
     task_tool = next((t for t in session._tools if t.name == "task"), None)
     assert task_tool is not None
     assert task_tool.name == "task"
+    await session.dispose()
+
+
+class TestMeasurePreloadedContext:
+    """What a session is already carrying before the user has typed.
+
+    The status line's only source used to be a provider's ``prompt_tokens``,
+    which does not exist until a turn completes — so a session opened with a
+    large tool inventory read as empty at the exact moment it was most loaded.
+    """
+
+    @pytest.mark.asyncio
+    async def test_counts_system_blocks_and_tool_schemas(self, tmp_path) -> None:
+        executed: list[str] = []
+        session = make_session(
+            tmp_path,
+            ScriptedStream([]),
+            tools=[echo_tool(executed)],
+            system_blocks_provider=lambda: ["a system prompt", "an environment block"],
+        )
+        try:
+            total = await session.measure_preloaded_context()
+
+            blocks_only = make_session(
+                tmp_path / "b",
+                ScriptedStream([]),
+                tools=[],
+                system_blocks_provider=lambda: ["a system prompt", "an environment block"],
+            )
+            try:
+                without_tools = await blocks_only.measure_preloaded_context()
+            finally:
+                await blocks_only.dispose()
+
+            assert without_tools > 0, "system blocks alone must count for something"
+            assert total > without_tools, "the tool schema is context too"
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_an_async_blocks_provider_is_awaited(self, tmp_path) -> None:
+        """The real provider is a coroutine (it builds the skills index)."""
+
+        async def blocks() -> list[str]:
+            return ["resolved asynchronously"]
+
+        session = make_session(tmp_path, ScriptedStream([]), system_blocks_provider=blocks)
+        try:
+            assert await session.measure_preloaded_context() > 0
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_it_tracks_a_tool_inventory_that_grows(self, tmp_path) -> None:
+        """MCP servers connect AFTER boot, and their schemas are the big term.
+
+        A measurement taken once at boot would understate the context for the
+        rest of the session, so the figure must follow ``refresh_tools``. The
+        new set is the incumbent PLUS the arrivals, which is what the manager
+        hands over — ``refresh_tools`` replaces rather than appends.
+        """
+        executed: list[str] = []
+        session = make_session(tmp_path, ScriptedStream([]), system_blocks_provider=lambda: ["sys"])
+        try:
+            before = await session.measure_preloaded_context()
+            arrivals = [echo_tool(executed, name=f"mcp_{i}") for i in range(12)]
+            session.refresh_tools([*session._tools, *arrivals])
+            after = await session.measure_preloaded_context()
+            assert after > before
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_an_empty_context_reports_zero(self, tmp_path) -> None:
+        """Zero must stay reachable: the segment renders nothing for it, and a
+        host with no system prompt and no tools genuinely has nothing loaded.
+
+        The inventory is emptied through ``refresh_tools`` because construction
+        merges this session's own capability tools in regardless of what the
+        caller passed.
+        """
+        session = make_session(
+            tmp_path, ScriptedStream([]), tools=[], system_blocks_provider=lambda: []
+        )
+        try:
+            session.refresh_tools([])
+            assert await session.measure_preloaded_context() == 0
+        finally:
+            await session.dispose()
+
+
+class TestMeasurementCosts:
+    """The two costs a pre-turn status readout must not incur.
+
+    Both were live defects: the measurement loaded tiktoken (~43.6 MB RSS, and
+    a NETWORK fetch of the BPE ranks on a cold cache) and ran its counting on
+    the caller's event loop — on the very boot path a sibling change cleared of
+    a 700 ms freeze.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_never_loads_the_tokenizer(self, tmp_path, monkeypatch) -> None:
+        from local_operator.compaction import tokens as tokens_mod
+
+        def _boom(*_args, **_kwargs):
+            raise AssertionError("the boot measurement must not load tiktoken")
+
+        monkeypatch.setattr(tokens_mod, "_get_encoding", _boom)
+        monkeypatch.setattr(tokens_mod, "_get_model_encoding", _boom)
+
+        executed: list[str] = []
+        session = make_session(
+            tmp_path,
+            ScriptedStream([]),
+            tools=[echo_tool(executed)],
+            system_blocks_provider=lambda: ["a system prompt " * 200],
+        )
+        try:
+            assert await session.measure_preloaded_context() > 0
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_everything_that_scales_leaves_the_event_loop(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Not "it is fast enough": the inventory is unbounded, so the work has
+        to leave the loop rather than merely be small today.
+
+        Both halves are checked, because an earlier version passed a
+        counting-only version of this test while leaving ~97% of the CPU work
+        on the pump: it serialized every tool schema with ``json.dumps`` to
+        BUILD the list, then crossed to the thread only to add up
+        ``len(text) // 4``. The term that grows with the inventory was the one
+        that stayed, and the hop cost more than it carried.
+        """
+        import json as json_mod
+        import threading
+
+        from local_operator.compaction import tokens as tokens_mod
+        from local_operator.session import session as session_mod
+
+        loop_thread = threading.get_ident()
+        counted: list[int] = []
+        dumped: list[int] = []
+        real_count = tokens_mod.approx_text_tokens
+        real_dumps = json_mod.dumps
+
+        def count_spy(text: str) -> int:
+            counted.append(threading.get_ident())
+            return real_count(text)
+
+        def dumps_spy(*args, **kwargs):
+            dumped.append(threading.get_ident())
+            return real_dumps(*args, **kwargs)
+
+        monkeypatch.setattr(session_mod, "approx_text_tokens", count_spy)
+        monkeypatch.setattr(session_mod.json, "dumps", dumps_spy)
+
+        executed: list[str] = []
+        session = make_session(
+            tmp_path,
+            ScriptedStream([]),
+            tools=[echo_tool(executed, name=f"t{i}") for i in range(6)],
+            system_blocks_provider=lambda: ["sys"],
+        )
+        try:
+            await session.measure_preloaded_context()
+        finally:
+            await session.dispose()
+
+        assert counted, "nothing was counted"
+        assert dumped, "no schema was serialized — the test tools lost their parameters"
+        assert loop_thread not in counted, "counting ran on the caller's loop"
+        assert loop_thread not in dumped, "schema serialization ran on the caller's loop"
+
+    @pytest.mark.asyncio
+    async def test_a_tool_swap_mid_measurement_cannot_race(self, tmp_path) -> None:
+        """The inventory is snapshotted before the thread hop, so an MCP
+        refresh landing mid-measurement cannot mutate the list being walked."""
+        executed: list[str] = []
+        session = make_session(
+            tmp_path,
+            ScriptedStream([]),
+            tools=[echo_tool(executed, name=f"t{i}") for i in range(8)],
+            system_blocks_provider=lambda: ["sys"],
+        )
+        try:
+            task = asyncio.create_task(session.measure_preloaded_context())
+            await asyncio.sleep(0)
+            session.refresh_tools([])
+            assert await task > 0
+        finally:
+            await session.dispose()
+
+
+class PoisonedThenFine:
+    """Raises the provider's image refusal on the first call, then behaves.
+
+    Models the reported failure exactly: the block is in HISTORY, so the
+    refusal is not tied to what the user just typed and recurs on every
+    request until something stops sending it.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[ChatRequest] = []
+        self.calls = 0
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        self.requests.append(request)
+        self.calls += 1
+        first = self.calls == 1
+
+        async def gen():
+            if first:
+                raise ProviderError(400, "Could not process image")
+            yield StreamTextDelta(delta="ok")
+            yield StreamEndEvent(stop_reason="endTurn")
+
+        return gen()
+
+
+def _image_blocks(request: ChatRequest) -> int:
+    return sum(
+        isinstance(block, ImageContent) for message in request.messages for block in message.content
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_image_the_provider_refuses_does_not_brick_the_session(tmp_path):
+    """The reported bug: every turn after the refusal failed identically.
+
+    An image block lives in the conversation history, so once the provider
+    starts refusing it, the next request sends it again and gets the same 400 —
+    and so does the one after that, and so does ``/compact``, which has to send
+    the history in order to summarise it. The session could only be abandoned.
+
+    Not preventable on our side: providers accept the same bytes for hours and
+    then start refusing them (anthropics/claude-code#50708), so the client
+    cannot validate its way out. It can only notice and stop.
+    """
+    stream = PoisonedThenFine()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[TextContent(text="look at this"), ImageContent(data="Zm9v")],
+            )
+        ]
+    )
+
+    await session.prompt("does it work")
+    assert stream.calls == 1
+    assert _image_blocks(stream.requests[0]) == 1, "the poisoned block was sent, as it must be"
+    assert session._images_rejected, "the refusal was not recognised"
+
+    # The whole point: the NEXT turn goes through.
+    await session.prompt("try again")
+    assert stream.calls == 2
+    assert _image_blocks(stream.requests[1]) == 0, "the session is still sending the bad image"
+    sent = [
+        block.text
+        for message in stream.requests[1].messages
+        for block in message.content
+        if isinstance(block, TextContent)
+    ]
+    assert "look at this" in sent, "the surrounding turn was dropped along with the image"
+    assert IMAGE_DROPPED_NOTICE in sent, "the model was left with a silent hole"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_failure_leaves_images_alone(tmp_path):
+    """The degrade is permanent and invisible, so it must not fire on weather.
+
+    A 5xx or an unrelated 400 has nothing to do with the images, and stripping
+    them would quietly cost the model every screenshot for the rest of the
+    session.
+    """
+
+    class AlwaysDown:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.requests.append(request)
+
+            async def gen():
+                raise ProviderError(503, "upstream connect error")
+                yield  # pragma: no cover - generator shape only
+
+            return gen()
+
+    stream = AlwaysDown()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [Message(role="user", content=[TextContent(text="hi"), ImageContent(data="Zm9v")])]
+    )
+    await session.prompt("go")
+    assert not session._images_rejected
+    assert _image_blocks(stream.requests[0]) == 1
     await session.dispose()

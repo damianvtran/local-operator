@@ -24,6 +24,11 @@ one that has to opt in.
 
 from __future__ import annotations
 
+import logging
+import os
+from collections.abc import Iterator
+from pathlib import Path
+
 import pytest
 
 #: Environment variables that steer credential resolution, config discovery or
@@ -79,3 +84,68 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     for name in _AMBIENT_VARS:
         monkeypatch.delenv(name, raising=False)
     yield home
+
+
+@pytest.fixture(autouse=True)
+def restore_root_logger() -> Iterator[None]:
+    """Give every test the process-global logging state back as it found it.
+
+    Logging is the one piece of global state a Python test suite cannot avoid
+    sharing, and this suite had no isolation for it at all. The failure that
+    forced this fixture: importing ``local_operator.server.app`` — which
+    collection does for the whole session the moment one server test module is
+    selected — left a stderr ``StreamHandler`` on the root logger, so
+    ``tests/unit/mcp/test_auth.py``'s "the browser's chatter goes to the LOG,
+    not the terminal" assertion saw the log ON the terminal and failed. Alone
+    it passed. That is the signature of leaked global state, and answering it
+    per-test is a fix that has to be remembered every time.
+
+    Restores what the modules under test actually mutate: root handlers and
+    level, plus ``lastResort``, ``raiseExceptions`` and ``Logger.addHandler``,
+    which :mod:`local_operator.logger`'s silencing patches in place. This
+    replaces the identical fixtures that ``tests/unit/test_logger.py`` and
+    ``tests/unit/tui/test_logger_silence.py`` each kept locally: they were
+    right, they were just scoped to the two files that already knew.
+    """
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_level = root.level
+    saved_last_resort = logging.lastResort
+    saved_raise = logging.raiseExceptions
+    saved_add_handler = logging.Logger.addHandler
+    try:
+        yield
+    finally:
+        logging.Logger.addHandler = saved_add_handler  # type: ignore[method-assign]
+        logging.lastResort = saved_last_resort
+        logging.raiseExceptions = saved_raise
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+
+@pytest.fixture
+def terminal_output(tmp_path) -> Iterator[Path]:
+    """Everything written to file descriptor 2 during the test, as a file.
+
+    For asserting that nothing reached the TERMINAL. Monkeypatching
+    ``sys.stderr`` to a ``StringIO`` — the usual move, and the right one for an
+    in-process ``StreamHandler`` — cannot see this: a spawned child inherits the
+    DESCRIPTOR, not the Python object, so it paints the real screen while the
+    buffer stays empty. A test built on the buffer passes with the defect fully
+    present; that is how an MCP server's startup banner reached a user's boot
+    splash with a green suite behind it.
+
+    ``os.dup2`` and not ``contextlib.redirect_stderr`` for the same reason.
+    Yields the sink path; read it back at the end of the test. Restored on the
+    way out, including on failure, or pytest loses its own error stream.
+    """
+    path = tmp_path / "terminal-fd2.bin"
+    sink = open(path, "wb")
+    saved = os.dup(2)
+    try:
+        os.dup2(sink.fileno(), 2)
+        yield path
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
+        sink.close()

@@ -225,22 +225,36 @@ def test_a_direct_provider_is_enriched_too_not_just_the_aggregators(monkeypatch,
     to be guessed from a family floor — the enrichment path either reads it or the
     session compacts at 160k on a model with 1M of room, throwing away 84% of it.
 
-    Prices are the other half, and they are still absent from that wire: an invented
-    one renders in the band as fact.
+    The id is an UNSHIPPED one rather than `claude-opus-5` itself, and the swap is
+    the point rather than a convenience. Enrichment is gated on the registry being
+    incomplete (`_needs_enrichment`: no real window, or no price), and now that the
+    5-generation rows carry Anthropic's published prices the whole family is
+    complete — so resolving `claude-opus-5` correctly does no listing at all and
+    could no longer demonstrate anything about this path. What the picker actually
+    offers that the registry cannot describe is the id released since this package
+    was cut, which is what this now uses.
+
+    Prices stay zero here because neither source has one: Anthropic's wire quotes
+    none, and the stubbed aggregator catalogue has no row for this id either. An
+    invented price renders in the band as fact.
     """
     from local_operator.model import configure as configure_mod
+    from local_operator.model.registry import anthropic_models
 
-    _stub_discovery(monkeypatch, [_anthropic_row("claude-opus-5", "Claude Opus 5")])
+    unshipped = "claude-nova-6"
+    assert unshipped not in anthropic_models, "the id this test treats as unshipped now ships"
+    _stub_discovery(monkeypatch, [_anthropic_row(unshipped, "Claude Nova 6")])
     monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    configure_mod.invalidate_model_info_cache()
 
-    config = configure_mod.configure_model(hosting="anthropic", model_name="claude-opus-5")
+    config = configure_mod.configure_model(hosting="anthropic", model_name=unshipped)
     assert config.spec.context_window == 1_000_000, "the listing's window never reached the spec"
     assert config.spec.max_output_tokens == 128_000, "64k silently truncates long answers"
     assert config.spec.supports_prompt_cache is True, "no cache_control on the priciest model"
     assert config.spec.supports_images is True
     assert config.info.input_price == 0.0
     assert config.info.output_price == 0.0
-    assert config.info.name == "Claude Opus 5"
+    assert config.info.name == "Claude Nova 6"
 
 
 def test_an_undescribed_claude_snapshot_inherits_its_familys_window(monkeypatch, tmp_path) -> None:
@@ -254,8 +268,10 @@ def test_an_undescribed_claude_snapshot_inherits_its_familys_window(monkeypatch,
     the whole vendor. That is the number the user saw. The FAMILY is what the id
     itself still says, so the snapshot resolves to Opus 5's real 1M.
 
-    The prices stay zero: same model, but this registry has no sourced price for
-    the 5 generation to inherit.
+    The PRICE is inherited by the same route and matters more than the window's
+    sibling assertions suggest: a dated snapshot is the same model at the same
+    published rate, so a snapshot that costed as unknown while its undated twin
+    costed correctly would put a "$—" in the band for no reason a user could see.
     """
     from local_operator.model import configure as configure_mod
     from local_operator.model.registry import anthropic_models
@@ -272,8 +288,8 @@ def test_an_undescribed_claude_snapshot_inherits_its_familys_window(monkeypatch,
     assert config.spec.context_window == 1_000_000, "fell back to the 200k family floor"
     assert config.spec.max_output_tokens == 128_000
     assert config.spec.supports_prompt_cache is True
-    assert config.info.input_price == 0.0
-    assert config.info.output_price == 0.0
+    assert (config.info.input_price, config.info.output_price) == (5.0, 25.0)
+    assert (config.info.cache_writes_price, config.info.cache_reads_price) == (6.25, 0.50)
 
 
 def test_an_unknown_claude_generation_does_not_inherit_downward(monkeypatch, tmp_path) -> None:
@@ -315,14 +331,25 @@ def test_the_providers_own_capability_answer_reaches_the_spec(
 
     `ModelSpec.supports_images` selects the compaction strategy, so a wrong value
     is not cosmetic: a text-only model routed through the vision path builds an
-    archive of image frames the provider will reject. Every shipped Anthropic row
-    says `supports_images=True`, so under the previous OR a live `false` could
-    never take effect and the precision of the capability read had no consumer.
+    archive of image frames the provider will reject. Both the shipped Anthropic
+    rows and the family template say `supports_images=True`, so under the previous
+    OR a live `false` could never take effect and the precision of the capability
+    read had no consumer.
+
+    Asserted on a SHIPPED row, which is the only place the harm is real: an
+    unshipped id has no vision claim of its own to be wrong about. That the row is
+    reachable at all depends on `limits_from_listing` — the ten current-generation
+    rows transcribed their limits out of this very listing, so resolution asks it
+    again rather than pinning the session to the transcription date. Pricing those
+    rows had briefly closed that door and made this case unreachable.
     """
     from local_operator.model import configure as configure_mod
     from local_operator.model.registry import anthropic_models
 
     assert anthropic_models["claude-opus-5"].supports_images is True, "fixture drifted"
+    assert (
+        anthropic_models["claude-opus-5"].limits_from_listing is True
+    ), "a row that does not re-ask its listing cannot receive a live capability answer"
     _stub_discovery(
         monkeypatch,
         [_anthropic_row("claude-opus-5", "Claude Opus 5", supports_images=listing_says)],

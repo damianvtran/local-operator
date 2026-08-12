@@ -15,6 +15,7 @@ Regenerate after intentional visual changes with::
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import pytest
@@ -37,6 +38,7 @@ pytestmark = pytest.mark.skipif(
 from local_operator.harness.types import (  # noqa: E402
     AgentEndEvent,
     AgentStartEvent,
+    ImageContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -48,6 +50,7 @@ from local_operator.harness.types import (  # noqa: E402
     TurnStartEvent,
     Usage,
 )
+from local_operator.session.protocol import CompactionOutcome  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
 from local_operator.tui.widgets.welcome import WelcomeView  # noqa: E402
@@ -75,6 +78,8 @@ class FakeSession:
         self.aborts: list[str] = []
         self.disposed = False
         self._handlers: list[Any] = []
+        self.asides: list[list[Any]] = []
+        self.adopted: list[list[Any]] = []
 
     @property
     def session_id(self) -> str:
@@ -110,10 +115,10 @@ class FakeSession:
     async def seed_history(self, messages: list[Any]) -> None:
         pass
 
-    async def prompt(self, text: str, attachments: list[Any] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         self.prompts.append(text)
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 
     def set_approval_handler(self, handler: object | None) -> None:
@@ -153,6 +158,29 @@ class FakeSession:
     def emit(self, event: Any) -> None:
         for handler in list(self._handlers):
             handler(event)
+
+    async def complete_aside(
+        self,
+        turns: list[Any],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        on_usage: Callable[[Any], None] | None = None,
+    ) -> str:
+        # Recorded, not answered: the aside's no-trace contract is proven
+        # against the real Session in tests/unit/session/test_aside.py. Here
+        # the only thing that must hold is that the app can call it.
+        self.asides.append(list(turns))
+        return ""
+
+    async def adopt_aside(self, messages: list[Any]) -> None:
+        self.adopted.append(list(messages))
+
+    async def compact_now(self) -> CompactionOutcome:
+        # No history to compact: this fake never carries a conversation, which
+        # is the state a real session answers with the same refusal.
+        return CompactionOutcome(
+            ran=False, reason="nothing_to_compact", detail="nothing to compact"
+        )
 
 
 async def _factory(session: FakeSession) -> FakeSession:

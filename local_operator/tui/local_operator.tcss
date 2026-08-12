@@ -6,9 +6,17 @@
  *
  * Minimalism contract (density is the brand):
  *   - NO bordered boxes anywhere. Structure comes from symbols, tint, and
- *     spacing. The only rule in the app is the input panel's thin top line,
- *     structural $lo-dim — the focus accent moves to the chevron, never the
- *     rule (D23/D24).
+ *     spacing. The app draws exactly ONE persistent structural rule, and it is
+ *     not an edge of anything: the user prompt's $lo-dim gutter bar, which
+ *     runs down the left of every row of a message so a multi-paragraph prompt
+ *     reads as ONE block. (This used to say TWO and name "the input panel's
+ *     thin top line" as the other. That rule does not exist — it was removed
+ *     deliberately, see the `#input-shell` comment; there is no `border-top`,
+ *     no `Rule(` and no `─` in any input widget. Focus still brightens the
+ *     chevron and never a rule, D23/D24.) Overlay cards may draw ONE $lo-faint
+ *     horizontal directly under their own title and nowhere else, which is
+ *     what every `─` in the app is. A rule that closes a shape is a box; a
+ *     rule that marks a margin is a gutter; a rule under a title is a caption.
  *   - NO uniform filler rows. Blocks own no outer margin; separation is
  *     ADAPTIVE and rides one opt-in class (.gap-above) that the transcript
  *     container applies only where the rhythm needs it — a run of one-line
@@ -18,13 +26,16 @@
  *     background-filled card (elevation = a background step, never a border
  *     or shadow) whose FILL carries the outcome
  *   - the accent green means ONE thing: a turn is live. It is spent on exactly
- *     five sites, and the list is exhaustive — `grep -rn 'semantic_color("accent")'
+ *     four sites, and the list is exhaustive — `grep -rn 'semantic_color("accent")'
  *     local_operator/tui` plus `$lo-accent` in this file should find no others:
  *       1. the working line's shimmer crest      (shimmer.py)
  *       2. a running tool's glyph                (widgets/tool_card.py)
  *       3. the status band's streaming spinner   (widgets/status_line.py)
- *       4. the focused input chevron             (this file, #input-row)
- *       5. the picker's highlighted command NAME (widgets/command_picker.py)
+ *       4. the picker's highlighted command NAME (widgets/command_picker.py)
+ *     It was FIVE until the focused input chevron gave its site back. Focus is
+ *     not liveness, and painting both green put a green chevron two rows above
+ *     the band's green spinner meaning something else (D5, round 11). Focus is
+ *     a brightness step in the neutral ramp now — see `#prompt-chevron`.
  *     Everything else is warm neutrals. Links and file paths are the `signal`
  *     blue and deliberately NOT green; `/usage` provider headings are `label`;
  *     the brand glyph in the band is `muted`, because a mark that is always on
@@ -32,7 +43,9 @@
  *     take one away: an accent spent everywhere is an accent spent nowhere.
  *
  * Edge spacing: one cell at the left, right, and bottom screen edges; NONE
- * along the top while scrolling (content meets the top edge).
+ * along the top while scrolling (content meets the top edge). The transcript
+ * also ends in one row of ground, so the conversation never touches the
+ * composer — see `TranscriptView` for why that row is the transcript's.
  */
 
 Screen {
@@ -76,8 +89,33 @@ TranscriptView {
      * below already supplies the right-hand cell, so `1` there made every
      * background-filled tool card one cell wider on the left than the right —
      * visible as an off-centre slab on the one element whose whole job is to
-     * look deliberately borderless. */
-    padding: 1 0 0 1;
+     * look deliberately borderless.
+     *
+     * The BOTTOM row is the conversation's last row of ground, and it was the
+     * one edge of the transcript nobody had spent. Measured at 60x40 with a
+     * conversation tall enough to reach the dock: 0 rows between the last
+     * transcript row and the composer's fill, so `▌ now do the other one`,
+     * `! interrupted` and a failed tool card's tinted slab each sat directly
+     * on the panel — the conversation and the input read as one slab.
+     *
+     * The row belongs to the TRANSCRIPT rather than to `#input-dock`, and that
+     * is load-bearing rather than cosmetic:
+     *   - the aside already reserves this same padding for its card's rows
+     *     (`OperatorApp._reserve_ground_for_aside`), so one owner keeps the
+     *     flush card-on-composer seam a single number: the reservation
+     *     REPLACES this row instead of stacking with it;
+     *   - every floating card is placed off the docked panel's `region.y`
+     *     (`widgets/overlay.rows_above_dock`), so a padding row on the DOCK
+     *     lifts the aside and `/usage` cards a row off the composer. Measured
+     *     at 120x40: it put a blank row into the aside's seam, the one join
+     *     that was deliberately chosen flush;
+     *   - it is the same semantics as the top row above — the conversation's
+     *     own first and last row of ground, scrolling with the content rather
+     *     than a permanent inset on the frame. It survives `scroll_end`
+     *     because a container's padding is inside its scrollable region.
+     * The boot layout takes it back (`Screen.boot TranscriptView`), where the
+     * column is bottom-aligned and the row could only ever be slack. */
+    padding: 1 0 1 1;
     scrollbar-size-vertical: 1;
     scrollbar-gutter: stable;
     scrollbar-background: $lo-bg;
@@ -106,6 +144,14 @@ TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ToolCard {
     margin-top: 1;
 }
 
+/* The prompt's own ink. The gutter bar and the prose are both styled per-span
+ * by the widget (see `UserBlock` in widgets/transcript.py, which owns the
+ * treatment because it has to wrap the text itself to keep the bar on every
+ * row), so this is the base the sheet would fall back to and the one place a
+ * reader grepping the stylesheet for "user" finds the pointer. There is
+ * deliberately no background here: elevation-as-a-background-step is spent in
+ * full on the tool ledger, whose FILL carries the outcome, and a second slab
+ * kind on the same surface turns the transcript into a stack of cards. */
 UserBlock {
     color: $lo-fg;
 }
@@ -120,6 +166,36 @@ RichBlock {
 
 /* Assistant markdown renders normal weight in the base ink color. */
 AssistantBlock {
+    color: $lo-fg;
+}
+
+/* DRAG-SELECTION band (TUI-021). The one place a background is allowed to mean
+ * nothing about the content under it — it marks a RANGE, and the range moves.
+ *
+ * Textual's default here is `textual-dark`'s `ansi_bright_blue` on
+ * `ansi_black` (see `theme.py`, `screen-selection-background`), which is the
+ * only saturated blue anywhere in the app and lands on prose the reader is
+ * mid-gesture over. `$lo-faint` is the answer for the one reason that
+ * distinguishes it: the band has to be visible on BOTH grounds it can fall on,
+ * the island `bg` and the tool ledger's `surface` fill, while leaving the body
+ * ink readable on top of itself. Measured on the dark ramp — `faint` is 1.97:1
+ * against `bg` and 1.81:1 against `surface` with `fg` at 7.58:1 on it (light
+ * ramp: 2.08, 1.90, 7.28). `edge` fails the first test (1.55 and 1.42 — a band
+ * you cannot find over a tool card) and `dim` fails the second (`fg` at
+ * 3.29:1, under the 4.5:1 floor for body text).
+ *
+ * The ink is NORMALISED to `fg` rather than left alone, which does flatten the
+ * markdown tints inside the band — inline code loses its `signal`, a heading
+ * its step. That is what a selection is: a mode the reader is holding for a
+ * moment, not a re-tint of the document, and it is what every terminal and
+ * editor does. Stating it also takes the choice away from Textual, whose
+ * default put `ansi_black` here.
+ *
+ * Written as the desugared descendant form because that is what `Screen`'s own
+ * `& > .screen--selection` compiles to; app CSS outranks widget DEFAULT_CSS in
+ * Textual's cascade, so this wins without a specificity fight. */
+Screen > .screen--selection {
+    background: $lo-faint;
     color: $lo-fg;
 }
 
@@ -255,9 +331,36 @@ ToolCard:focus {
     color: $lo-dim;
 }
 
-/* Focus moves the accent onto the chevron only — the rule stays dim (D23). */
-#input-dock:focus-within #prompt-chevron {
-    color: $lo-accent;
+/* Focus BRIGHTENS the chevron — the rule stays dim (D23), and so does the hue.
+ *
+ * `fg`, not `$lo-accent`. The accent means "a turn is live" and nothing else,
+ * and the composer is focused in essentially every frame a user looks at, so
+ * an accent chevron was a permanent green two rows above the band's streaming
+ * spinner — three accent sites on one frame carrying two different meanings,
+ * and the always-on one the loudest (D5, round 11).
+ *
+ * Brightness says it better anyway, measured against this panel's `surface`:
+ * `fg` 13.76:1 over `dim` 4.18:1 is a 3.86x luminance step and 3.29:1 BETWEEN
+ * the two states, clear of the 3:1 non-text floor. Accent over dim was 2.15x
+ * and 1.92:1 — accent and `muted` are within 1.3% of each other in luminance
+ * (0.4365 vs 0.4309), so the old focus signal was carried almost entirely by
+ * HUE and all but vanished for a red-green deficient reader. It also lands on
+ * exactly the ink the caret is drawn in, so a focused composer states itself
+ * once, in one colour, at both ends of its own row.
+ *
+ * Driven by a CLASS the app toggles (see `OperatorApp._sync_composer_focus`),
+ * NOT by `#input-dock:focus-within`, which silently never turned back off.
+ * Textual re-applies styles on a focus change by walking up from the widget
+ * that gained or lost focus until it finds an ancestor whose rules mention
+ * `focus-within` (`Screen._update_focus_styles`), and that flag is recorded on
+ * the node the rule SELECTS — here the chevron, which is the editor's SIBLING
+ * and so is never on that walk. Measured on the shipped build: after the boot
+ * `editor.focus()`, blurring the composer left `:focus-within` reporting False
+ * while the chevron still painted on every later frame. Class changes go
+ * through `App.update_styles`, which re-applies the node AND its descendants,
+ * so the chevron follows the class in both directions. */
+#input-dock.-composer-focused #prompt-chevron {
+    color: $lo-fg;
 }
 
 Editor {
@@ -295,6 +398,29 @@ Editor .text-area--cursor-line {
 
 Editor .text-area--suggestion {
     color: $lo-dim;
+}
+
+/* An attachment marker — `[Image #1, 1568x200]` — is an OBJECT the composer
+ * put in the buffer, not text the user typed, and it used to render in the
+ * prose colour on the prose ground with nothing to say so.
+ *
+ * A chip, not coloured text: syntax-highlighting the token would still read as
+ * text, where a ground behind it reads as something embedded. The ink is
+ * `signal`, the ramp's file/reference hue, which is also the one colour the
+ * composer has not already spent — the chevron one column left is accent
+ * green, and `edge` behind selected prose is the warm side.
+ *
+ * Not a focus ring and not a selection: the chip is iso-luminant with `edge`
+ * (1.04:1) so it never outranks a real selection sitting beside it, and the
+ * SELECTED chip is a further 1.61:1 up, so clicking one always brightens. */
+Editor .text-area--image-marker {
+    color: $lo-signal;
+    background: $lo-tint-attach;
+}
+
+Editor .text-area--image-marker-selected {
+    color: $lo-fg;
+    background: $lo-tint-attach-hi;
 }
 
 /* ── startup toast ───────────────────────────────────────────────────────
@@ -382,6 +508,104 @@ UsagePanel {
  * cannot disagree about whether those rows exist. Horizontal breathing stays. */
 UsagePanel.-squeezed {
     padding: 0 2;
+}
+
+/* ---- the /btw aside card --------------------------------------------- *
+ *
+ * Same layer, same host rule, same reason as `#usage-host` above: `width:
+ * auto` so the host hugs the card, because a stretched host on an overlay
+ * layer blanks every cell of every row it covers — including the transcript
+ * either side of the card. Placement is a Python-set offset on the host
+ * (`widgets/overlay.anchor_bottom` — bottom-anchored rather than centred,
+ * because this card GROWS while it is being read and a centred one would drag
+ * the text with it), which is also why there is no `align` here.
+ *
+ * It differs from the usage card in ONE way that matters to the stylesheet:
+ * this card does not take focus. The composer keeps it, because the user is
+ * meant to keep typing into the aside, so nothing here may compete for it. */
+#aside-host {
+    layer: toast;
+    width: auto;
+    height: auto;
+}
+
+/* One cell of horizontal padding is `#input-shell`'s, not the usage card's
+ * `1 2`, and that is the point: the card sits directly ON the composer and
+ * shares its column, so the same inset puts the card's `▌` spine in the same
+ * cell as the composer's `❯`, at every width and in both layouts. (The card's
+ * PROSE then sits one cell left of the editor's typed text, because Textual's
+ * `TextArea` carries an inherited `padding: 0 1` the composer never overrides
+ * — the card lines up with the TRANSCRIPT's user block instead, which is
+ * where `^f` forks the question to.)
+ *
+ * One padding row on every side. The seam between the hint row and the `❯`
+ * measures 2 rows, but the fill change falls BETWEEN them, so the card
+ * contributes one and the composer contributes one and neither surface holds
+ * a 2-row interval — the unit that has to stay on a 1-row rhythm is each
+ * SURFACE, not the cell column across a fill boundary. That is the refinement
+ * of an earlier measurement here which was right about the 2 rows and one
+ * level too coarse about what they meant.
+ *
+ * Measured at 120x40 without the bottom row, the hint row was simultaneously
+ * the last text row and the card's last row, so the fill terminated on an
+ * inked line while every other row had fill above and below it — and the row
+ * denied that air was the one telling the user how to leave. With the dock
+ * band populated the same hint row abutted the band's heading with zero rows
+ * between two different widgets.
+ *
+ * The widget mirrors both numbers in PANEL_PADDING_CELLS/ROWS because it sizes
+ * itself (Textual is border-box), so a change here MUST change those.
+ *
+ * `$lo-overlay` over the composer's `$lo-surface` — one elevation step apart,
+ * which is how this kit separates stacked surfaces. No border and no rule
+ * between them: the step IS the seam. Dropping the card to the composer's
+ * fill and marking the boundary with a line was tried and measured: it puts
+ * the card/ground edge at 1.088:1, the exact figure this sheet already calls
+ * invisible where it chose `$lo-overlay` in the first place, and a rule on the
+ * card's LAST row is its bottom edge — it closes the shape rather than marking
+ * a margin, which is the line this file's own contract draws. The step is also
+ * what makes the bottom padding row affordable: without it the two rows fall
+ * inside ONE fill and become a real hole. */
+AsidePanel {
+    width: auto;
+    height: auto;
+    padding: 1;
+    background: $lo-overlay;
+    color: $lo-fg;
+}
+
+/* Too short for the vertical gutter: spend the decoration rather than cover
+ * the docked prompt. Set from the same `_fit()` result that pins the height. */
+AsidePanel.-squeezed {
+    padding: 0 1;
+}
+
+/* No `pointer: pointer`, and no click targets. Textual 8.2.8 supports the
+ * property, so this says NO deliberately rather than by omission. The card
+ * owns no input by contract — the ONE composer is pointed at it — so a hit
+ * area would be a second input surface competing for focus the aside
+ * deliberately leaves in the editor, and `esc`/`^f` are modal keys with no
+ * sensible region to click. Clicks are swallowed (`AsidePanel.on_click`); a
+ * pointer cursor over a surface that stops every click is a promise the card
+ * does not keep. The one mouse gesture that DOES act is the wheel, which
+ * walks back through earlier questions. */
+
+/* The conversation recedes while the aside owns the composer. Same rule as
+ * the subagent page below — what recedes is what is INERT, and with Enter
+ * aimed at the card the transcript is exactly that. It also settles the
+ * fragment noise: an 88-cell card over a 120-cell screen leaves ~16 cells of
+ * mid-word transcript down each side, interleaving with the card's own rows
+ * at full brightness.
+ *
+ * `opacity`, NOT the `text-opacity` the subagent rule uses: measured, the
+ * latter does not reach the mounted transcript blocks (their ink stayed at
+ * the full `fg` token) while `opacity` does. 60% rather than the subagent
+ * page's 45%, and the difference is the point — an aside is a question ABOUT
+ * the conversation, so it has to stay readable behind the card. 60% puts it
+ * at 5.92:1 against the card's 11.24:1 answer text; 45% drops it to 3.84:1,
+ * too far for content the user may still be reading. */
+Screen.aside #transcript {
+    opacity: 60%;
 }
 
 /* ---- welcome view (new-session empty state) --------------------------- *
@@ -590,15 +814,16 @@ ApprovalBlock:focus {
 
 /* ── dock band (subagent task list + todo list) ────────────────────────── *
  *
- * Sits between the transcript and the composer: a transparent POSITIONER that
- * reserves rows only when a panel inside it is visible, so an idle session
- * costs the layout nothing. The two panels each manage their own `display`
- * (hidden when their ledger/store is empty), and each holds ONE filled body
- * (`$lo-surface`, the tool card's elevation) on the ground — the same
- * "elevation is a background step, never a line" rule as everything else. The
- * slot's top padding row is the ONE margin the sheet permits: it separates the
- * band from the transcript, and it is padding on the slot, never a margin, so
- * the element that owns the vertical rhythm is the container. */
+ * Sits between the transcript and the composer: a POSITIONER that reserves
+ * rows only when a panel inside it is visible, so an idle session costs the
+ * layout nothing, and that carries the dock's fill so the rows it reserves
+ * belong to the input rather than to the conversation. The two panels each
+ * manage their own `display` (hidden when their ledger/store is empty), and
+ * each holds ONE filled body (`$lo-surface`, the tool card's elevation) — the
+ * same "elevation is a background step, never a line" rule as everything
+ * else. Each slot owns one blank row BELOW itself (see `.band-slot`), and it
+ * is padding on the slot, never a margin, so the element that owns the
+ * vertical rhythm is the container. */
 /* The band is a normal-flow child INSIDE the docked input-dock (D-15-01).
  * `width: auto` (content-sized) so it does NOT consume the dock's full width
  * and defeat the shell's centering below it — a full-width sibling was the
@@ -606,17 +831,100 @@ ApprovalBlock:focus {
  * input's width via `.band-slot { width: 1fr }`, which resolves against the
  * band's parent width when the band is content-sized. Zero rows when both
  * panels are hidden; the height of the todo/subagent rows otherwise (D-01). */
+/* THE FILL RULE, stated once so neither half has to be re-derived: GROUND
+ * SEPARATES THE CONVERSATION FROM THE DOCK, NOT THE DOCK'S PANELS FROM THE
+ * COMPOSER. The transcript's trailing row is ground and stays ground
+ * (`TranscriptView`'s bottom padding, pinned by
+ * tests/unit/tui/test_composer_seam.py). Everything from the band's first row
+ * down is the dock's own fill, including the rhythm row each `.band-slot`
+ * owns below itself — a docked panel is CHROME, and chrome with the
+ * transcript showing through it reads as having come loose from the input it
+ * belongs to.
+ *
+ * Measured at 120x40, five todos docked, before this rule: `#todo-body`
+ * painted `$lo-surface` on rows 27-32 over columns 1-119, row 33 came back
+ * `$lo-bg` over the FULL 0-120 — wider than either slab it sat between,
+ * because the slot's padding row is transparent the whole way down to the
+ * Screen — and `#input-shell` resumed `$lo-surface` on row 34. One dark row
+ * between two lighter ones is a trench, not a margin, and the same single row
+ * measured at 60 columns. The subagent slot was further gone: only its header
+ * carries `.band-body`, so its ROWS were `$lo-bg` too and the panel read as a
+ * lone surface strip floating over a dark list. One fill on the band settles
+ * both, and every slot the band is ever given.
+ *
+ * This lived at `Screen.aside #band` (round 11's D1: the aside card read as
+ * floating five rows up, because that same trench sat under it). It was
+ * scoped to the aside because `.band-slot` then padded ABOVE itself, so an
+ * unconditional fill would have pushed a surface row up against the
+ * transcript. The padding flip below moved that row BELOW each slot, so the
+ * band's first row is now a panel's own slab and the reason for the scope is
+ * gone. An empty band is zero rows and paints nothing, so the splash and
+ * every idle session are untouched. */
 #band {
     width: auto;
     height: auto;
+    background: $lo-surface;
 }
 
+/* One blank row UNDER each slot, not over it, and the direction is the whole
+ * point: the transcript ends in a row of its own ground (`TranscriptView`'s
+ * bottom padding), so a top padding row here stacked with it — measured at
+ * 120x40 with a todo list up, 2 blank rows between the conversation's last row
+ * and the band's slab against 1 everywhere else in the stack, which is the
+ * widest interval on screen and reads as the band having come loose. Downward,
+ * each join between the column's own STACKED children is one row: the
+ * transcript's trailing row above the band, and this row between two visible
+ * panels.
+ *
+ * The join above the COMPOSER is the exception, and it has two owners: the last
+ * visible slot's row here, plus `#input-shell`'s own `padding: 1`. Measured at
+ * 60/80/100/120/160 it is two rows docked against one undocked (design round
+ * 13, D1-13). Both are surface, so it reads as a slightly deeper gutter rather
+ * than a seam, which is why it survived twelve rounds unnoticed — but it is one
+ * row more than this comment used to claim. Not fixed here because the obvious
+ * spellings do not work: hidden panels keep their place in the DOM
+ * (`self.display = False`), so `:last-of-type` targets the wrong slot whenever
+ * the subagent panel is down, and dropping the shell's top padding moves the
+ * defect to the undocked case. The honest fix belongs in the container that
+ * owns this rhythm — `#band` toggling a class onto its last DISPLAYED slot —
+ * and is deliberately left out of the release that fixed the fill.
+ *
+ * What that last row IS changed with the fill rule on `#band`; the geometry did
+ * not. It is the dock's own `$lo-surface` now, so band and composer read as one
+ * panel with a todo list inside it — which is what was asked for, and what an
+ * earlier round argued against while the row was still `$lo-bg`. That argument
+ * was right about the slabs and wrong about the remedy: two same-fill slabs
+ * touching with NO row between them read as one crowded panel, so the row
+ * stays. It is interior rhythm now, the same job the padding row inside the
+ * aside card does, and not a boundary. Deleting it crowds the dock; painting it
+ * `$lo-bg` again cuts the dock in half.
+ *
+ * A FLOATING card is the deliberate exception, and the flip made it consistent
+ * rather than breaking it. The aside rests on whatever the dock puts at its top
+ * (`overlay.stack_on_dock`, gap 0), so with a band up the card's footer now
+ * touches the band's slab — measured at 120x40, card footer at row 29 and
+ * `Todos · 1/2` at 30. That is the same flush seam the card has on the composer
+ * when no band is up, and it is legible for the same reason: the card is
+ * `$lo-overlay` over the band's `$lo-surface`, one elevation step, which is
+ * this kit's separator. Before the flip the card had a stray ground row under
+ * it in this state only, so the one card looked seated on the composer and
+ * loose above the band. */
 .band-slot {
     width: 1fr;
     height: auto;
-    padding: 1 0 0 0;
+    padding: 0 0 1 0;
 }
 
+/* The BODY every docked panel is made of, and the reason there is a class
+ * rather than two id rules: the fill and the one-cell inset are what make a
+ * panel a panel, and a slot that renders its content anywhere else gets
+ * neither. `padding: 0 1` is the dock's rail — the same column as the
+ * composer's `❯`, the status band's leading glyph and the todo list's `- [ ]`.
+ * The subagent panel put this class on its header only, so its ROWS sat on
+ * bare ground one cell to the left of everything else in the column: a filled
+ * caption over a floating list, four rows above a todo panel that was one
+ * solid slab (design round 12, D1/D5). Anything mounted inside a `.band-slot`
+ * that is meant to be read as part of the panel wears this. */
 .band-body {
     width: 1fr;
     height: auto;
@@ -635,67 +943,183 @@ ApprovalBlock:focus {
  * transcript to a single row (D-01). ``height: auto`` ("as tall as my
  * children") keeps the band as tall as its rows — typically one — so the
  * transcript keeps the space above it. Rows themselves are already ``1``
- * tall; the container is what was overeager. */
+ * tall; the container is what was overeager. (It also carries `.band-body`,
+ * which is where its fill and its inset come from; this rule only overrides
+ * the height, which `.band-body` already declares the same way.) */
 #subagent-rows {
     height: auto;
 }
 
 /* A row is a live surface: hover lights it, and a running row's trailing cell
  * carries the spinner glyph. Rows are Static; the whole row is the click/Enter
- * target for the trajectory modal, so hover and focus must read as reachable. */
+ * target for the full-page subagent view, so hover and focus must read as
+ * reachable. */
 SubagentRow {
     width: 1fr;
     height: 1;
+    /* The whole row opens the page, so the pointer says so before the click
+     * does — the same affordance the page's own hints carry. Textual emits
+     * this as OSC 22; a terminal that ignores it loses nothing. */
+    pointer: pointer;
 }
 
 SubagentRow:hover {
     background: $lo-overlay;
 }
 
-/* ── trajectory modal ──────────────────────────────────────────────────── *
+/* The row the full-page view is currently showing. The panel stays at full
+ * ink in that mode because it is the one thing in the dock that still does
+ * something — a row retargets the page — and an interactive list of identical
+ * bullets cannot say which one you are reading. `tint-select` is the app's
+ * existing word for "this row is the one" (a focused approval carries the
+ * same step) and stays distinguishable from the hover tint above. */
+Screen.subagent SubagentRow.current {
+    background: $lo-tint-select;
+}
+
+/* ── full-page subagent view ───────────────────────────────────────────── *
  *
- * Opened from a band row (click or Enter). The modal is the app's own
- * "floating read surface": same overlay ramp as the toast/usage, borderless,
- * content-sized, holding a pinned header and a scrolling body. Esc dismisses.
- */
-TrajectoryScreen {
-    align: center middle;
-    background: $lo-sunken;
+ * Opened from a band row (click or Enter). NOT an overlay: it takes the
+ * transcript's region of the live screen and leaves the dock exactly where it
+ * was, because the reader has to be able to see this is the same app looking
+ * somewhere else. Its predecessor was a centred card on the sunken ground,
+ * which blacked out the conversation, clipped the child's prose at the card's
+ * edge, and had nowhere to put the way back out.
+ *
+ * Four rows: title, rule, the child's transcript (`1fr`), the hint. The
+ * gutter lives HERE rather than on the body, so all four share one left edge;
+ * the body's own TranscriptView padding is dropped for the same reason. The
+ * right cell is spent so the chrome stops where the body's reserved scrollbar
+ * column starts.
+ *
+ * The BOTTOM cell is this page's share of the transcript's trailing row: the
+ * page takes the transcript's region, so it inherits the region's contract that
+ * whatever is above the composer ends in a row of ground. Measured at 120x40
+ * without it, `↑↓scroll · esc back to conversation · read-only` sat directly on
+ * `❯ Read-only — press esc to reply` and the two chrome lines fused into one
+ * four-row panel. It cannot come from the body's `TranscriptView` padding,
+ * which the class below deliberately zeroes — the hint row is BELOW the body,
+ * so the row has to be the page's. */
+.subagent-view {
+    height: 1fr;
+    padding: 1 1 1 1;
 }
 
-TrajectoryScreen .trajectory {
+.subagent-view-title {
+    height: 1;
+}
+
+.subagent-view-rule {
+    height: 1;
+}
+
+/* One row of air under the rule. Without it the rule sits directly on the
+ * first block, and when that block is a tool card — i.e. whenever the reader
+ * has scrolled — a faint full-width line resting on a tinted slab reads as
+ * that slab's TOP BORDER, which is the one thing the minimalism contract
+ * forbids. The left gutter stays zero: it belongs to the container, so all
+ * four rows share one edge. */
+.subagent-view-body {
+    height: 1fr;
+    padding: 1 0 0 0;
+}
+
+/* One quiet row above the hint. Without it the footer sits flush against the
+ * last transcript block and reads as one more row of the child's output
+ * rather than as the page's own chrome — the same reason the usage card keeps
+ * ground above its meta. */
+.subagent-view-hints {
+    height: 2;
+    width: 1fr;
+    padding: 1 0 0 0;
+}
+
+/* Each hint is its own widget so it can be hovered and clicked. Content-sized,
+ * because the row is laid out by shedding whole hints rather than by
+ * distributing space. The background step is the only part of the hover the
+ * stylesheet can own: the hint's ink is chosen per span in rich `Text`, so a
+ * `color` rule here would lose to the style the widget builds — the widget
+ * repaints its own tones on Enter/Leave, the way a tool card already does.
+ * `.actionable` gates it: `read-only` is a state, and a highlight that leads
+ * nowhere is worse than none. */
+.subagent-view-hint {
+    height: 1;
     width: auto;
-    height: auto;
-    max-width: 80;
-    max-height: 60%;
+}
+
+/* The hand pointer, which Textual 8.2.8 DOES support: `styles.pointer` is a
+ * real property (`textual.css.constants.VALID_POINTER`), `Screen` walks it on
+ * every mouse event, and `App._set_pointer_shape` emits it as OSC 22 — which
+ * ghostty implements. The old scope note in docs/VERIFICATION.md searched for
+ * `set_mouse_cursor` and a `cursor:` property, neither of which is the name,
+ * and concluded the API did not exist. */
+.subagent-view-hint.actionable {
+    pointer: pointer;
+}
+
+/* `$lo-overlay`, the SAME hover ground as `ToolCard:hover` and
+ * `SubagentRow:hover` — "pointing at a row should always look the same". On
+ * `surface` the step was 1.09:1 against the page ground, roughly a quarter of
+ * the app's established hover delta, so the slab was invisible and the whole
+ * observable hover was the ink lift. */
+.subagent-view-hint.actionable:hover {
     background: $lo-overlay;
-    padding: 1;
 }
 
-#trajectory-header {
-    width: auto;
-    height: auto;
-    color: $lo-fg;
+/* The dock in subagent mode: PRESENT and RECEDED, never removed.
+ *
+ * `text-opacity` and not `color`, because every one of these paints rich
+ * `Text` with its ink already chosen — a `color` declaration would be
+ * overridden by the styles the widget builds, and the greying would silently
+ * do nothing. Opacity blends whatever was painted toward the ground, which is
+ * exactly "this belongs to the session you are not currently reading".
+ *
+ * 45%: enough that the composer reads as unavailable at a glance, not so much
+ * that the status band stops being legible — it is still the parent's live
+ * state, and a subagent page is precisely where someone watches for the
+ * parent finishing.
+ *
+ * `#subagent-panel` is deliberately NOT in this list. It is the one thing in
+ * the dock that still does something in this mode (a row retargets the page),
+ * and the mode's whole visual argument is that what recedes is what is inert. */
+Screen.subagent #prompt-chevron,
+Screen.subagent #todo-panel {
+    text-opacity: 45%;
 }
 
-#trajectory-scroll {
-    width: auto;
-    height: auto;
-    max-height: 50vh;
-}
+/* The status band is NOT greyed, and the composer is not greyed either.
+ *
+ * The band carries the parent's live state, including the streaming spinner —
+ * accent site 3 of the five. At 45% that green blends to roughly 2.6:1 and the
+ * shimmer loses half its amplitude, so the mode would put out the one mark
+ * answering the question a reader on this page is most likely waiting on
+ * ("has the parent finished?"). The rule the mode paints by is that what
+ * recedes is what is INERT; the band is not inert, it is just not yours.
+ *
+ * The composer keeps its ink because in this mode its placeholder is a
+ * SENTENCE about the mode (`Read-only — press esc to reply`), not an
+ * invitation, and a statement nobody can read is not a statement. Its
+ * chevron carries the greying instead: a dead spine marker over a live one is
+ * the whole signal, at no cost to legibility. */
 
-.trajectory-row {
-    width: auto;
-    height: auto;
-    color: $lo-fg;
+/* The chevron stays DIM in this mode, stated rather than inferred from where
+ * focus happens to be. A composer that refuses every key is not one you are
+ * typing into, whatever the focus chain says — that is a property of the MODE,
+ * so the mode says it. Higher specificity by one TYPE than the focus rule
+ * above, so it wins outright whatever the dock's class says. (It also used to
+ * be the only thing holding: the focus treatment was driven by
+ * `#input-dock:focus-within`, which never turned back off — see that rule for
+ * the mechanism.) */
+Screen.subagent #input-dock #prompt-chevron {
+    color: $lo-dim;
 }
 
 
 /* ── /resume session picker ────────────────────────────────────────────── *
  *
- * The same floating read surface as the trajectory modal (overlay ramp,
- * borderless, content-sized, Esc to dismiss) because it answers the same
- * shape of question — read a list, pick a row. It differs in being two-way:
+ * A floating read surface (overlay ramp, borderless, content-sized, Esc to
+ * dismiss) because it answers a "read a list, pick a row" question. It differs
+ * from the other read surfaces in being two-way:
  * it owns a cursor and hands an id back to the caller.
  *
  * `max-width` rather than a fixed width so an 80-column terminal gets the

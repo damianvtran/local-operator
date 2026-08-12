@@ -40,10 +40,13 @@ attached a scheduler to the ``ToolContext``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import difflib
 import fnmatch
+import io
 import json
+import mimetypes
 import os
 import re
 import signal as signal_module
@@ -57,6 +60,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from local_operator.harness.approval import ask_approval
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -64,6 +68,7 @@ from local_operator.harness.types import (
     ApprovalDescribeFn,
     BrowserSurface,
     BrowserSurfaceProtocol,
+    ImageContent,
     TextContent,
     ToolContext,
     ToolResult,
@@ -75,6 +80,9 @@ from local_operator.harness.wake import (
     build_wake_schedule,
     format_duration,
 )
+from local_operator.helpers import heif_image_module, pillow_image_module
+from local_operator.media import ImageInfo, sniff_image_file
+from local_operator.optional import missing_extra_error
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -122,9 +130,56 @@ BASH_MAX_TIMEOUT_SECONDS = 3600.0
 #: Number of trailing traceback characters kept in an error result.
 TRACEBACK_TAIL_CHARS = 2000
 
-#: Files larger than this are refused by read (serve 2MB+ blobs through bash
-#: with head/tail instead); the cap serves the per-tool output budget.
+#: Files larger than this are refused by read as TEXT (serve 2MB+ blobs
+#: through bash with head/tail instead); the cap serves the per-tool output
+#: budget. Images are governed by :data:`READ_IMAGE_LIMIT_BYTES` instead.
 READ_FILE_LIMIT_BYTES = 2 * 1024 * 1024
+#: Byte ceiling for a file read as an IMAGE, 8x the text ceiling. The text cap
+#: exists because bytes become context; an image's context cost is its PIXELS
+#: (~w*h/750 tokens on Anthropic and OpenAI alike) and is bounded downstream by
+#: :data:`READ_IMAGE_MAX_EDGE` no matter how large the source file is. Applying
+#: the text cap to images refused ordinary inputs for no benefit and offered
+#: nonsense advice while doing it: two of seven real PNG screenshots sampled on
+#: this machine were 2.0-2.1 MB, and "use bash (head/tail)" is not a way to
+#: look at a screenshot. What this cap actually limits is DECODE cost, so it is
+#: paired with :data:`READ_IMAGE_MAX_PIXELS` — compressed bytes bound neither
+#: the pixel count nor the RAM to hold it.
+READ_IMAGE_LIMIT_BYTES = 16 * 1024 * 1024
+#: Refuse to decode above this pixel count (~200 MB of RGBA at 4 bytes/pixel).
+#: Checked against the header dimensions BEFORE the decode allocates, because
+#: a decompression bomb is small on disk by construction: the byte cap above
+#: cannot see it coming. 50M pixels is ~7000x7000, comfortably above any
+#: camera or display this reads from and comfortably below Pillow's own 89M
+#: bomb threshold, so the refusal is ours and is an error rather than a warning.
+READ_IMAGE_MAX_PIXELS = 50_000_000
+#: Long-edge ceiling in pixels for an image handed to the model. Anthropic
+#: downsizes anything above 1568 server-side and bills the resized token count
+#: either way, so pixels past this line are pure upload with zero fidelity
+#: reaching the model; omp uses the same number and this repo's snapcompact
+#: already renders its frames at 1568. Measured on real files: a 2560x1600 UI
+#: screenshot costs 5,461 image tokens untouched and 2,049 at 1568 (2.7x), and
+#: a 4032x3024 phone photo — 1.5 MB as JPEG, so it passes the byte cap easily
+#: — costs 16,257 tokens untouched against 2,459 resized (6.6x).
+READ_IMAGE_MAX_EDGE = 1568
+#: Encoded-byte threshold for the image block, before base64 inflates it by
+#: 4/3. Two jobs. It decides when a small in-bounds image is forwarded
+#: VERBATIM (cheapest and lossless — no re-encode can improve an image the
+#: model will see at its original size), and it decides when the resized PNG
+#: is too fat to keep, which is the only reason lossy JPEG is ever reached.
+#:
+#: A TRIGGER, not a guarantee: the ladder stops after JPEG rather than
+#: chasing quality down, so pathological input still lands above it (uniform
+#: noise at 1568x1176 measured 1.19 MiB of quality-85 JPEG). The guarantee is
+#: the wall this is set against — Anthropic rejects images over 5 MB of
+#: base64, and the long-edge cap means even that pathological case encodes to
+#: 1.59 MiB, 32% of the wall. 1 MiB was picked to leave 3.7x headroom on the
+#: ordinary path, and the fat cases are real: a photographic 1568x1176 frame
+#: re-encodes to a 3.3 MiB PNG (4.46 MiB base64, inside 5 MB by only 12%) and
+#: to a 804 KiB JPEG.
+READ_IMAGE_MAX_BYTES = 1024 * 1024
+#: JPEG quality used for that fallback. 85 is the standard visually-lossless
+#: point; on the sampled files it turned 1.9 MB of re-encoded PNG into 271 KB.
+READ_IMAGE_JPEG_QUALITY = 85
 #: Maximum lines read renders; larger files show the head plus a footer
 #: telling the model to continue with a line range.
 READ_LINE_CAP = 2000
@@ -829,6 +884,37 @@ def _text(
     )
 
 
+def _image(
+    tool_call_id: str,
+    tool_name: str,
+    caption: str,
+    payload: bytes,
+    mime_type: str,
+    *,
+    details: dict[str, Any] | None = None,
+) -> ToolResult:
+    """Build an image result: a one-line caption FOLLOWED BY the image block.
+
+    The caption is not decoration. An image block arrives in the transcript
+    with no filename, no format and no dimensions attached — a bare one leaves
+    the model unable to say what it is looking at, whether the read it asked
+    for is the thing it got, or even that the call succeeded rather than
+    silently returning nothing. It leads for the same reason: every text-only
+    consumer in the stack (``ToolResult.text``, compaction's truncation, the
+    TUI transcript row) sees the caption and nothing else, so the caption is
+    the entire result for all of them.
+    """
+    return ToolResult(
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        content=[
+            TextContent(text=caption),
+            ImageContent(data=base64.b64encode(payload).decode("ascii"), mime_type=mime_type),
+        ],
+        details=details,
+    )
+
+
 def _validation_error(tool_call_id: str, tool_name: str, exc: ValidationError) -> ToolResult:
     """One ``invalid arguments:`` line per field — no traceback. The model can
     correct its call from the message; the stack trace could not."""
@@ -895,11 +981,16 @@ async def _check_approval(context: ToolContext | None, tier: str, description: s
     No approval hook installed -> auto-approved (CLI --yolo and headless tests
     rely on this). A hook returning False denies the action without error
     state beyond a plain refusal message.
+
+    Routed through ``ask_approval`` for the same reason the loop's tier gate
+    is: the two paths must put the question to the host the SAME way, or a
+    self-gating tool's ask arrives without the provenance a tier-gated one
+    carries and a host scoping its answer sees half the picture.
     """
     request_approval = getattr(context, "request_approval", None) if context else None
     if request_approval is None:
         return True
-    return bool(await request_approval(tier, description))
+    return await ask_approval(request_approval, tier, description, getattr(context, "job_id", None))
 
 
 async def _run_with_abort(
@@ -1287,6 +1378,161 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     )
 
 
+def _forward_image_undecoded(data: bytes, info: ImageInfo) -> tuple[bytes, str, str]:
+    """Ship image bytes VERBATIM on a host with no usable Pillow.
+
+    Pillow reaches a default install as a pillow-heif dependency rather than a
+    direct one, and pillow-heif is the most platform-fragile wheel this
+    project pulls. When it is missing or broken there is no decoder, so there
+    is also no resize and no validation beyond the header — the two things
+    :func:`_encode_image_for_model` normally provides. Refusing every image on
+    such a host would be the worse trade: a screenshot the model can look at
+    beats a paragraph explaining why it cannot, and the format is one the
+    provider clients already serialize.
+
+    What remains enforceable from the header alone is the BYTE cap, so that is
+    the line. Above it the answer is an error, because forwarding an unbounded
+    blob is how a session ends up wedged behind a provider that refuses it.
+    """
+    if not info.sendable:
+        # Not a degrade: no provider accepts HEIC, so forwarding it verbatim
+        # would GUARANTEE the refusal rather than risk it. Transcoding is the
+        # only way to send one, and transcoding is what is unavailable.
+        raise ValueError(missing_extra_error("images", "HEIC/HEIF decoding"))
+    if len(data) > READ_IMAGE_MAX_BYTES:
+        raise ValueError(
+            f"it is {len(data)} bytes, over the {READ_IMAGE_MAX_BYTES}-byte cap for an "
+            f"unresized image, and {missing_extra_error('images', 'resizing it')}"
+        )
+    summary = f"{info.mime_type}, {info.dimensions or 'dimensions unknown'}, {len(data)} bytes"
+    if info.width and info.height and max(info.width, info.height) > READ_IMAGE_MAX_EDGE:
+        # Worth saying rather than swallowing: this is the case the resize
+        # exists for, and the model is about to be billed several times the
+        # tokens for it. Naming it is also the only hint anyone gets that the
+        # host is missing the extra.
+        summary += ", too large to send efficiently and no decoder to resize it"
+    else:
+        summary += ", forwarded without resizing"
+    return data, info.mime_type, summary
+
+
+def _guard_pixel_budget(width: int, height: int) -> None:
+    """Refuse an image whose pixel count would dominate the process.
+
+    A decompression bomb is small on disk by construction, so the byte cap
+    cannot see it coming and only the dimensions can.
+    """
+    if width * height > READ_IMAGE_MAX_PIXELS:
+        raise ValueError(
+            f"it is {width}x{height} ({width * height:,} pixels) and the decode limit is "
+            f"{READ_IMAGE_MAX_PIXELS:,} pixels"
+        )
+
+
+def _encode_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str]:
+    """Decode, bound and re-encode image bytes for a provider.
+
+    Returns ``(payload, wire_mime, summary)``; raises ``ValueError`` with a
+    model-readable message when the bytes will not decode. The raise is
+    load-bearing: a corrupt or truncated image forwarded as an image block
+    earns a ``Could not process image`` 400 from Anthropic. The session layer
+    now recovers from that, but a backstop is not a licence — the bad block is
+    still a wasted round trip and a degraded session, and decoding here is
+    where it is cheap to avoid. So the decode is never skipped, not even on
+    the verbatim path.
+
+    The ladder, cheapest first:
+
+    1. Verbatim, when the image is already inside both bounds and in a format
+       the clients serialize. No re-encode can improve an image the model sees
+       at its original size, and PNG round-tripping routinely makes files
+       BIGGER (a 2560x1600 UI screenshot measured 550 KB on disk against
+       335 KB re-encoded only because the resize came with it).
+    2. Resize to :data:`READ_IMAGE_MAX_EDGE` and re-encode as PNG. Lossless,
+       which is what a screenshot of 9-pixel text needs.
+    3. JPEG when that PNG blows :data:`READ_IMAGE_MAX_BYTES`, and only when it
+       actually comes out smaller. PNG is a bad photographic codec and that is
+       the usual case here — the sampled 1672x941 photographic PNG re-encoded
+       to 1.9 MB of PNG against 271 KB of quality-85 JPEG — but it is not the
+       only one, so the choice is measured rather than assumed.
+
+    With no decoder available the whole ladder collapses to
+    :func:`_forward_image_undecoded`.
+    """
+    image_module = pillow_image_module() if info.sendable else heif_image_module()
+    if image_module is None:
+        return _forward_image_undecoded(data, info)
+
+    # The pixel cap wants to fire BEFORE the decode allocates, and for every
+    # format except HEIF the header already answers it. HEIF keeps its size in
+    # a meta-nested ispe box that media.sniff_image deliberately does not walk,
+    # so those are capped below on the decoded size instead — later than ideal,
+    # but the only point at which the number exists.
+    if info.width and info.height:
+        _guard_pixel_budget(info.width, info.height)
+
+    try:
+        image = image_module.open(io.BytesIO(data))
+        width, height = image.size
+        _guard_pixel_budget(width, height)
+        # Multi-frame sources never pass through: providers read frame 0 and
+        # ignore the rest, so an animation's other frames are bytes uploaded
+        # to be discarded.
+        frames = getattr(image, "n_frames", 1)
+        image.load()
+
+        long_edge = max(width, height)
+        if (
+            info.sendable
+            and frames == 1
+            and long_edge <= READ_IMAGE_MAX_EDGE
+            and len(data) <= READ_IMAGE_MAX_BYTES
+        ):
+            return data, info.mime_type, f"{info.mime_type}, {width}x{height}, {len(data)} bytes"
+
+        if long_edge > READ_IMAGE_MAX_EDGE:
+            scale = READ_IMAGE_MAX_EDGE / long_edge
+            size = (max(1, round(width * scale)), max(1, round(height * scale)))
+            image = image.resize(size, image_module.LANCZOS)
+
+        # Palette and high-bit-depth modes are legal PNG but not legal JPEG,
+        # and rung 3 must not be the first place a mode problem shows up.
+        image = image.convert("RGBA" if image.mode in ("RGBA", "LA", "PA", "P") else "RGB")
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        payload, wire_mime = buffer.getvalue(), "image/png"
+
+        if len(payload) > READ_IMAGE_MAX_BYTES:
+            if image.mode == "RGBA":
+                # JPEG has no alpha channel. Compositing onto white rather
+                # than dropping the channel keeps a transparent-background
+                # diagram legible instead of rendering it onto black.
+                flat = image_module.new("RGB", image.size, (255, 255, 255))
+                flat.paste(image, mask=image.getchannel("A"))
+                image = flat
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=READ_IMAGE_JPEG_QUALITY)
+            jpeg = buffer.getvalue()
+            # Take the smaller of the two, so the lossy rung can never make the
+            # result WORSE on both axes at once. PNG beats JPEG on flat
+            # synthetic images, and one of those clearing the budget is
+            # possible even though nothing sampled here did it.
+            if len(jpeg) < len(payload):
+                payload, wire_mime = jpeg, "image/jpeg"
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — Pillow raises OSError, SyntaxError and its own
+        raise ValueError(f"could not decode the image data ({type(exc).__name__}: {exc})") from exc
+
+    summary = f"{wire_mime}, {image.width}x{image.height}, {len(payload)} bytes"
+    if image.size != (width, height) or wire_mime != info.mime_type:
+        # State the source whenever what the model sees is not what is on
+        # disk. Otherwise a model comparing this against `ls -l` output, or
+        # against a later re-read, has no way to reconcile the two.
+        summary += f"; source {width}x{height} {info.mime_type}"
+    return payload, wire_mime, summary
+
+
 def _capped_list_body(
     full: str, shown: str, tool_name: str, context: ToolContext | None
 ) -> tuple[str, dict[str, Any] | None]:
@@ -1509,20 +1755,64 @@ async def execute_read(
             details={"path": str(path)},
         )
 
-    # Stat BEFORE reading: refuse oversized files instead of loading them,
-    # then read only up to the line cap's worth of bytes.
+    # Stat and SNIFF before reading the body: an oversized file is refused
+    # instead of loaded, and the applicable ceiling depends on what the file
+    # is. Classification is by CONTENT, never by extension — a `.png` holding
+    # an HTML error page must not reach a provider as an image, and a
+    # screenshot saved with no extension at all is still a screenshot.
+    # `sniff_image_file` reads at most 64 KB and never imports a decoder, so a
+    # text read pays a short header read to learn it is a text read.
     size = path.stat().st_size
-    if size > READ_FILE_LIMIT_BYTES:
+    info = sniff_image_file(str(path))
+    limit = READ_IMAGE_LIMIT_BYTES if info else READ_FILE_LIMIT_BYTES
+    if size > limit:
+        advice = (
+            "Resize it first (bash + sips/magick)."
+            if info
+            else "Use bash (head/tail) or a 'range' on a smaller file."
+        )
         return _error(
             tool_call_id,
             "read",
-            f"File too large to read ({size} bytes; limit "
-            f"{READ_FILE_LIMIT_BYTES} bytes): {path}. Use bash (head/tail) "
-            "or a 'range' on a smaller file.",
+            f"File too large to read ({size} bytes; limit {limit} bytes): {path}. {advice}",
         )
 
     data = path.read_bytes()
+
+    if info:
+        try:
+            payload, wire_mime, summary = _encode_image_for_model(data, info)
+        except ValueError as exc:
+            # A text error, never an image block. Forwarding undecodable bytes
+            # gets a 400 from the provider that no retry clears, because the
+            # bad block is already in the transcript.
+            return _error(tool_call_id, "read", f"Cannot read {path} as an image: {exc}")
+        caption = f"Image {path} ({summary})"
+        if params.range:
+            # Silently dropping it would leave the model believing it read a
+            # slice of something.
+            caption += " — 'range' does not apply to an image and was ignored"
+        return _image(
+            tool_call_id,
+            "read",
+            caption,
+            payload,
+            wire_mime,
+            details={"path": str(path), "mime_type": wire_mime},
+        )
+
     if b"\x00" in data[:8000]:
+        guessed = mimetypes.guess_type(path.name)[0] or ""
+        if guessed.startswith("image/"):
+            # The extension is the only evidence left, and it says image. Name
+            # the format instead of reporting a generic binary: "not readable
+            # as text" reads as a bug in read when the caller can see a .bmp.
+            return _error(
+                tool_call_id,
+                "read",
+                f"Unsupported image format ({guessed}): {path}. read returns PNG, JPEG, "
+                "GIF, WebP and HEIC; convert it first (bash + sips/magick).",
+            )
         return _error(tool_call_id, "read", f"Binary file not readable as text: {path}")
 
     try:
@@ -1577,7 +1867,10 @@ def build_read_tool() -> AgentTool:
     return AgentTool(
         name="read",
         label="Read",
-        description="Read a file, line range, or internal URL (skill://, guide://, mcp://).",
+        description=(
+            "Read a file, line range, or internal URL (skill://, guide://, mcp://). "
+            "PNG/JPEG/GIF/WebP/HEIC files come back as a viewable image."
+        ),
         parameters=ReadParams.model_json_schema(),
         approval_tier="read",
         # read model: parallel reads are the common batch shape.
@@ -3847,4 +4140,305 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
         concurrency="shared",
         interruptible=False,
         execute=execute_jobs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# hub — parent↔subagent messaging and control
+# ---------------------------------------------------------------------------
+# One tool, two shapes, chosen by who is being built for (see
+# ``build_hub_tool``). ONE tool rather than five (send/ask/steer/cancel/resume)
+# because they share a target and a body and differ only in intent — five
+# entries would spend five tool-schema slots and five descriptions on one
+# concept, and the model would still have to learn which of them means "and
+# wait for the answer". Named ``hub`` after the surface the same ops have in
+# omp, whose shape this follows deliberately: ``to`` addresses one peer or
+# ``"all"``, delivery returns per-recipient receipts, and asking is a send
+# that waits.
+#
+# The two shapes are not cosmetic. A parent may address, redirect, stop and
+# resume its children; a child has exactly one peer (its parent) and no
+# children of its own, so it gets a tool with no ``op`` and no ``to`` at all.
+# Advertising the parent schema to a child would spend the child's context on
+# four ops it cannot use and invite it to try them.
+
+
+class HubParams(BaseModel):
+    """Parent-side hub arguments."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["send", "ask", "steer", "cancel", "resume"] = Field(
+        description=(
+            "send: a note, no reply waited for. ask: a question, blocks for the "
+            "subagent's answer. steer: change what it is doing (becomes part of its "
+            "instructions). cancel: stop it. resume: relaunch a stopped subagent "
+            "against its own transcript so it continues where it left off."
+        )
+    )
+    # A plain array, NOT ``str | list[str]``: pydantic renders a union as
+    # ``anyOf``, and this module's schemas reach Gemini verbatim as
+    # ``function_declarations`` (providers/clients.py builds the body with
+    # ``tool.parameters`` untouched). A construct one provider rejects would
+    # fail every request in the session, not just the hub call — no builtin
+    # here uses a non-nullable anyOf, and this is not the tool to be first.
+    to: list[str] = Field(
+        min_length=1,
+        description=(
+            "Who to address: job ids from 'task'/'jobs', subagent labels, or "
+            '["all"] for every running subagent. Several ids address several '
+            "subagents. 'ask' and 'resume' take exactly one."
+        ),
+    )
+    message: str | None = Field(
+        default=None,
+        description=(
+            "The body. Required for send/ask/steer, and for resume (what to do next); "
+            "ignored by cancel."
+        ),
+    )
+    timeout_ms: int = Field(
+        default=120_000,
+        gt=0,
+        le=600_000,
+        description="op='ask' only: how long to wait for the answer.",
+    )
+
+
+class HubChildParams(BaseModel):
+    """Child-side hub arguments: one peer, one direction, no ops."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(
+        description="What to tell the parent agent. Answers its question when it asked one."
+    )
+
+
+def _describe_hub_approval(args: dict[str, Any], cwd: str) -> str:
+    """``<op> <target>: <body>`` — the act, who it hits, and what it says.
+
+    All three matter to the decision and none of them is the parameter shape:
+    stopping a subagent and asking it a question are different answers, and
+    "all" versus one id is the difference between a note and a broadcast. The
+    body is truncated because an approval row is read at a glance.
+    """
+    op = str(args.get("op") or "send")
+    target = args.get("to")
+    if isinstance(target, list):
+        target = ", ".join(str(item) for item in target)
+    target = " ".join(str(target or "").split())
+    body = " ".join(str(args.get("message") or "").split())
+    if len(body) > 60:
+        body = body[:57] + "..."
+    head = f"{op} {target}".strip()
+    return f"{head}: {body}" if body else head
+
+
+def _hub_targets(comms: Any, raw: Any) -> tuple[list[str], list[str]]:
+    """Resolve the ``to`` argument to ``(job ids, errors)``, order preserved
+    and duplicates dropped (``["all", "<id>"]`` must not message one child
+    twice)."""
+    requested = raw if isinstance(raw, list) else [raw]
+    ids: list[str] = []
+    errors: list[str] = []
+    for item in requested:
+        resolved, error = comms.resolve(str(item))
+        if error is not None:
+            errors.append(error)
+        for job_id in resolved:
+            if job_id not in ids:
+                ids.append(job_id)
+    return ids, errors
+
+
+def _hub_receipt_lines(deliveries: list[Any]) -> list[str]:
+    return [
+        (
+            f"- {delivery.label} ({delivery.job_id}): {delivery.outcome}"
+            + (f" — {delivery.error}" if delivery.error else "")
+        )
+        for delivery in deliveries
+    ]
+
+
+@_guard("hub")
+async def execute_hub(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Message, steer, stop or resume subagents (parent), or answer the parent
+    (child)."""
+    comms = context.subagent_comms if context else None
+    if comms is None:
+        return _error(
+            tool_call_id,
+            "hub",
+            "agent messaging is not available in this session (no subagent engine).",
+        )
+    if comms.is_child(context.job_id if context else None):
+        return await _execute_hub_child(tool_call_id, args, comms, context)
+    return await _execute_hub_parent(tool_call_id, args, comms)
+
+
+async def _execute_hub_child(
+    tool_call_id: str,
+    args: dict[str, Any],
+    comms: Any,
+    context: ToolContext | None,
+) -> ToolResult:
+    try:
+        params = HubChildParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "hub", exc)
+    job_id = context.job_id if context else None
+    if job_id is None:  # unreachable: is_child() already required one
+        return _error(tool_call_id, "hub", "this subagent has no job id to reply from.")
+    outcome = comms.reply_to_parent(job_id, params.message)
+    return _text(tool_call_id, "hub", outcome, details={"direction": "to_parent"})
+
+
+async def _execute_hub_parent(
+    tool_call_id: str,
+    args: dict[str, Any],
+    comms: Any,
+) -> ToolResult:
+    try:
+        params = HubParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "hub", exc)
+
+    if params.op != "cancel" and not (params.message or "").strip():
+        return _error(tool_call_id, "hub", f"op='{params.op}' needs a message.")
+
+    ids, errors = _hub_targets(comms, params.to)
+    if not ids:
+        return _error(
+            tool_call_id,
+            "hub",
+            "; ".join(errors) or "no subagent matched; use 'jobs' to list them.",
+        )
+    # A question and a resume both have exactly one answer, so they refuse a
+    # fan-out rather than silently acting on the first match.
+    if params.op in ("ask", "resume") and len(ids) > 1:
+        return _error(
+            tool_call_id,
+            "hub",
+            f"op='{params.op}' addresses one subagent at a time; got {len(ids)}.",
+        )
+
+    message = params.message or ""
+    if params.op == "ask":
+        reply = await comms.ask(ids[0], message, params.timeout_ms)
+        if reply.error is not None:
+            return _error(tool_call_id, "hub", f"{reply.label} ({reply.job_id}): {reply.error}")
+        if reply.timed_out:
+            return _text(
+                tool_call_id,
+                "hub",
+                f"{reply.label} ({reply.job_id}) did not answer within {params.timeout_ms}ms; "
+                "it is still running and the question is in its context.",
+                details={"op": "ask", "job_id": reply.job_id, "timed_out": True},
+            )
+        return _text(
+            tool_call_id,
+            "hub",
+            f"{reply.label} ({reply.job_id}) replied:\n{reply.text}",
+            details={"op": "ask", "job_id": reply.job_id, "reply": reply.text},
+        )
+
+    if params.op == "resume":
+        new_job_id, error = comms.resume(ids[0], message)
+        if error is not None:
+            return _error(tool_call_id, "hub", error)
+        return _text(
+            tool_call_id,
+            "hub",
+            f"resumed {comms.label_of(ids[0])} as job {new_job_id}; it replays its own "
+            "transcript before reading this instruction. Await it with 'wait'.",
+            details={"op": "resume", "job_id": new_job_id, "resumed_from": ids[0]},
+        )
+
+    deliveries = []
+    for job_id in ids:
+        if params.op == "send":
+            deliveries.append(comms.send(job_id, message))
+        elif params.op == "steer":
+            deliveries.append(comms.steer(job_id, message))
+        else:
+            deliveries.append(await comms.cancel(job_id))
+
+    acted = [delivery for delivery in deliveries if delivery.outcome != "failed"]
+    header = (
+        f"{params.op}: {len(acted)}/{len(deliveries)} subagent(s)"
+        if deliveries
+        else f"{params.op}: nothing to do"
+    )
+    lines = [header, *_hub_receipt_lines(deliveries), *(f"- {error}" for error in errors)]
+    return _text(
+        tool_call_id,
+        "hub",
+        "\n".join(lines),
+        details={
+            "op": params.op,
+            "job_ids": ids,
+            "acted": len(acted),
+            # Mirrored into details as well as the flag: every other useless
+            # site in this module carries the key, and compaction's pruning
+            # pass reads it from there.
+            "useless": not acted,
+        },
+        # Nothing was reached: a receipt list of pure failures is not an
+        # observation the model should act on as if it had been heard.
+        useless=not acted,
+    )
+
+
+def build_hub_tool(context: ToolContext) -> AgentTool | None:
+    if context.subagent_comms is None:
+        return None
+    if context.subagent_comms.is_child(context.job_id):
+        return AgentTool(
+            name="hub",
+            label="Message parent",
+            description=(
+                "Send a message to the parent agent that delegated this task. Use it to "
+                "answer a question it asked you, or to report unprompted that you are "
+                "blocked, that the task is wrong, or that you found something it needs "
+                "to know now rather than at the end."
+            ),
+            parameters=HubChildParams.model_json_schema(),
+            # A child talking to its own parent starts nothing and touches
+            # nothing; gating it would also mean a background child stalling
+            # on an approval prompt nobody is watching.
+            approval_tier="read",
+            concurrency="shared",
+            interruptible=False,
+            execute=execute_hub,
+        )
+    return AgentTool(
+        name="hub",
+        label="Subagent hub",
+        describe_approval=_describe_hub_approval,
+        description=(
+            "Talk to the subagents you launched with 'task': send a note, ask one a "
+            "question and get its answer (use this to find out whether a quiet child is "
+            "stuck), steer one onto a different course, cancel one, or resume a stopped "
+            "one against its own transcript. Address them by job id, by label, or "
+            '"all".'
+        ),
+        parameters=HubParams.model_json_schema(),
+        # Write, like 'task' and 'wake': these ops redirect, kill and restart
+        # autonomous work. The gate is per TOOL, not per op, so the tier is
+        # the highest any op needs — 'resume' starts a child session, which is
+        # exactly what 'task' asks the user to approve.
+        approval_tier="write",
+        # 'ask' blocks the turn on another agent's answer; running it beside
+        # other tools would hold a shared slot for the whole timeout.
+        concurrency="exclusive",
+        interruptible=True,
+        execute=execute_hub,
     )

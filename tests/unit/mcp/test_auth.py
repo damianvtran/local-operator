@@ -9,6 +9,7 @@ through the real SQLite store.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -35,11 +36,19 @@ class FakeAuthStore:
         self._next_id = 1
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
+        import time
+
         identity = credential.get("project_id")  # mirrors _identity_key_for ordering
         payload = dict(credential)
+        # The real store stamps `updated_at = now` on EVERY write, including the
+        # client-info writes that do not touch tokens. A fake that leaves the
+        # column at 0 cannot catch a caller that mistakes it for the token's
+        # issue time, which is exactly the defect this mirrors.
+        now_ms = int(time.time() * 1000)
         for existing in self.rows:
             if existing.provider == provider and existing.identity_key == identity:
                 existing.data = payload
+                existing.updated_at = now_ms
                 return existing
         row = StoredCredential(
             id=self._next_id,
@@ -47,6 +56,8 @@ class FakeAuthStore:
             credential_type="api_key",
             data=payload,
             identity_key=identity,
+            created_at=now_ms,
+            updated_at=now_ms,
         )
         self._next_id += 1
         self.rows.append(row)
@@ -260,16 +271,18 @@ class TestCallbackInputParsing:
     @pytest.mark.asyncio
     async def test_callback_handler_returns_parsed_state(self, monkeypatch) -> None:
         """Handler given a redirect URL yields the matching state (MCP-02)."""
-        from local_operator.mcp.auth import _default_callback_handler
+        from local_operator.mcp.auth import LoopbackAuthFlow
 
         redirect = "http://127.0.0.1:3000/callback?code=the-code&state=the-state"
         monkeypatch.setattr("builtins.input", lambda _prompt="": redirect)
-        # The handler gates on a real TTY; the suite is not one.
+        # The paste path gates on an interactive stdin; the suite is not one.
         import sys
 
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
 
-        result = await _default_callback_handler()()
+        # A non-loopback redirect URI: nothing to listen on, so the paste is
+        # the only route and the test never binds a port.
+        result = await LoopbackAuthFlow("https://example.test/cb").callback_handler()
         assert result.code == "the-code"
         assert result.state == "the-state"  # SDK state validation now passes
         assert result.iss is None
@@ -277,7 +290,7 @@ class TestCallbackInputParsing:
     @pytest.mark.asyncio
     async def test_prompt_asks_for_full_redirect_url(self) -> None:
         """The paste prompt must say 'full redirect URL', not 'code'."""
-        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.auth import LoopbackAuthFlow
 
         prompts: list[str] = []
 
@@ -293,11 +306,317 @@ class TestCallbackInputParsing:
 
         monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
         try:
-            result = await auth_mod._default_callback_handler()()
+            result = await LoopbackAuthFlow("https://example.test/cb").callback_handler()
         finally:
             monkeypatch.undo()
         assert result.state == "s"
         assert prompts and "full redirect URL" in prompts[0]
+
+    @pytest.mark.asyncio
+    async def test_paste_is_refused_while_the_tui_owns_the_terminal(self, monkeypatch) -> None:
+        """Never read stdin behind Textual's back — that is where keystrokes go.
+
+        Two readers on the same tty do not queue: they split the input between
+        them, so the user's typing lands half in the editor and half in a
+        prompt they cannot see. With no listener to fall back on, the flow must
+        fail with an actionable message instead of eating the keyboard.
+        """
+        import sys
+
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("local_operator.logger.console_is_silenced", lambda: True)
+        called = False
+
+        def must_not_run(_prompt: str = "") -> str:
+            nonlocal called
+            called = True
+            return ""
+
+        monkeypatch.setattr("builtins.input", must_not_run)
+
+        with pytest.raises(RuntimeError, match="mcp login"):
+            await LoopbackAuthFlow("https://example.test/cb").callback_handler()
+        assert called is False
+
+
+class TestLoopbackCallbackServer:
+    """The redirect URI we advertise is one we actually answer."""
+
+    @staticmethod
+    def _free_port() -> int:
+        import socket
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return int(probe.getsockname()[1])
+
+    @staticmethod
+    async def _listening(flow: Any) -> None:
+        """Open the flow's listener, failing loudly if the bind was lost.
+
+        ``_free_port`` closes its probe before the flow binds, so another
+        process can take the port in between. ``_start_server`` swallows that
+        as a notice, which would otherwise surface here as a confusing
+        connection-refused or "not a loopback address" much later.
+        """
+        await flow.redirect_handler("https://provider.test/authorize")
+        assert flow._server is not None, f"listener never bound: {flow._bind_error}"
+
+    @pytest.mark.asyncio
+    async def test_browser_redirect_completes_the_flow(self, monkeypatch) -> None:
+        """A real GET to the redirect URI hands the code back to the SDK."""
+        import asyncio
+        import sys
+        import urllib.request
+
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        # stdin must stay out of it: the listener is the whole point here.
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        await self._listening(flow)
+
+        async def visit() -> str:
+            url = f"http://127.0.0.1:{port}/callback?code=abc&state=xyz&iss=https://issuer.test"
+            return await asyncio.to_thread(
+                lambda: urllib.request.urlopen(url, timeout=5).read().decode()
+            )
+
+        page, result = await asyncio.gather(visit(), flow.callback_handler())
+        assert "Authorized" in page  # the tab says something useful
+        assert (result.code, result.state) == ("abc", "xyz")
+        assert result.iss == "https://issuer.test"
+
+    @pytest.mark.asyncio
+    async def test_provider_error_redirect_fails_the_flow(self, monkeypatch) -> None:
+        """``?error=`` is the provider refusing; surface it, do not hang."""
+        import asyncio
+        import sys
+        import urllib.request
+
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        await self._listening(flow)
+
+        async def visit() -> None:
+            url = f"http://127.0.0.1:{port}/callback?error=access_denied"
+            await asyncio.to_thread(lambda: urllib.request.urlopen(url, timeout=5).read())
+
+        with pytest.raises(RuntimeError, match="access_denied"):
+            await asyncio.gather(visit(), flow.callback_handler())
+
+    @pytest.mark.asyncio
+    async def test_listener_is_released_after_the_flow(self, monkeypatch) -> None:
+        """The port must not stay bound: a retry has to be able to rebind it."""
+        import asyncio
+        import socket
+        import sys
+        import urllib.request
+
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        await self._listening(flow)
+
+        async def visit() -> None:
+            url = f"http://127.0.0.1:{port}/callback?code=c&state=s"
+            await asyncio.to_thread(lambda: urllib.request.urlopen(url, timeout=5).read())
+
+        await asyncio.gather(visit(), flow.callback_handler())
+        with socket.socket() as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", port))  # raises if the flow leaked the listener
+
+    @pytest.mark.asyncio
+    async def test_an_idle_connection_cannot_hold_the_flow_open(self, monkeypatch) -> None:
+        """A silent peer must not park teardown — the code is already in hand.
+
+        Since 3.12.1 ``Server.wait_closed()`` also waits for every accepted
+        connection's handler, so one socket that connects and says nothing (a
+        browser preconnect, a port scanner) would hang ``callback_handler``
+        forever after a perfectly successful authorization.
+        """
+        import asyncio
+        import socket
+        import sys
+        import time
+        import urllib.request
+
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        await self._listening(flow)
+
+        idle = socket.create_connection(("127.0.0.1", port), timeout=5)  # says nothing, ever
+        try:
+
+            async def visit() -> None:
+                url = f"http://127.0.0.1:{port}/callback?code=c&state=s"
+                await asyncio.to_thread(lambda: urllib.request.urlopen(url, timeout=5).read())
+
+            # Bounded BELOW the head-read deadline on purpose. R1 asked for two
+            # bounds — the read deadline and the teardown timeout — and either
+            # one alone is enough to finish this scenario eventually, so a
+            # generous outer timeout would keep passing after one of them was
+            # deleted. Waiting less than `_REQUEST_READ_TIMEOUT_S` means only
+            # the teardown bound can satisfy it.
+            started = time.monotonic()
+            _, result = await asyncio.wait_for(
+                asyncio.gather(visit(), flow.callback_handler()), timeout=5
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            idle.close()
+        assert result.code == "c"
+        assert elapsed < auth_mod._REQUEST_READ_TIMEOUT_S, (
+            f"took {elapsed:.1f}s — the idle handler's own read deadline carried "
+            "this, not the teardown bound"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_listener_path_never_reads_stdin(self, monkeypatch) -> None:
+        """No paste race: a thread parked in ``input()`` cannot be cancelled.
+
+        Racing one would leave a second reader on the tty and a thread that
+        ``asyncio.run`` joins at shutdown, so ``local-operator mcp login`` would
+        hang AFTER the browser login succeeded. With a listener bound, stdin
+        must not be touched at all.
+        """
+        import asyncio
+        import sys
+        import urllib.request
+
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        # Everything the paste gate checks says "yes, you may read stdin".
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("local_operator.logger.console_is_silenced", lambda: False)
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+
+        def must_not_run(_prompt: str = "") -> str:
+            raise AssertionError("the listener path must never read stdin")
+
+        monkeypatch.setattr("builtins.input", must_not_run)
+
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        await self._listening(flow)
+
+        async def visit() -> None:
+            url = f"http://127.0.0.1:{port}/callback?code=c&state=s"
+            await asyncio.to_thread(lambda: urllib.request.urlopen(url, timeout=5).read())
+
+        _, result = await asyncio.gather(visit(), flow.callback_handler())
+        assert result.code == "c"
+
+    @pytest.mark.asyncio
+    async def test_a_lost_bind_says_the_port_is_taken(self, monkeypatch) -> None:
+        """ "Port busy" and "unservable redirect URI" need different advice."""
+        import socket
+        import sys
+
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        squatter = socket.socket()
+        squatter.bind(("127.0.0.1", 0))
+        squatter.listen(1)
+        port = squatter.getsockname()[1]
+        try:
+            flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+            await flow.redirect_handler("https://provider.test/authorize")
+            assert flow._server is None
+            with pytest.raises(RuntimeError, match="could listen on .*address already in use"):
+                await flow.callback_handler()
+        finally:
+            squatter.close()
+
+    @pytest.mark.asyncio
+    async def test_a_blank_error_description_still_names_the_error(self, monkeypatch) -> None:
+        """A whitespace-only description must not blank the error code.
+
+        `?error=access_denied&error_description=%20%20%20` is reachable from the
+        wire, and testing the raw value for truthiness satisfies it — so the
+        `or error` fallback never fires and the CLI-facing exception loses the
+        one word that says what went wrong.
+        """
+        import asyncio
+        import sys
+        import urllib.parse
+        import urllib.request
+
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        await self._listening(flow)
+
+        query = urllib.parse.urlencode({"error": "access_denied", "error_description": "   "})
+
+        async def visit() -> str:
+            url = f"http://127.0.0.1:{port}/callback?{query}"
+            return await asyncio.to_thread(
+                lambda: urllib.request.urlopen(url, timeout=5).read().decode()
+            )
+
+        page_task = asyncio.ensure_future(visit())
+        with pytest.raises(RuntimeError, match="access_denied"):
+            await asyncio.wait_for(flow.callback_handler(), timeout=10)
+        page = await page_task
+        # And the page shows the code rather than a labelled empty box.
+        assert "Provider response" in page
+        assert "access_denied" in page
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_without_a_code_fails_the_flow(self, monkeypatch) -> None:
+        """A codeless redirect must end the grant, not leave it waiting.
+
+        The page tells the user they can close the tab. If the flow does not
+        settle, that sentence points at a terminal still parked on a redirect
+        that can never carry a code — a five-minute silent wait after the user
+        has been told it is over.
+        """
+        import asyncio
+        import sys
+        import urllib.request
+
+        from local_operator.mcp.auth import LoopbackAuthFlow
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        await self._listening(flow)
+
+        async def visit() -> str:
+            url = f"http://127.0.0.1:{port}/callback?state=s"  # no code
+            return await asyncio.to_thread(
+                lambda: urllib.request.urlopen(url, timeout=5).read().decode()
+            )
+
+        page_task = asyncio.ensure_future(visit())
+        with pytest.raises(RuntimeError, match="carried no authorization code"):
+            await asyncio.wait_for(flow.callback_handler(), timeout=10)
+        page = await page_task
+        assert "No authorization code" in page
 
 
 class TestWireOauthAuth:
@@ -380,3 +699,221 @@ class TestWireOauthAuth:
         """Configs without auth.type=oauth produce no provider (manager skips)."""
         cfg = MCPHttpServerConfig(url="https://srv.example/mcp")
         assert cfg.auth is None
+
+
+class TestStoredTokenExpiry:
+    """A token's lifetime has to survive the process that received it.
+
+    ``OAuthToken`` carries only the relative ``expires_in`` the server quoted,
+    and the SDK reloads tokens without reloading any deadline — so an expired
+    access token looks valid to a fresh process, gets a 401, and triggers a
+    full browser grant while an unspent refresh token sits in the same row.
+    """
+
+    URL = "https://srv.example/mcp"
+
+    def _storage(self) -> tuple[McpTokenStorage, FakeAuthStore]:
+        store = FakeAuthStore()
+        return McpTokenStorage(self.URL, store), store
+
+    @pytest.mark.asyncio
+    async def test_expiry_is_issue_time_plus_lifetime(self) -> None:
+        import time
+
+        from mcp.shared.auth import OAuthToken
+
+        storage, _ = self._storage()
+        before = time.time()
+        await storage.set_tokens(OAuthToken(access_token="a", refresh_token="r", expires_in=3600))
+        expiry = storage.stored_token_expiry()
+        assert expiry is not None
+        assert before + 3600 <= expiry <= time.time() + 3600
+
+    @pytest.mark.asyncio
+    async def test_refreshed_tokens_restamp_the_issue_time(self) -> None:
+        """A refresh must move the deadline; otherwise it expires immediately."""
+        import time
+
+        from mcp.shared.auth import OAuthToken
+
+        storage, store = self._storage()
+        await storage.set_tokens(OAuthToken(access_token="old", expires_in=60))
+        stale = storage.stored_token_expiry()
+        store.rows[0].data["tokens_obtained_at"] = time.time() - 600  # pretend it aged
+        await storage.set_tokens(OAuthToken(access_token="new", expires_in=60))
+        fresh = storage.stored_token_expiry()
+        assert stale is not None and fresh is not None
+        assert fresh > time.time()
+
+    @staticmethod
+    def _legacy_row(store: FakeAuthStore, url: str, *, age_s: float, expires_in: int) -> None:
+        """Plant a grant in the shape rows had before this fix: no issue time."""
+        import time
+
+        store.upsert_credential(
+            MCP_OAUTH_PROVIDER,
+            {
+                "project_id": url,
+                "tokens": {"access_token": "a", "refresh_token": "r", "expires_in": expires_in},
+                "client_info": {"client_id": "cid"},
+            },
+        )
+        store.rows[0].updated_at = int((time.time() - age_s) * 1000)  # ms, as SQLite stores it
+
+    def test_legacy_row_without_issue_time_uses_updated_at(self) -> None:
+        """Grants written before this fix must benefit without re-authorizing."""
+        import time
+
+        store = FakeAuthStore()
+        self._legacy_row(store, self.URL, age_s=100_000, expires_in=86400)
+        # Opened AFTER the row exists, which is what a fresh process does.
+        storage = McpTokenStorage(self.URL, store)
+        expiry = storage.stored_token_expiry()
+        assert expiry is not None and expiry < time.time()  # correctly seen as expired
+
+    @pytest.mark.asyncio
+    async def test_a_pinned_client_id_does_not_erase_the_legacy_expiry(self) -> None:
+        """Our own client-info seed must not reset the deadline it is read from.
+
+        ``wire_oauth_auth`` calls ``seed_client_info`` whenever the config pins
+        a ``client_id``, and the store stamps ``updated_at`` on that write. Read
+        the column afterwards and every legacy grant looks brand new — so the
+        migration would be a guaranteed no-op for exactly the pinned-redirect
+        servers the seed exists to serve.
+        """
+        import time
+
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        self._legacy_row(store, self.URL, age_s=100_000, expires_in=86400)
+        cfg = MCPHttpServerConfig(
+            url=self.URL, auth=MCPAuthConfig(type="oauth", client_id="pinned-cid")
+        )
+        provider = build_oauth_provider(self.URL, cfg, store=store)
+        assert provider.context.token_expiry_time is not None
+        assert provider.context.token_expiry_time < time.time()
+        await provider._initialize()
+        assert provider.context.is_token_valid() is False
+
+    @pytest.mark.asyncio
+    async def test_token_without_a_quoted_lifetime_has_no_opinion(self) -> None:
+        """No ``expires_in`` means no deadline to invent — leave the SDK alone."""
+        from mcp.shared.auth import OAuthToken
+
+        storage, _ = self._storage()
+        await storage.set_tokens(OAuthToken(access_token="a"))
+        assert storage.stored_token_expiry() is None
+
+    def test_no_row_has_no_opinion(self) -> None:
+        storage, _ = self._storage()
+        assert storage.stored_token_expiry() is None
+
+    @pytest.mark.asyncio
+    async def test_provider_is_primed_so_a_stale_token_refreshes(self) -> None:
+        """The end of the chain: the SDK must see the token as expired.
+
+        ``is_token_valid()`` False + a refresh token present is exactly the
+        state that sends ``async_auth_flow`` down the refresh branch instead of
+        the browser one.
+        """
+        import time
+
+        from mcp.shared.auth import OAuthToken
+
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        await storage.set_tokens(OAuthToken(access_token="stale", refresh_token="r", expires_in=60))
+        store.rows[0].data["tokens_obtained_at"] = time.time() - 3600  # a day-old grant
+
+        cfg = MCPHttpServerConfig(url=self.URL, auth=MCPAuthConfig(type="oauth"))
+        provider = build_oauth_provider(self.URL, cfg, store=store)
+        assert provider.context.token_expiry_time is not None
+
+        await provider._initialize()  # what the SDK does on the first request
+        assert provider.context.is_token_valid() is False
+        assert provider.context.current_tokens is not None
+        assert provider.context.current_tokens.refresh_token == "r"
+
+    @pytest.mark.asyncio
+    async def test_live_token_is_left_valid(self) -> None:
+        """The mirror case: a token still inside its lifetime must not refresh."""
+        from mcp.shared.auth import OAuthToken
+
+        from local_operator.mcp.auth import build_oauth_provider
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage(self.URL, store)
+        await storage.set_tokens(
+            OAuthToken(access_token="fresh", refresh_token="r", expires_in=3600)
+        )
+        cfg = MCPHttpServerConfig(url=self.URL, auth=MCPAuthConfig(type="oauth"))
+        provider = build_oauth_provider(self.URL, cfg, store=store)
+        await provider._initialize()
+        assert provider.context.is_token_valid() is True
+
+
+class TestBrowserLaunchContainment:
+    """A login flow spawns a browser, and browsers print.
+
+    ``webbrowser.open`` hands the browser fd 1 and fd 2 UNCHANGED — the
+    stdlib's ``GenericBrowser``/``BackgroundBrowser`` pass neither ``stdout``
+    nor ``stderr`` to ``Popen`` — so under the TUI a ``Gtk-Message:`` line or
+    an ``xdg-open: no method available`` lands on the composed frame. Same
+    defect as an MCP server's startup banner, reached through OAuth instead.
+
+    ``BROWSER`` is the env var ``webbrowser`` honours for a custom command, so
+    these drive a real launch of a real script rather than a patched function.
+    """
+
+    @staticmethod
+    def _noisy_browser(tmp_path: Path) -> Path:
+        script = tmp_path / "browser.sh"
+        script.write_text(
+            "#!/bin/sh\n" 'echo "Gtk-Message: Failed to load module for $1" >&2\n' "exit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return script
+
+    @pytest.mark.asyncio
+    async def test_silenced_console_keeps_the_browser_off_the_terminal(
+        self, monkeypatch, tmp_path: Path, terminal_output: Path, caplog
+    ) -> None:
+        """With the TUI on screen the browser's chatter goes to the log."""
+        import logging
+
+        from local_operator.mcp.auth import open_browser_quietly
+
+        monkeypatch.setenv("BROWSER", f"{self._noisy_browser(tmp_path)} %s")
+        monkeypatch.setattr("local_operator.logger.console_is_silenced", lambda: True)
+
+        with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
+            opened = await open_browser_quietly("https://provider.test/authorize")
+
+        assert opened is True
+        assert terminal_output.read_bytes() == b""
+        # Not discarded: a browser that could not start is a real login failure,
+        # and this line is the only place the reason survives.
+        assert "Gtk-Message: Failed to load module" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_owning_the_terminal_keeps_the_in_process_call(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Headless ``mcp login`` must not pay for, or hide, the containment.
+
+        With the terminal ours the browser's complaint is exactly what the user
+        should see, so the plain ``webbrowser.open`` call stays — asserted by
+        patching it, which the launcher subprocess would bypass entirely.
+        """
+        from local_operator.mcp.auth import open_browser_quietly
+
+        monkeypatch.setattr("local_operator.logger.console_is_silenced", lambda: False)
+        calls: list[str] = []
+        monkeypatch.setattr("webbrowser.open", lambda url: calls.append(url) or True)
+
+        assert await open_browser_quietly("https://provider.test/authorize") is True
+        assert calls == ["https://provider.test/authorize"]

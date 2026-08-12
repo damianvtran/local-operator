@@ -278,6 +278,34 @@ border. Shimmer rides the working text (green crest over dim). Keep the
 island palette — violet accents become our green/string tint; the STRUCTURE
 is what we emphasize, not the hue.
 
+**User-message delineation (user feedback, refines "lines only where truly
+necessary"):** "Can you also have user messages have a more obvious
+delineation, in OpenCode and my fork of OMP there's a borderless chrome and
+left sidebar for example, we probably want a local-operator specific style for
+this but the user messages should stand out and consider that they will often
+be multi-line with paragraphs."
+
+So a prompt is drawn behind a **gutter rule**: `▌` in structural `dim` at
+column 0, on EVERY row of the message — wrapped continuations and the blank
+rows between paragraphs included — with the prose two cells in, where the old
+`❯ ` prefix already put it. This is the second and last line in the app, and
+it does not contradict the borderless mandate: a line that CLOSES a shape is a
+box, a line that marks a margin is a gutter. The `❯` is freed to mean exactly
+one thing — the composer, where you type.
+
+What the references do, and where we diverge: OpenCode draws a left rule in
+the agent's accent colour AND fills the message with a panel tint; omp fills
+with a tint and no rule. We take the rule and reject the tint, because
+elevation-as-a-background-step is already spent in full on the tool ledger,
+whose FILL carries the outcome — rendered, a tinted prompt is a card, and a
+one-line prompt is a mostly-empty slab the width of the terminal. And the rule
+is `dim`, not the accent: the accent green is spent on five enumerated sites
+and means "a turn is live", so a green column beside every prompt would be the
+largest accent surface in the app and would mean nothing. `dim` measures 4.55:1
+on the dark ground and 3.77:1 on paper, clearing the 3:1 floor for a graphical
+object in both ramps; the weight comes from the GLYPH (a half-cell of solid
+ink) rather than from the hue.
+
 - Layout (top→bottom): transcript scroll area; status line rendered as the
   TOP BORDER of the input box (zero extra rows); multiline input.
 - **Minimalism rules**: one line per action. Tool executions render as a
