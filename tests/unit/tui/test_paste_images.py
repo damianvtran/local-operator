@@ -1870,10 +1870,16 @@ async def test_an_unrelated_fragment_cannot_keep_a_deleted_image_alive(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_clearing_away_a_damaged_marker_releases_its_image(tmp_path) -> None:
-    """The other half of the touched-range rule: an attachment that is ALREADY
-    uncitable is released when the cut text names its number, or the map would
-    keep an image no text in the buffer can reach."""
+async def test_clearing_away_a_damaged_marker_holds_but_never_sends_it(tmp_path) -> None:
+    """A damaged marker cleared away leaves its image held, uncited and unsent.
+
+    This asserted a release until review round 26 showed the rule that produced
+    it - "the cut text names #N" - cannot tell a damaged marker from prose that
+    says `#1`, and destroyed repairable attachments irreversibly. The rule is
+    gone and the orphan is the accepted cost: invisible, never sent, and
+    cleared with the draft. Reachable only through `cite`'s documented
+    fallback, which is the residual already recorded on that function.
+    """
     path = _png(tmp_path / "a.png", 10, 20)
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -1891,10 +1897,9 @@ async def test_clearing_away_a_damaged_marker_releases_its_image(tmp_path) -> No
         await pilot.press("backspace")
         await pilot.pause()
 
-        assert editor._attachments == {}, "the damaged marker's image was kept"
-        editor.insert("[Image #1]")
-        await pilot.pause()
-        assert editor.referenced_images() == [], "a typed marker revived it"
+        assert editor._attachments, "the orphan was destroyed rather than held"
+        assert editor.referenced_images() == [], "an uncited orphan was sent"
+        assert editor._first_citation_columns(0) == set(), "an uncited orphan was chipped"
 
 
 @pytest.mark.asyncio
@@ -1973,3 +1978,79 @@ async def test_deleting_a_marker_s_tail_releases_it(tmp_path) -> None:
         editor.insert("] see [Image #1] please")
         await pilot.pause()
         assert editor.referenced_images() == [], "a typed marker revived the image"
+
+
+@pytest.mark.asyncio
+async def test_a_lengthened_tail_is_measured_at_its_real_width(tmp_path) -> None:
+    """Review round 26, P1. The citation's span comes from `cite`, not from
+    `len(attachment.marker)`.
+
+    Editing the tail longer is a gesture `cite` deliberately protects, and it
+    makes the citation in the buffer wider than the recorded marker. Measuring
+    with the recorded width stopped the span short, so a cut in the gap escaped
+    the overlap test - reopening D16 exactly: held, unchipped, and revived by a
+    typed marker.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        # Lengthen the tail: '10x20' -> '10x200'.
+        editor.selection = Selection.cursor((0, editor.text.index("]")))
+        await pilot.press("0")
+        await pilot.pause()
+        assert "[Image #1, 10x200]" in editor.text, f"fixture: {editor.text!r}"
+        assert len(editor.referenced_images()) == 1, "the longer tail orphaned the draft"
+
+        # Cut ONLY the closing bracket - past the recorded marker's end.
+        closing = editor.text.index("]")
+        editor.selection = Selection((0, closing), (0, closing + 1))
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert editor._attachments == {}, "a cut past the recorded width was not seen"
+        editor.insert("] see [Image #1] please")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "a typed marker revived the image"
+
+
+@pytest.mark.asyncio
+async def test_deleting_prose_that_says_the_number_spares_a_damaged_marker(tmp_path) -> None:
+    """Review round 26, P2. `#1` is ordinary prose in a draft about images.
+
+    While a marker is damaged and repairable, deleting unrelated text that
+    happens to contain its number destroyed the image - and the repair then
+    produced a perfectly formed marker citing nothing, with no way back.
+    """
+    path = _png(tmp_path / "a.png", 10, 20)
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+        prose = "compare with screenshot #1 from yesterday"
+        editor.selection = Selection.cursor((0, len(editor.text)))
+        editor.insert(prose)
+        await pilot.pause()
+
+        editor.selection = Selection.cursor((0, 4))
+        await pilot.press("x")
+        await pilot.pause()
+        assert editor.referenced_images() == [], "the fixture did not damage the marker"
+
+        start = editor.text.index("screenshot #1")
+        editor.selection = Selection((0, start), (0, len(editor.text)))
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert editor._attachments, "deleting prose that says #1 destroyed the image"
+
+        editor.selection = Selection.cursor((0, 5))
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert editor.text.startswith("[Image #1, 10x20]"), f"repair failed: {editor.text!r}"
+        assert len(editor.referenced_images()) == 1, "the repaired marker lost its image"

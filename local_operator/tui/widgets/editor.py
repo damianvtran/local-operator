@@ -150,8 +150,13 @@ class Attachment:
     marker: str
 
 
-def cite(text: str, index: int, attachment: Attachment) -> int:
-    """Where ``index`` is cited by the APP in ``text``, or ``-1``.
+def cite(text: str, index: int, attachment: Attachment) -> tuple[int, int] | None:
+    """The span of the APP's citation of ``index`` in ``text``, or ``None``.
+
+    A SPAN, not an offset, because the citation in the buffer is not always the
+    recorded marker: the fallback below resolves a differently-tailed one, and
+    a caller that assumed `len(attachment.marker)` measured a marker the user
+    had lengthened as if it were still short (review round 26).
 
     Prefers the citation whose text matches the marker byte for byte, and only
     falls back to the first citation of the number when no exact match
@@ -163,11 +168,11 @@ def cite(text: str, index: int, attachment: Attachment) -> int:
     """
     exact = text.find(attachment.marker)
     if exact != -1:
-        return exact
+        return exact, exact + len(attachment.marker)
     for match in IMAGE_MARKER.finditer(text):
         if int(match.group(1)) == index:
-            return match.start()
-    return -1
+            return match.span()
+    return None
 
 
 def resolve_markers(text: str, attachments: Mapping[int, Attachment]) -> list[ImageContent]:
@@ -183,9 +188,9 @@ def resolve_markers(text: str, attachments: Mapping[int, Attachment]) -> list[Im
     predicate, not two that happen to agree.
     """
     cited = [
-        (position, index)
+        (span[0], index)
         for index, attachment in attachments.items()
-        if (position := cite(text, index, attachment)) != -1
+        if (span := cite(text, index, attachment)) is not None
     ]
     return [attachments[index].image for _, index in sorted(cited)]
 
@@ -1036,7 +1041,7 @@ class Editor(TextArea):
         """Apply the release rule to a marker that was just removed as a token."""
         attachment = self._attachments.get(index)
         if attachment is not None and (
-            cite(self.text, index, attachment) == -1
+            cite(self.text, index, attachment) is None
             or (token == attachment.marker and attachment.marker not in self.text)
         ):
             del self._attachments[index]
@@ -1111,7 +1116,7 @@ class Editor(TextArea):
         text = self.text
         for index in indices:
             attachment = self._attachments.get(index)
-            if attachment is not None and cite(text, index, attachment) == -1:
+            if attachment is not None and cite(text, index, attachment) is None:
                 del self._attachments[index]
 
     def action_delete_left(self) -> None:
@@ -1149,9 +1154,9 @@ class Editor(TextArea):
         text = self.text
         columns: set[int] = set()
         for index, attachment in self._attachments.items():
-            position = cite(text, index, attachment)
-            if base <= position < base + len(line):
-                columns.add(position - base)
+            span = cite(text, index, attachment)
+            if span is not None and base <= span[0] < base + len(line):
+                columns.add(span[0] - base)
         return columns
 
     def _marker_cells(self, y: int) -> list[tuple[int, int, bool]]:
@@ -1465,21 +1470,28 @@ class Editor(TextArea):
     def _attachments_touched_by(self, edit: Edit) -> list[int]:
         """Which attachments a pending edit could plausibly uncite.
 
-        Empty for a pure insertion: adding text cannot remove a citation, and
+        ONE rule: the removal's range overlaps the citation's span. Empty for a
+        pure insertion, because adding text cannot remove a citation and
         sweeping there would adjudicate a marker the user is typing through -
-        every printable character breaks the marker's grammar while it is being
-        typed into.
+        every printable character breaks the grammar while it is being typed
+        into.
 
-        For a removal, an attachment qualifies when either
+        There was a second clause - release an ALREADY uncitable attachment
+        when the cut text names its number, so the map could not keep an image
+        no text can reach. It is gone, because a text test cannot tell the
+        damaged marker the user is clearing away from ordinary prose that
+        happens to say `#1`, and in a draft about images that is ordinary prose.
+        Deleting `screenshot #1 from yesterday` destroyed a repairable
+        attachment, irreversibly, since a retyped marker may not revive it
+        (review round 26).
 
-        - its citation lies inside the range being cut, which is the ordinary
-          "the user deleted this marker" case; or
-        - it is ALREADY uncitable and the cut text names its number, which is
-          the user clearing away a marker they had damaged earlier. Without
-          this the map would keep an image no text can reach.
-
-        An attachment that is uncitable for some unrelated reason is in neither
-        set, which is exactly the repair window that must stay open.
+        The cost of dropping it is that an attachment whose marker was damaged
+        and then cleared away stays in the map, uncited and unsent, until the
+        draft is submitted or cleared. It is invisible and it is never sent;
+        the only way to reach it is to type its number, which is `cite`'s
+        documented fallback and the residual already recorded there. Holding an
+        image nobody can see is a smaller wrong than destroying one the user
+        is halfway through repairing.
         """
         if edit.from_location == edit.to_location or not self._attachments:
             return []
@@ -1492,16 +1504,14 @@ class Editor(TextArea):
         text = self.text
         touched: list[int] = []
         for index, attachment in self._attachments.items():
-            position = cite(text, index, attachment)
-            if position == -1:
-                if re.search(rf"#{index}(?![0-9])", cut):
-                    touched.append(index)
-            elif start < position + len(attachment.marker) and position < end:
-                # SPAN overlap, not "the cut contains the first cell". Dragging
-                # over a marker's tail and pressing backspace leaves its head at
-                # an offset outside the cut, so a containment test never watched
-                # it: the image stayed held with no chip, and a typed
-                # `[Image #1]` then chipped and sent it (design round 20, D16).
+            span = cite(text, index, attachment)
+            # SPAN overlap, and the span comes from `cite` rather than from
+            # `len(attachment.marker)`. Two separate lessons: a containment test
+            # missed a tail delete, because the head stays outside the cut
+            # (design round 24, D16); and measuring with the RECORDED marker's
+            # length misjudged a citation the user had lengthened, so a cut past
+            # the old end escaped the test and reopened D16 (round 26).
+            if span is not None and start < span[1] and span[0] < end:
                 touched.append(index)
         return touched
 
