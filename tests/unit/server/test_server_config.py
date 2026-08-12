@@ -193,57 +193,64 @@ async def test_get_system_prompt_error(test_app_client):
 
 
 @pytest.mark.asyncio
-async def test_update_system_prompt_success(test_app_client):
-    """Test updating system prompt successfully."""
+async def test_update_system_prompt_success(test_app_client, tmp_path, monkeypatch):
+    """A real file under a real config dir, not a mock.
+
+    Mocking the module attribute pinned the implementation's SHAPE (a
+    module-level constant) rather than its behaviour, and that shape was the
+    defect: it froze the path at import and ignored
+    ``LOCAL_OPERATOR_CONFIG_DIR``, so this endpoint and the session loader
+    stopped being the same file the moment the override was set.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     test_content = "You are Local Operator, an AI assistant with new capabilities..."
-    test_timestamp = 1609459200.0  # 2021-01-01 00:00:00
-    test_iso_timestamp = "2021-01-01T00:00:00"
     update_payload = SystemPromptUpdate(content=test_content)
 
-    # Mock the file operations
-    with (
-        patch("local_operator.server.routes.config.SYSTEM_PROMPT_FILE") as mock_file,
-        patch("local_operator.server.routes.config.datetime") as mock_datetime,
-    ):
-        # Configure the mock file
-        mock_file.parent.mkdir.return_value = None
-        mock_file.write_text.return_value = None
-        mock_stat_result = MagicMock()
-        mock_stat_result.st_mtime = test_timestamp
-        mock_file.stat.return_value = mock_stat_result
-
-        # Mock datetime to return a datetime object with isoformat method
-        mock_dt = MagicMock()
-        mock_dt.isoformat.return_value = test_iso_timestamp
-        mock_datetime.fromtimestamp.return_value = mock_dt
-
-        response = await test_app_client.patch(
-            "/v1/config/system-prompt", json=update_payload.model_dump()
-        )
-
-        # Verify the directory was created if needed
-        mock_file.parent.mkdir.assert_called_once_with(parents=True, exist_ok=True)
-        # Verify the content was written to the file
-        mock_file.write_text.assert_called_once_with(test_content, encoding="utf-8")
+    response = await test_app_client.patch(
+        "/v1/config/system-prompt", json=update_payload.model_dump()
+    )
 
     assert response.status_code == 200
     data = response.json()
     assert data.get("status") == 200
     assert data.get("message") == "System prompt updated successfully"
-    result = data.get("result")
-    assert result.get("content") == test_content
-    assert result.get("last_modified") == test_iso_timestamp
+    assert data.get("result", {}).get("content") == test_content
+    # Written where the override says, and readable back through the endpoint.
+    assert (tmp_path / "system_prompt.md").read_text(encoding="utf-8") == test_content
 
 
 @pytest.mark.asyncio
-async def test_update_system_prompt_error(test_app_client):
-    """Test error handling when updating system prompt."""
-    test_content = "You are Local Operator, an AI assistant..."
-    update_payload = SystemPromptUpdate(content=test_content)
+async def test_the_endpoint_and_the_session_loader_read_one_file(
+    test_app_client, tmp_path, monkeypatch
+):
+    """The feature's central promise: the desktop Settings box, this endpoint
+    and every session's system prompt are ONE file. A hardcoded home path made
+    that false under an override, silently — the endpoint would report content
+    no session ever loaded."""
+    from local_operator.session_factory import load_user_instructions
 
-    with patch("local_operator.server.routes.config.SYSTEM_PROMPT_FILE") as mock_file:
-        mock_file.write_text.side_effect = Exception("Test error")
-        mock_file.parent.mkdir.return_value = None
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    content = "- Always use conventional commits."
+    await test_app_client.patch(
+        "/v1/config/system-prompt",
+        json=SystemPromptUpdate(content=content).model_dump(),
+    )
+
+    assert load_user_instructions() == content
+
+    got = await test_app_client.get("/v1/config/system-prompt")
+    assert got.status_code == 200
+    assert got.json()["result"]["content"] == content
+
+
+@pytest.mark.asyncio
+async def test_update_system_prompt_error(test_app_client, tmp_path, monkeypatch):
+    """Test error handling when updating system prompt."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    update_payload = SystemPromptUpdate(content="You are Local Operator, an AI assistant...")
+
+    with patch("local_operator.server.routes.config.system_prompt_file") as mock_path:
+        mock_path.return_value.write_text.side_effect = Exception("Test error")
 
         response = await test_app_client.patch(
             "/v1/config/system-prompt", json=update_payload.model_dump()
