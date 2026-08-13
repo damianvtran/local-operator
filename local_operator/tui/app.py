@@ -5465,6 +5465,17 @@ class OperatorApp(App[None]):
             footer.append(str(log_file), style=dim)
             lines.append(Text())
             lines.append(footer)
+        title_note = Text()
+        title_note.append("window title".ljust(name_width), style=muted)
+        title_note.append(
+            "shows session state outside the app; disable with "
+            "`config set display.terminal_title false` or "
+            "`LOCAL_OPERATOR_NO_TERMINAL_TITLE=1`",
+            style=dim,
+        )
+        if not lines or lines[-1].plain:
+            lines.append(Text())
+        lines.append(title_note)
         return RichBlock(Group(*lines))
 
     def _skills_block(self) -> RichBlock | None:

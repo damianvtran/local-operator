@@ -2859,6 +2859,16 @@ def test_help_uses_one_column_wider_than_every_command_name() -> None:
         assert row[len(names) :].startswith("  "), row
 
 
+def test_help_mentions_the_window_title_toggle() -> None:
+    """The title lives outside the app's frame, so the help is where a user who
+    notices it and wants it off can discover the toggle without source-diving."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    text = _renderable_plain(app._help_block().renderable)
+    assert "window title" in text
+    assert "display.terminal_title" in text
+    assert "LOCAL_OPERATOR_NO_TERMINAL_TITLE" in text
+
+
 @pytest.mark.asyncio
 async def test_a_switch_admits_it_is_session_only_and_names_the_persist_command() -> None:
     """A switch that looks permanent and is not is the actual bug: the old
