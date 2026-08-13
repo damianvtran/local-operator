@@ -17,6 +17,11 @@ _DEFAULTS: dict[str, Any] = {
     # patched fonts, and OFF is one `config set` (or the env kill switch in
     # `tui/glyphs.py`) away for a terminal that would draw them as boxes.
     "display.nerd_icons": True,
+    # The OSC 0 window/tab title carrying the session name and run state
+    # (`tui/terminal_title.py`). Defaults ON: a terminal without OSC 0 ignores
+    # the sequence entirely, and the title is saved on start and restored on
+    # exit, so the worst case for an unsupported terminal is no change at all.
+    "display.terminal_title": True,
 }
 
 _cache: dict[str, Any] | None = None
