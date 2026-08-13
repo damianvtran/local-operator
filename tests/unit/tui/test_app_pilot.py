@@ -3710,7 +3710,7 @@ async def test_the_aside_keeps_the_caret_because_it_keeps_the_composer() -> None
 def _osc_titles(writes: Sequence[str]) -> list[str]:
     """The OSC 0 title payloads, in order, deduped only by the caller.
 
-    Saved titles (`\x1b[22;2t`) and restores (`\x1b[23;2t`) are different
+    Saved titles (`\x1b[22;0t`) and restores (`\x1b[23;0t`) are different
     evidence and are asserted separately, so this helper extracts only the
     "what would the tab title read" payloads.
     """
@@ -3812,6 +3812,6 @@ async def test_unmount_restores_the_terminals_own_title(monkeypatch) -> None:  #
         app._stop_terminal_title()
         app._start_terminal_title()
         await pilot.pause()
-    push_index = writes.index("\x1b[22;2t")
-    pop_index = writes.index("\x1b[23;2t")
+    push_index = writes.index("\x1b[22;0t")
+    pop_index = writes.index("\x1b[23;0t")
     assert push_index < pop_index
