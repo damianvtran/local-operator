@@ -3759,13 +3759,15 @@ async def test_app_wires_the_terminal_title_to_boot_and_turn_state(
         app._start_terminal_title()
         await pilot.pause()
         titles = _osc_titles(writes)
-        assert titles[-1] == "lo › lo-terminal-title"
+        assert app._status is not None
+        cwd_label = Path(app._status._cwd).name  # the band's own fallback label
+        assert titles[-1] == f"lo › {cwd_label}"
         assert "lo ›" not in titles
 
         app.on_turn_started(TurnStarted())
         await pilot.pause()
         latest = _osc_titles(writes)[-1]
-        assert latest.endswith(" lo-terminal-title")
+        assert latest.endswith(f" {cwd_label}")
         assert latest.split(" ")[1] in {"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
 
 
@@ -3786,15 +3788,17 @@ async def test_session_swap_clears_a_parked_approval_title(monkeypatch) -> None:
         app._stop_terminal_title()
         app._start_terminal_title()
         await pilot.pause()
+        assert app._status is not None
+        cwd_label = Path(app._status._cwd).name
         approval = ApprovalBlock("bash", "run a command")
         app._approval = approval
         app._refresh_working_activity()
         await pilot.pause()
-        assert _osc_titles(writes)[-1] == "lo ! lo-terminal-title"
+        assert _osc_titles(writes)[-1] == f"lo ! {cwd_label}"
 
         await app._reload_session()
         await pilot.pause()
-        assert _osc_titles(writes)[-1] == "lo › lo-terminal-title"
+        assert _osc_titles(writes)[-1] == f"lo › {cwd_label}"
 
 
 @pytest.mark.asyncio
