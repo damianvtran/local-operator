@@ -42,11 +42,7 @@ from local_operator.model.naming import model_label as model_label_forms
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.terminal_title import SPINNER_FRAMES as _SPINNER_FRAMES
 from local_operator.tui.terminal_title import SPINNER_INTERVAL_S as _SPINNER_INTERVAL_S
-from local_operator.tui.terminal_title import (
-    TerminalTitle,
-    TitleState,
-    cwd_label,
-)
+from local_operator.tui.terminal_title import TerminalTitle, TitleState, cwd_label
 from local_operator.tui.widgets.tool_card import format_duration, truncate_cells
 
 # Spinner frames and cadence live in ``terminal_title`` and are imported here
