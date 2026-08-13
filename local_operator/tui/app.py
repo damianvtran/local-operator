@@ -5470,14 +5470,21 @@ class OperatorApp(App[None]):
         title_note = Text()
         title_note.append("window title".ljust(name_width), style=muted)
         title_note.append(
-            "shows session state outside the app; disable with "
-            "`config set display.terminal_title false` or "
-            "`LOCAL_OPERATOR_NO_TERMINAL_TITLE=1`",
+            "shows session state outside the app; shell: "
+            "`lop config edit display.terminal_title false`",
+            style=dim,
+        )
+        title_note_more = Text()
+        title_note_more.append("".ljust(name_width), style=muted)
+        title_note_more.append(
+            "or set `LOCAL_OPERATOR_NO_TERMINAL_TITLE=1`; legend: "
+            "`lo ›` idle, `lo ⣾` running, `lo !` waiting for approval",
             style=dim,
         )
         if not lines or lines[-1].plain:
             lines.append(Text())
         lines.append(title_note)
+        lines.append(title_note_more)
         return RichBlock(Group(*lines))
 
     def _skills_block(self) -> RichBlock | None:

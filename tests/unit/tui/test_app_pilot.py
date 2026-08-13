@@ -2865,8 +2865,9 @@ def test_help_mentions_the_window_title_toggle() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     text = _renderable_plain(app._help_block().renderable)
     assert "window title" in text
-    assert "display.terminal_title" in text
+    assert "lop config edit display.terminal_title false" in text
     assert "LOCAL_OPERATOR_NO_TERMINAL_TITLE" in text
+    assert "lo ›" in text and "lo ⣾" in text and "lo !" in text
 
 
 @pytest.mark.asyncio
