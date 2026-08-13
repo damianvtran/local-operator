@@ -250,9 +250,12 @@ class TerminalTitle:
     def set_state(self, state: TitleState) -> None:
         """Move to ``idle``/``working``/``attention``.
 
-        Leaving ``working`` resets the frame so the next turn starts its
-        animation from the top rather than resuming a stale phase — a spinner
-        that begins mid-sequence looks like it never stopped.
+        Leaving ``working`` resets the local frame index, but the next title
+        paint is still brought back into phase with the status band's current
+        spinner frame by :meth:`set_frame`. That shared phase is the real
+        invariant: in a tiled terminal the band and the tab title can be on
+        screen together, and two working indicators stepping differently read
+        as two different jobs.
         """
         if state == self._state:
             return
