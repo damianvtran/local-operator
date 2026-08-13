@@ -900,10 +900,10 @@ class OperatorApp(App[None]):
 
         self._status = StatusLine(self.query_one("#status-band", Static))
         self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
-        # Attached AFTER the first `update`, so the title's opening paint
-        # already carries the working directory it falls back to while the
-        # conversation is unnamed. Attaching first would emit a bare `lo ›`
-        # that a sidebar shows for as long as the boot takes.
+        # Attached AFTER the first `update`, so the first STABLE title already
+        # carries the working directory it falls back to while the conversation
+        # is unnamed. Attaching first would leave a bare `lo ›` on screen for
+        # as long as the boot takes.
         self._start_terminal_title()
         # Straight after the band exists and before the session is asked for:
         # the saved mode has to be in force by the time the first tool can ask,
@@ -1322,6 +1322,12 @@ class OperatorApp(App[None]):
         # set, the NEW session's first write/exec approval queued behind a
         # question that is no longer on screen and nothing could answer it.
         self._approval = None
+        # The approval title state belongs to the dying session too. Left
+        # standing, a `/reload` or `/new` launched from a parked approval would
+        # retitle the fresh idle session as `lo ! …` — a false alarm naming a
+        # question that no longer exists. Re-derived through the same helper the
+        # prompt lifecycle uses so the working line and the title clear together.
+        self._refresh_working_activity()
         # Same argument, and a sharper failure. `_compacting` and the prompt it
         # holds belong to the session that just died, and their ONLY other
         # writer is `on_compaction_ended` — which can never run after this

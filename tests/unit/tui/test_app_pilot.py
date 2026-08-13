@@ -29,7 +29,8 @@ from local_operator.tui.app import (
     OperatorApp,
 )
 from local_operator.tui.autocomplete import ArgumentChoice
-from local_operator.tui.events import TurnEnded
+from local_operator.tui.events import TurnEnded, TurnStarted
+from local_operator.tui.widgets.approval import ApprovalBlock
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import ASIDE_PLACEHOLDER, Editor
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
@@ -3694,3 +3695,110 @@ async def test_the_aside_keeps_the_caret_because_it_keeps_the_composer() -> None
         assert [
             text for text, _, _ in cells if ASIDE_PLACEHOLDER in text
         ], f"the caret broke the aside's own placeholder up: {cells}"
+
+
+def _osc_titles(writes: Sequence[str]) -> list[str]:
+    """The OSC 0 title payloads, in order, deduped only by the caller.
+
+    Saved titles (`\x1b[22;2t`) and restores (`\x1b[23;2t`) are different
+    evidence and are asserted separately, so this helper extracts only the
+    "what would the tab title read" payloads.
+    """
+    out: list[str] = []
+    for data in writes:
+        if data.startswith("\x1b]0;") and data.endswith("\x07"):
+            out.append(data.removeprefix("\x1b]0;").removesuffix("\x07"))
+    return out
+
+
+def _spy_driver_writes(app: OperatorApp, writes: list[str]) -> None:
+    """Record the real driver's writes while still forwarding them.
+
+    Tests want the app-level contract (`_start_terminal_title` writes through
+    the driver and `on_unmount` restores through it), not a fake driver with a
+    growing list of Textual methods to impersonate.
+    """
+    assert app._driver is not None
+    original = app._driver.write
+
+    def spy(data: str) -> None:
+        writes.append(data)
+        original(data)
+
+    app._driver.write = spy  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_app_wires_the_terminal_title_to_boot_and_turn_state(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    """The app, not just the band, must prove the wiring works.
+
+    ``run_test`` uses Textual's headless driver, so `_start_terminal_title`
+    normally exits early and the app-level contract would otherwise go
+    unexercised: boot attaches a title writer, the writer sees the cwd fallback
+    on first stable paint, and a started turn flips it to the working state.
+    """
+    writes: list[str] = []
+    monkeypatch.setattr(OperatorApp, "is_headless", property(lambda self: False))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        _spy_driver_writes(app, writes)
+        app._stop_terminal_title()
+        app._start_terminal_title()
+        await pilot.pause()
+        titles = _osc_titles(writes)
+        assert "lo ›" in titles
+        assert "lo › lo-terminal-title" in titles
+
+        app.on_turn_started(TurnStarted())
+        await pilot.pause()
+        assert _osc_titles(writes)[-1].startswith("lo ⣾ lo-terminal-title")
+
+
+@pytest.mark.asyncio
+async def test_session_swap_clears_a_parked_approval_title(monkeypatch) -> None:  # noqa: ANN001
+    """A dead session must not leave `lo ! …` standing on the replacement.
+
+    This is the bug the review found: `_approval` was cleared during a session
+    swap, but the title's derived `attention` state was not, so `/reload` or
+    `/new` from a parked approval left the next idle session claiming it still
+    owed one.
+    """
+    writes: list[str] = []
+    monkeypatch.setattr(OperatorApp, "is_headless", property(lambda self: False))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        _spy_driver_writes(app, writes)
+        app._stop_terminal_title()
+        app._start_terminal_title()
+        await pilot.pause()
+        approval = ApprovalBlock("bash", "run a command")
+        app._approval = approval
+        app._refresh_working_activity()
+        await pilot.pause()
+        assert _osc_titles(writes)[-1] == "lo ! lo-terminal-title"
+
+        await app._reload_session()
+        await pilot.pause()
+        assert _osc_titles(writes)[-1] == "lo › lo-terminal-title"
+
+
+@pytest.mark.asyncio
+async def test_unmount_restores_the_terminals_own_title(monkeypatch) -> None:  # noqa: ANN001
+    """The app owns the terminal and therefore the restore.
+
+    Pinned here rather than in the pure title unit tests because the ordering is
+    app-level: `on_unmount` must restore before any awaited teardown can fail
+    and strand the shell under this session's title.
+    """
+    writes: list[str] = []
+    monkeypatch.setattr(OperatorApp, "is_headless", property(lambda self: False))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        _spy_driver_writes(app, writes)
+        app._stop_terminal_title()
+        app._start_terminal_title()
+        await pilot.pause()
+    assert "\x1b[22;2t" in writes
+    assert writes[-1] == "\x1b[23;2t"
