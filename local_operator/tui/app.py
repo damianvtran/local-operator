@@ -94,6 +94,7 @@ from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
 )
+from local_operator.tui.terminal_title import TerminalTitle, terminal_title_enabled
 from local_operator.tui.widgets.approval import ApprovalBlock
 from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
 from local_operator.tui.widgets.assistant import AssistantBlock
@@ -349,6 +350,13 @@ DOUBLE_INTERRUPT_WINDOW_S = 1.5
 #: fortnight ago is exactly the one worth searching for; low enough that
 #: opening it never costs more than a few dozen short transcript reads.
 RESUME_PICKER_LIMIT = 50
+
+#: The working line's PHASE while a turn is parked on a tool-approval prompt.
+#: A named constant because two surfaces now branch on it — the working line
+#: and the terminal title's `attention` state — and a phase compared against a
+#: string literal in one place and produced as one in another is a rename away
+#: from silently never matching.
+ACTIVITY_APPROVAL = "approval"
 
 #: Class the Screen carries while the session has no content. It selects the
 #: boot layout in the stylesheet (centred, clamped input card) and is flipped in
@@ -607,6 +615,11 @@ class OperatorApp(App[None]):
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
+        #: The window/tab title writer, or ``None`` when there is no terminal
+        #: to title (headless) or the user turned it off. Held by the app,
+        #: which owns the terminal, and lent to the band, which owns the state
+        #: it displays — see :meth:`_start_terminal_title`.
+        self._terminal_title: TerminalTitle | None = None
         self._streaming_block: AssistantBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
@@ -887,6 +900,11 @@ class OperatorApp(App[None]):
 
         self._status = StatusLine(self.query_one("#status-band", Static))
         self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
+        # Attached AFTER the first `update`, so the first STABLE title already
+        # carries the working directory it falls back to while the conversation
+        # is unnamed. Attaching first would leave a bare `lo ›` on screen for
+        # as long as the boot takes.
+        self._start_terminal_title()
         # Straight after the band exists and before the session is asked for:
         # the saved mode has to be in force by the time the first tool can ask,
         # and the band has to say so on the boot frame rather than on whichever
@@ -1304,6 +1322,12 @@ class OperatorApp(App[None]):
         # set, the NEW session's first write/exec approval queued behind a
         # question that is no longer on screen and nothing could answer it.
         self._approval = None
+        # The approval title state belongs to the dying session too. Left
+        # standing, a `/reload` or `/new` launched from a parked approval would
+        # retitle the fresh idle session as `lo ! …` — a false alarm naming a
+        # question that no longer exists. Re-derived through the same helper the
+        # prompt lifecycle uses so the working line and the title clear together.
+        self._refresh_working_activity()
         # Same argument, and a sharper failure. `_compacting` and the prompt it
         # holds belong to the session that just died, and their ONLY other
         # writer is `on_compaction_ended` — which can never run after this
@@ -2740,10 +2764,55 @@ class OperatorApp(App[None]):
         self.screen.set_class(visible, BOOT_LAYOUT_CLASS)
         self._sync_boot_layout()
 
+    def _start_terminal_title(self) -> None:
+        """Take over the window/tab title and hand it to the status band.
+
+        The sink is ``driver.write`` and not ``sys.stdout.write``, and that is
+        a correctness requirement rather than a preference: Textual serialises
+        every byte it paints through a writer thread, so a second writer
+        interleaves an OSC string into the middle of a frame's escape
+        sequences and corrupts it. ``driver.write`` is the same door Textual
+        itself uses for OSC 52 (``App.copy_to_clipboard``).
+
+        No driver means no terminal to title — the headless driver the test
+        pilot runs under discards writes anyway, but skipping the object
+        entirely keeps the save/restore pair off paths that have no terminal
+        state to restore.
+        """
+        driver = self._driver
+        if driver is None or self.is_headless or not terminal_title_enabled():
+            return
+        title = TerminalTitle(driver.write)
+        self._terminal_title = title
+        if self._status is not None:
+            # Attach BEFORE `start()`, so the first emitted title already has
+            # the band's cwd/name/state rather than briefly flashing bare `lo ›`.
+            self._status.set_terminal_title(title)
+        title.start()
+
+    def _stop_terminal_title(self) -> None:
+        """Give the terminal its own title back (idempotent).
+
+        Owned by the app rather than by the band because it is part of handing
+        the terminal back, and it has to happen on every exit path — including
+        one where the band was never built.
+        """
+        if self._terminal_title is None:
+            return
+        if self._status is not None:
+            self._status.set_terminal_title(None)
+        self._terminal_title.stop()
+        self._terminal_title = None
+
     async def on_unmount(self) -> None:
         # Before disposing the session: dispose awaits teardown, and a turn
         # parked on an unanswered approval would never reach it.
         self._deny_queued_approvals()
+        # First, and synchronously: the restore is one write on a driver that
+        # is still up, and everything below it can await. An exception in
+        # session teardown would otherwise leave the user's shell wearing this
+        # session's title.
+        self._stop_terminal_title()
         if self._status is not None:
             self._status.dispose()
         if self._controller is not None:
@@ -5398,6 +5467,24 @@ class OperatorApp(App[None]):
             footer.append(str(log_file), style=dim)
             lines.append(Text())
             lines.append(footer)
+        title_note = Text()
+        title_note.append("window title".ljust(name_width), style=muted)
+        title_note.append(
+            "shows session state outside the app; shell: "
+            "`lop config edit display.terminal_title false`",
+            style=dim,
+        )
+        title_note_more = Text()
+        title_note_more.append("".ljust(name_width), style=muted)
+        title_note_more.append(
+            "or set `LOCAL_OPERATOR_NO_TERMINAL_TITLE=1`; legend: "
+            "`lo ›` idle, `lo ⣾` running, `lo !` waiting for approval",
+            style=dim,
+        )
+        if not lines or lines[-1].plain:
+            lines.append(Text())
+        lines.append(title_note)
+        lines.append(title_note_more)
         return RichBlock(Group(*lines))
 
     def _skills_block(self) -> RichBlock | None:
@@ -5581,9 +5668,24 @@ class OperatorApp(App[None]):
         self._working_fallback = DEFAULT_ACTIVITY
 
     def _refresh_working_activity(self) -> None:
-        """Re-derive what the working line says after the turn's state moved."""
+        """Re-derive what the working line says after the turn's state moved.
+
+        Also re-derives the terminal title's ``attention`` state, from the SAME
+        phase, because they answer the same question one surface apart: the
+        working line tells a user who is looking at this session that it is
+        parked on them, and the title tells a user who is looking at a sidebar
+        of five. Deriving both here rather than latching attention at the
+        approval call sites is what keeps them from disagreeing — the working
+        line was written that way for the identical reason (see
+        :meth:`_current_activity`), and an approval settled by ``/clear`` or by
+        a stop reaches this hook without either of those paths knowing a title
+        exists.
+        """
+        label, phase = self._current_activity()
         if self._working_block is not None:
-            self._working_block.set_activity(*self._current_activity())
+            self._working_block.set_activity(label, phase)
+        if self._status is not None:
+            self._status.set_attention(phase == ACTIVITY_APPROVAL)
 
     def _current_activity(self) -> tuple[str, str]:
         """What the agent is doing right now: ``(label, phase)``.
@@ -5611,7 +5713,7 @@ class OperatorApp(App[None]):
             # Nothing is running: the turn is parked on the question on screen,
             # and "thinking" under an unanswered prompt blames the model for a
             # wait that belongs to the user.
-            return ("waiting for approval", "approval")
+            return ("waiting for approval", ACTIVITY_APPROVAL)
         if self._tool_cards:
             return (self._batch_phrase(list(self._tool_cards.values())), "running")
         if self._composing_cards:
