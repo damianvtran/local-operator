@@ -40,12 +40,17 @@ from textual.widgets import Static
 
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.terminal_title import SPINNER_FRAMES as _SPINNER_FRAMES
+from local_operator.tui.terminal_title import SPINNER_INTERVAL_S as _SPINNER_INTERVAL_S
+from local_operator.tui.terminal_title import TerminalTitle, TitleState, cwd_label
 from local_operator.tui.widgets.tool_card import format_duration, truncate_cells
 
-#: Spinner frames shown while the session is streaming (~12.5 fps glyph
-#: cadence when shimmer is disabled).
-_SPINNER_FRAMES = ("⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷")
-_SPINNER_INTERVAL_S = 0.08
+# Spinner frames and cadence live in ``terminal_title`` and are imported here
+# rather than declared twice. The band's spinner and the terminal title's
+# animated separator report the SAME fact, and in a tiled terminal both are on
+# screen at once — two braille sequences stepping at two cadences read as two
+# things happening. Aliased to the module-private names the band has always
+# used so the ladder's arithmetic and the tests keep their vocabulary.
 
 #: Segment icons. Every one is a SINGLE cell in ``rich.cells.cell_len`` — this
 #: is a hard requirement, not a preference: the band's whole layout is measured
@@ -671,6 +676,10 @@ class StatusLine:
         # session-wide mode with no persistent indicator is how a disarmed gate
         # gets forgotten about.
         self._approvals_auto: bool = False
+        # True while the turn is parked on something the USER owes (currently
+        # the tool-approval prompt). Only the terminal title reads it; see
+        # :meth:`set_attention` for why it is not inferred from `_streaming`.
+        self._attention: bool = False
         # And whether that mode is the SAVED default rather than this session's
         # choice. Two different promises — "until I close this window" and
         # "every window from now on" — and the alarm is the only place a user
@@ -687,6 +696,81 @@ class StatusLine:
         #: The child's readings, shadowing the session's own while the
         #: full-page subagent view is up. ``None`` is the ordinary band.
         self._subagent: SubagentBand | None = None
+        #: The window/tab title, driven from the band rather than from the app
+        #: because the band is ALREADY the one object that knows all three
+        #: inputs — the conversation name, whether a turn is streaming, and
+        #: which spinner frame is current. Wiring the title from the app would
+        #: mean a second subscription to the same three facts, and the failure
+        #: mode of two subscriptions is the one this feature is about: a title
+        #: still spinning after the band has gone idle. ``None`` until the app
+        #: attaches one, which keeps the band usable by the lightweight test
+        #: hosts that have no terminal to write to.
+        self._title: TerminalTitle | None = None
+
+    def set_terminal_title(self, title: TerminalTitle | None) -> None:
+        """Attach (or detach) the window-title writer and paint it once.
+
+        Called by the app once the driver exists. The immediate sync matters:
+        the band is constructed and updated with the model and cwd BEFORE the
+        session is awaited, so without it the title would stay blank for the
+        whole of a slow boot — which is exactly when a user is most likely to
+        be looking at a sidebar full of starting sessions.
+        """
+        self._title = title
+        self._sync_terminal_title()
+
+    def _title_state(self) -> TitleState:
+        """The run state the title should show.
+
+        Only two of the three states are derivable here: ``attention`` is the
+        app's to declare (it owns the approval prompt), and it is applied by
+        :meth:`set_attention` rather than inferred, because the band has no
+        way to distinguish "streaming, working" from "streaming, parked on a
+        question" — the session is streaming in both.
+        """
+        if self._attention:
+            return "attention"
+        return "working" if self._streaming else "idle"
+
+    def set_attention(self, attention: bool) -> None:
+        """Whether the turn is parked on something the USER owes.
+
+        Currently the tool-approval prompt. Kept separate from ``streaming``
+        because it outranks it: a turn waiting on an approval is technically
+        streaming, and a session that shows a spinner while it is actually
+        blocked on the user is precisely the session the user never comes back
+        to. The band itself does not change — the transcript's approval card
+        is unmissable once you are looking at it, and the whole point of the
+        title is the case where you are not.
+        """
+        if attention == self._attention:
+            return
+        self._attention = attention
+        self._sync_terminal_title()
+
+    def _sync_terminal_title(self) -> None:
+        """Push the band's current name/state/frame at the title writer.
+
+        Cheap to call from anywhere: every setter on ``TerminalTitle``
+        early-returns on an unchanged value, and the writer coalesces on the
+        rendered string, so a redundant sync costs three comparisons and
+        writes nothing.
+        """
+        title = self._title
+        if title is None:
+            return
+        # The SUBAGENT's name wins while its page is up, matching the band
+        # beneath it: everything on screen is the child's, and a title naming
+        # the parent would be the one contradicting label in the frame.
+        label = self._subagent.label if self._subagent is not None else self._conversation_name
+        # Unnamed conversations fall back to the working directory, which is
+        # every session for its first minute or two: naming is a detached call
+        # made off the first substantive prompt. A sidebar row reading `lo ›`
+        # five times over is the exact failure this feature exists to fix, and
+        # the directory is what the user opened the session for.
+        title.set_label(label or cwd_label(self._cwd))
+        title.set_state(self._title_state())
+        title.set_frame(self._spinner_index)
 
     @property
     def context_tokens(self) -> int:
@@ -782,6 +866,16 @@ class StatusLine:
         """
         width = max(self._dock.size.width, 10)
         self._dock.update(self._render(width), layout=False)
+        # The window title rides the band's repaint rather than having its own
+        # hook on each of the seven call sites that change a title input
+        # (`update`, `set_subagent`, the spinner tick, …). One hook cannot be
+        # forgotten by the eighth, and the two indicators are then updated by
+        # construction on the same frame — the band saying "idle" while the tab
+        # still spins is the specific incoherence this feature would otherwise
+        # introduce. It is free when nothing changed: the writer coalesces on
+        # the rendered string, so the 12.5 Hz spinner is the only thing here
+        # that reaches the terminal, and only while a turn is live.
+        self._sync_terminal_title()
 
     def is_showing(self, segment: str) -> bool:
         """Whether ``segment`` survived the drop ladder on the last render.
@@ -795,7 +889,14 @@ class StatusLine:
         return segment not in self._dropped
 
     def dispose(self) -> None:
-        """Stop the spinner timer (idempotent)."""
+        """Stop the spinner timer (idempotent).
+
+        Deliberately does NOT stop the terminal title: the band borrows the
+        writer, the app owns it. Restoring the terminal's own title is part of
+        handing the terminal back, which is the app's job and has to happen
+        exactly once even on the paths that never built a band (a boot that
+        failed before ``on_mount`` finished).
+        """
         self._stop_spinner()
 
     # -- duration ------------------------------------------------------------
@@ -808,6 +909,12 @@ class StatusLine:
         """
         if streaming:
             self._turn_started_at = self._clock()
+            # A new turn's first working frame is frame 0, by contract on both
+            # the band and the title. Without resetting here the spinner resumed
+            # from whichever frame the last turn happened to stop on, and the
+            # title tests' "starts from the top" claim was true only for the
+            # pure state holder and false for the real wiring through the band.
+            self._spinner_index = 0
         elif self._turn_started_at is not None:
             self._active_seconds += self._clock() - self._turn_started_at
             self._turn_started_at = None
