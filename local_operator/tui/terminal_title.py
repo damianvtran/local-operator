@@ -94,12 +94,19 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f-\x9f]")
 #: on its own terms. No switcher shows this many cells anyway.
 MAX_LABEL_CHARS = 80
 
-#: Save/restore the terminal's own title using xterm window operations, so a
-#: shell prompt that set the tab title gets it back when the app exits.
-#: Terminals that do not implement window ops ignore both, which is the
-#: reason this is preferred to reading the title back and replaying it.
-PUSH_TITLE = "\x1b[22;2t"
-POP_TITLE = "\x1b[23;2t"
+#: Save/restore BOTH the icon name and the window title using xterm window
+#: operations, matching :func:`osc_title`, which deliberately sets both via
+#: OSC 0 so tab bars / multiplexers that read the icon channel see the same
+#: session label. ``22;2t``/``23;2t`` would cover only the window title and
+#: could therefore leave a pane/tab label stranded as `lo …` after exit even
+#: though the restore ran. ``0`` is the "both channels" subcode.
+#:
+#: Terminals that do not implement these window ops ignore them, which is still
+#: preferable to trying to read the current title back and replay it — there is
+#: no portable readback path, and an attempted restore guessed from nowhere is
+#: worse than an ignored save/restore pair.
+PUSH_TITLE = "\x1b[22;0t"
+POP_TITLE = "\x1b[23;0t"
 
 TitleState = Literal["idle", "working", "attention"]
 
