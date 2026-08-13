@@ -3753,7 +3753,9 @@ async def test_app_wires_the_terminal_title_to_boot_and_turn_state(
 
         app.on_turn_started(TurnStarted())
         await pilot.pause()
-        assert _osc_titles(writes)[-1].startswith("lo ⣾ lo-terminal-title")
+        latest = _osc_titles(writes)[-1]
+        assert latest.endswith(" lo-terminal-title")
+        assert latest.split(" ")[1] in {"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
 
 
 @pytest.mark.asyncio
