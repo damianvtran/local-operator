@@ -3758,8 +3758,8 @@ async def test_app_wires_the_terminal_title_to_boot_and_turn_state(
         app._start_terminal_title()
         await pilot.pause()
         titles = _osc_titles(writes)
-        assert "lo ›" in titles
-        assert "lo › lo-terminal-title" in titles
+        assert titles[-1] == "lo › lo-terminal-title"
+        assert "lo ›" not in titles
 
         app.on_turn_started(TurnStarted())
         await pilot.pause()
