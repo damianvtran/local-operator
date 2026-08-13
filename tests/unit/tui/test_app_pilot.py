@@ -3739,9 +3739,23 @@ def _spy_driver_writes(app: OperatorApp, writes: list[str]) -> None:
     app._driver.write = spy  # type: ignore[method-assign]
 
 
+def _isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    """Point display-setting reads at a disposable config dir for one test.
+
+    The title path consults `display.terminal_title`, and these tests are about
+    app wiring, not the developer's personal config. Using the shared config-dir
+    override exercises the real setting path while guaranteeing the test can
+    neither vary with nor create anything in `~/.local-operator`.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "lo-config"))
+    from local_operator.tui.settings import settings_reload
+
+    settings_reload()
+
+
 @pytest.mark.asyncio
 async def test_app_wires_the_terminal_title_to_boot_and_turn_state(
-    monkeypatch,
+    monkeypatch, tmp_path: Path
 ) -> None:  # noqa: ANN001
     """The app, not just the band, must prove the wiring works.
 
@@ -3751,6 +3765,7 @@ async def test_app_wires_the_terminal_title_to_boot_and_turn_state(
     on first stable paint, and a started turn flips it to the working state.
     """
     writes: list[str] = []
+    _isolate_tui_settings(monkeypatch, tmp_path)
     monkeypatch.setattr(OperatorApp, "is_headless", property(lambda self: False))
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -3772,7 +3787,9 @@ async def test_app_wires_the_terminal_title_to_boot_and_turn_state(
 
 
 @pytest.mark.asyncio
-async def test_session_swap_clears_a_parked_approval_title(monkeypatch) -> None:  # noqa: ANN001
+async def test_session_swap_clears_a_parked_approval_title(
+    monkeypatch, tmp_path: Path
+) -> None:  # noqa: ANN001
     """A dead session must not leave `lo ! …` standing on the replacement.
 
     This is the bug the review found: `_approval` was cleared during a session
@@ -3781,6 +3798,7 @@ async def test_session_swap_clears_a_parked_approval_title(monkeypatch) -> None:
     owed one.
     """
     writes: list[str] = []
+    _isolate_tui_settings(monkeypatch, tmp_path)
     monkeypatch.setattr(OperatorApp, "is_headless", property(lambda self: False))
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -3802,7 +3820,9 @@ async def test_session_swap_clears_a_parked_approval_title(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unmount_restores_the_terminals_own_title(monkeypatch) -> None:  # noqa: ANN001
+async def test_unmount_restores_the_terminals_own_title(
+    monkeypatch, tmp_path: Path
+) -> None:  # noqa: ANN001
     """The app owns the terminal and therefore the restore.
 
     Pinned here rather than in the pure title unit tests because the ordering is
@@ -3810,6 +3830,7 @@ async def test_unmount_restores_the_terminals_own_title(monkeypatch) -> None:  #
     and strand the shell under this session's title.
     """
     writes: list[str] = []
+    _isolate_tui_settings(monkeypatch, tmp_path)
     monkeypatch.setattr(OperatorApp, "is_headless", property(lambda self: False))
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:

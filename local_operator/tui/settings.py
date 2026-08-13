@@ -1,8 +1,8 @@
-"""TUI display settings — a thin read-only view of ``~/.local-operator/config.yml``.
+"""TUI display settings — a thin read-only view of ``config_dir()/config.yml``.
 
 Display flags (``display.*`` keys in ``values``) are read lazily and cached
 per process; a missing or unreadable config never breaks the TUI — every
-lookup falls back to its default. Writes stay in the CLI's ``config set``
+lookup falls back to its default. Writes stay in the CLI's ``config edit``
 surface; the TUI only reads.
 """
 
@@ -14,7 +14,7 @@ from typing import Any
 _DEFAULTS: dict[str, Any] = {
     "display.shimmer": True,
     # Nerd Font glyphs on tool rows. Defaults ON because the audience runs
-    # patched fonts, and OFF is one `config set` (or the env kill switch in
+    # patched fonts, and OFF is one `config edit` (or the env kill switch in
     # `tui/glyphs.py`) away for a terminal that would draw them as boxes.
     "display.nerd_icons": True,
     # The OSC 0 window/tab title carrying the session name and run state
@@ -31,11 +31,10 @@ def _load() -> dict[str, Any]:
     """Read ``values`` once; any failure yields pure defaults."""
     values: dict[str, Any] = {}
     try:
-        from pathlib import Path
-
         from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
 
-        manager = ConfigManager(Path.home() / ".local-operator")
+        manager = ConfigManager(config_dir())
         values = dict(manager.get_config().values)
     except Exception:
         values = {}
