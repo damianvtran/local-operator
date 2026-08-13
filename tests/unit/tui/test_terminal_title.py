@@ -294,6 +294,23 @@ def test_the_titles_spinner_steps_with_the_bands() -> None:
     assert sink.titles[-1] == f"{BRAND} {SPINNER_FRAMES[2]} Fix quota reporting"
 
 
+def test_a_new_turn_restarts_the_title_spinner_from_frame_zero() -> None:
+    """Streaming → idle → streaming must not flash the old turn's last frame.
+
+    This is the real wiring path, not the pure ``TerminalTitle`` test: the band
+    keeps its own spinner index and pushes it into the title on every refresh,
+    which is where the stale-frame flash lived.
+    """
+    status, sink, _ = _banded()
+    status.update(conversation_name="Fix quota reporting", streaming=True)
+    status._advance_spinner()
+    status._advance_spinner()
+    assert sink.titles[-1] == f"{BRAND} {SPINNER_FRAMES[2]} Fix quota reporting"
+    status.update(streaming=False)
+    status.update(streaming=True)
+    assert sink.titles[-1] == f"{BRAND} {SPINNER_FRAMES[0]} Fix quota reporting"
+
+
 def test_attention_outranks_streaming() -> None:
     """A turn parked on an approval IS streaming; showing it as working is how
     a session the user needs to answer gets left alone."""

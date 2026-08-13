@@ -269,13 +269,21 @@ class TerminalTitle:
 
         Takes the band's own frame index, so the two spinners step together
         instead of drifting apart on two independent clocks.
+
+        The "ignored outside working" part is load-bearing. The status band
+        keeps syncing its spinner index after a turn ends, and storing those
+        idle indices here let the NEXT turn's first `set_state("working")`
+        emit a stale frame before the band had a chance to push frame 0. That
+        produced a visible one-tick flash in the title (`⣻` then `⣾`) on a
+        fresh turn — exactly the broken restart the band reset exists to avoid.
         """
+        if self._state != "working":
+            return
         frame %= len(SPINNER_FRAMES)
         if frame == self._frame:
             return
         self._frame = frame
-        if self._state == "working":
-            self.emit()
+        self.emit()
 
     def emit(self) -> None:
         """Write the current title unless it is already on screen.

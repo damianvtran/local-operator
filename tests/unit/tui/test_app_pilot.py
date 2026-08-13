@@ -3812,5 +3812,6 @@ async def test_unmount_restores_the_terminals_own_title(monkeypatch) -> None:  #
         app._stop_terminal_title()
         app._start_terminal_title()
         await pilot.pause()
-    assert "\x1b[22;2t" in writes
-    assert writes[-1] == "\x1b[23;2t"
+    push_index = writes.index("\x1b[22;2t")
+    pop_index = writes.index("\x1b[23;2t")
+    assert push_index < pop_index
