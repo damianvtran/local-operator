@@ -909,6 +909,12 @@ class StatusLine:
         """
         if streaming:
             self._turn_started_at = self._clock()
+            # A new turn's first working frame is frame 0, by contract on both
+            # the band and the title. Without resetting here the spinner resumed
+            # from whichever frame the last turn happened to stop on, and the
+            # title tests' "starts from the top" claim was true only for the
+            # pure state holder and false for the real wiring through the band.
+            self._spinner_index = 0
         elif self._turn_started_at is not None:
             self._active_seconds += self._clock() - self._turn_started_at
             self._turn_started_at = None

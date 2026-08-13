@@ -2783,10 +2783,12 @@ class OperatorApp(App[None]):
         if driver is None or self.is_headless or not terminal_title_enabled():
             return
         title = TerminalTitle(driver.write)
-        title.start()
         self._terminal_title = title
         if self._status is not None:
+            # Attach BEFORE `start()`, so the first emitted title already has
+            # the band's cwd/name/state rather than briefly flashing bare `lo ›`.
             self._status.set_terminal_title(title)
+        title.start()
 
     def _stop_terminal_title(self) -> None:
         """Give the terminal its own title back (idempotent).
