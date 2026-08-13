@@ -425,12 +425,17 @@ class ProviderController:
             connected = usable is None or definition.id in usable
             api_key: str | None = None
             is_oauth = False
+            account_id: str | None = None
             if connected:
                 try:
-                    api_key, is_oauth = await self._listing_credential(definition.id)
+                    api_key, is_oauth, account_id = await self._listing_credential(definition.id)
                 except Exception:  # noqa: BLE001 — one provider's auth is not fatal
-                    api_key, is_oauth = None, False
-            kwargs: dict[str, Any] = {"api_key": api_key, "is_oauth": is_oauth}
+                    api_key, is_oauth, account_id = None, False, None
+            kwargs: dict[str, Any] = {
+                "api_key": api_key,
+                "is_oauth": is_oauth,
+                "account_id": account_id,
+            }
             if ttl_s is not None:
                 kwargs["ttl_s"] = ttl_s
             # Off the event loop: discovery is synchronous httpx by design (it is
@@ -453,21 +458,19 @@ class ProviderController:
                 )
         return entries, statuses
 
-    async def _listing_credential(self, provider: str) -> tuple[str | None, bool]:
-        """``(secret, is_oauth)`` for a model LISTING call.
+    async def _listing_credential(self, provider: str) -> tuple[str | None, bool, str | None]:
+        """``(secret, is_oauth, account_id)`` for a model listing call.
 
-        Separate from the usage path because the two want different things from the
-        same store: usage needs a billing key and gives up without one, while a
-        listing is happy with either an OAuth access token or an API key and is
-        worth attempting with whichever exists. The OAuth branch is reported as
-        such because Anthropic switches header shape on it — `x-api-key` for keys,
-        `Authorization: Bearer` for tokens — and sending the wrong one is a 401.
+        The account id is part of OpenAI's ChatGPT authorization boundary; the
+        current Codex catalogue rejects a subscription token without it. Other
+        providers ignore the value, while ``is_oauth`` still selects Anthropic's
+        bearer header instead of its API-key header.
         """
         access = await self.auth_store.get_oauth_access(provider)
         if access is not None and access.kind == "oauth" and access.access_token:
-            return access.access_token, True
+            return access.access_token, True, access.account_id or access.org_id
         if access is not None and access.access_token:
-            return access.access_token, False
+            return access.access_token, False, None
         try:
             stored = await self.auth_store.get_api_key(provider)
         except Exception:  # noqa: BLE001 — a refresh failure just means no listing
@@ -475,7 +478,7 @@ class ProviderController:
         # The environment is the last tier of the same cascade the stream uses, so
         # a key set there has to reach the listing too: otherwise the provider a
         # session is ACTUALLY RUNNING ON is the one whose catalogue stays empty.
-        return stored or resolve_env_key(provider), False
+        return stored or resolve_env_key(provider), False, None
 
     async def _fetch_one(
         self,

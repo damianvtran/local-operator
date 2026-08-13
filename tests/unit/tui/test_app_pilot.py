@@ -2263,6 +2263,77 @@ async def test_a_hidden_model_is_still_reachable_by_typing_its_selector() -> Non
     assert "anthropic needs login — /login anthropic" in text, text
 
 
+class _OpenAILiveController(_AccessController):
+    """Logged into OpenAI with the account-scoped Codex catalogue, not the
+    shipped gpt-4o/o3 registry. That is the ChatGPT OAuth path: the public
+    ``/v1/models`` 403s a subscription token, so gpt-5.6 only exists here."""
+
+    def __init__(self) -> None:
+        super().__init__(stored=("openai",))
+
+    def login_providers(self):
+        return [
+            _FakeDef("openai", "OpenAI", None, ("gpt",)),
+            _FakeDef("anthropic", "Anthropic", None, ("claude",)),
+        ]
+
+    def static_catalogue(self):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="openai",
+                model_id="gpt-4o",
+                label="GPT-4o",
+                context_window=128_000,
+                input_price=2.5,
+                output_price=10.0,
+                connected=True,
+            )
+        ]
+
+    async def live_catalogue(self, *, ttl_s=None):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="openai",
+                model_id=model_id,
+                label=label,
+                context_window=272_000,
+                input_price=0.0,
+                output_price=0.0,
+                connected=True,
+            )
+            for model_id, label in (
+                ("gpt-5.6-sol", "GPT-5.6-Sol"),
+                ("gpt-5.6-terra", "GPT-5.6-Terra"),
+                ("gpt-5.6-luna", "GPT-5.6-Luna"),
+                ("gpt-5.5", "GPT-5.5"),
+            )
+        ], {"openai": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_oauth_offers_the_live_gpt_5_family() -> None:
+    """The reported `/model gpt-5.6` miss. A ChatGPT login whose live
+    catalogue is the Codex list must surface those slugs, not the shipped
+    gpt-4o/o3 registry that the public API would have left behind."""
+    ctrl = _OpenAILiveController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        editor = app.query_one(Editor)
+        editor.text = "/model gpt-5.6"
+        await pilot.pause()
+        offered = {row.model_id for row in picker.suggestions()}
+        chrome = picker.render_text(90).plain
+    assert {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} <= offered, offered
+    assert "gpt-4o" not in offered
+    assert "no matching models" not in chrome
+
+
 @pytest.mark.asyncio
 async def test_a_failed_credential_check_is_reported_as_itself() -> None:
     """Neither a confirmation the app cannot make nor the old blanket warning: the

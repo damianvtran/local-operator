@@ -235,6 +235,24 @@ class TestUsageIsPerAccount:
         assert calls == 1
 
 
+@pytest.mark.asyncio
+async def test_openai_listing_credential_carries_the_chatgpt_account_scope(
+    controller, store
+) -> None:
+    store.oauth["openai"] = types.SimpleNamespace(
+        kind="oauth",
+        access_token="chatgpt-token",
+        account_id="acct-42",
+        org_id=None,
+    )
+
+    assert await controller._listing_credential("openai") == (
+        "chatgpt-token",
+        True,
+        "acct-42",
+    )
+
+
 def test_usage_enabled_provider_ids(controller) -> None:
     ids = controller.usage_enabled_providers()
     assert "openrouter" in ids
