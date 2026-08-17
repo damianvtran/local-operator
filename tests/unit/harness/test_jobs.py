@@ -8,6 +8,7 @@ import asyncio
 import pytest
 
 from local_operator.harness.jobs import (
+    CANCELLED_BEFORE_START,
     DEFAULT_MAX_RUNNING_JOBS,
     AsyncJob,
     AsyncJobManager,
@@ -100,6 +101,120 @@ async def test_start_queued_promotes_and_runs():
     assert manager.start_queued(job_id) is False  # already promoted
     await wait_for(lambda: require_job(manager, job_id).status == "completed")
     assert started == [job_id]
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_parked_job_clears_its_queued_flag_and_runner():
+    """``queued`` means "waiting for a slot", and a cancelled job waits for
+    nothing.
+
+    Left set, every reader that branches on the flag reported the job as
+    pending: the subagent panel painted ``⏳ queued`` on a row whose status was
+    ``cancelled``, which reads as work about to start rather than work that
+    was stopped. The parked runner is dropped with it — ``start_queued``
+    refuses a non-running job, so the entry could never run again and only
+    pinned its closure (prompt, parent session, model spec) for the life of
+    the manager.
+    """
+    manager = AsyncJobManager(max_running=1)
+    gate = asyncio.Event()
+
+    async def blocked(job_id, signal, report_progress):
+        await gate.wait()
+        return "ok"
+
+    running = manager.register("task", "running", blocked)
+    parked = manager.register("task", "parked", blocked, queued=manager.at_capacity())
+    assert require_job(manager, parked).queued is True
+
+    assert await manager.cancel(parked) is True
+    job = require_job(manager, parked)
+    assert job.status == "cancelled"
+    assert job.queued is False, "a cancelled job is not waiting for a slot"
+    # The runner is gone, so nothing can promote it and nothing pins its closure.
+    assert parked not in manager._queued_runners
+    # The surviving running job still holds the manager's only slot: clearing
+    # a cancelled row's ``queued`` must not free or double-count one.
+    # (``queued_ids() == []`` was asserted here and could not fail — it filters
+    # on ``status == "running"``, which a cancelled row never is.)
+    assert manager.at_capacity() is True
+
+    gate.set()
+    await wait_for(lambda: require_job(manager, running).status == "completed")
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_job_that_never_ran_records_that_it_never_ran():
+    """Cancelling erases the record that the job never started, and every
+    surface then presents its WAITING time as work time.
+
+    Both the panel row and the full-page view measure ``settled_at -
+    start_time``, which for a job that never began is how long it sat — printed
+    in the column where every other row's number is time a child spent working.
+    A child that ran 0 s and spent $0 rendered ``⊘ 1m36s`` with no word beside
+    it, which reads as a run somebody killed a minute and a half in.
+
+    Three states reach ``cancel`` without the runner ever being entered, and
+    ``queued`` only identifies one of them. The ADMITTED-but-not-yet-entered
+    job is the state that motivated this fix at all: the observed ledger had
+    ``at_capacity: False`` with nothing parked, so a stamp keyed on ``queued``
+    would have labelled none of those rows.
+    """
+    manager = AsyncJobManager(max_running=1)
+    gate = asyncio.Event()
+
+    async def blocked(job_id, signal, report_progress):
+        await gate.wait()
+        return "ok"
+
+    running = manager.register("task", "running", blocked)
+    parked = manager.register("task", "parked", blocked, queued=manager.at_capacity())
+    # `register` only SCHEDULES the runner, so the yield is what makes
+    # `running` a job that genuinely started — and what stops its coroutine
+    # being abandoned un-awaited when `cancel` kills the task.
+    await asyncio.sleep(0)
+    assert require_job(manager, running).started_at is not None
+    assert require_job(manager, parked).started_at is None
+
+    assert await manager.cancel(parked) is True
+    assert require_job(manager, parked).result_text == CANCELLED_BEFORE_START
+
+    # A job whose runner DID begin owns this field — it may be mid-flight in it
+    # — so a genuinely running job is never stamped.
+    assert await manager.cancel(running) is True
+    assert require_job(manager, running).result_text is None
+
+    gate.set()
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_admitted_job_cancelled_before_it_ran_is_not_called_a_run():
+    """The state this fix exists for, and the one ``queued`` does not identify.
+
+    ``register`` calls ``ensure_future``, which SCHEDULES the runner without
+    entering it, so between registration and the parent's next await the job is
+    admitted, counted against capacity, ``queued=False``, and has not executed a
+    line. Cancelled there it did no work, and a stamp keyed on ``queued`` left
+    it reading ``⊘ cancelled · 1m36s`` — the exact failure the parked case was
+    fixed for, on the row the original incident actually produced.
+    """
+    manager = AsyncJobManager(max_running=15)
+
+    async def never_reached(job_id, signal, report_progress):
+        return "ok"
+
+    admitted = manager.register("task", "admitted", never_reached)
+    job = require_job(manager, admitted)
+    # No yield: the runner is scheduled and has not been entered.
+    assert job.queued is False, "premise: this job is admitted, not parked"
+    assert job.started_at is None, "premise: its runner has not begun"
+
+    assert await manager.cancel(admitted) is True
+    assert job.result_text == CANCELLED_BEFORE_START
+
     await manager.dispose()
 
 

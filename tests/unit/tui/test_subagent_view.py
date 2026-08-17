@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from rich.cells import cell_len
 
+from local_operator.harness.jobs import CANCELLED_BEFORE_START
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
@@ -379,6 +380,99 @@ async def test_a_swept_job_says_so_instead_of_claiming_to_be_running() -> None:
         assert rows[0] == "Subagent · sub-gone  no longer on the ledger"
         assert GLYPH_DONE not in rows[0]
         assert LEDGER_GONE_NOTE in " ".join(rows)
+
+
+@pytest.mark.asyncio
+async def test_the_title_says_a_cancelled_child_never_ran() -> None:
+    """``⊘ cancelled · 1m36s`` presents waiting time as work time.
+
+    A job cancelled before its runner was entered ran for zero seconds and
+    spent nothing; its duration is how long it WAITED. Beside a page whose
+    sibling rows read ``⣷ running · 7m53s``, the bare word paired with that
+    number says an operator killed a child a minute and a half into its work.
+    The manager records the distinction on the row
+    (``CANCELLED_BEFORE_START``, keyed on ``started_at``) and the title spends
+    it.
+    """
+    parked = _Job("sub-parked", "flaky test bisect", status="cancelled")
+    parked.settled_at = parked.start_time + 96.0
+    parked.result_text = CANCELLED_BEFORE_START
+    mid_run = _Job("sub-midrun", "docs sweep agent", status="cancelled")
+    mid_run.settled_at = mid_run.start_time + 96.0
+    # Representational, not load-bearing: the view reads ``result_text``, but
+    # this row's premise is "its runner began", and ``started_at`` is the fact
+    # that says so on a real job — left unset, the row encodes the OPPOSITE.
+    mid_run.started_at = mid_run.start_time
+    session = FakeSession()
+    session.jobs = _fake_jobs(parked, mid_run)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, parked)
+        title = view.rendered_rows()[0]
+        assert CANCELLED_BEFORE_START in title, title
+        # A child whose runner DID begin keeps the bare word: it worked, and
+        # that duration is work time. ``started_at`` (set above) is what
+        # separates it from the parked row — ``queued`` would not, since an
+        # admitted-but-never-entered job is not parked either.
+        app._open_subagent_view("sub-midrun")
+        await pilot.pause()
+        title = view.rendered_rows()[0]
+        assert "cancelled" in title
+        assert CANCELLED_BEFORE_START not in title, title
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_title_shortens_the_state_word_before_losing_it() -> None:
+    """The phrase is 27 cells where the bare word is 9, and a single-rung
+    ladder dropped the state ENTIRELY at the widths between the two.
+
+    At those widths the page showed a glyph and a duration with no word on
+    screen — for the one state whose whole point is being said. The state is
+    shortened before it is dropped, so it is the last thing to go, not the
+    first.
+    """
+    parked = _Job("sub-parked", "flaky test bisect", status="cancelled")
+    parked.settled_at = parked.start_time + 96.0
+    parked.result_text = CANCELLED_BEFORE_START
+    session = FakeSession()
+    session.jobs = _fake_jobs(parked)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(48, 24)) as pilot:
+        view = await _open(pilot, app, parked)
+        title = view.rendered_rows()[0]
+
+    assert "cancelled" in title, title
+    assert CANCELLED_BEFORE_START not in title, "premise: too narrow for the phrase"
+
+
+@pytest.mark.asyncio
+async def test_the_title_never_loses_its_state_as_it_widens() -> None:
+    """A wider title must never lose a state word a narrower one carried.
+
+    The label budget omitted the glyph cell, so a rung whose label consumed its
+    budget exactly was rejected and the ladder fell through: the state visible
+    at 35 cells and gone again at 36-40, where it still fit. The assertion is
+    deliberately about STATE preservation, not every field: the ladder may
+    trade a duration for the longer, more precise phrase as it widens.
+    """
+    parked = _Job("sub-parked", "flaky test bisect", status="cancelled")
+    parked.settled_at = parked.start_time + 96.0
+    parked.result_text = CANCELLED_BEFORE_START
+    session = FakeSession()
+    session.jobs = _fake_jobs(parked)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 24)) as pilot:
+        view = await _open(pilot, app, parked)
+
+        state_seen = False
+        for width in range(20, 110):
+            row = view._title_row(width, "⠋", 0).plain
+            has_state = "cancelled" in row
+            if state_seen:
+                assert (
+                    has_state
+                ), f"width {width} lost the state its narrower neighbour kept: {row!r}"
+            state_seen = state_seen or has_state
 
 
 @pytest.mark.asyncio

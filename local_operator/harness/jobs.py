@@ -36,6 +36,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RUNNING_JOBS = 15
 DEFAULT_RETENTION_MS = 5 * 60_000
 
+#: ``result_text`` stamped by :meth:`AsyncJobManager.cancel` on a job whose
+#: runner was never entered, so the one fact the cancellation destroys — that
+#: the job never ran — survives on the row every settled surface already reads.
+#: Named rather than inlined because two renderers match on it: the panel row
+#: prints it as the outcome, and the full-page view's title spends it instead of
+#: the bare word ``cancelled`` beside a duration that was spent waiting.
+CANCELLED_BEFORE_START = "cancelled before it started"
+
 JobStatus = Literal["running", "completed", "failed", "cancelled"]
 JobType = Literal["bash", "task"]
 
@@ -55,6 +63,15 @@ class AsyncJob(BaseModel):
     type: JobType
     status: JobStatus = "running"
     start_time: float
+    # Epoch seconds when the job's runner actually BEGAN, or ``None`` if it
+    # never did. Distinct from ``start_time``, which is stamped at
+    # REGISTRATION: ``register`` calls ``ensure_future``, which schedules the
+    # runner without entering it, so between the two a job is admitted, counted
+    # against capacity, and has not run a line. ``queued`` does not answer this
+    # — it means "parked behind the gate", and the admitted-but-not-yet-entered
+    # state is not parked — so anything that needs to know whether work
+    # happened must read this and not that.
+    started_at: float | None = None
     # Epoch seconds when the job SETTLED (completed/failed/cancelled).
     # Retention sweeps against this, not start_time, so a long-running job
     # stays observable for the full window after it finishes.
@@ -259,6 +276,40 @@ class AsyncJobManager:
         if job.status != "running":
             return False
         job.status = "cancelled"
+        # A job cancelled while still parked stops being queued: ``queued`` is
+        # "waiting for a slot", and a cancelled job is waiting for nothing. Left
+        # set, every reader that branches on it reported the job as still
+        # pending — the panel painted ``⏳ queued`` on a row whose status was
+        # ``cancelled``, which reads as work that is about to start. Its runner
+        # is dropped for the same reason: ``start_queued`` refuses a non-running
+        # job, so the entry could never run again and only kept the closure
+        # (prompt, parent session, model spec) alive for the life of the manager.
+        #
+        # Cancelling also erases the record that the job never ran, and every
+        # surface then presents its WAITING time as work time: the panel row and
+        # the page title both measure ``settled_at - start_time``, which for a
+        # job that never began is how long it sat, printed in the column where
+        # every other row's number is time a child spent working. So the fact
+        # moves to the carrier the settled-row paths already read.
+        #
+        # Keyed on ``started_at``, NOT on ``queued``. ``queued`` means "parked
+        # at the capacity gate", which is only one of three ways a job reaches
+        # here without its runner ever being entered: a job admitted with
+        # ``queued=False`` is merely SCHEDULED (``register`` calls
+        # ``ensure_future``, which does not enter the coroutine), and a job
+        # promoted by ``start_queued`` has ``queued`` cleared before its runner
+        # runs. Both did no work, and the first is the state this fix was
+        # written for — the ledger that motivated it recorded
+        # ``at_capacity: False`` with nothing parked, so keying on ``queued``
+        # would have stamped none of the rows in that incident.
+        #
+        # A genuinely running job is left alone for a different reason: it may
+        # be mid-``_run_job`` and owns ``result_text``. ``started_at is None``
+        # excludes it by construction.
+        if job.started_at is None and job.result_text is None:
+            job.result_text = CANCELLED_BEFORE_START
+        job.queued = False
+        self._queued_runners.pop(job_id, None)
         signal = self._signals.get(job_id)
         if signal is not None:
             signal.abort("cancelled")
@@ -312,6 +363,11 @@ class AsyncJobManager:
         return report
 
     async def _run_job(self, job: AsyncJob, coro: Awaitable[str | None]) -> None:
+        # FIRST statement, before any await: this is the fact "the runner
+        # actually began", and everything that asks whether a job did work
+        # reads it. Stamping it later would leave a window where the coroutine
+        # is running and the row still says it never started.
+        job.started_at = time.time()
         try:
             result = await coro
             if job.status == "cancelled":

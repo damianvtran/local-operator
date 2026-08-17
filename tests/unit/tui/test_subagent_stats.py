@@ -25,6 +25,7 @@ from rich.cells import cell_len
 from textual.geometry import Size
 from textual.widgets import Static
 
+from local_operator.harness.jobs import CANCELLED_BEFORE_START
 from local_operator.harness.types import Usage
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.status_line import StatusLine, SubagentBand
@@ -34,7 +35,9 @@ from local_operator.tui.widgets.subagent_panel import (
     JobStats,
     SubagentPanel,
     SubagentRow,
+    _glyph_cells,
     compose_row,
+    job_elapsed,
     job_stats,
     panel_layout,
     row_facts,
@@ -347,6 +350,87 @@ def test_a_row_never_overruns_the_width_it_was_given() -> None:
     for width in range(20, 141):
         for row in _column(jobs, width):
             assert cell_len(row) <= width, f"{width}: {row!r}"
+
+
+def test_every_state_paints_a_word_beside_its_mark() -> None:
+    """``cancelled`` was the only row state carried by a glyph alone.
+
+    A job cancelled mid-run records no ``result_text``, so its row spent its
+    activity column on nothing and the whole state rested on a 1-cell ``⊘`` —
+    in a list where running rows say what they are doing, failed rows say how
+    they failed, and the sibling ``queued`` branch already spells itself. The
+    page the row opens prints ``⊘ cancelled``; the row it opens from did not.
+    """
+    jobs = [
+        Job("j1", "docs sweep", progress="auditing merged MRs"),
+        Job("j2", "queued crawler", queued=True),
+        Job("j3", "flaky test bisect", status="cancelled", settled=True),
+        Job("j4", "pip-audit", status="failed", settled=True, error_text="exited 1"),
+        Job("j5", "changelog", status="completed", settled=True, result_text="wrote 41 entries"),
+    ]
+    rows = _column(jobs, 120)
+    words = [row_facts(job, fallback_id=job.id, current=False).activity for job in jobs]
+    assert all(words), dict(zip([job.label for job in jobs], words))
+    assert "cancelled" in rows[2], rows[2]
+
+
+def test_a_cancelled_row_prints_its_state_once() -> None:
+    """The manager stamps the parked case, so the row must not add a second
+    word beside it — and the running case must not be left silent."""
+    stamped = Job(
+        "j1",
+        "flaky test bisect",
+        status="cancelled",
+        settled=True,
+        result_text=CANCELLED_BEFORE_START,
+    )
+    mid_run = Job("j2", "flaky test bisect", status="cancelled", settled=True)
+    assert _plain(stamped, 120).count("cancelled") == 1
+    assert _plain(mid_run, 120).count("cancelled") == 1
+    assert CANCELLED_BEFORE_START in _plain(stamped, 120)
+
+
+def test_the_clock_column_starts_in_the_same_cell_on_every_row() -> None:
+    """``⏳`` is two cells where every other state mark is one.
+
+    Appended raw it pushed a queued row's clock, numbers and activity one cell
+    right of the column the rest of the list right-aligns into — one stepped
+    row in a list whose whole job is comparison.
+    """
+    jobs = [
+        Job("j1", "docs sweep", progress="auditing merged MRs", age=469.0),
+        Job("j2", "queued crawler", queued=True, age=215.0),
+        Job("j3", "flaky test bisect", status="cancelled", settled=True, age=96.0),
+        Job("j4", "pip-audit", status="failed", settled=True, error_text="exited 1", age=58.0),
+    ]
+    rows = _column(jobs, 120)
+    # Durations right-align into one column, so every row's clock has to END
+    # in the same CELL — measured in cells, because `⏳` is one character and
+    # two of them.
+    ends = set()
+    for job, row in zip(jobs, rows):
+        elapsed = job_elapsed(job)
+        ends.add(cell_len(row[: row.index(elapsed) + len(elapsed)]))
+    assert len(ends) == 1, f"the clock column sheared: {rows!r}"
+
+
+def test_the_glyph_budget_is_the_column_the_row_actually_draws() -> None:
+    """The pad and the BUDGET are two halves of one fix, and each can regress
+    alone.
+
+    ``compose_row`` spends ``_glyph_cells`` when it decides what to truncate. A
+    budget measured at the raw glyph width while the row draws a padded column
+    is short by one cell, which is what let the truncate eat the last cell of a
+    dollar figure — and a money value clipped mid-digit is a worse answer than
+    the ``$0.0000`` this module refuses to print. So the budget must report the
+    padded column for a one-cell mark, not the mark.
+    """
+    facts = {"fallback_id": "j0", "current": False}
+    one_cell = row_facts(Job("j1", "docs sweep", progress="auditing merged MRs"), **facts)
+    two_cell = row_facts(Job("j2", "queued crawler", queued=True), **facts)
+
+    assert _glyph_cells(one_cell) == 2, "a one-cell mark still occupies the shared column"
+    assert _glyph_cells(two_cell) == 2, "and a two-cell mark is already that wide"
 
 
 def test_the_whole_column_sheds_together_so_a_blank_cell_means_one_thing() -> None:
