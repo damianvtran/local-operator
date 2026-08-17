@@ -64,7 +64,7 @@ class MCPOAuthConfig(BaseModel):
 class MCPStdioServerConfig(BaseModel):
     """A stdio MCP server: spawn ``command`` with ``args``."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     type: Literal["stdio"] = "stdio"
     command: str = ""
@@ -72,6 +72,19 @@ class MCPStdioServerConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str | None = None
     enabled: bool | None = None
+    enabled_tools: list[str] = Field(
+        default_factory=list,
+        alias="enabledTools",
+        description=(
+            "Optional allowlist of MCP tool names (exact or glob patterns); "
+            "empty means all tools."
+        ),
+    )
+    disabled_tools: list[str] = Field(
+        default_factory=list,
+        alias="disabledTools",
+        description=("MCP tool names/patterns to deny; wins over enabledTools."),
+    )
     timeout: float | None = None  # milliseconds; 0 disables client-side timeout
     auth: MCPAuthConfig | None = None
     oauth: MCPOAuthConfig | None = None
@@ -80,12 +93,25 @@ class MCPStdioServerConfig(BaseModel):
 class MCPHttpServerConfig(BaseModel):
     """A Streamable HTTP MCP server."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     type: Literal["http"] = "http"
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool | None = None
+    enabled_tools: list[str] = Field(
+        default_factory=list,
+        alias="enabledTools",
+        description=(
+            "Optional allowlist of MCP tool names (exact or glob patterns); "
+            "empty means all tools."
+        ),
+    )
+    disabled_tools: list[str] = Field(
+        default_factory=list,
+        alias="disabledTools",
+        description=("MCP tool names/patterns to deny; wins over enabledTools."),
+    )
     timeout: float | None = None
     auth: MCPAuthConfig | None = None
     oauth: MCPOAuthConfig | None = None
@@ -95,12 +121,25 @@ class MCPSseServerConfig(BaseModel):
     """A legacy dual-endpoint SSE MCP server (deprecated by the spec, kept for
     compatibility)."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     type: Literal["sse"] = "sse"
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool | None = None
+    enabled_tools: list[str] = Field(
+        default_factory=list,
+        alias="enabledTools",
+        description=(
+            "Optional allowlist of MCP tool names (exact or glob patterns); "
+            "empty means all tools."
+        ),
+    )
+    disabled_tools: list[str] = Field(
+        default_factory=list,
+        alias="disabledTools",
+        description=("MCP tool names/patterns to deny; wins over enabledTools."),
+    )
     timeout: float | None = None
     auth: MCPAuthConfig | None = None
     oauth: MCPOAuthConfig | None = None

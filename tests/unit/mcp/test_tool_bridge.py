@@ -264,7 +264,7 @@ class TestIsRetriableConnectionError:
 
     @pytest.mark.parametrize(
         "message",
-        ["tool not found", "invalid arguments", "HTTP 401: unauthorized", "timeout waiting"],
+        ["tool not found", "invalid arguments", "timeout waiting"],
     )
     def test_not_retriable(self, message: str) -> None:
         assert is_retriable_connection_error(RuntimeError(message)) is False
@@ -308,3 +308,14 @@ class TestBuildAgentTool:
             "properties": {INTENT_FIELD: dict(INTENT_PROPERTY)},
             "required": [],
         }
+
+
+def test_auth_challenges_are_retriable_once() -> None:
+    """Mid-call hosted MCP auth challenges must enter the manager's existing
+    one-reconnect/one-retry path; otherwise a refreshed OAuth token is never
+    used until the next user call."""
+    from local_operator.mcp.tool_bridge import is_retriable_connection_error
+
+    assert is_retriable_connection_error(RuntimeError("HTTP 401 Unauthorized"))
+    assert is_retriable_connection_error(RuntimeError("WWW-Authenticate: Bearer scope=x"))
+    assert is_retriable_connection_error(RuntimeError("mcp/www_authenticate challenge"))

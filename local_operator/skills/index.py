@@ -6,6 +6,11 @@ respective URL protocols. Registered-agent hints share the vector machinery but
 are never rendered; they can surface the generic agents guide without exposing
 the registry itself.
 
+Scoring is hybrid: cosine over embeddings, blended with a lexical Jaccard
+over ``name: description`` (see :func:`_hybrid_scores`), and gitignore-style
+``globs`` frontmatter force-includes path-matched skills at 1.0. The
+threshold applies to that final score.
+
 Vectors persist at ``cache_dir/<identity>.skills.vec``. The content hash covers
 the ordered resource type, name, description, file path, and mtime; the matrix
 row order and backend identity must also match before a cache is reused.
@@ -16,10 +21,12 @@ readable but never appear in semantic results.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import logging
 import os
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -28,6 +35,119 @@ from local_operator.skills.embeddings import EmbeddingBackend, LocalEmbedder
 from local_operator.skills.vectors import VectorMatrix, deserialize
 
 logger = logging.getLogger(__name__)
+
+#: Word tokenizer for the lexical half of the hybrid score. Deliberately the
+#: same shape as the local embedder's (``[a-z0-9]+`` on lowercased text) so
+#: both halves of the blend see the same words.
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+#: Hybrid blend weights: ``final = max(cos, w_c*cos + w_l*jaccard)``. The
+#: outer max keeps a strong semantic match from being dragged down by a
+#: near-zero Jaccard (a short query against a long description), while the
+#: blend alone lifts a lexically-exact hit whose embedding landed below
+#: threshold.
+_COSINE_WEIGHT = 0.6
+_LEXICAL_WEIGHT = 0.4
+
+#: Punctuation stripped from query tokens before path-likeness is judged —
+#: "fix (src/app.py)" must yield "src/app.py", not "(src/app.py)".
+_TOKEN_STRIP = "\"'`()[]{}<>,;:"
+
+#: A bare filename with an extension ("pyproject.toml"). Must end in
+#: alphanumerics, so sentence noise like "e.g." or "3.2." is rejected while
+#: real filenames pass.
+_FILENAME_RE = re.compile(r"^[A-Za-z0-9_+.~\-]+\.[A-Za-z0-9]+$")
+
+
+def _path_suffixes(path: str) -> Sequence[str]:
+    """A path plus every component-suffix of it: ``a/b/c`` → ``a/b/c``,
+    ``b/c``, ``c``.
+
+    Suffix matching is what makes an unanchored gitignore pattern behave at
+    any depth (``*.py`` must hit ``…/src/app.py``) without knowing where the
+    repository root is — selection only ever sees absolute paths.
+    """
+    suffixes = [path]
+    parts = [part for part in path.split("/") if part]
+    suffixes.extend("/".join(parts[start:]) for start in range(1, len(parts)))
+    return suffixes
+
+
+def _query_path_tokens(query: str) -> list[str]:
+    """Extract file-path-like tokens from a natural-language query.
+
+    "fix the import in src/app/main.py please" yields ``src/app/main.py``.
+    Path-like means: contains a slash, starts with ``.``/``~`` (relative or
+    home paths, dotfiles), or is a bare filename with an extension. Prose
+    words are ignored so ordinary queries cannot trigger path routing.
+    """
+    tokens: list[str] = []
+    for raw in query.split():
+        token = raw.strip(_TOKEN_STRIP)
+        if token in ("", ".", ".."):
+            continue
+        if "/" in token or token.startswith((".", "~")) or _FILENAME_RE.match(token):
+            tokens.append(token)
+    return tokens
+
+
+def _glob_matches(globs: Sequence[str], cwd: Path | None, query: str) -> bool:
+    """True when any gitignore-style glob matches the cwd or a query token.
+
+    Matching is fnmatch against each target and every component-suffix of it
+    (see :func:`_path_suffixes`), which reproduces gitignore's any-depth
+    behavior for unanchored patterns. A leading ``/`` anchor is dropped —
+    redundant once suffixes are tried — and a trailing ``/`` (directory-only)
+    is dropped too, because targets are never stat'ed here; an author who
+    needs that precision should write the distinguishing path components.
+    """
+    patterns = [pattern.strip().strip("/") for pattern in globs]
+    patterns = [pattern for pattern in patterns if pattern]
+    if not patterns:
+        return False
+    targets: list[str] = []
+    if cwd is not None:
+        targets.append(str(cwd))
+    targets.extend(_query_path_tokens(query))
+    return any(
+        fnmatch.fnmatchcase(candidate, pattern)
+        for pattern in patterns
+        for target in targets
+        for candidate in _path_suffixes(target)
+    )
+
+
+def _hybrid_scores(
+    query: str,
+    skills: Sequence[Skill],
+    cosines: Sequence[float],
+    cwd: Path | None,
+) -> list[float]:
+    """Blend cosine similarity with lexical Jaccard, then apply glob boosts.
+
+    The shipped local embedder is honestly ~71% recall — it hashes character
+    n-grams, so it IS lexical — and the exact-word overlap the embedder
+    washes out is recoverable for free with a Jaccard over the same
+    ``name: description`` strings the index already embeds. The lexical
+    blend is the free part of that fix: no new backend, no re-embedding,
+    deterministic, byte-stable across turns.
+
+    ``final = max(cos, 0.6*cos + 0.4*jaccard)``; glob-matched skills are
+    forced to 1.0, bypassing the cosine threshold entirely (the author's
+    path claim outranks the embedder's guess) while remaining subject to
+    the caller's ``k`` cap and the hidden filter downstream.
+    """
+    query_words = frozenset(_WORD_RE.findall(query.lower()))
+    scores: list[float] = []
+    for skill, cosine in zip(skills, cosines):
+        if _glob_matches(skill.globs, cwd, query):
+            scores.append(1.0)
+            continue
+        text_words = frozenset(_WORD_RE.findall(f"{skill.name}: {skill.description}".lower()))
+        union = len(query_words | text_words)
+        jaccard = len(query_words & text_words) / union if union else 0.0
+        scores.append(max(cosine, _COSINE_WEIGHT * cosine + _LEXICAL_WEIGHT * jaccard))
+    return scores
 
 
 def _content_hash(skills: Sequence[Skill]) -> str:
@@ -296,15 +416,25 @@ class SkillIndex:
 
     # --- select ------------------------------------------------------------
 
-    async def select(self, query: str, k: int = 8, threshold: float | None = None) -> list[Skill]:
+    async def select(
+        self,
+        query: str,
+        k: int = 8,
+        threshold: float | None = None,
+        *,
+        cwd: Path | None = None,
+    ) -> list[Skill]:
         """Return the top-k skills whose descriptions match ``query``.
 
         Cosine search over L2-normalized vectors (one exhaustive inner-product
-        scan of the cached matrix). ``threshold`` defaults to the backend's
-        ``default_threshold``. Hidden skills never appear — they stay
-        reachable only via direct ``skill://`` reads. Results are sorted by
-        the discovery key (name.lower, name, path) so two turns selecting
-        the SAME set render a byte-identical block.
+        scan of the cached matrix), blended with a lexical Jaccard and
+        gitignore-style glob boosts (see :func:`_hybrid_scores`); the
+        threshold applies to that final score. ``cwd`` is the session working
+        directory, matched alongside path-like query tokens for globs.
+        Hidden skills never appear — they stay reachable only via direct
+        ``skill://`` reads. Results are sorted by the discovery key
+        (name.lower, name, path) so two turns selecting the SAME set render
+        a byte-identical block.
 
         Degradation ladder: primary backend failure → offline
         :class:`LocalEmbedder`, memoized for the index lifetime so an API
@@ -318,7 +448,7 @@ class SkillIndex:
             return []
 
         if not self._backend_failed:
-            picked = await self._select_with_backend(self.backend, query, k, threshold)
+            picked = await self._select_with_backend(self.backend, query, k, threshold, cwd)
             if picked is not None:
                 return picked
 
@@ -335,7 +465,7 @@ class SkillIndex:
                 )
             if self._local_fallback is None:
                 self._local_fallback = LocalEmbedder()
-            picked = await self._select_with_backend(self._local_fallback, query, k, threshold)
+            picked = await self._select_with_backend(self._local_fallback, query, k, threshold, cwd)
             if picked is not None:
                 return picked
 
@@ -351,6 +481,7 @@ class SkillIndex:
         query: str,
         k: int,
         threshold: float | None,
+        cwd: Path | None = None,
     ) -> list[Skill] | None:
         """Score with ``backend``; None on any failure (caller degrades)."""
         if threshold is None:
@@ -360,6 +491,7 @@ class SkillIndex:
                 await self.build(backend)
             query_vec = (await backend.embed([query]))[0]
             scores = self._scores(query_vec)
+            scores = _hybrid_scores(query, self.skills, scores, cwd)
         except Exception as exc:  # noqa: BLE001 — degradation is the contract
             logger.warning("Skill selection failed: %s", exc)
             return None

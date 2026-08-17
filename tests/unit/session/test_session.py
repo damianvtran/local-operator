@@ -30,6 +30,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     TextContent,
     ToolResult,
+    Usage,
 )
 from local_operator.providers.failover import ProviderError
 from local_operator.session.session import IMAGE_DROPPED_NOTICE, Session
@@ -1101,3 +1102,405 @@ async def test_an_ordinary_failure_leaves_images_alone(tmp_path):
     assert not session._images_rejected
     assert _image_blocks(stream.requests[0]) == 1
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_compaction_at_continuing_boundary(tmp_path, monkeypatch):
+    """A tool-loop run that crosses the threshold mid-run compacts at the safe
+    boundary — after the tool batch lands, before the next model call — inside
+    the run's event boundary, and the next model call sees the compacted
+    context. Post-run persistence must not resurrect what the pass summarized:
+    the loop prunes its run accumulator to the replacement's survivors, so the
+    transcript after the compaction entry holds only surviving run messages."""
+    from pydantic import BaseModel, Field
+
+    class CompactionSettings(BaseModel):
+        enabled: bool = True
+        reserve_tokens: int = 16384
+        keep_recent_tokens: int = 20000
+        threshold_percent: float = -1.0
+        threshold_tokens: int = Field(default=-1)
+        max_threshold_tokens: int = 600_000
+        auto_continue: bool = False
+        mid_turn_enabled: bool = True
+
+    compacted = {"done": False}
+
+    def estimate_messages_tokens(messages):
+        return 5_000 if compacted["done"] else 90_000
+
+    def messages_tokens_upper_bound(messages):
+        return 5_500 if compacted["done"] else 95_000
+
+    def prune_tool_outputs(messages, now_ts, last_activity_ts, **kwargs):
+        return list(messages), False
+
+    fake_api = types.ModuleType("local_operator.compaction.api")
+    setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
+    setattr(fake_api, "estimate_messages_tokens", estimate_messages_tokens)
+    setattr(fake_api, "messages_tokens_upper_bound", messages_tokens_upper_bound)
+    setattr(
+        fake_api, "compaction_context_tokens", lambda provider, local: max(provider or 0, local)
+    )
+    # Cut before the run's user prompt: kept = [user, assistant, tool result].
+    # The user prompt is a transcript entry (appended pre-run), so the cut is
+    # replayable; a cut into run-produced-only history is refused by design.
+    setattr(fake_api, "find_cut_point", lambda messages, keep: 3)
+    setattr(
+        fake_api,
+        "resolve_threshold_tokens",
+        lambda window, settings: min(int(window * 0.8), 600_000),
+    )
+    setattr(fake_api, "RECOVERY_BAND", 0.8)
+    setattr(
+        fake_api,
+        "should_compact",
+        lambda ctx_tokens, window, settings: ctx_tokens > settings.threshold_tokens,
+    )
+
+    async def summarize(
+        messages: Sequence[Message | CustomMessage],
+        complete_fn: Callable[[str, str], Awaitable[str]],
+    ) -> str:
+        compacted["done"] = True
+        summary = await complete_fn("sys", "summarize this")
+        return f"SUMMARY({summary})"
+
+    setattr(fake_api, "summarize_messages", summarize)
+
+    fake_pkg = types.ModuleType("local_operator.compaction")
+    setattr(fake_pkg, "api", fake_api)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction", fake_pkg)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.api", fake_api)
+    fake_thresholds = types.ModuleType("local_operator.compaction.thresholds")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.thresholds", fake_thresholds)
+    fake_snap = types.ModuleType("local_operator.compaction.snapcompact")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.snapcompact", fake_snap)
+
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="working"),
+                StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta='{"text":"x"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            # The mid-run one-shot summary call.
+            [StreamTextDelta(delta="compressed"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(
+        tmp_path, stream, tools=[echo_tool(executed)], compaction_settings=CompactionSettings()
+    )
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    # Prime persisted + live history so the cut lands on a replayable entry:
+    # three older user turns exist in both the transcript and the context.
+    primed = [Message.user(f"earlier {i}") for i in range(3)]
+    for message in primed:
+        await session._transcript.append_message(message)
+    session._context.messages.extend(primed)
+
+    await session.prompt("go")
+
+    assert executed == ["echo"]
+
+    # Compaction events fired with the mid-turn reason, INSIDE the run
+    # boundary (between agent_start and agent_end — the streaming contract's
+    # SC-4 pairing rule).
+    kinds = [(type(e).__name__, getattr(e, "reason", None)) for e in events]
+    assert ("CompactionStartEvent", "mid-turn") in kinds
+    start_idx = next(i for i, e in enumerate(events) if isinstance(e, AgentStartEvent))
+    end_idx = next(i for i, e in enumerate(events) if isinstance(e, AgentEndEvent))
+    compact_idx = next(i for i, e in enumerate(events) if isinstance(e, CompactionStartEvent))
+    assert start_idx < compact_idx < end_idx
+
+    # Exactly one compaction ran: the post-turn pass found the compacted
+    # context below threshold and refused.
+    compactions = [e for e in session._transcript.entries() if e.type == "compaction"]
+    assert len(compactions) == 1
+    assert compactions[0].payload["summary"] == "SUMMARY(compressed)"
+
+    # Context rebuilt: marker + kept window (user, assistant, tool result)
+    # plus the final assistant turn the loop went on to produce after the
+    # compaction — the whole point of compacting mid-run instead of failing.
+    assert len(session._context.messages) == 5
+    marker = session._context.messages[0]
+    assert isinstance(marker, CustomMessage)
+    assert marker.custom_type == "compaction_summary"
+
+    # The next model call saw the compacted context: the rendered marker
+    # (a user message carrying the summary) leads the request.
+    third = stream.requests[2]
+    assert "SUMMARY(compressed)" in third.messages[0].text
+
+    # No resurrection: after the compaction entry the transcript holds only
+    # the run's three surviving messages (assistant, tool result, final
+    # assistant) — the primed history the pass summarized never re-lands
+    # after it, and nothing is persisted twice.
+    entries = session._transcript.entries()
+    c_index = next(i for i, e in enumerate(entries) if e.type == "compaction")
+    after = [e for e in entries[c_index + 1 :] if e.type == "message"]
+    assert len(after) == 3
+
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_compaction_disabled_by_setting(tmp_path, monkeypatch):
+    """``mid_turn_enabled=False`` restores the old posture exactly: the
+    boundary hook is a no-op and only the post-turn pass compacts."""
+    from pydantic import BaseModel, Field
+
+    class CompactionSettings(BaseModel):
+        enabled: bool = True
+        reserve_tokens: int = 16384
+        keep_recent_tokens: int = 20000
+        threshold_percent: float = -1.0
+        threshold_tokens: int = Field(default=-1)
+        max_threshold_tokens: int = 600_000
+        auto_continue: bool = False
+        mid_turn_enabled: bool = False
+
+    def prune_tool_outputs(messages, now_ts, last_activity_ts, **kwargs):
+        return list(messages), False
+
+    fake_api = types.ModuleType("local_operator.compaction.api")
+    setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
+    setattr(fake_api, "estimate_messages_tokens", lambda messages: 90_000)
+    setattr(fake_api, "messages_tokens_upper_bound", lambda messages: 95_000)
+    setattr(
+        fake_api, "compaction_context_tokens", lambda provider, local: max(provider or 0, local)
+    )
+    setattr(fake_api, "find_cut_point", lambda messages, keep: 0)
+    setattr(
+        fake_api,
+        "resolve_threshold_tokens",
+        lambda window, settings: min(int(window * 0.8), 600_000),
+    )
+    setattr(fake_api, "RECOVERY_BAND", 0.8)
+    setattr(
+        fake_api,
+        "should_compact",
+        lambda ctx_tokens, window, settings: ctx_tokens > settings.threshold_tokens,
+    )
+
+    async def summarize(
+        messages: Sequence[Message | CustomMessage],
+        complete_fn: Callable[[str, str], Awaitable[str]],
+    ) -> str:
+        return "SUMMARY(post-turn)"
+
+    setattr(fake_api, "summarize_messages", summarize)
+
+    fake_pkg = types.ModuleType("local_operator.compaction")
+    setattr(fake_pkg, "api", fake_api)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction", fake_pkg)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.api", fake_api)
+    fake_thresholds = types.ModuleType("local_operator.compaction.thresholds")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.thresholds", fake_thresholds)
+    fake_snap = types.ModuleType("local_operator.compaction.snapcompact")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.snapcompact", fake_snap)
+
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta='{"text":"x"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(
+        tmp_path, stream, tools=[echo_tool(executed)], compaction_settings=CompactionSettings()
+    )
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.prompt("go")
+
+    reasons = [
+        getattr(e, "reason", None)
+        for e in events
+        if isinstance(e, (CompactionStartEvent, CompactionEndEvent))
+    ]
+    # No mid-turn pass; the single pass (if any) is the post-turn one.
+    assert "mid-turn" not in reasons
+    compactions = [e for e in session._transcript.entries() if e.type == "compaction"]
+    assert len(compactions) <= 1
+    await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# session incidents (why a run died, model-visible)
+# ---------------------------------------------------------------------------
+
+
+class ExplodingStream:
+    """First call raises a provider-shaped error; later calls succeed."""
+
+    def __init__(self) -> None:
+        self.requests: list[ChatRequest] = []
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+
+            async def boom():
+                yield StreamTextDelta(delta="partial")
+                raise RuntimeError("429 Too Many Requests: rate limit exceeded")
+
+            return boom()
+
+        async def ok():
+            yield StreamTextDelta(delta="recovered")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return ok()
+
+
+@pytest.mark.asyncio
+async def test_error_run_journals_model_visible_incident(tmp_path):
+    """A run that dies on a provider error leaves a classified incident in
+    the LIVE context (the next prompt sees it) and in the transcript (a
+    resumed session replays it) — the model learns WHY, not just the UI."""
+    stream = ExplodingStream()
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.prompt("go")
+
+    incidents = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == "session_incident"
+    ]
+    assert incidents, "error run must journal a session incident"
+    assert "rate-limit" in incidents[-1].details["text"]
+    assert "429" in incidents[-1].details["raw"]
+
+    # Persisted: the transcript replay carries it.
+    dumped = "\n".join(
+        __import__("json").dumps(e.payload, default=str) for e in session._transcript.entries()
+    )
+    assert "session_incident" in dumped
+
+    # The NEXT prompt renders it into the request the provider sees.
+    await session.prompt("continue")
+    rendered = "\n".join(getattr(m, "text", "") for m in stream.requests[1].messages)
+    assert "[session incident" in rendered and "rate-limit" in rendered
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_job_completion_auto_delivers_when_idle(tmp_path):
+    """A settled model-owned job re-wakes the idle session: the result lands
+    as a conversation turn without the model polling 'jobs'."""
+    turn_count = {"n": 0}
+
+    class TwoTurnStream:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.requests.append(request)
+            turn_count["n"] += 1
+
+            async def gen():
+                yield StreamTextDelta(delta=f"turn {turn_count['n']}")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+    stream = TwoTurnStream()
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.prompt("start something")
+
+    async def quick(job_id, signal, report_progress):
+        return "the answer is 42"
+
+    session.jobs.register("task", "researcher", quick)
+    await wait_for(lambda: sum(1 for e in events if isinstance(e, AgentStartEvent)) >= 2)
+    delivered = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == "job_result"
+    ]
+    assert delivered
+    assert "the answer is 42" in delivered[-1].details["text"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_consumed_and_foreign_jobs_do_not_auto_deliver(tmp_path):
+    """wait already returned the result (consumed) and host-registered job
+    types stay quiet; only fresh model-owned work re-wakes the session."""
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")
+    before = len(session._context.messages)
+
+    async def runner(job_id, signal, report_progress):
+        return "done"
+
+    consumed_id = session.jobs.register("task", "consumed-job", runner)
+    job = session.jobs.get(consumed_id)
+    assert job is not None
+    job.consumed = True
+    await session._on_job_completed(consumed_id, "done", job)
+
+    # A streaming session stays quiet too: the in-turn model owns the floor.
+    # The runner must still be RUNNING when the flag flips, or the manager's
+    # own settle-delivery wins the race and delivers while idle.
+    async def slow_runner(job_id, signal, report_progress):
+        await asyncio.sleep(0.3)
+        return "done"
+
+    session.jobs.register("task", "while-busy", slow_runner)
+    session._is_streaming = True
+    try:
+        await asyncio.sleep(0.45)  # settles while the session is "streaming"
+    finally:
+        session._is_streaming = False
+    await asyncio.sleep(0.05)
+    assert len(session._context.messages) == before  # nothing delivered
+    await session.dispose()
+
+
+def test_context_breakdown_counts_wire_schemas_and_messages(tmp_path):
+    """The `/context` source measures what the provider actually receives:
+    four system blocks, wire tool schemas (not just names), rendered messages,
+    window and the last cache-read bucket."""
+    tool = echo_tool([])
+    session = make_session(tmp_path, ScriptedStream([]), tools=[tool])
+    session._context.system_blocks = ["instructions", "inventory", "env", "skills"]
+    session._context.messages = [Message.user("hello"), Message.assistant("world")]
+    session._last_usage = Usage(input_tokens=10, cache_read_tokens=7, context_tokens=17)
+    data = session.context_breakdown()
+    assert data["instructions"] > 0
+    assert data["tool_schemas"] > 0
+    assert data["messages"] > 0
+    assert data["context_window"] == MODEL.context_window
+    assert data["cache_read"] == 7
+    assert data["total"] == sum(
+        data[key]
+        for key in (
+            "instructions",
+            "tool_inventory",
+            "environment",
+            "knowledge_mcp_goal",
+            "tool_schemas",
+            "messages",
+        )
+    )

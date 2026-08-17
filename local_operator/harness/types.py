@@ -392,6 +392,26 @@ class JobManagerProtocol(Protocol):
     async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool: ...
 
 
+@runtime_checkable
+class SubagentLauncher(Protocol):
+    """Spawn a one-shot child session on the session's job manager.
+
+    ``agent`` selects the tier: ``"task"`` is the full child, ``"scout"`` a
+    read-only research child (its tool inventory is filtered to read-tier
+    lookups). ``effort`` routes to a configured model tier (``lo``/``med``/
+    ``hi`` in ``values.subagents.models``); None keeps the parent's model.
+    """
+
+    def __call__(
+        self,
+        label: str,
+        prompt: str,
+        *,
+        agent: str = "task",
+        effort: str | None = None,
+    ) -> str: ...
+
+
 class ToolContext(BaseModel):
     """Minimal host-provided context handed to tool execution.
 
@@ -459,7 +479,7 @@ class ToolContext(BaseModel):
     # subagent engine and the task tool is then not advertised at all
     # (createIf) rather than advertised and always failing — the same
     # convention ``wake_scheduler`` uses.
-    subagent_launcher: Callable[[str, str], str] | None = None
+    subagent_launcher: "SubagentLauncher | None" = None
     # The session's background job manager. Declared as a Protocol because
     # the concrete class lives in ``harness.jobs``, which imports this
     # module (import cycle). The ``wait``/``job`` tools read it; ``None``
@@ -894,9 +914,20 @@ class LoopConfig(BaseModel):
     before_model_call: Callable[[], Awaitable[bool] | bool] | None = Field(
         default=None, exclude=True
     )
-    on_turn_end: Callable[[list[AgentMessage]], Awaitable[None] | None] | None = Field(
-        default=None, exclude=True
-    )
+    # Called at the safe boundary after each tool batch lands (before the
+    # next model call). May return a replacement ``context.messages`` list —
+    # the loop swaps it in and prunes its own run accumulator to the
+    # replacement's survivors, so a host that compacts mid-run (automatic
+    # mid-turn compaction) never double-persists summarized history. The
+    # replacement must keep surviving messages' ids stable: the accumulator
+    # filter matches by id.
+    on_turn_end: (
+        Callable[
+            [list[AgentMessage]],
+            Awaitable[list[AgentMessage] | None] | list[AgentMessage] | None,
+        ]
+        | None
+    ) = Field(default=None, exclude=True)
     on_before_yield: Callable[[], Awaitable[None] | None] | None = Field(default=None, exclude=True)
 
     # Fallback routing for unknown tool names (e.g. deferred MCP tools).
@@ -927,6 +958,10 @@ class ModelSpec(BaseModel):
     supports_tools: bool = True
     supports_images: bool = True
     supports_prompt_cache: bool = False
+    # Public OpenAI Responses routing is a model capability, not a provider-wire
+    # guess: compatibility providers may serve the same model id while exposing
+    # only chat/completions.
+    supports_responses_api: bool = False
     base_url: str | None = None  # override for OpenAI-compatible endpoints
     temperature: float = 0.2
     top_p: float = 0.9
@@ -987,6 +1022,10 @@ class ChatRequest(BaseModel):
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
     tool_choice: Literal["auto", "none", "required"] = "auto"
+    # Stable request-prefix identity used by providers' server-side prompt
+    # caches. Session hosts populate it once from their session id; keeping it
+    # on the request lets retries and fallback clones preserve the same value.
+    prompt_cache_key: str | None = None
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:

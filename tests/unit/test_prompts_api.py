@@ -247,7 +247,7 @@ def test_inventory_block_matches_default_tool_order() -> None:
         ToolContext(
             cwd=".",
             wake_scheduler=_FakeSchedulerForBlocks(),
-            subagent_launcher=lambda label, prompt: "job-x",
+            subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
             jobs=_FakeJobsForBlocks(),
             subagent_comms=_FakeCommsForBlocks(),
         )

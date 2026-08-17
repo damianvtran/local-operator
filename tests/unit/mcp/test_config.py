@@ -368,3 +368,30 @@ class TestCliHelpers:
         doc2 = {"mcpServers": {"b": _stdio("b")}}
         _write_json_atomic(path, doc2)
         assert json.loads(path.read_text(encoding="utf-8")) == doc2
+
+
+def test_server_tool_filters_parse_aliases_for_every_transport() -> None:
+    from local_operator.mcp.config import (
+        MCPHttpServerConfig,
+        MCPSseServerConfig,
+        MCPStdioServerConfig,
+    )
+
+    payloads = [
+        (MCPStdioServerConfig, {"command": "x"}),
+        (MCPHttpServerConfig, {"url": "https://x.test"}),
+        (MCPSseServerConfig, {"url": "https://x.test/sse"}),
+    ]
+    for cls, base in payloads:
+        cfg = cls.model_validate(
+            {
+                **base,
+                "enabledTools": ["search_*", "get_one"],
+                "disabledTools": ["search_private"],
+            }
+        )
+        assert cfg.enabled_tools == ["search_*", "get_one"]
+        assert cfg.disabled_tools == ["search_private"]
+        dumped = cfg.model_dump(by_alias=True)
+        assert dumped["enabledTools"] == ["search_*", "get_one"]
+        assert dumped["disabledTools"] == ["search_private"]

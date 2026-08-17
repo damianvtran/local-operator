@@ -6,17 +6,20 @@ the harness ``ModelSpec`` consumed by wire clients, and ``validate_model``
 hits the same endpoints as before through a descriptor table.
 """
 
+import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 import requests
 from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
-from local_operator.harness.types import ModelSpec
+from local_operator.harness.types import ChatRequest, Message, ModelSpec
 from local_operator.model.configure import (
     DEFAULT_TEMPERATURE,
+    build_model_spec,
     calculate_cost,
     configure_model,
     create_stream_fn,
@@ -239,6 +242,77 @@ def test_configure_model_openrouter_via_client(mock_openrouter_client):
 def test_create_stream_fn_returns_callable():
     stream_fn = create_stream_fn(MagicMock(), None)
     assert callable(stream_fn)
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_override_routes_gpt5_to_legacy_endpoint() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            content=b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    stream = create_stream_fn(
+        MagicMock(),
+        {"providers": {"openai": {"api": "chat_completions"}}},
+        session_id="session-override",
+    )
+    await stream._http.aclose()
+    stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    spec = build_model_spec("openai", "gpt-5.4")
+    try:
+        client = stream._client_for(spec)
+        await _collect_stream(
+            client.stream(ChatRequest(model=spec, messages=[Message.user("hi")]), "sk-test")
+        )
+    finally:
+        await stream.close()
+
+    assert captured["url"] == "https://api.openai.com/v1/chat/completions"
+
+
+@pytest.mark.asyncio
+async def test_session_stream_supplies_stable_prompt_cache_key_to_public_responses(
+    tmp_path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"type":"response.completed","response":{"id":"resp_1",'
+                b'"usage":{"input_tokens":1,"output_tokens":1}}}\n\ndata: [DONE]\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(store, {}, session_id="session-cache-key")
+    await stream._http.aclose()
+    stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    spec = build_model_spec("openai", "gpt-5.4")
+    try:
+        await _collect_stream(stream(ChatRequest(model=spec, messages=[Message.user("hi")]), None))
+    finally:
+        await stream.close()
+        store.close()
+
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    body = json.loads(captured["body"])
+    assert body["prompt_cache_key"] == "session-cache-key"
+    assert body["prompt_cache_retention"] == "24h"
+
+
+async def _collect_stream(stream: Any) -> list[Any]:
+    return [event async for event in stream]
 
 
 def _oauth(access: str, account_id: str) -> dict[str, Any]:

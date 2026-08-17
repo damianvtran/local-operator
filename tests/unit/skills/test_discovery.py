@@ -24,6 +24,7 @@ def _write_skill(
     hide: bool | None = None,
     disable_model_invocation: bool | None = None,
     body: str = "# Body",
+    globs: str | list[str] | None = None,
 ) -> Path:
     skill_dir = root / dirname
     skill_dir.mkdir(parents=True)
@@ -38,12 +39,61 @@ def _write_skill(
         lines.append(f"hide: {str(hide).lower()}")
     if disable_model_invocation is not None:
         lines.append(f"disable-model-invocation: {str(disable_model_invocation).lower()}")
+    if globs is not None:
+        # YAML plain scalars cannot start with "*" (alias marker), so both
+        # spellings quote their values — exactly what real SKILL.md authors
+        # must do; an unquoted ``*.py`` makes the whole block malformed YAML
+        # and discovery drops the skill.
+        if isinstance(globs, str):
+            lines.append(f'globs: "{globs}"')
+        else:
+            lines.append("globs:")
+            lines.extend(f'  - "{pattern}"' for pattern in globs)
     lines.append("---")
     lines.append("")
     lines.append(body)
     skill_md = skill_dir / "SKILL.md"
     skill_md.write_text("\n".join(lines), encoding="utf-8")
     return skill_md
+
+
+class TestGlobsFrontmatter:
+    """The optional ``globs`` key rides on the Skill record in both ecosystem
+    spellings; junk shapes degrade to no globs rather than dropping the
+    skill (the description remains the primary routing signal)."""
+
+    def test_csv_string_and_yaml_list(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _write_skill(root, "csv", globs="*.py, src/**/*.ts ,")
+        _write_skill(root, "list", globs=["*.tf", "infra/**"])
+        skills = {skill.name: skill for skill in scan_skills_dir(root, source="test")}
+        assert skills["csv"].globs == ("*.py", "src/**/*.ts")
+        assert skills["list"].globs == ("*.tf", "infra/**")
+
+    def test_junk_shapes_degrade_gracefully(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        # Hand-written frontmatter: the helper quotes list items, but the
+        # degradation contract has to hold for unquoted non-strings too.
+        skill_dir = root / "junk"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\ndescription: A test skill.\n"
+            "globs:\n"
+            "  - 3\n"
+            "  - true\n"
+            '  - "*.md"\n'
+            "---\n# Body",
+            encoding="utf-8",
+        )
+        skills = {skill.name: skill for skill in scan_skills_dir(root, source="test")}
+        # Only the usable pattern survives; the skill itself is kept.
+        assert skills["junk"].globs == ("*.md",)
+
+    def test_absent_key_defaults_to_empty_tuple(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _write_skill(root, "plain")
+        skills = {skill.name: skill for skill in scan_skills_dir(root, source="test")}
+        assert skills["plain"].globs == ()
 
 
 class TestParseFrontmatter:

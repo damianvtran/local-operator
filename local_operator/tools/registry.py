@@ -16,6 +16,8 @@ from collections.abc import Callable, Sequence
 from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
 from local_operator.tools import builtin
+from local_operator.tools.eval import build_eval_tool
+from local_operator.tools.lsp import build_lsp_tool
 from local_operator.web_search.tool import build_web_search_tool
 
 #: Factory table: tool name -> builder (createIf convention). ``wake`` takes
@@ -29,6 +31,8 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "edit": lambda _context: builtin.build_edit_tool(),
     "glob": lambda _context: builtin.build_glob_tool(),
     "grep": lambda _context: builtin.build_grep_tool(),
+    "eval": lambda _context: build_eval_tool(),
+    "lsp": lambda _context: build_lsp_tool(),
     "todo": lambda _context: builtin.build_todo_tool(),
     "web_search": lambda context: build_web_search_tool(context),
     "wake": lambda context: builtin.build_wake_tool(context),
@@ -52,6 +56,8 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "edit",
     "glob",
     "grep",
+    "eval",
+    "lsp",
     "todo",
     "web_search",
     "wake",

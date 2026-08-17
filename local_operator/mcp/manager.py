@@ -39,6 +39,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, TypeVar
 
@@ -790,6 +791,8 @@ class McpManager:
         # so a flapping server still trips the breaker.
         self._backoff_index: dict[str, int] = {}
         self._on_tools_changed: ToolsChangedCallback | None = None
+        # Session-installed sink for model-visible MCP breaker incidents.
+        self.on_incident: Callable[[str, str], None] | None = None
         # Tool-name collision state keyed by stable origin key (MCP-09):
         # (server name, original tool name), never registration order.
         self._tool_meta: dict[str, McpToolMeta] = {}
@@ -1000,7 +1003,9 @@ class McpManager:
             if cached:
                 self._unregister_origins(name)
                 self._tools_by_server[name] = [
-                    self._build_tool(name, entry, deferred=True) for entry in cached
+                    self._build_tool(name, entry, deferred=True)
+                    for entry in cached
+                    if self._tool_is_enabled(name, self._raw_tool_name(entry))
                 ]
                 self._rebuild_agent_names()
             # Deferred executes await this future; the continuation settles it.
@@ -1354,9 +1359,34 @@ class McpManager:
         """Build AgentTools for one server's tool list (live, not deferred)."""
         self._unregister_origins(name)
         self._tools_by_server[name] = [
-            self._build_tool(name, tool, deferred=False) for tool in tools
+            self._build_tool(name, tool, deferred=False)
+            for tool in tools
+            if self._tool_is_enabled(name, self._raw_tool_name(tool))
         ]
         self._rebuild_agent_names()
+
+    @staticmethod
+    def _raw_tool_name(tool: Tool | dict[str, Any]) -> str:
+        return str(tool.get("name", "")) if isinstance(tool, dict) else str(tool.name)
+
+    def _tool_is_enabled(self, server_name: str, tool_name: str) -> bool:
+        """Per-server MCP tool filter.
+
+        ``disabledTools`` wins; a non-empty ``enabledTools`` is an allowlist;
+        both accept exact names or glob patterns. Filtering happens before
+        name minting for BOTH cached/deferred and live tools, so a reconnect
+        or tools/list_changed cannot resurrect a denied schema into the
+        provider tools array (the context-cost and trust guarantees are the
+        same at startup and after recovery).
+        """
+        cfg = self._configs.get(server_name)
+        if cfg is None:
+            return True
+        denied = getattr(cfg, "disabled_tools", []) or []
+        if any(fnmatchcase(tool_name, pattern) for pattern in denied):
+            return False
+        allowed = getattr(cfg, "enabled_tools", []) or []
+        return not allowed or any(fnmatchcase(tool_name, pattern) for pattern in allowed)
 
     def _build_tool(
         self, server_name: str, tool: Tool | dict[str, Any], *, deferred: bool
@@ -1657,6 +1687,21 @@ class McpManager:
                 RECONNECT_BURST_LIMIT,
                 int(RECONNECT_BURST_WINDOW_S),
             )
+            # Model-visible incident (session installs the sink): the agent
+            # must know the server's tools are GONE, or it hammers them in a
+            # tight loop. Fire-and-forget so a raising sink cannot stall the
+            # reconnect machinery.
+            sink = getattr(self, "on_incident", None)
+            if sink is not None:
+                try:
+                    sink(
+                        name,
+                        f"auto-reconnect suspended after >{RECONNECT_BURST_LIMIT} "
+                        f"attempts in {int(RECONNECT_BURST_WINDOW_S)}s; its tools are "
+                        "unavailable until a reconnect succeeds",
+                    )
+                except Exception:  # noqa: BLE001 — incidents must never break the manager
+                    logger.debug("mcp incident sink raised", exc_info=True)
             self._abandon_reconnect(
                 name,
                 f"reconnect breaker tripped (>{RECONNECT_BURST_LIMIT} in "

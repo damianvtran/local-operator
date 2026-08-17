@@ -51,6 +51,13 @@ _RETRIABLE_PATTERNS = (
     "http 404",
     "http 502",
     "http 503",
+    # A tools/call can surface an OAuth challenge AFTER initialize. Reconnect
+    # recreates the HTTP transport through OAuthClientProvider (refreshing the
+    # access token) and the call site retries ONCE — no replay loop.
+    "http 401",
+    "401 unauthorized",
+    "www-authenticate",
+    "mcp/www_authenticate",
     "404 not found",
     "502 bad gateway",
     "503 service unavailable",

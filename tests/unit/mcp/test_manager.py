@@ -272,6 +272,8 @@ class TestCircuitBreaker:
         self, project: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         manager = McpManager(str(project))
+        incidents: list[tuple[str, str]] = []
+        manager.on_incident = lambda server, reason: incidents.append((server, reason))
         real_sleep = asyncio.sleep
         sleeps: list[float] = []
 
@@ -295,6 +297,13 @@ class TestCircuitBreaker:
                 break
 
         assert manager.reconnect_suspended("fast") is True
+        assert incidents == [
+            (
+                "fast",
+                "auto-reconnect suspended after >5 attempts in 30s; its tools are "
+                "unavailable until a reconnect succeeds",
+            )
+        ]
         # Backoff escalates 0.5, 1, 2, 4 and caps at 4 (five failed attempts).
         assert [d for d in sleeps if d > 0] == [0.5, 1.0, 2.0, 4.0, 4.0]
 
@@ -942,3 +951,19 @@ class TestChildOutputContainment:
         stderr_log.feed("x" * 1000)
         assert len(stderr_log.quoted_tail()) <= STDERR_QUOTED_CHARS + 1
         assert stderr_log.quoted_tail().endswith("…")
+
+
+def test_per_tool_filter_allow_deny_and_deny_wins(project: Path) -> None:
+    from local_operator.mcp.config import MCPStdioServerConfig
+
+    manager = McpManager(str(project))
+    manager._configs["srv"] = MCPStdioServerConfig(
+        command="x",
+        enabledTools=["search_*", "get_one"],
+        disabledTools=["search_private", "get_one"],
+    )
+    assert manager._tool_is_enabled("srv", "search_public") is True
+    assert manager._tool_is_enabled("srv", "search_private") is False
+    assert manager._tool_is_enabled("srv", "get_one") is False  # deny wins
+    assert manager._tool_is_enabled("srv", "unlisted") is False
+    assert manager._tool_is_enabled("missing", "anything") is True

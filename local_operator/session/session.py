@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from local_operator.compaction.tokens import approx_text_tokens
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
-from local_operator.harness.jobs import AsyncJobManager
+from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJobManager
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.subagent import run_subagent
 from local_operator.harness.types import (
@@ -82,6 +82,7 @@ from local_operator.harness.wake import (
     WakeScheduler,
     format_wake_delivery_text,
 )
+from local_operator.incidents import SESSION_INCIDENT_MESSAGE_TYPE
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
@@ -192,7 +193,23 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # compaction cut landing on a rendered marker can still locate
             # ``first_kept_entry_id`` on replay.
             out.append(_render_compaction_marker(message, entry_id=message.id))
-        elif message.custom_type in (WAKE_PROMPT_MESSAGE_TYPE, HUB_MESSAGE_TYPE):
+        elif message.custom_type == SESSION_INCIDENT_MESSAGE_TYPE:
+            # An incident rides the sender's preformatted text (the classifier
+            # already wrote category + suggested action), exactly like a wake
+            # delivery: it must reach the model as a user turn or the session
+            # stays blind to why its last run died.
+            out.append(
+                Message(
+                    role="user",
+                    content=[TextContent(text=message.details.get("text", ""))],
+                    id=message.id,
+                )
+            )
+        elif message.custom_type in (
+            WAKE_PROMPT_MESSAGE_TYPE,
+            HUB_MESSAGE_TYPE,
+            JOB_RESULT_MESSAGE_TYPE,
+        ):
             # A hub message renders exactly like a wake delivery: the sender
             # already formatted ``details["text"]``, and it must reach the
             # model as a user turn or the agent it was addressed to never
@@ -454,9 +471,15 @@ class Session:
         # this one runs between turns, so a caller that finds the lock held
         # needs a way to tell WHICH holder it is looking at (see `prompt`).
         self._compacting = False
+        # Error text from the run just ended, journalled as a session incident
+        # once persistence finishes (see _run_turn / journal_incident).
+        self._pending_incident: str | None = None
         self._turn_task: asyncio.Task[None] | None = None  # in-flight turn (wake deliveries)
 
-        self.jobs = AsyncJobManager()
+        # on_job_complete: settled model-owned jobs auto-deliver back into the
+        # conversation when the session is idle (see _on_job_completed) — the
+        # model stops having to poll 'jobs' for work it already started.
+        self.jobs = AsyncJobManager(on_job_complete=self._on_job_completed)
         self._wake = WakeScheduler(
             now=lambda: int(time.time() * 1000),
             deliver=self._deliver_wake,
@@ -640,6 +663,62 @@ class Session:
         ``Message`` docstring).
         """
         return list(self._context.messages)
+
+    def context_breakdown(self) -> dict[str, int]:
+        """On-demand token breakdown for the context the next request sends.
+
+        This is the user-visible counterpart to the 30k start-context budget:
+        it tokenizes the actual system blocks + wire tool schemas + rendered
+        messages, so a 126-tool MCP server's cost is a fact the user can SEE
+        instead of an invisible latency/cost regression. The four fixed blocks
+        retain their cache-layout names; schemas are counted separately
+        because providers serialize them beside the prompt, not in block 1.
+        """
+        import json
+
+        from local_operator.compaction.tokens import (
+            approx_text_tokens,
+            estimate_messages_tokens,
+        )
+
+        blocks = list(self._context.system_blocks)
+        while len(blocks) < 4:
+            blocks.append("")
+        result = {
+            "instructions": approx_text_tokens(blocks[0]),
+            "tool_inventory": approx_text_tokens(blocks[1]),
+            "environment": approx_text_tokens(blocks[2]),
+            "knowledge_mcp_goal": approx_text_tokens(blocks[3]),
+            "tool_schemas": sum(
+                approx_text_tokens(
+                    tool.name
+                    + "\n"
+                    + (tool.description or "")
+                    + "\n"
+                    + json.dumps(tool.parameters, sort_keys=True, separators=(",", ":"))
+                )
+                for tool in self._tools
+            ),
+            "messages": estimate_messages_tokens(
+                self._render_history(list(self._context.messages))
+            ),
+            "context_window": int(self._model.context_window),
+            "cache_read": int(
+                self._last_usage.cache_read_tokens if self._last_usage is not None else 0
+            ),
+        }
+        result["total"] = sum(
+            result[key]
+            for key in (
+                "instructions",
+                "tool_inventory",
+                "environment",
+                "knowledge_mcp_goal",
+                "tool_schemas",
+                "messages",
+            )
+        )
+        return result
 
     def set_model(self, model: ModelSpec) -> None:
         """Swap the model spec mid-session.
@@ -1004,6 +1083,7 @@ class Session:
                 get_aside_messages=self._drain_asides,
                 resolve_fallback_tool=self._fallback_tool_resolver,
                 interrupt_mode="immediate",
+                on_turn_end=self._on_turn_end,
             )
 
             new_messages: list[AgentMessage] = []
@@ -1030,6 +1110,10 @@ class Session:
                         # same prompt (§B).
                         if event.error is not None:
                             await self._degrade_if_image_rejected(event.error)
+                            # Journal WHY the run died after persistence: the
+                            # model (this session or a resumed one) must see
+                            # the failure, not just the UI.
+                            self._pending_incident = event.error
                         self._abort_requested = True
                         self._continuation_queue.clear()
                         self._held_end = None
@@ -1064,6 +1148,11 @@ class Session:
                 if message in initial:
                     continue
                 await self._transcript.append_message(message)
+
+            pending_incident = self._pending_incident
+            self._pending_incident = None
+            if pending_incident:
+                await self.journal_incident(pending_incident)
 
             await self._maybe_compact()
         finally:
@@ -1158,7 +1247,9 @@ class Session:
             },
         )
 
-    def _launch_subagent(self, label: str, prompt: str) -> str:
+    def _launch_subagent(
+        self, label: str, prompt: str, *, agent: str = "task", effort: str | None = None
+    ) -> str:
         """Register one one-shot child run on this session's job manager.
 
         The production caller of :func:`run_subagent`: spawn the child against
@@ -1167,13 +1258,121 @@ class Session:
         the child wiring. Installed on the ``ToolContext`` as
         ``subagent_launcher`` every turn so the ``task`` tool can start a
         child. Returns the job id.
+
+        ``agent``/``effort`` select the tier (see ``SubagentLauncher``):
+        effort resolves through ``values.subagents.models`` (``lo``/``med``/
+        ``hi`` -> ``provider/model-id``), so a scout or a cheap bulk task runs
+        on the model the operator picked for that job, not the session's
+        default. An unresolvable tier falls back to the parent's model with a
+        warning — a delegation must not fail because a config key is stale.
         """
+        model_spec = self._resolve_subagent_model(agent, effort)
         return run_subagent(
             label=label,
             prompt=prompt,
             parent_session=self,
             jobs_manager=self.jobs,
+            model_spec=model_spec,
+            agent=agent,
         )
+
+    def _resolve_subagent_model(self, agent: str, effort: str | None) -> ModelSpec | None:
+        """Effort tier -> ModelSpec via config; None keeps the parent's model."""
+        wanted = effort or ("lo" if agent == "scout" else None)
+        if wanted is None:
+            return None
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+            models = raw.get("models", {}) if isinstance(raw, dict) else {}
+            selector = models.get(wanted)
+            if not selector:
+                return None
+            provider, _, model_id = str(selector).partition("/")
+            if not model_id:
+                logger.warning("subagents.models.%s=%r lacks provider/model", wanted, selector)
+                return None
+            from local_operator.model.configure import build_model_spec
+
+            return build_model_spec(provider, model_id)
+        except Exception:  # noqa: BLE001 — stale config must not fail a spawn
+            logger.warning(
+                "subagent model tier %r could not be resolved; using session model", wanted
+            )
+            return None
+
+    async def journal_incident(self, raw: str) -> None:
+        """Persist and surface WHY the session last failed.
+
+        The failover cascade rotates credentials and models and its notices
+        reach the UI, but without this the MODEL never learned the
+        difference between "quota exhausted" and "my own bug" — the next
+        prompt (and a resumed session) resumed blind. The incident is
+        classified (rate-limit / auth / provider / network / context / MCP),
+        appended to the LIVE context so the very next turn sees it, and
+        persisted so ``--resume`` replays it.
+        """
+        from local_operator.incidents import format_incident_message
+
+        if self._disposed or not raw:
+            return
+        text = format_incident_message(raw, self._model.provider, self._model.model_id)
+        message = CustomMessage(
+            custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": text, "raw": raw[:1000]},
+        )
+        try:
+            await self._transcript.append_message(message)
+            self._context.messages.append(message)
+        except OSError:
+            logger.warning("could not journal session incident", exc_info=True)
+
+    def _on_mcp_incident(self, server: str, reason: str) -> None:
+        """MCP manager hook (breaker trips): journal without blocking the
+        manager's reconnect loop."""
+        self._spawn_background(self.journal_incident(f"MCP server '{server}': {reason}"))
+
+    async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
+        """Auto-deliver one settled model-owned job back into the conversation.
+
+        Only when the session is IDLE: a running turn already owns the
+        conversation (its model either waited or can 'jobs'), and
+        steering-injecting a result nobody asked for mid-turn is noise. Only
+        model-registered job types (task, backgrounded bash): host jobs keep
+        their own delivery. A job the wait tool already returned is marked
+        consumed and stays quiet, or the same result would arrive twice.
+        """
+        if self._disposed or job is None:
+            return
+        # Top-level only: a child session is a one-shot runner. Auto-starting
+        # an invisible re-entrant child turn from a nested job conflicts with
+        # its teardown (and nobody has a panel for it); the child can still
+        # consume nested work deliberately through its own jobs/wait tools.
+        if self._job_id is not None:
+            return
+        if getattr(job, "consumed", False) or job.type not in ("task", "bash"):
+            return
+        if self._is_streaming:
+            return
+        label = getattr(job, "label", job_id)
+        status = getattr(job, "status", "completed")
+        summary = (text or "").strip()
+        if len(summary) > 2000:
+            summary = summary[:2000] + "…[truncated; full result via jobs/wait]"
+        delivery = (
+            f"background job '{label}' {status}:\n{summary}"
+            if summary
+            else f"background job '{label}' {status}."
+        )
+        message = CustomMessage(
+            custom_type=JOB_RESULT_MESSAGE_TYPE,
+            attribution="user",
+            details={"job_id": job_id, "text": delivery},
+        )
+        self._spawn_background(self._prompt_messages([message]))
 
     async def _drain_steering(self) -> list[AgentMessage]:
         """Consume the steering queue. Steering messages are real injected
@@ -1239,6 +1438,82 @@ class Session:
             await self._transcript.compact_file()
         except OSError as exc:
             logger.warning("could not journal pruned tool outputs: %s", exc)
+
+    async def _on_turn_end(self, messages: list[AgentMessage]) -> list[AgentMessage] | None:
+        """Mid-turn compaction gate — runs INSIDE the tool loop, at the safe
+        boundary after each tool batch lands and before the next model call.
+
+        Without this, a single long tool run (dozens of calls, no user turn)
+        grows past the window with no relief until the run ends — the next
+        provider request then fails the whole run, and the post-turn pass
+        recovers a turn that never needed to break. The knob
+        (``values.compaction.mid_turn_enabled``) defaults on; the pass itself
+        is the same single plan+commit the post-turn gate and ``/compact``
+        share, so there is no second compaction implementation to drift.
+
+        Returns the replacement context so the loop can prune its run
+        accumulator (see ``LoopConfig.on_turn_end``), or ``None`` when no
+        compaction ran. The replayability guard in ``_plan_compaction``
+        (kept[0] must be a transcript entry) naturally constrains mid-run
+        cuts to already-persisted history, which is where a cut belongs
+        mid-run anyway.
+        """
+        if self._disposed:
+            return None
+        try:
+            from local_operator.compaction.api import CompactionSettings
+        except ImportError:
+            return None
+        settings = self._compaction_settings or CompactionSettings()
+        # getattr: hosts (and the test suite) may inject a duck-typed
+        # settings model that predates the knob; absence means the §C default
+        # (on), same posture as _resolve_strategy's capability probes.
+        if not settings.enabled or not getattr(settings, "mid_turn_enabled", True):
+            return None
+        # The post-run usage scan has not happened yet — the boundary
+        # snapshot carries the assistant message that just finished, whose
+        # usage is the provider's ground truth for the trigger math.
+        for message in reversed(messages):
+            if isinstance(message, Message) and message.usage is not None:
+                self._last_usage = message.usage
+                break
+        # Cheap pre-gate: when the provider just reported its context size and
+        # that figure already fails the trigger, skip the full plan — the
+        # plan renders the whole history to prove the same thing, and this
+        # hook fires at EVERY continuing tool-loop boundary. The threshold
+        # mirror below is 4 lines; _plan_compaction stays the authority for
+        # any context that passes this gate. No provider figure (usage not
+        # yet reported) falls through to the plan, whose own upper-bound
+        # proof is the cheap path there.
+        provider_reported = (
+            self._last_usage.context_tokens if self._last_usage is not None else None
+        )
+        if provider_reported is not None:
+            from local_operator.compaction import api as compaction_api
+
+            gate_settings = settings
+            if (
+                getattr(settings, "threshold_tokens", -1) <= 0
+                and getattr(settings, "threshold_percent", -1) <= 0
+            ):
+                gate_settings = settings.model_copy(
+                    update={
+                        "threshold_tokens": compaction_api.resolve_threshold_tokens(
+                            self._model.context_window, settings
+                        )
+                    }
+                )
+            if not compaction_api.should_compact(
+                provider_reported, self._model.context_window, gate_settings
+            ):
+                return None
+        planned = await self._plan_compaction(respect_threshold=True)
+        if isinstance(planned, CompactionOutcome):
+            return None
+        outcome = await self._run_compaction(planned, reason="mid-turn")
+        if not outcome.ran:
+            return None
+        return list(self._context.messages)
 
     async def _maybe_compact(self) -> None:
         """Post-turn compaction check — the AUTOMATIC trigger.
