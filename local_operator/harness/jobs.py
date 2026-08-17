@@ -42,6 +42,11 @@ JobType = Literal["bash", "task"]
 # run(job_id, signal, report_progress) -> awaitable text result
 JobRunFn = Callable[[str, AbortSignal, Callable[[str], None]], Awaitable[str | None]]
 DeliverySink = Callable[[str, str, "AsyncJob | None"], Awaitable[None] | None]
+
+#: Custom-message type used by a session to deliver a settled job's result
+#: back into the conversation as a re-entering message (rendered as a user
+#: message). Lives here because the job manager owns the lifecycle.
+JOB_RESULT_MESSAGE_TYPE = "job_result"
 ProgressFn = Callable[[str], None]
 
 
@@ -64,6 +69,10 @@ class AsyncJob(BaseModel):
     error_text: str | None = None
     latest_details: dict[str, Any] | None = None
     owner_id: str | None = None
+    # Set when a caller (the `wait` tool) has already returned this job's
+    # result to the model: auto-delivery must then stay quiet, or the same
+    # result would reach the conversation twice.
+    consumed: bool = False
     agent_id: str | None = None
     queued: bool = False
     # Serialized child events of a ``task`` job (``model_dump(mode="json")``
@@ -234,6 +243,13 @@ class AsyncJobManager:
         return True
 
     # -- delivery -----------------------------------------------------------
+
+    def mark_consumed(self, job_id: str) -> None:
+        """Flag a job's result as already handed to the model (see the
+        ``consumed`` field): auto-delivery checks it and stays quiet."""
+        job = self._jobs.get(job_id)
+        if job is not None:
+            job.consumed = True
 
     def register_delivery_sink(self, owner_id: str, sink: DeliverySink) -> Callable[[], None]:
         """Route completions owned by ``owner_id`` to ``sink``. Returns an

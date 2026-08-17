@@ -1349,3 +1349,77 @@ async def test_glob_respects_gitignore_unless_pattern_names_it(tools, context, t
     assert "dist/out.js" not in broad.text
     named = await _call(tools, "glob", {"pattern": "dist/*.js"}, context)
     assert "dist/out.js" in named.text
+
+
+# ---------------------------------------------------------------------------
+# bash: steering detach vs real abort
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bash_steering_cancellation_backgrounds_the_command(tmp_path) -> None:
+    """A steering cancel (task cancelled, signal NOT aborted) detaches the
+    command into a tracked background job instead of killing it: the tool
+    returns a result naming the job, and the job later reports the exit code
+    and output of the process that was allowed to finish."""
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg", jobs=manager)
+    tools = {t.name: t for t in create_tools(context)}
+
+    task = asyncio.create_task(
+        _call(
+            tools,
+            "bash",
+            {"command": f"sleep 0.6 && echo finished-marker"},
+            context,
+        )
+    )
+    await asyncio.sleep(0.2)  # let the command start
+    task.cancel()
+    result = await task  # the tool swallows the steering cancel and answers
+
+    assert result.is_error is False
+    assert "continues in the background" in result.text
+    job_id = result.details["job_id"]
+    job = manager.get(job_id)
+    assert job is not None and job.type == "bash"
+
+    async def settle():
+        while job.status == "running":
+            await asyncio.sleep(0.05)
+
+    await settle()
+    assert job.status == "completed"
+    assert "exit code: 0" in (job.result_text or "")
+    assert "finished-marker" in (job.result_text or "")
+
+
+@pytest.mark.asyncio
+async def test_bash_real_abort_still_kills(tmp_path) -> None:
+    """A genuine abort (Ctrl+C / jobs cancel: signal.aborted) kills the
+    process group; the cancellation propagates as before."""
+    from local_operator.harness.jobs import AsyncJobManager
+    from local_operator.harness.types import AbortSignal
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg2", jobs=manager)
+    tools = {t.name: t for t in create_tools(context)}
+    sig = AbortSignal()
+    task = asyncio.create_task(
+        tools["bash"].execute(
+            "c",
+            {"command": f"sleep 5 && echo should-not-run"},
+            sig,
+            None,
+            context,
+        )
+    )
+    await asyncio.sleep(0.2)
+    sig.abort("interrupted")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.1)
+    assert manager.list() == []  # nothing was backgrounded

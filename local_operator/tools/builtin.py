@@ -1180,27 +1180,110 @@ async def execute_bash(
     aborted = False
     next_update = loop.time() + 0.5
 
-    while True:
-        waiters: list[asyncio.Task[object]] = [wait_task, stdout_task, stderr_task]
-        if abort_waiter is not None:
-            waiters.append(abort_waiter)
-        if wait_task.done():
-            break  # finished already — never misreport as timeout
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            timed_out = True
+    try:
+        while True:
+            waiters: list[asyncio.Task[object]] = [wait_task, stdout_task, stderr_task]
+            if abort_waiter is not None:
+                waiters.append(abort_waiter)
+            if wait_task.done():
+                break  # finished already — never misreport as timeout
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                timed_out = True
+                _kill()
+                break
+            done, _pending = await asyncio.wait(waiters, timeout=min(0.25, remaining))
+            if wait_task in done:
+                break
+            if abort_waiter is not None and abort_waiter in done:
+                aborted = True
+                _kill()
+                break
+            if loop.time() >= next_update:
+                _emit_update()
+                next_update = loop.time() + 0.5
+    except asyncio.CancelledError:
+        # Steering interrupted the tool task (the loop cancels interruptible
+        # tools at its 0.25s poll). Killing the process here used to (a)
+        # destroy minutes of a long build on a one-line user aside and (b)
+        # leak the child anyway when cancellation raced the kill. Instead the
+        # command DETACHES: it keeps running (it was spawned start_new_session
+        # so it survives its own process group), its readers keep draining so
+        # a full pipe cannot block it, and it is tracked as a background job
+        # whose completion auto-delivers when the session is idle. A REAL
+        # abort (Ctrl+C, jobs cancel) still kills: that is a stop, not a
+        # redirect.
+        if signal is not None and signal.aborted:
             _kill()
-            break
-        done, _pending = await asyncio.wait(waiters, timeout=min(0.25, remaining))
-        if wait_task in done:
-            break
-        if abort_waiter is not None and abort_waiter in done:
-            aborted = True
+            raise
+        jobs = context.jobs if context is not None else None
+        if jobs is None:
+            # No job manager to own a detached child: kill rather than leak.
             _kill()
-            break
-        if loop.time() >= next_update:
-            _emit_update()
-            next_update = loop.time() + 0.5
+            raise
+        partial = _bash_output_summary(
+            b"".join(stdout_chunks).decode("utf-8", errors="replace"),
+            b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+        )
+        wait_task.cancel()
+        if abort_waiter is not None and not abort_waiter.done():
+            abort_waiter.cancel()
+        command = params.command
+        remaining_timeout = max(deadline - loop.time(), 0.0)
+
+        async def _detached(job_id: str, job_signal: Any, report_progress: Any) -> str:
+            # Owns the process from here: waits with the ORIGINAL timeout
+            # budget, keeps the readers alive to drain the pipes, and reports
+            # the exit status + bounded output as the job result.
+            del job_id, report_progress
+            # Local from the start: assigning it in the timeout branch without
+            # this line would make it a local read-before-assign (the closure
+            # never runs — the outer assignment happens in a scope the runner
+            # never re-enters after registration).
+            timed_out_bg = False
+            bg_deadline = asyncio.get_running_loop().time() + remaining_timeout
+            while process.returncode is None:
+                if job_signal is not None and job_signal.aborted:
+                    _kill()
+                    break
+                if asyncio.get_running_loop().time() > bg_deadline:
+                    timed_out_bg = True
+                    _kill()
+                    break
+                try:
+                    await asyncio.wait_for(asyncio.shield(process.wait()), timeout=0.25)
+                except (TimeoutError, asyncio.TimeoutError):
+                    continue
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            out = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+            err = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+            code = process.returncode if process.returncode is not None else -1
+            head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
+            summary, spill = _capped_list_body(
+                _bash_output_summary(out, err),
+                _bash_output_summary(out, err)[:TOOL_OUTPUT_LIMIT_CHARS],
+                "bash",
+                context,
+            )
+            transport = getattr(process, "_transport", None)
+            if transport is not None:
+                transport.close()
+            return "\n".join(part for part in (head, f"exit code: {code}", summary) if part)
+
+        timed_out_bg = False
+        try:
+            bg_job_id = jobs.register("bash", f"bash: {command[:60]}", _detached, owner_id=None)
+        except Exception:  # noqa: BLE001 — no manager slot: kill, don't leak
+            _kill()
+            raise
+        return _text(
+            tool_call_id,
+            "bash",
+            f"steering interrupted; command continues in the background as job "
+            f"{bg_job_id} (use 'jobs'/'wait'; its result auto-delivers when "
+            f"the session is idle)\ncommand: {command}\n{partial}",
+            details={"job_id": bg_job_id, "backgrounded": True},
+        )
 
     # Bounded drain: the kill above EOFs both pipes; give the readers 250 ms
     # to consume what is already buffered so partial output survives.
@@ -4919,6 +5002,10 @@ async def execute_wait(
         job = jobs.get(params.job_id)
         if job is None:
             return _error(tool_call_id, "wait", f"job {params.job_id} disappeared")
+    # Handing the result to the model HERE means auto-delivery must not
+    # repeat it when the session next goes idle (see Session._on_job_completed
+    # and AsyncJob.consumed).
+    jobs.mark_consumed(params.job_id)
     text, spill_details = _job_summary(job, context)
     details = {"job_id": job.id, "status": job.status}
     if spill_details:

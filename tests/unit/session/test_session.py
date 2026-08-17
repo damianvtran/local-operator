@@ -1332,3 +1332,151 @@ async def test_mid_turn_compaction_disabled_by_setting(tmp_path, monkeypatch):
     compactions = [e for e in session._transcript.entries() if e.type == "compaction"]
     assert len(compactions) <= 1
     await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# session incidents (why a run died, model-visible)
+# ---------------------------------------------------------------------------
+
+
+class ExplodingStream:
+    """First call raises a provider-shaped error; later calls succeed."""
+
+    def __init__(self) -> None:
+        self.requests: list[ChatRequest] = []
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+
+            async def boom():
+                yield StreamTextDelta(delta="partial")
+                raise RuntimeError("429 Too Many Requests: rate limit exceeded")
+
+            return boom()
+
+        async def ok():
+            yield StreamTextDelta(delta="recovered")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return ok()
+
+
+@pytest.mark.asyncio
+async def test_error_run_journals_model_visible_incident(tmp_path):
+    """A run that dies on a provider error leaves a classified incident in
+    the LIVE context (the next prompt sees it) and in the transcript (a
+    resumed session replays it) — the model learns WHY, not just the UI."""
+    stream = ExplodingStream()
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.prompt("go")
+
+    incidents = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == "session_incident"
+    ]
+    assert incidents, "error run must journal a session incident"
+    assert "rate-limit" in incidents[-1].details["text"]
+    assert "429" in incidents[-1].details["raw"]
+
+    # Persisted: the transcript replay carries it.
+    dumped = "\n".join(
+        __import__("json").dumps(e.payload, default=str) for e in session._transcript.entries()
+    )
+    assert "session_incident" in dumped
+
+    # The NEXT prompt renders it into the request the provider sees.
+    await session.prompt("continue")
+    rendered = "\n".join(getattr(m, "text", "") for m in stream.requests[1].messages)
+    assert "[session incident" in rendered and "rate-limit" in rendered
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_job_completion_auto_delivers_when_idle(tmp_path):
+    """A settled model-owned job re-wakes the idle session: the result lands
+    as a conversation turn without the model polling 'jobs'."""
+    from local_operator.harness.jobs import AsyncJobManager
+
+    turn_count = {"n": 0}
+
+    class TwoTurnStream:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.requests.append(request)
+            turn_count["n"] += 1
+
+            async def gen():
+                yield StreamTextDelta(delta=f"turn {turn_count['n']}")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+    stream = TwoTurnStream()
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.prompt("start something")
+
+    async def quick(job_id, signal, report_progress):
+        return "the answer is 42"
+
+    session.jobs.register("task", "researcher", quick)
+    await wait_for(lambda: sum(1 for e in events if isinstance(e, AgentStartEvent)) >= 2)
+    delivered = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == "job_result"
+    ]
+    assert delivered
+    assert "the answer is 42" in delivered[-1].details["text"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_consumed_and_foreign_jobs_do_not_auto_deliver(tmp_path):
+    """wait already returned the result (consumed) and host-registered job
+    types stay quiet; only fresh model-owned work re-wakes the session."""
+    from local_operator.harness.jobs import AsyncJobManager
+    from local_operator.harness.types import Usage
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")
+    before = len(session._context.messages)
+
+    async def runner(job_id, signal, report_progress):
+        return "done"
+
+    consumed_id = session.jobs.register("task", "consumed-job", runner)
+    job = session.jobs.get(consumed_id)
+    assert job is not None
+    job.consumed = True
+    await session._on_job_completed(consumed_id, "done", job)
+
+    # A streaming session stays quiet too: the in-turn model owns the floor.
+    # The runner must still be RUNNING when the flag flips, or the manager's
+    # own settle-delivery wins the race and delivers while idle.
+    async def slow_runner(job_id, signal, report_progress):
+        await asyncio.sleep(0.3)
+        return "done"
+
+    streaming_id = session.jobs.register("task", "while-busy", slow_runner)
+    session._is_streaming = True
+    try:
+        await asyncio.sleep(0.45)  # settles while the session is "streaming"
+    finally:
+        session._is_streaming = False
+    await asyncio.sleep(0.05)
+    assert len(session._context.messages) == before  # nothing delivered
+    await session.dispose()

@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from local_operator.compaction.tokens import approx_text_tokens
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
-from local_operator.harness.jobs import AsyncJobManager
+from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJobManager
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.subagent import run_subagent
 from local_operator.harness.types import (
@@ -82,6 +82,7 @@ from local_operator.harness.wake import (
     WakeScheduler,
     format_wake_delivery_text,
 )
+from local_operator.incidents import SESSION_INCIDENT_MESSAGE_TYPE
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
@@ -192,7 +193,23 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # compaction cut landing on a rendered marker can still locate
             # ``first_kept_entry_id`` on replay.
             out.append(_render_compaction_marker(message, entry_id=message.id))
-        elif message.custom_type in (WAKE_PROMPT_MESSAGE_TYPE, HUB_MESSAGE_TYPE):
+        elif message.custom_type == SESSION_INCIDENT_MESSAGE_TYPE:
+            # An incident rides the sender's preformatted text (the classifier
+            # already wrote category + suggested action), exactly like a wake
+            # delivery: it must reach the model as a user turn or the session
+            # stays blind to why its last run died.
+            out.append(
+                Message(
+                    role="user",
+                    content=[TextContent(text=message.details.get("text", ""))],
+                    id=message.id,
+                )
+            )
+        elif message.custom_type in (
+            WAKE_PROMPT_MESSAGE_TYPE,
+            HUB_MESSAGE_TYPE,
+            JOB_RESULT_MESSAGE_TYPE,
+        ):
             # A hub message renders exactly like a wake delivery: the sender
             # already formatted ``details["text"]``, and it must reach the
             # model as a user turn or the agent it was addressed to never
@@ -454,9 +471,15 @@ class Session:
         # this one runs between turns, so a caller that finds the lock held
         # needs a way to tell WHICH holder it is looking at (see `prompt`).
         self._compacting = False
+        # Error text from the run just ended, journalled as a session incident
+        # once persistence finishes (see _run_turn / journal_incident).
+        self._pending_incident: str | None = None
         self._turn_task: asyncio.Task[None] | None = None  # in-flight turn (wake deliveries)
 
-        self.jobs = AsyncJobManager()
+        # on_job_complete: settled model-owned jobs auto-deliver back into the
+        # conversation when the session is idle (see _on_job_completed) — the
+        # model stops having to poll 'jobs' for work it already started.
+        self.jobs = AsyncJobManager(on_job_complete=self._on_job_completed)
         self._wake = WakeScheduler(
             now=lambda: int(time.time() * 1000),
             deliver=self._deliver_wake,
@@ -1031,6 +1054,10 @@ class Session:
                         # same prompt (§B).
                         if event.error is not None:
                             await self._degrade_if_image_rejected(event.error)
+                            # Journal WHY the run died after persistence: the
+                            # model (this session or a resumed one) must see
+                            # the failure, not just the UI.
+                            self._pending_incident = event.error
                         self._abort_requested = True
                         self._continuation_queue.clear()
                         self._held_end = None
@@ -1065,6 +1092,11 @@ class Session:
                 if message in initial:
                     continue
                 await self._transcript.append_message(message)
+
+            pending_incident = self._pending_incident
+            self._pending_incident = None
+            if pending_incident:
+                await self.journal_incident(pending_incident)
 
             await self._maybe_compact()
         finally:
@@ -1214,6 +1246,77 @@ class Session:
                 "subagent model tier %r could not be resolved; using session model", wanted
             )
             return None
+
+    async def journal_incident(self, raw: str) -> None:
+        """Persist and surface WHY the session last failed.
+
+        The failover cascade rotates credentials and models and its notices
+        reach the UI, but without this the MODEL never learned the
+        difference between "quota exhausted" and "my own bug" — the next
+        prompt (and a resumed session) resumed blind. The incident is
+        classified (rate-limit / auth / provider / network / context / MCP),
+        appended to the LIVE context so the very next turn sees it, and
+        persisted so ``--resume`` replays it.
+        """
+        from local_operator.incidents import format_incident_message
+
+        if self._disposed or not raw:
+            return
+        text = format_incident_message(raw, self._model.provider, self._model.model_id)
+        message = CustomMessage(
+            custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": text, "raw": raw[:1000]},
+        )
+        try:
+            await self._transcript.append_message(message)
+            self._context.messages.append(message)
+        except OSError:
+            logger.warning("could not journal session incident", exc_info=True)
+
+    def _on_mcp_incident(self, server: str, reason: str) -> None:
+        """MCP manager hook (breaker trips): journal without blocking the
+        manager's reconnect loop."""
+        self._spawn_background(self.journal_incident(f"MCP server '{server}': {reason}"))
+
+    async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
+        """Auto-deliver one settled model-owned job back into the conversation.
+
+        Only when the session is IDLE: a running turn already owns the
+        conversation (its model either waited or can 'jobs'), and
+        steering-injecting a result nobody asked for mid-turn is noise. Only
+        model-registered job types (task, backgrounded bash): host jobs keep
+        their own delivery. A job the wait tool already returned is marked
+        consumed and stays quiet, or the same result would arrive twice.
+        """
+        if self._disposed or job is None:
+            return
+        # Top-level only: a child session is a one-shot runner. Auto-starting
+        # an invisible re-entrant child turn from a nested job conflicts with
+        # its teardown (and nobody has a panel for it); the child can still
+        # consume nested work deliberately through its own jobs/wait tools.
+        if self._job_id is not None:
+            return
+        if getattr(job, "consumed", False) or job.type not in ("task", "bash"):
+            return
+        if self._is_streaming:
+            return
+        label = getattr(job, "label", job_id)
+        status = getattr(job, "status", "completed")
+        summary = (text or "").strip()
+        if len(summary) > 2000:
+            summary = summary[:2000] + "…[truncated; full result via jobs/wait]"
+        delivery = (
+            f"background job '{label}' {status}:\n{summary}"
+            if summary
+            else f"background job '{label}' {status}."
+        )
+        message = CustomMessage(
+            custom_type=JOB_RESULT_MESSAGE_TYPE,
+            attribution="user",
+            details={"job_id": job_id, "text": delivery},
+        )
+        self._spawn_background(self._prompt_messages([message]))
 
     async def _drain_steering(self) -> list[AgentMessage]:
         """Consume the steering queue. Steering messages are real injected

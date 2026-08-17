@@ -1657,6 +1657,21 @@ class McpManager:
                 RECONNECT_BURST_LIMIT,
                 int(RECONNECT_BURST_WINDOW_S),
             )
+            # Model-visible incident (session installs the sink): the agent
+            # must know the server's tools are GONE, or it hammers them in a
+            # tight loop. Fire-and-forget so a raising sink cannot stall the
+            # reconnect machinery.
+            sink = getattr(self, "on_incident", None)
+            if sink is not None:
+                try:
+                    sink(
+                        name,
+                        f"auto-reconnect suspended after >{RECONNECT_BURST_LIMIT} "
+                        f"attempts in {int(RECONNECT_BURST_WINDOW_S)}s; its tools are "
+                        "unavailable until a reconnect succeeds",
+                    )
+                except Exception:  # noqa: BLE001 — incidents must never break the manager
+                    logger.debug("mcp incident sink raised", exc_info=True)
             self._abandon_reconnect(
                 name,
                 f"reconnect breaker tripped (>{RECONNECT_BURST_LIMIT} in "

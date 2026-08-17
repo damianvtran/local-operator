@@ -826,6 +826,12 @@ class ScriptedProvider:
             return text_stream("acknowledged; stopping now")
         if "You were interrupted" in body:
             return text_stream("resumed and wrapped up")
+        if "background job" in body:
+            # Job auto-delivery now re-wakes the TOP-LEVEL parent. The fixture's
+            # old default is an intentional infinite bash loop (it models a
+            # busy child), so without an acknowledgement for this new parent
+            # turn it spins forever after the child has already completed.
+            return text_stream("job result received")
         return tool_call_stream("bash", {"command": "sleep 0.1; echo tick"})
 
 

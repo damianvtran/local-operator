@@ -272,6 +272,8 @@ class TestCircuitBreaker:
         self, project: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         manager = McpManager(str(project))
+        incidents: list[tuple[str, str]] = []
+        manager.on_incident = lambda server, reason: incidents.append((server, reason))
         real_sleep = asyncio.sleep
         sleeps: list[float] = []
 
@@ -295,6 +297,13 @@ class TestCircuitBreaker:
                 break
 
         assert manager.reconnect_suspended("fast") is True
+        assert incidents == [
+            (
+                "fast",
+                "auto-reconnect suspended after >5 attempts in 30s; its tools are "
+                "unavailable until a reconnect succeeds",
+            )
+        ]
         # Backoff escalates 0.5, 1, 2, 4 and caps at 4 (five failed attempts).
         assert [d for d in sleeps if d > 0] == [0.5, 1.0, 2.0, 4.0, 4.0]
 
