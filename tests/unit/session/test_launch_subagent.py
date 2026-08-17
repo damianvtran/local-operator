@@ -106,10 +106,16 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert "child did the work" in (ends[0].result_text or "")
 
     # The child actually ran its own provider turn through the shared stream.
-    assert len(stream.requests) == 1
+    assert stream.requests
     assert stream.requests[0].messages
     assert isinstance(stream.requests[0].messages[0], Message)
     assert stream.requests[0].messages[0].text == "go do a thing"
+
+    # Item 12: once the task settles, the idle TOP-LEVEL parent re-wakes with
+    # the result instead of polling `jobs`; the shared provider sees a second
+    # request carrying that job-result custom message.
+    await wait_for(lambda: len(stream.requests) >= 2)
+    assert any("background job 'sub' completed" in m.text for m in stream.requests[1].messages)
 
     await parent.dispose()
 
