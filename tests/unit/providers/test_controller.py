@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
+from local_operator.harness.types import ModelSpec
 from local_operator.providers.controller import ProviderController
 from local_operator.providers.usage import UsageReport
 
@@ -416,6 +417,45 @@ def test_one_entry_can_be_rebuilt_for_the_model_a_session_is_running(controller)
     # operator may have configured a model by hand.
     assert controller.entry_for("anthropic", "claude-not-a-model") is None
     assert controller.entry_for("not-a-provider", "whatever") is None
+
+
+def test_an_aggregator_current_model_is_rebuilt_from_the_resolved_spec(controller) -> None:
+    """Aggregators deliberately have no enumerable static catalogue.
+
+    ``static_models('openrouter')`` is empty even for a model the session is
+    running, so a rescue that only reads static rows cannot restore the current
+    marker when the live listing is unavailable. Session startup already
+    resolved the exact model; the single-row rescue spends that spec rather than
+    doing synchronous network/cache work on the TUI thread.
+    """
+    spec = ModelSpec(
+        provider="openrouter",
+        model_id="deepseek/deepseek-chat",
+        display_name="DeepSeek Chat",
+        context_window=64_000,
+    )
+
+    entry = controller.entry_for(
+        "openrouter",
+        "deepseek/deepseek-chat",
+        spec=spec,
+    )
+
+    assert entry is not None
+    assert entry.selector == "openrouter/deepseek/deepseek-chat"
+    # Naming's honesty rule declines an ambiguous family name and spends the
+    # selector instead — the rescue must use the SAME display decision as the
+    # band, not force the raw metadata name through.
+    assert entry.label == "openrouter/deepseek/deepseek-chat"
+    assert entry.context_window == 64_000
+    assert entry.input_price == -1.0
+    assert entry.output_price == -1.0
+    assert entry.aggregated is True
+
+    # The supplied spec is only evidence for itself, never a generic bypass for
+    # another selector or provider.
+    assert controller.entry_for("openrouter", "other/model", spec=spec) is None
+    assert controller.entry_for("radient", spec.model_id, spec=spec) is None
 
 
 def test_an_unknown_price_is_not_reported_as_free(controller, monkeypatch) -> None:

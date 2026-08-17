@@ -400,37 +400,61 @@ class ProviderController:
                 )
         return entries
 
-    def entry_for(self, provider: str, model_id: str) -> CatalogueEntry | None:
+    def entry_for(
+        self,
+        provider: str,
+        model_id: str,
+        *,
+        spec: ModelSpec | None = None,
+    ) -> CatalogueEntry | None:
         """One entry for ``provider``/``model_id``, or ``None`` if unknown here.
 
         Exists for the model a session is ALREADY RUNNING. A picker must offer
-        it whatever the catalogue says, and after an authoritative listing it may
-        not be in the catalogue at all: the account's live list is allowed to
-        prune bundled ids, so a session started on one of those ids had its own
-        model disappear from the list while the status band still named it, and
-        typing the id answered "no matching models".
+        it whatever the catalogue says, and after an authoritative listing it
+        may not be in the catalogue at all: the account's live list is allowed
+        to prune bundled ids, so a session started on one of those ids had its
+        own model disappear from the list while the status band still named it,
+        and typing the id answered "no matching models".
+
+        ``spec`` is the session's already-resolved active model. It matters for
+        aggregators: they deliberately have no ENUMERABLE static catalogue, so
+        ``static_models("openrouter")`` is empty even for a model the session
+        is running. Re-listing here would put synchronous network/cache work
+        back on the TUI thread; the spec already carries the name and context
+        that session startup resolved. Prices are unknown on ``ModelSpec`` and
+        stay unknown rather than being invented.
 
         Built here rather than in the caller because the normalization is this
         module's job (see :class:`CatalogueEntry`): a caller reaching into the
         registry itself would have to know that a context window of ``-1`` and
         ``0`` both mean unknown, and would spell the price rules a second time.
-        ``None`` means the registry does not describe this pair, which is a real
-        answer for a model the operator configured by hand.
+        ``None`` means neither the registry nor the active spec describes this
+        pair, which is a real answer for a model an operator configured by hand.
         """
         definition = get_provider_definition(provider)
         if definition is None:
             return None
         info = static_models(definition.id).get(model_id)
-        if info is None:
+        if info is not None:
+            name = info.name or ""
+            context_window = max(0, info.context_window or 0)
+            input_price = _price(info.input_price, definition)
+            output_price = _price(info.output_price, definition)
+        elif spec is not None and spec.provider == definition.id and spec.model_id == model_id:
+            name = spec.display_name
+            context_window = max(0, spec.context_window)
+            input_price = -1.0
+            output_price = -1.0
+        else:
             return None
         usable = self.usable_providers()
         return CatalogueEntry(
             provider=definition.id,
             model_id=model_id,
-            label=model_label(definition.id, model_id, info.name or "").full,
-            context_window=max(0, info.context_window or 0),
-            input_price=_price(info.input_price, definition),
-            output_price=_price(info.output_price, definition),
+            label=model_label(definition.id, model_id, name).full,
+            context_window=context_window,
+            input_price=input_price,
+            output_price=output_price,
             connected=usable is None or definition.id in usable,
             aggregated=definition.id in AGGREGATOR_PROVIDERS,
         )

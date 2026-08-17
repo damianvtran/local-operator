@@ -4120,13 +4120,14 @@ class OperatorApp(App[None]):
             for entry in entries
             if usable is None or entry.provider in usable or entry.selector == current
         ]
+        # Count what the catalogue FILTER dropped before appending a current
+        # row that was never in ``entries``. Subtracting the rescued row made
+        # one real hidden catalogue entry disappear from the footer; flooring
+        # at zero prevented ``-1`` but did not preserve what "hidden" means.
+        hidden = len(entries) - len(rows)
         rows = self._with_current_row(rows, current)
         if usable is None:
             return rows, "credential check unavailable — showing every model"
-        # ``max(0, …)``: a rebuilt current row is not in ``entries``, so a
-        # catalogue that pruned the running model would otherwise report a
-        # NEGATIVE hidden count.
-        hidden = max(0, len(entries) - len(rows))
         return rows, (f"{hidden} hidden — /login <provider>" if hidden else "")
 
     def _with_current_row(self, rows: list[ModelRow], current: str | None) -> list[ModelRow]:
@@ -4149,12 +4150,20 @@ class OperatorApp(App[None]):
         provider, _, model_id = current.partition("/")
         if not provider or not model_id:
             return rows
+        spec = self._session.model if self._session is not None else None
         try:
-            entry = providers.entry_for(provider, model_id)
+            try:
+                entry = providers.entry_for(provider, model_id, spec=spec)
+            except TypeError:
+                # Backward-compatible with a duck-typed embedding facade that
+                # implemented the old two-argument courtesy. The real
+                # controller's method is synchronous and side-effect-free, so a
+                # retry cannot duplicate work; a rescue row must never be the
+                # reason an older host's picker fails to paint.
+                entry = providers.entry_for(provider, model_id)
         # ``AttributeError`` included deliberately: this facade is duck-typed
         # (``provider_controller: Any``) and an embedding host may not implement
-        # ``entry_for`` at all. A rescue row is a courtesy; never the reason a
-        # picker fails to paint.
+        # ``entry_for`` at all.
         except Exception:  # noqa: BLE001 — a rescue row never costs the list
             return rows
         if entry is None:

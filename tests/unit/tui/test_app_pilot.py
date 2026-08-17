@@ -2184,6 +2184,55 @@ class _PruningController(_AccessController):
         )
 
 
+class _PruningWithHiddenController(_PruningController):
+    """One usable row, one filtered row, and one rescued row not in either."""
+
+    def static_catalogue(self):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="openrouter",
+                model_id="deepseek/deepseek-chat",
+                label="DeepSeek Chat",
+                context_window=64_000,
+                input_price=0.14,
+                output_price=0.28,
+                connected=True,
+                aggregated=True,
+            ),
+            CatalogueEntry(
+                provider="anthropic",
+                model_id="claude-opus-5",
+                label="Claude Opus 5",
+                context_window=1_000_000,
+                input_price=15.0,
+                output_price=75.0,
+                connected=False,
+            ),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_rescued_row_does_not_hide_a_real_hidden_catalogue_entry() -> None:
+    """``hidden`` counts catalogue rows filtered out, not final rows painted.
+
+    A rescued current row was never in ``entries``. Subtracting it anyway made
+    one real filtered catalogue entry disappear from the footer; flooring at
+    zero prevented ``-1`` but did not preserve what the count means.
+    """
+    ctrl = _PruningWithHiddenController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.selector for row in picker.rows()}
+        chrome = picker.render_text(90).plain
+
+    assert offered == {"openrouter/deepseek/deepseek-chat", "test/model"}, offered
+    assert "1 hidden — /login <provider>" in chrome, chrome
+
+
 @pytest.mark.asyncio
 async def test_the_running_model_is_offered_even_when_the_listing_withdrew_it() -> None:
     """The band names the model; the list must not deny it.
