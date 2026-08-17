@@ -697,6 +697,11 @@ class OperatorApp(App[None]):
         # next substantive message retries, which is bounded by the user's own
         # sends and only ever fires while no name exists to displace.
         self._name_requested: bool = False
+        # Ownership token for the latch above. Turn start can supersede an
+        # in-flight naming worker synchronously, then schedule its replacement
+        # from the follow-up message before cancellation has unwound; only the
+        # current generation may clear the new latch or store a title.
+        self._name_generation: int = 0
         # Cleared while a turn is live, set the moment it settles. The naming
         # errand waits on this rather than racing the turn's own provider
         # call: OAuth accounts enforce low concurrent-request ceilings, and a
@@ -1283,6 +1288,10 @@ class OperatorApp(App[None]):
         """
         previous_id = self._conversation_id()
         previous_len = self._history_length()
+        # Invalidate latch ownership synchronously and request cancellation
+        # before disposing the old session. The provider lock is drained after
+        # disposal below, so no stale title call can delay the replacement.
+        self._cancel_naming_attempt()
         # A subagent page is a window onto THIS session's job ledger. The
         # session is about to be disposed and the ledger with it, so the page
         # would go on standing over a conversation it no longer describes
@@ -1339,7 +1348,12 @@ class OperatorApp(App[None]):
                 await self._session.dispose()
             except Exception:
                 pass
-            self._session = None
+        # `dispose` aborts a live turn; naming cancellation above aborts the
+        # courtesy call. Drain the shared lane before losing the old session
+        # reference or constructing/adopting its replacement.
+        async with self._turn_provider_lock:
+            pass
+        self._session = None
         # The pending approval belonged to the session that just died. Left
         # set, the NEW session's first write/exec approval queued behind a
         # question that is no longer on screen and nothing could answer it.
@@ -2922,11 +2936,12 @@ class OperatorApp(App[None]):
         session = self._session
         if session is None or self._status is None:
             return
-        # A user prompt always outranks decoration. Cancellation alone is not
-        # enough — it is delivered at an await — so `run_prompt` also acquires
-        # the provider lock below and cannot enter `session.prompt` until a
-        # live naming request has actually unwound.
-        self.workers.cancel_group(self, "naming")
+        # A user prompt always outranks decoration. Invalidate the old
+        # worker's latch ownership synchronously so `_submit_prompt` can
+        # schedule this follow-up's replacement naming attempt immediately;
+        # then cancellation + the provider lock ensure the prompt cannot
+        # overlap the old courtesy call.
+        self._cancel_naming_attempt()
         self._status.update(streaming=True)
         # Marked busy for the naming errand BEFORE the worker exists: the
         # worker is scheduled from `_submit_prompt` a moment after this, and
@@ -2950,6 +2965,12 @@ class OperatorApp(App[None]):
         self.run_worker(run_prompt(), thread=False, group="turns")
 
     # -- conversation naming --------------------------------------------------
+    def _cancel_naming_attempt(self) -> None:
+        """Supersede and cancel the current naming worker, if any."""
+        self._name_generation += 1
+        self._name_requested = False
+        self.workers.cancel_group(self, "naming")
+
     def _maybe_name_conversation(self, text: str) -> None:
         """Schedule the one auto-naming call for this conversation.
 
@@ -2965,9 +2986,17 @@ class OperatorApp(App[None]):
         if naming.is_low_signal(text):
             return
         self._name_requested = True
-        self.run_worker(self._name_conversation_worker(session, text), thread=False, group="naming")
+        self._name_generation += 1
+        generation = self._name_generation
+        self.run_worker(
+            self._name_conversation_worker(session, text, generation),
+            thread=False,
+            group="naming",
+        )
 
-    async def _name_conversation_worker(self, session: SessionProtocol, text: str) -> None:
+    async def _name_conversation_worker(
+        self, session: SessionProtocol, text: str, generation: int
+    ) -> None:
         """Name only while no live turn owns (or is waiting for) the provider.
 
         The errand first waits for the current turn to settle, then takes the
@@ -2977,36 +3006,49 @@ class OperatorApp(App[None]):
         deliberately no timeout on the turn-settled wait: a title may be
         absent, but a courtesy call must never make a user request worse.
 
+        The generation owns the shared latch. A follow-up supersedes it
+        synchronously before scheduling the replacement worker, so cancellation
+        from the old attempt cannot clear or store into the new attempt.
         Reload/user rename are checked after every wait, immediately before
-        the provider side effect. Cancellation while waiting for the event or
-        lock releases the latch; cancellation inside ``generate_title`` is
-        intentionally absorbed there and returns ``None``, which follows the
-        same release path below.
+        the provider side effect.
         """
         try:
             if session is self._session and not session.conversation_name:
                 await self._turn_settled.wait()
-            if session is not self._session or session.conversation_name:
+            if (
+                generation != self._name_generation
+                or session is not self._session
+                or session.conversation_name
+            ):
                 return
             async with self._turn_provider_lock:
                 # A follow-up may clear the event while this worker waits for
                 # the lock. Never turn that race into provider concurrency.
                 if (
-                    session is not self._session
+                    generation != self._name_generation
+                    or session is not self._session
                     or session.conversation_name
                     or not self._turn_settled.is_set()
                 ):
-                    if session is self._session and not session.conversation_name:
+                    if (
+                        generation == self._name_generation
+                        and session is self._session
+                        and not session.conversation_name
+                    ):
                         self._name_requested = False
                     return
                 title = await naming.generate_title(text, session.complete_once)
         except asyncio.CancelledError:
-            if session is self._session and not session.conversation_name:
+            if (
+                generation == self._name_generation
+                and session is self._session
+                and not session.conversation_name
+            ):
                 self._name_requested = False
             return
 
-        if session is not self._session:
-            return  # the session was reloaded out from under this attempt
+        if generation != self._name_generation or session is not self._session:
+            return
         if not title:
             # Provider failure, cancellation, or "no topic": a later
             # substantive message may retry while the conversation is unnamed.

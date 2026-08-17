@@ -2081,10 +2081,20 @@ def _list_dir_entries(path: Path) -> list[str]:
     return sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
 
 
-def _read_file_bytes(path: Path) -> bytes:
-    """Read one coherent snapshot, serialized with in-process mutations."""
+def _read_file_snapshot(path: Path) -> tuple[int, ImageInfo | None, bytes | None]:
+    """Stat, classify and read one snapshot under the mutation stripe.
+
+    ``None`` data means the classified snapshot exceeded its applicable cap.
+    Keeping all three operations in one transaction prevents a writer from
+    swapping text for an image (or a small file for an oversized one) between
+    the limit/classification checks and the returned bytes.
+    """
     with _file_transaction_lock(path):
-        return path.read_bytes()
+        size = path.stat().st_size
+        info = sniff_image_file(str(path))
+        limit = READ_IMAGE_LIMIT_BYTES if info else READ_FILE_LIMIT_BYTES
+        data = None if size > limit else path.read_bytes()
+        return size, info, data
 
 
 def _decode_text_lines(data: bytes) -> tuple[str, list[str]]:
@@ -2168,17 +2178,13 @@ async def execute_read(
             details={"path": str(path)},
         )
 
-    # Stat and SNIFF before reading the body: an oversized file is refused
-    # instead of loaded, and the applicable ceiling depends on what the file
-    # is. Classification is by CONTENT, never by extension — a `.png` holding
-    # an HTML error page must not reach a provider as an image, and a
-    # screenshot saved with no extension at all is still a screenshot.
-    # `sniff_image_file` reads at most 64 KB and never imports a decoder, so a
-    # text read pays a short header read to learn it is a text read.
-    size = path.stat().st_size
-    info = sniff_image_file(str(path))
+    # Stat, content sniff and body read are one worker-thread transaction.
+    # Classification is by CONTENT, never extension — and it must describe
+    # the same bytes returned below. A concurrent in-process edit/write takes
+    # the same path stripe and cannot swap the file between these decisions.
+    size, info, data = await asyncio.to_thread(_read_file_snapshot, path)
     limit = READ_IMAGE_LIMIT_BYTES if info else READ_FILE_LIMIT_BYTES
-    if size > limit:
+    if data is None:
         advice = (
             "Resize it first (bash + sips/magick)."
             if info
@@ -2189,13 +2195,6 @@ async def execute_read(
             "read",
             f"File too large to read ({size} bytes; limit {limit} bytes): {path}. {advice}",
         )
-
-    # The byte read and the image encode both run in a thread. They are the
-    # two longest synchronous stretches in any tool: up to 16 MB of disk for
-    # an image, then a PIL decode + re-encode that can run for seconds — and
-    # the coroutine's loop is the TUI's render loop, so on it this was the
-    # whole-screen freeze whenever a batch of reads settled together.
-    data = await asyncio.to_thread(_read_file_bytes, path)
 
     if info:
         try:

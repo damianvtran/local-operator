@@ -106,13 +106,61 @@ async def test_follow_up_preempts_an_inflight_naming_call() -> None:
 
         session.gate.set()  # opening turn settles; naming takes the provider lane
         await asyncio.wait_for(session.name_started.wait(), timeout=1)
+
         app._start_turn("follow-up turn")
+        # Mirrors `_submit_prompt`: latch ownership is transferred
+        # synchronously, so this follow-up schedules the replacement naming
+        # worker before the canceled one has finished unwinding.
+        app._maybe_name_conversation("follow-up turn")
         await _settle()
 
         assert "name:cancel" in session.timeline
         assert session.timeline.index("name:cancel") < session.timeline.index(
             "prompt:follow-up turn"
         )
+        starts = [index for index, item in enumerate(session.timeline) if item == "name:start"]
+        assert len(starts) == 2
+        assert session.timeline.index("prompt:follow-up turn") < starts[1]
+
+        session.name_gate.set()
+        await _settle()
+        assert session.conversation_name == "Fix the login flow"
+
+
+@pytest.mark.asyncio
+async def test_reload_cancels_and_drains_naming_before_adoption() -> None:
+    """A replacement session never inherits the old title call's provider lock."""
+    first = _GatedSession()
+    first.title = "<title>Old session</title>"
+    first.name_gate = asyncio.Event()
+    second = _GatedSession()
+    sessions = [first, second]
+    calls = 0
+    app: OperatorApp
+
+    async def factory() -> _GatedSession:
+        nonlocal calls
+        session = sessions[calls]
+        calls += 1
+        if calls == 2:
+            # The old naming worker must have unwound before construction and
+            # adoption of the replacement.
+            assert not app._turn_provider_lock.locked()
+        return session
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._maybe_name_conversation("name the old session")
+        await asyncio.wait_for(first.name_started.wait(), timeout=1)
+
+        await app._reload_session()
+        await _settle()
+
+        assert first.disposed
+        assert "name:cancel" in first.timeline
+        assert app._session is second
+        assert not app._turn_provider_lock.locked()
 
 
 @pytest.mark.asyncio

@@ -1594,11 +1594,12 @@ and glob already used):
 Off-loop did NOT mean transaction-free. Review round 1 caught two concurrency
 edges the event loop had serialized accidentally:
 
-- `read`/`edit`/`write` now share 64 fixed process-wide path stripes. Parent
-  and child AgentLoops can run concurrently, but two spellings of one resolved
-  path share a lock across the whole read/decide/write/diff transaction; reads
-  take the same stripe so they cannot observe a truncated writer. Fixed
-  stripes bound memory; a hash collision only serializes unrelated files.
+- `read`/`edit`/`write` share 64 fixed process-wide path stripes. Parent and
+  child AgentLoops can run concurrently, but two spellings of one resolved
+  path share a lock across the whole transaction. Read's `stat` + content
+  sniff + cap decision + bytes are one snapshot under that stripe; edit/write
+  hold it across read/decide/write/diff. Fixed stripes bound memory, and a
+  hash collision only serializes unrelated files.
 - Spill content and metadata now stage through unique same-directory temp
   files and atomic replace. Identical content has an identical digest, so the
   old deterministic `<digest>.txt.tmp` let concurrent writers rename one
@@ -1615,6 +1616,10 @@ Those F1/F3 tests fail there and pass with the process lock / unique atomic
 temps. Round-2 tests additionally hold the store transaction at one active
 entry installer and force a write failure after temp creation, asserting the
 partial temp is removed.
+Round-3's read-snapshot repro swaps `before` to `after` between content sniff
+and byte read: `68cd87b` returns `1| after` under checks made against the old
+snapshot; the striped snapshot returns `before` and the writer commits only
+afterward.
 
 Evidence: `tests/unit/tools/test_loop_liveness.py` — a 20 ms heartbeat
 running while the tools work. On the fix: max gap under 120 ms. At `d424441`
@@ -1640,17 +1645,20 @@ session's terminal title stayed `lo › tmp` forever. Two causes, one fix each:
 2. **A follow-up could race the title call itself.** After the first turn
    settled, `complete_once` could run for up to 20 seconds with no lock; a
    prompt submitted in that window entered `session.prompt` concurrently.
-   Turn and naming now share one app-level provider lock. Turn start cancels
-   naming BEFORE waiting on the lock, so the user request begins only after
-   the courtesy call has actually unwound; naming takes the lock only while
-   `_turn_settled` remains set.
-3. **A failed attempt was spent forever.** `_name_requested` latched on
+   Turn and naming share one app-level provider lock. Turn start invalidates
+   the naming generation and cancels it BEFORE waiting on the lock, so the
+   user request begins only after the courtesy call has unwound. The
+   generation owns the latch: the follow-up schedules its replacement naming
+   worker immediately, and the canceled attempt cannot clear/store into it.
+3. **Reload could carry the old lane into the replacement.** Session swap now
+   invalidates/cancels naming before disposal, then drains the provider lock
+   after disposing the old turn and before constructing/adopting the new
+   session. A stale title call cannot hold the replacement's first prompt.
+4. **A failed attempt was spent forever.** `_name_requested` latched on
    schedule, not on success, so the minute-zero failure cost the session its
    name permanently. The latch now releases when an attempt produces no title
    and the conversation is still unnamed; the next substantive message
-   retries. Bounded by the user's own sends, and it can never displace an
-   existing (or user-set) title — the `conversation_name` guard in
-   `_maybe_name_conversation` still owns that.
+   retries without displacing an existing/user-set title.
 
 Short-throttle 429s also get **two** same-credential retries (was one), each
 sleeping the ADVERTISED delay: burst and concurrency limits clear in
@@ -1659,11 +1667,12 @@ the 429. Long quota windows still rotate immediately — the 30 s
 `MAX_USAGE_RETRY_AFTER_MS` cap is what keeps an interactive session out of a
 provider's reset window.
 
-Evidence: `tests/unit/tui/test_conversation_naming.py` (4 tests — opening-turn
-deferral, follow-up preemption, unlatch-and-retry, store-and-stay-spent).
-Deferral/unlatch fail at PR base `d424441`; follow-up preemption fails at
-reviewed head `218308f` because `prompt:follow-up turn` precedes naming
-cancellation. `tests/unit/providers/test_failover.py::test_short_rate_limit_retries_twice_per_credential`
+Evidence: `tests/unit/tui/test_conversation_naming.py` (5 tests — opening-turn
+deferral, follow-up preemption+latch transfer, reload drain, unlatch-and-retry,
+store-and-stay-spent). At reviewed head `68cd87b`, the follow-up schedules no
+replacement naming worker and reload leaves the old call uncancelled; both
+regressions fail there and pass after generation ownership + drain.
+`tests/unit/providers/test_failover.py::test_short_rate_limit_retries_twice_per_credential`
 asserts `k1,k1,k1,k2,k2,k2` with 4 advertised-delay sleeps.
 
 ## The pointer that never changed

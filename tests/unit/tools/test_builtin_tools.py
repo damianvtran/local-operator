@@ -14,6 +14,7 @@ import io
 import os
 import random
 import struct
+import threading
 import time
 import zlib
 from pathlib import Path
@@ -1106,6 +1107,53 @@ async def test_edit_multi_hunk_applies_all_in_one_call(tools, context, tmp_path)
     assert result.is_error is False
     assert (tmp_path / "m.py").read_text() == "ALPHA\nmiddle\nBETA\nmiddle\nGAMMA\n"
     assert "3 hunk(s)" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_classification_and_bytes_share_the_write_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A writer cannot swap the file between read sniffing and its byte snapshot."""
+    path = tmp_path / "snapshot.txt"
+    path.write_text("before")
+    sniff_entered = threading.Event()
+    release_sniff = threading.Event()
+    real_sniff = builtin.sniff_image_file
+
+    def blocked_sniff(target: str):
+        # Capture classification, then give the writer a deterministic window.
+        # Without one shared transaction it commits `after` during the sleep,
+        # so the read's earlier checks describe different returned bytes.
+        info = real_sniff(target)
+        sniff_entered.set()
+        assert release_sniff.wait(timeout=2)
+        time.sleep(0.05)
+        return info
+
+    def writer() -> None:
+        assert sniff_entered.wait(timeout=2)
+        release_sniff.set()
+        builtin._write_file_result(path, "after")
+
+    monkeypatch.setattr(builtin, "sniff_image_file", blocked_sniff)
+    writer_thread = threading.Thread(target=writer)
+    writer_thread.start()
+    context = ToolContext(cwd=str(tmp_path))
+    result = await builtin.execute_read(
+        "read-snapshot",
+        {"path": "snapshot.txt", "raw": True},
+        None,
+        None,
+        context,
+    )
+    await asyncio.to_thread(writer_thread.join, 2)
+
+    assert not writer_thread.is_alive()
+    assert not result.is_error
+    assert "before" in result.text
+    assert "after" not in result.text
+    assert path.read_text() == "after"
 
 
 @pytest.mark.asyncio
