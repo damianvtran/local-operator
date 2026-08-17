@@ -48,16 +48,19 @@ parent's own stream, and the TUI repaint for its whole duration.
 tiktoken's ``encode`` is a Rust extension that RELEASES the GIL, so moving it
 to a worker thread genuinely buys parallelism rather than just moving the
 stall (measured: 90 ms → 0.7 ms of loop stall, 3x faster wall clock for the
-same work). :func:`estimate_messages_tokens_async` and
-:func:`find_cut_point_async`-style helpers therefore exist for callers that
-run on the loop; the synchronous forms remain for pure-CPU callers and tests.
+same work). ``Session._offloaded`` is the caller that does that hop, for
+histories past :data:`OFFLOAD_MIN_CHARS`; the functions here stay synchronous
+so they remain usable from a worker thread, from pure-CPU callers, and from
+tests.
 
 That makes the module-level cache reachable from worker threads, so the
 mutations that are NOT individually atomic — the LRU ``move_to_end`` +
 ``popitem`` eviction sequence, and the lazy encoding singleton — are guarded
 by :data:`_CACHE_LOCK`. The lock deliberately covers only the dict/singleton
 bookkeeping (sub-microsecond) and never ``encode`` itself, so concurrent
-estimates still tokenize in parallel.
+estimates still tokenize in parallel. Because the encode runs unlocked, an
+invalidation can land between a computation and its insert; that race is
+closed by :data:`_ESTIMATE_GENERATION` rather than by widening the lock.
 """
 
 from __future__ import annotations
@@ -295,6 +298,21 @@ _ESTIMATE_CACHE_MAX = 4096
 #: and unsubscribe is O(1).
 _INVALIDATORS: dict[int, Callable[[Message], None]] = {}
 
+#: Monotonic counter bumped by every :func:`invalidate_message_cache`, per
+#: message id. It closes a lost-invalidation race that only exists because
+#: ``_compute_tokens`` deliberately runs OUTSIDE :data:`_CACHE_LOCK`:
+#:
+#:   thread A reads the cache (miss) -> starts encoding
+#:   the loop mutates the message and invalidates it (``pop`` finds nothing)
+#:   thread A inserts the count it computed from the PRE-mutation message
+#:
+#: The stale value then survives forever, because the invalidation that should
+#: have removed it already ran. Recording the generation A observed BEFORE it
+#: computed, and refusing the insert if it changed meanwhile, makes the
+#: invalidation win without pulling the encode under the lock. Entries are
+#: dropped alongside their cache entry, so this cannot outgrow the cache.
+_ESTIMATE_GENERATION: dict[str, int] = {}
+
 
 def estimate_tokens(message: Message) -> int:
     """Estimated token cost of ``message`` as sent on the wire.
@@ -322,13 +340,23 @@ def estimate_tokens(message: Message) -> int:
         if cached is not None:
             _ESTIMATE_CACHE.move_to_end(message.id)
             return cached
+        # The generation this computation is about to be based on. If an
+        # invalidation bumps it while the encode runs, the result below
+        # describes a message that no longer exists and must not be cached.
+        generation = _ESTIMATE_GENERATION.get(message.id, 0)
 
     tokens = _compute_tokens(message)
 
     with _CACHE_LOCK:
+        if _ESTIMATE_GENERATION.get(message.id, 0) != generation:
+            # Invalidated mid-flight: return the value to THIS caller (it is
+            # the honest answer for the message as it was read) but leave the
+            # cache empty so the next reader recomputes from the current one.
+            return tokens
         _ESTIMATE_CACHE[message.id] = tokens
         while len(_ESTIMATE_CACHE) > _ESTIMATE_CACHE_MAX:
-            _ESTIMATE_CACHE.popitem(last=False)
+            evicted, _ = _ESTIMATE_CACHE.popitem(last=False)
+            _ESTIMATE_GENERATION.pop(evicted, None)
     return tokens
 
 
@@ -489,6 +517,11 @@ def invalidate_message_cache(message: Message) -> None:
     """
     with _CACHE_LOCK:
         _ESTIMATE_CACHE.pop(message.id, None)
+        # Bump even when nothing was cached: the entry this invalidation is
+        # racing may not have been INSERTED yet (see _ESTIMATE_GENERATION).
+        # Popping a miss and returning is exactly how the stale value used to
+        # survive.
+        _ESTIMATE_GENERATION[message.id] = _ESTIMATE_GENERATION.get(message.id, 0) + 1
     for invalidator in list(_INVALIDATORS.values()):
         try:
             invalidator(message)
@@ -515,3 +548,12 @@ def clear_estimate_cache() -> None:
     """Wipe the whole estimate cache (tests, memory pressure)."""
     with _CACHE_LOCK:
         _ESTIMATE_CACHE.clear()
+        # Deliberately NOT cleared: an in-flight computation still holds a
+        # generation read before this call, and resetting the counters to 0
+        # would let its result look current and land in the fresh cache.
+        # Entries are evicted with their cache entry; a clear only leaves
+        # counters for ids that may still be mid-flight, which the next
+        # insert prunes.
+        for key in list(_ESTIMATE_GENERATION):
+            if key not in _ESTIMATE_CACHE:
+                _ESTIMATE_GENERATION[key] = _ESTIMATE_GENERATION[key] + 1

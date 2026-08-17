@@ -384,7 +384,47 @@ async def test_a_child_that_settles_before_starting_fails_the_wait_at_once():
 
     reply = await asyncio.wait_for(question, timeout=2.0)
     assert reply.text is None
-    assert reply.error
+    # The REASON matters, not merely that there is one: a child that died must
+    # not be reported as "not started yet ... retry in a moment", which invites
+    # exactly the polling loop this wait exists to remove.
+    assert "failed" in (reply.error or "")
+    assert "retry in a moment" not in (reply.error or "")
+
+
+@pytest.mark.asyncio
+async def test_ask_never_exceeds_the_timeout_it_was_given():
+    """The attach grace is deducted from the caller's budget, not added to it.
+
+    ``timeout_ms`` is the whole budget a caller planned around. Spending the
+    grace first and then granting the full timeout for the answer let a
+    1000 ms request block for ~1450 ms while reporting it had waited 1000 ms,
+    and it scales with the timeout — the 600 s schema maximum could block for
+    900 s.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1")
+    comms.record_launch("job-1", "designer")
+
+    # Attach late enough to consume part of the grace, then never answer, so
+    # the call spends grace AND answer wait: the sum must still fit the budget.
+    async def attach_soon() -> None:
+        # Late enough to burn most of the 300 ms grace (half of 600 ms).
+        await asyncio.sleep(0.28)
+        comms.attach("job-1", FakeChild(), tmp_dir())
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    attacher = asyncio.create_task(attach_soon())
+    reply = await comms.ask("job-1", "status?", 600)
+    elapsed = loop.time() - started
+    await attacher
+
+    assert reply.timed_out
+    # Measured: 601 ms with the deadline honoured, 884 ms without it. The bound
+    # sits between the two, with enough slack above the correct figure that a
+    # loaded CI box does not flake it.
+    assert elapsed < 0.75, f"overshot a 600 ms budget: took {elapsed * 1000:.0f} ms"
 
 
 def test_send_to_an_unknown_job_fails_without_raising():

@@ -367,6 +367,12 @@ class SubagentComms:
         record = self._records.get(job_id)
         if record is None:
             return Reply(job_id, job_id, error=f"unknown subagent {job_id!r}")
+        # ``timeout_ms`` is the caller's WHOLE budget, so any time spent
+        # waiting for the child to come up is deducted from the answer wait
+        # below rather than added to it. Charging the grace on top let a
+        # 1000 ms request block for 1452 ms while reporting it had waited
+        # 1000 ms, and scaled: the 600 s schema maximum could block 900 s.
+        deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0
         if record.child is None:
             if record.settled or not self._is_running(record):
                 return Reply(job_id, record.label, error=self._gone_reason(record))
@@ -377,7 +383,15 @@ class SubagentComms:
             # so report rather than burn the caller's timeout.
             grace = min(self.ATTACH_WAIT_MAX_S, (timeout_ms / 1000.0) * self.ATTACH_WAIT_FRACTION)
             if parked or not await self._await_child(record, grace):
-                return Reply(job_id, record.label, error=self._not_started_reason(record))
+                # A child that DIED while we waited is gone, not "not started":
+                # telling a caller to retry in a moment is the polling loop this
+                # wait exists to remove.
+                reason = (
+                    self._gone_reason(record)
+                    if record.settled or not self._is_running(record)
+                    else self._not_started_reason(record)
+                )
+                return Reply(job_id, record.label, error=reason)
         if record.child is None:  # pragma: no cover - narrowing for the checker
             return Reply(job_id, record.label, error=self._not_started_reason(record))
         if record.ask is not None and not record.ask.done():
@@ -391,7 +405,11 @@ class SubagentComms:
         message = self._to_child_message(text, expects_reply=True)
         record.child.queue_aside(self._thunk(record, message, awaiting=future))
         try:
-            answer = await asyncio.wait_for(future, timeout_ms / 1000.0)
+            # Whatever is LEFT of the caller's budget after the attach wait,
+            # floored just above zero so a fully-spent budget still gets one
+            # scheduling pass at an answer instead of raising immediately.
+            remaining = max(0.001, deadline - asyncio.get_running_loop().time())
+            answer = await asyncio.wait_for(future, remaining)
         except asyncio.TimeoutError:
             # The question stays in the child's context — it was asked, and a
             # late answer is still useful to the child's own reasoning — but

@@ -164,6 +164,14 @@ profile = "black"
 reportMissingTypeArgument = true
 strictListInference = true
 reportPrivateImportUsage = false
+# Resolve imports against the project venv rather than whatever interpreter
+# pyright happens to find. Without this a bare `pyright` run reports hundreds
+# of spurious "import could not be resolved" errors (it picks up the system
+# Python, which has none of the dependencies), so the real errors are buried
+# and the gate looks broken to anyone who runs it without the documented
+# `--pythonpath .venv/bin/python`. Both forms agree now.
+venvPath = "."
+venv = ".venv"
 
 [tool.pytest.ini_options]
 addopts = "-vv -s"

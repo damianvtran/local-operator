@@ -1,5 +1,7 @@
 """Token estimation: tiktoken path, fallback, memoization, invalidation."""
 
+import time
+
 import pytest
 
 from local_operator.compaction import tokens as tokens_mod
@@ -433,3 +435,67 @@ class TestThreadSafetyForOffloadedEstimation:
                 sys.modules.pop("tiktoken", None)
             tokens_mod._ENCODING = None
             tokens_mod._ENCODING_FAILED = False
+
+    def test_an_invalidation_during_a_computation_is_not_lost(self):
+        """A mutation that lands mid-encode must not leave a stale count.
+
+        `_compute_tokens` runs OUTSIDE `_CACHE_LOCK` on purpose (holding the
+        lock across the encode would re-serialize what the offload exists to
+        parallelize). That opens a window: a thread reads a cache miss, starts
+        encoding, and while it encodes the loop mutates the message and
+        invalidates it — the `pop` finds nothing, and the thread then inserts a
+        count describing the PRE-mutation message. Nothing ever clears it, so
+        the stale value survives for the life of the process.
+
+        Reproduced at 295/300 before `_ESTIMATE_GENERATION` existed. This is
+        the exact silent-staleness the module contract forbids, and the
+        compaction gate's cheap upper-bound early return depends on it not
+        happening.
+        """
+        import threading
+
+        from local_operator.compaction import tokens as mod
+
+        real_compute = mod._compute_tokens
+        stale = 0
+        try:
+            for _ in range(25):
+                message = Message.user("lorem ipsum dolor " * 400)
+                clear_estimate_cache()
+                computing = threading.Event()
+
+                def slow_compute(msg, _real=real_compute):
+                    value = _real(msg)
+                    computing.set()
+                    time.sleep(0.002)  # hold the compute->insert window open
+                    return value
+
+                mod._compute_tokens = slow_compute
+                worker = threading.Thread(target=lambda: estimate_tokens(message))
+                worker.start()
+                computing.wait(timeout=5)
+                # Mutate + invalidate inside the window, exactly as pruning does.
+                message.content = [TextContent(text="blanked")]
+                invalidate_message_cache(message)
+                worker.join(timeout=5)
+                mod._compute_tokens = real_compute
+
+                cached = mod._ESTIMATE_CACHE.get(message.id)
+                if cached is not None and cached != real_compute(message):
+                    stale += 1
+        finally:
+            mod._compute_tokens = real_compute
+
+        assert stale == 0, f"{stale}/25 invalidations were lost, leaving a stale estimate"
+
+    def test_generation_bookkeeping_cannot_grow_without_bound(self):
+        """The race fix must not become the leak the cache bound exists to stop."""
+        from local_operator.compaction import tokens as mod
+
+        clear_estimate_cache()
+        for batch in range(20):
+            estimate_messages_tokens(
+                [Message.user(f"b{batch} m{i} hello world") for i in range(400)]
+            )
+        assert len(mod._ESTIMATE_CACHE) <= mod._ESTIMATE_CACHE_MAX
+        assert len(mod._ESTIMATE_GENERATION) <= mod._ESTIMATE_CACHE_MAX
