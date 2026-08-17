@@ -9,3 +9,10 @@ actually log in". Captured from the real `OperatorApp` (the host that loads
 - `shots/after_typed.png` — 15 characters typed, masked @ 5d1b581
 - `shots/after_submitted.png` — submitted, key stored @ 5d1b581
 - `shots/after_cancel.png` — Escape, reported as a cancel @ 5d1b581
+
+## Round 2 (after review remediation) @ 77065d1
+
+- `shots/r2_empty.png` — prompt, empty state
+- `shots/r2_typed.png` — typed, masked, label no longer duplicated
+- `shots/r2_submitted.png` — submitted receipt with the ✓ glyph
+- `shots/r2_cancel.png` — cancelled receipt with the ✗ glyph
