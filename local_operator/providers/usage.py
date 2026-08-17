@@ -567,6 +567,11 @@ ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
 #: absolute ``nextResetTime`` from the vendor, so a locally derived window
 #: length would be a second, unreconciled answer to a question already
 #: answered — and the one that drifts if a window is redefined.
+#: The non-chat allowances Z.AI meters together as one bucket. A TIME_LIMIT row
+#: whose per-model breakdown lists ONLY these is that bucket rather than the
+#: account-wide request cap; see the classification note at the use site.
+_ZAI_FEATURE_CODES = frozenset({"search-prime", "web-reader", "zread"})
+
 _ZAI_WINDOW_UNITS: dict[int, str] = {
     3: "hour",
     4: "day",
@@ -584,24 +589,19 @@ def _zai_window(item: dict[str, Any]) -> tuple[str, int | None]:
     disambiguated by magnitude, matching how the other fetchers here treat
     ambiguous vendor timestamps.
     """
-    # `_num` rather than a bare cast throughout: a quota fetcher must never
-    # raise (the caller drops the report on None, but an exception escapes to
-    # the UI). `int()` is the trap — `json.loads` accepts bare NaN and Infinity,
-    # and both blow up on conversion (ValueError / OverflowError) rather than
-    # returning something odd, so the vendor could crash the panel with a field
-    # we only ever read for a LABEL. Strings are coerced too, since a vendor
-    # that starts quoting `"unit": "3"` would otherwise silently lose the window
-    # name while still reporting the numbers.
+    # `_num` rather than a bare cast on EVERY field, including the ones read
+    # only to build a label: a quota fetcher must never raise (the caller drops
+    # a None report, but an exception escapes to the UI), and `int()` is the
+    # trap — `json.loads` accepts bare NaN/Infinity and an oversized integer,
+    # all of which blow up on conversion rather than returning something odd.
+    # `_num` rejects both the unconvertible and the non-finite, so anything that
+    # reaches an `int()` below is already known-safe. Strings are coerced too,
+    # since a vendor that starts quoting `"unit": "3"` would otherwise silently
+    # lose the window name while still reporting the numbers.
     count = _num(item.get("number")) or 1
     unit = _num(item.get("unit"))
-    mapped = None
-    if unit is not None and math.isfinite(unit):
-        mapped = _ZAI_WINDOW_UNITS.get(int(unit))
-    if mapped is None:
-        label = "quota"
-    else:
-        count_int = int(count) if math.isfinite(count) else 1
-        label = f"{count_int} {mapped}"
+    mapped = _ZAI_WINDOW_UNITS.get(int(unit)) if unit is not None else None
+    label = "quota" if mapped is None else f"{int(count)} {mapped}"
     reset = _num(item.get("nextResetTime"))
     resets_ms: int | None = None
     if reset is not None and reset > 0:
@@ -689,15 +689,24 @@ async def fetch_zai_quota(client: httpx.AsyncClient, api_key: str) -> UsageRepor
                 if isinstance(details, list)
                 else set()
             )
-            # ANY of the feature codes, not all three. Requiring the full set
-            # fails OPEN if Z.AI ever adds or renames one: the row would be
+            # A row is the feature bucket when EVERY code it lists is a known
+            # feature code — not "contains one" and not "contains all three".
+            #
+            # Both simpler tests fail in a direction that matters. Requiring all
+            # three fails OPEN if Z.AI adds or renames a feature: the row is
             # reclassified as the account-wide request cap and marked
-            # ``shared=True``, which `usage_health` then applies to EVERY model
-            # — a depleted zread bucket would read as a depleted plan and stop
-            # work that is not actually blocked. Failing closed (treating an
-            # unrecognised feature mix as the feature bucket) only mislabels a
-            # row nobody is gated on.
-            is_feature = bool(codes & {"search-prime", "web-reader", "zread"})
+            # ``shared=True``, which `usage_health` then applies to EVERY model,
+            # so a depleted zread bucket reads as a depleted plan and stops work
+            # that is not blocked. Matching ANY code fails the other way: a
+            # genuine account-wide cap whose per-model breakdown happens to
+            # mention zread would be demoted to a tier and excluded from the
+            # health check that should have gated the account.
+            #
+            # Subset-of-known is the test that survives both: a renamed feature
+            # still leaves every listed code inside the known set (still a
+            # tier), while an account cap listing real chat models does not
+            # (still shared). An empty list is not a feature bucket.
+            is_feature = bool(codes) and codes <= _ZAI_FEATURE_CODES
             if percentage is None and used is None:
                 continue
             amount = UsageAmount(
@@ -725,11 +734,11 @@ async def fetch_zai_quota(client: httpx.AsyncClient, api_key: str) -> UsageRepor
                     # redundant one: the tier indent and the dimmed label ramp
                     # already say this is not the account-wide cap.
                     #
-                    # The bucket actually covers search-prime, web-reader AND
-                    # zread (all three must be present to match), so the label
-                    # names one member of a set. Kept because "Zread" is the name
-                    # Z.AI's own plan page gives this allowance, so it is the
-                    # word a user will recognise from their dashboard.
+                    # The bucket covers search-prime, web-reader AND zread
+                    # together, so the label names one member of a set. Kept
+                    # because "Zread" is the name Z.AI's own plan page gives this
+                    # allowance, so it is the word a user will recognise from
+                    # their dashboard.
                     label=("Zread quota" if is_feature else "Request quota") + f" ({window})",
                     amount=amount,
                     window=window,
@@ -1525,13 +1534,28 @@ async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> Usage
 
 
 def _num(value: Any, default: float | None = None) -> float | None:
-    """Coerce numeric/str fields defensively; None on garbage."""
+    """Coerce numeric/str fields defensively; None on garbage.
+
+    ``OverflowError`` is caught alongside the obvious two because a JSON body
+    may carry an integer too large for a float (``10**400`` parses fine and
+    then raises on conversion). Every vendor field in this module reaches a
+    fetcher through here, so catching it at the coercion boundary is what keeps
+    the "a quota fetcher never raises" contract true for all of them rather
+    than for the call sites someone remembered to guard.
+
+    Non-finite values are rejected rather than returned: ``json.loads`` accepts
+    bare ``NaN``/``Infinity``, and a float that survives coercion only to blow
+    up at the ``int()`` that formats it has merely moved the crash somewhere
+    harder to see. ``None`` here means "no usable number", which every caller
+    already handles.
+    """
     try:
         if value is None:
             return default
-        return float(value)
-    except (TypeError, ValueError):
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
         return default
+    return parsed if math.isfinite(parsed) else default
 
 
 async def _qwencloud_bss_call(

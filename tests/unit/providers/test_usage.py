@@ -390,6 +390,107 @@ async def test_zai_hostile_window_fields_do_not_raise() -> None:
 
 
 @pytest.mark.asyncio
+async def test_zai_never_raises_on_any_hostile_numeric_field() -> None:
+    """The never-raise contract, enforced over the whole cross-product.
+
+    A previous round fixed the two call sites a review happened to quote and
+    left the defect class open: `nextResetTime` still crashed on Infinity, and
+    an oversized integer (``10**400`` parses, then raises ``OverflowError`` on
+    `float()`) took out every numeric field at once. Testing one field with one
+    bad value is what let that through, so this walks every field with every
+    hostile value rather than trusting a spot check.
+    """
+    nasty: list[Any] = [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        10**400,
+        -(10**400),
+        -1,
+        "3",
+        "abc",
+        "",
+        None,
+        True,
+        [],
+        {},
+    ]
+    fields = ["unit", "number", "percentage", "usage", "currentValue", "remaining", "nextResetTime"]
+    for row_type in ("TOKENS_LIMIT", "TIME_LIMIT"):
+        for field in fields:
+            for value in nasty:
+                row: dict[str, Any] = {
+                    "type": row_type,
+                    "unit": 3,
+                    "number": 1,
+                    "percentage": 10,
+                    field: value,
+                }
+                payload = {"success": True, "data": {"limits": [row]}}
+                # `allow_nan=True` + raw bytes: the strict encoder in
+                # `_client_for` refuses NaN/Infinity, which would quietly drop
+                # the values this test exists to exercise.
+                body = json.dumps(payload, allow_nan=True, default=str).encode()
+
+                def handler(request: httpx.Request, _body: bytes = body) -> httpx.Response:
+                    return httpx.Response(
+                        200, content=_body, headers={"content-type": "application/json"}
+                    )
+
+                client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+                async with client:
+                    # The assertion is that this line returns at all.
+                    await fetch_usage(client, "zai", api_key="k")
+
+
+@pytest.mark.asyncio
+async def test_zai_feature_bucket_is_codes_that_are_all_known_features() -> None:
+    """Neither "contains one" nor "contains all three" survives contact.
+
+    Matching ANY code demotes a genuine account-wide cap whose breakdown
+    mentions zread into a tier, excluding it from the health check that should
+    gate the account. Requiring ALL THREE promotes the feature bucket into the
+    account cap if Z.AI renames a feature, marking it ``shared`` so a depleted
+    zread allowance reads as a depleted plan.
+    """
+
+    async def classify(codes: list[str]) -> UsageLimit:
+        payload = {
+            "success": True,
+            "data": {
+                "limits": [
+                    {
+                        "type": "TIME_LIMIT",
+                        "unit": 5,
+                        "number": 1,
+                        "usage": 100,
+                        "currentValue": 1,
+                        "usageDetails": [{"modelCode": c, "usage": 0} for c in codes],
+                    }
+                ]
+            },
+        }
+        client = _client_for(payload)
+        async with client:
+            report = await fetch_usage(client, "zai", api_key="k")
+        assert report is not None
+        return report.limits[0]
+
+    # The live shape, and a renamed/extended feature set: still the tier.
+    assert (await classify(["search-prime", "web-reader", "zread"])).tier == "zread"
+    assert (await classify(["search-prime", "zread"])).tier == "zread"
+    # An account-wide cap whose breakdown merely mentions zread alongside real
+    # chat models is NOT the feature bucket, and must stay shared.
+    mixed = await classify(["glm-5.3", "zread"])
+    assert mixed.tier == ""
+    assert mixed.shared is True
+    # No breakdown at all is the plain request cap.
+    plain = await classify([])
+    assert plain.tier == ""
+    assert plain.shared is True
+
+
+@pytest.mark.asyncio
 async def test_zai_labels_fit_the_usage_panel_label_column() -> None:
     """A label the panel cannot render is a window the user can never read.
 
