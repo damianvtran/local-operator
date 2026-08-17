@@ -8,7 +8,9 @@ exercised through it.
 
 from __future__ import annotations
 
+import json
 import time
+from typing import Any
 
 import httpx
 import pytest
@@ -787,7 +789,7 @@ def test_the_advertised_set_is_the_dispatch_table() -> None:
     from local_operator.providers import usage as usage_mod
 
     assert usage_mod.USAGE_PROVIDERS == frozenset(usage_mod._FETCHERS)
-    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 8
+    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 10
     assert not hasattr(usage_mod, "OAUTH_USAGE_PROVIDERS")
 
 
@@ -828,3 +830,195 @@ def test_usage_limit_effective_status_defaults_to_amount() -> None:
     assert limit.effective_status() == "warning"
     explicit = UsageLimit(id="y", label="y", amount=UsageAmount(), status="ok")
     assert explicit.effective_status() == "ok"
+
+
+# ---------------------------------------------------------------------------
+# QwenCloud Token Plan (alibaba-token-plan): management-OAuth BSS gateway.
+# ---------------------------------------------------------------------------
+
+
+def _qwencloud_client(
+    responses_by_action: dict[str, dict[str, Any]], requests: list[httpx.Request] | None = None
+) -> httpx.AsyncClient:
+    """Route official-gateway posts by their ``action``."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if requests is not None:
+            requests.append(request)
+        body = json.loads(request.content) if request.content else {}
+        canned = responses_by_action.get(str(body.get("action")), {"code": "200", "data": {}})
+        return httpx.Response(200, json=canned)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _qwencloud_fr_rows(commodity: str) -> dict[str, Any]:
+    if commodity == "sfm_tokenplanpersonal_dp_intl":
+        return {
+            "code": "200",
+            "data": {
+                "Data": [
+                    {
+                        "Status": {"Code": "valid"},
+                        "InitCapacityBaseValue": 10_000,
+                        "CurrCapacityBaseValue": 2_500,
+                        "EndTime": 1_800_100_000_000,
+                        "TemplateName": "Token Plan Individual Standard",
+                    }
+                ]
+            },
+        }
+    if commodity == "sfm_tokenplanteamsaddon_dp_intl":
+        return {
+            "code": "200",
+            "data": {"Data": [{"Status": "valid", "CurrCapacityBaseValue": 20_000}]},
+        }
+    return {"code": "200", "data": {"Data": []}}
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_token_plan_personal_window_and_packs() -> None:
+    """The personal commodity is the 7-day credit window; add-on instances are
+    Credit Packs outside every window. QwenCloud documents no 5-hour Token Plan
+    window, so none may appear even though the console gateway has one."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        body = json.loads(request.content)
+        if body.get("action") == "QuerySubscriptionGray":
+            return httpx.Response(200, json={"code": "200", "data": {"IsGray": False}})
+        if body.get("action") == "DescribeFrInstances":
+            return httpx.Response(200, json=_qwencloud_fr_rows(body["params"]["CommodityCode"]))
+        return httpx.Response(200, json={"code": "200", "data": {}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(
+            client,
+            "alibaba-token-plan",
+            access_token="sk-sp-wire-key",
+            oauth_creds={"access": "mgmt-token"},
+        )
+
+    assert report is not None
+    assert report.provider == "alibaba-token-plan"
+    assert [(limit.id, limit.label) for limit in report.limits] == [
+        ("credits-7d", "7 Day Credits"),
+        ("credits-packs", "Credit Packs"),
+    ]
+    window = report.limits[0]
+    assert window.amount.used == 7_500
+    assert window.amount.limit == 10_000
+    assert window.amount.remaining == 2_500
+    assert window.resets_at_ms == 1_800_100_000_000
+    assert window.shared is True
+    assert report.limits[1].amount.remaining == 20_000
+
+    # Every gateway call carries the MANAGEMENT token, not the wire key.
+    assert len(requests) == 4  # gray + addon + teams + personal
+    for request in requests:
+        assert request.url == "https://cli.qwencloud.com/data/v2/api.json"
+        assert request.headers["Authorization"] == "Bearer mgmt-token"
+    gray_body = json.loads(requests[0].content)
+    assert gray_body == {
+        "product": "BssOpenAPI-V3",
+        "action": "QuerySubscriptionGray",
+        "region": "ap-southeast-1",
+        "params": {},
+    }
+    personal_bodies = [
+        json.loads(request.content)
+        for request in requests
+        if json.loads(request.content)["action"] == "DescribeFrInstances"
+        and json.loads(request.content)["params"]["CommodityCode"]
+        == "sfm_tokenplanpersonal_dp_intl"
+    ]
+    assert personal_bodies[0]["params"] == {
+        "Group": "tokenPlan",
+        "CommodityCode": "sfm_tokenplanpersonal_dp_intl",
+        "PageNum": "1",
+        "PageSize": "10",
+    }
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_token_plan_team_seat_summary_is_monthly() -> None:
+    """Seat-migrated (gray) accounts answer through GetSeatSubscriptionSummary."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("action") == "QuerySubscriptionGray":
+            return httpx.Response(200, json={"code": "200", "data": {"IsGray": True}})
+        if body.get("action") == "GetSeatSubscriptionSummary":
+            return httpx.Response(
+                200,
+                json={
+                    "code": "200",
+                    "data": {
+                        "Data": {
+                            "SubscriptionGroupList": [
+                                {"EquityList": [{"TotalValue": "25000", "SurplusValue": "10000"}]}
+                            ],
+                            "EndTime": 1_800_200_000_000,
+                            "PlanName": "Token Plan Team Pro",
+                        }
+                    },
+                },
+            )
+        return httpx.Response(200, json={"code": "200", "data": {"Data": []}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(
+            client,
+            "alibaba-token-plan",
+            access_token="sk-sp-wire-key",
+            oauth_creds={"access": "mgmt-token"},
+        )
+
+    assert report is not None
+    assert [(limit.id, limit.amount.used, limit.amount.limit) for limit in report.limits] == [
+        ("credits-monthly", 15_000.0, 25_000.0)
+    ]
+    assert report.limits[0].resets_at_ms == 1_800_200_000_000
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_token_plan_needs_the_management_token_from_the_raw_row() -> None:
+    """``access_token`` is the wire-mapped sk-sp key; without the raw row's
+    ``access`` there is nothing valid to authenticate with, and no request may
+    leave the process."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"code": "200", "data": {}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(
+            client, "alibaba-token-plan", access_token="sk-sp-wire-key", oauth_creds=None
+        )
+    assert report is None
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_token_plan_fails_closed_on_console_need_login() -> None:
+    """A dead management token gets code "ConsoleNeedLogin" inside HTTP 200."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"code": "ConsoleNeedLogin", "message": "You need to log in."}
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(
+            client,
+            "alibaba-token-plan",
+            access_token="sk-sp-wire-key",
+            oauth_creds={"access": "expired-mgmt"},
+        )
+    assert report is None

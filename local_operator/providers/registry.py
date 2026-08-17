@@ -96,6 +96,17 @@ def _oauth_api_key(creds: dict[str, Any]) -> str:
     return creds["access"]
 
 
+def _token_plan_wire_key(creds: dict[str, Any]) -> str:
+    """The Token Plan's OAuth row carries TWO tokens with different jobs.
+
+    ``access`` is the QwenCloud management token (usage:read) and is rejected
+    by the inference endpoint; ``api_key`` is the pasted ``sk-sp-…`` key the
+    wire actually wants. Falls back to ``access`` for hand-written rows so the
+    credential still authenticates something rather than raising KeyError.
+    """
+    return creds.get("api_key") or creds["access"]
+
+
 def create_api_key_login(provider_label: str, auth_url: str, instructions: str = "") -> LoginFn:
     """Paste-an-API-key "login" for providers without real OAuth.
 
@@ -298,6 +309,31 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
             "Paste your DashScope API key",
         ),
         base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    ),
+    ProviderDefinition(
+        id="alibaba-token-plan",
+        search_aliases=(
+            "token-plan",
+            "tokenplan",
+            "qwencloud",
+        ),
+        name="QwenCloud Token Plan",
+        env_keys="ALIBABA_TOKEN_PLAN_API_KEY",
+        login=create_api_key_login(
+            "QwenCloud Token Plan",
+            "https://home.qwencloud.com/billing/subscription/token-plan-individual",
+            "Paste your Token Plan API key (sk-sp-…)",
+        ),
+        get_api_key=_token_plan_wire_key,
+        base_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    ),
+    ProviderDefinition(
+        id="alibaba-token-plan-oauth",
+        search_aliases=("token-plan",),
+        name="QwenCloud Token Plan (usage OAuth)",
+        login=_lazy_login("local_operator.providers.oauth.qwencloud", "login_qwencloud_token_plan"),
+        store_credentials_as="alibaba-token-plan",
+        base_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
     ),
     ProviderDefinition(
         id="test",

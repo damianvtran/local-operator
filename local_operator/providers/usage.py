@@ -55,6 +55,7 @@ code path here owns a client.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -120,6 +121,25 @@ DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 #: xAI Grok subscription usage (OAuth).
 XAI_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 
+#: QwenCloud Token Plan consumption through the first-party management
+#: gateway — the same flat BSS surface the official ``qwencloud-cli`` posts
+#: to. The management token comes from the device-flow login
+#: (``/login alibaba-token-plan-oauth``); the ``sk-sp-…`` inference key
+#: cannot read quota. Verified against production: HTTP 200 with
+#: ``code == "200"`` on success and ``ConsoleNeedLogin`` for a dead token.
+QWENCLOUD_BSS_URL = "https://cli.qwencloud.com/data/v2/api.json"
+QWENCLOUD_BSS_PRODUCT = "BssOpenAPI-V3"
+QWENCLOUD_REGION = "ap-southeast-1"
+#: Token Plan commodity codes on the international product (qwencloud-cli
+#: ``site.ts``): personal = 7-day credit window, teams = monthly seat
+#: credits, addon = Credit Packs outside every window. QwenCloud documents
+#: NO 5-hour Token Plan window, so none is synthesized.
+QWENCLOUD_TOKEN_PLAN_COMMODITIES = {
+    "teams": "sfm_tokenplanteams_dp_intl",
+    "personal": "sfm_tokenplanpersonal_dp_intl",
+    "addon": "sfm_tokenplanteamsaddon_dp_intl",
+}
+
 #: The fetcher a provider id routes to. Naming the kinds keeps the dispatch
 #: table and the if-chain in :func:`fetch_usage` in lockstep.
 FetcherKind = Literal[
@@ -130,6 +150,7 @@ FetcherKind = Literal[
     "moonshot-balance",
     "deepseek-balance",
     "xai-oauth",
+    "qwencloud-token-plan",
 ]
 
 #: Provider id (canonical) -> ``(oauth_fetcher, api_key_fetcher)``.
@@ -161,6 +182,8 @@ _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
     "deepseek": (None, "deepseek-balance"),
     "xai": ("xai-oauth", None),
     "xai-oauth": ("xai-oauth", None),
+    "alibaba-token-plan": ("qwencloud-token-plan", None),
+    "alibaba-token-plan-oauth": ("qwencloud-token-plan", None),
 }
 
 #: Providers with a live quota endpoint, for callers that only need the question
@@ -1304,12 +1327,206 @@ def _num(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+async def _qwencloud_bss_call(
+    client: httpx.AsyncClient, token: str, action: str, params: dict[str, Any]
+) -> dict[str, Any] | None:
+    """One flat BSS call through the official gateway; None on any failure."""
+    flattened = {
+        key: (
+            value
+            if isinstance(value, str)
+            else str(value) if isinstance(value, int) else json.dumps(value)
+        )
+        for key, value in params.items()
+    }
+    try:
+        response = await client.post(
+            QWENCLOUD_BSS_URL,
+            json={
+                "product": QWENCLOUD_BSS_PRODUCT,
+                "action": action,
+                "region": QWENCLOUD_REGION,
+                "params": flattened,
+            },
+            headers=_bearer(token),
+        )
+    except httpx.HTTPError:
+        return None
+    if response.status_code != 200:
+        return None
+    payload = response.json() if response.content else {}
+    data = payload.get("data")
+    if payload.get("code") != "200" or not isinstance(data, dict):
+        return None
+    return data
+
+
+def _qwencloud_fr_status(item: dict[str, Any]) -> str:
+    """``valid`` from an instance's Status, which is a string or {Code: …}."""
+    status = item.get("Status")
+    if isinstance(status, dict):
+        code = status.get("Code")
+        return str(code).lower() if code else ""
+    return str(status).lower() if status is not None else ""
+
+
+def _qwencloud_credits_limit(
+    limit_id: str, label: str, window: str, total: float, remaining: float, resets_at_ms: int | None
+) -> UsageLimit | None:
+    """One subscription window in absolute credits (used falls out of total−remaining)."""
+    if not total or total <= 0:
+        return None
+    return UsageLimit(
+        id=limit_id,
+        label=label,
+        amount=UsageAmount(
+            used=max(0.0, total - remaining), limit=total, remaining=remaining, unit="unknown"
+        ),
+        window=window,
+        resets_at_ms=resets_at_ms,
+        shared=True,
+    )
+
+
+async def fetch_qwencloud_token_plan(client: httpx.AsyncClient, token: str) -> UsageReport | None:
+    """QwenCloud Token Plan credits via the management OAuth token.
+
+    Mirrors the official CLI's data path: accounts migrated to seat-based
+    subscriptions (``QuerySubscriptionGray`` → true) answer through
+    ``GetSeatSubscriptionSummary`` with a monthly window; everyone else
+    reports per-commodity ``DescribeFrInstances``, where the personal
+    commodity carries the 7-day credit window (``InitCapacityBaseValue``
+    total, ``CurrCapacityBaseValue`` remaining, ``EndTime`` reset) and team
+    seats a monthly one. Add-on instances sum into a window-less Credit
+    Packs limit — packs draw down outside the subscription window.
+    """
+
+    async def instances(commodity: str, page_size: int = 10) -> list[dict[str, Any]]:
+        data = await _qwencloud_bss_call(
+            client,
+            token,
+            "DescribeFrInstances",
+            {
+                "Group": "tokenPlan",
+                "CommodityCode": commodity,
+                "PageNum": 1,
+                "PageSize": page_size,
+            },
+        )
+        rows = data.get("Data") if data else None
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    gray = await _qwencloud_bss_call(client, token, "QuerySubscriptionGray", {})
+    if gray is None:
+        return None
+    packs_rows = await instances(QWENCLOUD_TOKEN_PLAN_COMMODITIES["addon"], 100)
+    packs = sum(
+        _num(row.get("CurrCapacityBaseValue"), 0.0) or 0.0
+        for row in packs_rows
+        if _qwencloud_fr_status(row) == "valid"
+    )
+    limits: list[UsageLimit] = []
+
+    if gray.get("IsGray") is True:
+        seat = await _qwencloud_bss_call(
+            client,
+            token,
+            "GetSeatSubscriptionSummary",
+            {"productCode": QWENCLOUD_TOKEN_PLAN_COMMODITIES["teams"]},
+        )
+        if seat is None:
+            return None
+        # BSS sometimes nests the summary under a second Data envelope.
+        nested = seat.get("Data")
+        inner: dict[str, Any] = nested if isinstance(nested, dict) else seat
+        groups = inner.get("SubscriptionGroupList")
+        total = 0.0
+        remaining = 0.0
+        for group in groups if isinstance(groups, list) else []:
+            if not isinstance(group, dict):
+                continue
+            equity_list = group.get("EquityList")
+            equity = (
+                equity_list[0]
+                if isinstance(equity_list, list)
+                and equity_list
+                and isinstance(equity_list[0], dict)
+                else {}
+            )
+            total += _num(equity.get("TotalValue") or group.get("TotalValue"), 0.0) or 0.0
+            remaining += _num(equity.get("SurplusValue") or group.get("SurplusValue"), 0.0) or 0.0
+        end = _num(inner.get("EndTime"))
+        limit = _qwencloud_credits_limit(
+            "credits-monthly",
+            "Monthly Credits",
+            "monthly",
+            total,
+            remaining,
+            int(end) if end and end > 0 else None,
+        )
+        if limit is not None:
+            limits.append(limit)
+    else:
+        teams_rows = await instances(QWENCLOUD_TOKEN_PLAN_COMMODITIES["teams"])
+        personal_rows = await instances(QWENCLOUD_TOKEN_PLAN_COMMODITIES["personal"])
+        # Teams first, mirroring the CLI: a team seat outranks a personal
+        # subscription on the same account for which window is THE constraint.
+        pick = next((row for row in teams_rows if _qwencloud_fr_status(row) == "valid"), None)
+        window = "monthly"
+        if pick is None:
+            pick = next(
+                (row for row in personal_rows if _qwencloud_fr_status(row) == "valid"),
+                personal_rows[0] if personal_rows else None,
+            )
+            window = "7d"
+        if pick is not None:
+            monthly_shift = pick.get("CapacityTypeCode") == "periodMonthlyShift"
+            total = _num(pick.get("InitCapacityBaseValue"), 0.0) or 0.0
+            remaining = (
+                (_num(pick.get("periodCapacityBaseValue")) if monthly_shift else None)
+                or _num(pick.get("CurrCapacityBaseValue"), 0.0)
+                or 0.0
+            )
+            end = _num(pick.get("EndTime"))
+            if window == "7d" and not monthly_shift:
+                limit = _qwencloud_credits_limit(
+                    "credits-7d",
+                    "7 Day Credits",
+                    "7d",
+                    total,
+                    remaining,
+                    int(end) if end and end > 0 else None,
+                )
+            else:
+                limit = _qwencloud_credits_limit(
+                    "credits-monthly",
+                    "Monthly Credits",
+                    "monthly",
+                    total,
+                    remaining,
+                    int(end) if end and end > 0 else None,
+                )
+            if limit is not None:
+                limits.append(limit)
+
+    if packs > 0:
+        limits.append(
+            UsageLimit(
+                id="credits-packs",
+                label="Credit Packs",
+                amount=UsageAmount(remaining=packs, unit="unknown"),
+            )
+        )
+    return UsageReport(provider="alibaba-token-plan", limits=limits) if limits else None
+
+
 async def fetch_usage(
     client: httpx.AsyncClient,
     provider: str,
     api_key: str | None = None,
     access_token: str | None = None,
     account_id: str | None = None,
+    oauth_creds: dict[str, Any] | None = None,
 ) -> UsageReport | None:
     """Dispatch a provider id to whichever fetcher its credentials can reach.
 
@@ -1318,6 +1535,8 @@ async def fetch_usage(
     because for every provider that has both it reports the SUBSCRIPTION the user
     is actually spending (plan windows) while the API-key route reports a
     pay-as-you-go balance that a subscription user does not draw down.
+    ``oauth_creds`` is the raw stored OAuth row for split-token providers whose
+    wire bearer is not the token the quota endpoint wants.
 
     Returns None when the provider has no endpoint, or has one but not for the
     credential kind on hand. Never raises.
@@ -1327,7 +1546,7 @@ async def fetch_usage(
         return None
     oauth_kind, api_kind = routes
     if access_token and oauth_kind is not None:
-        return await _run_fetcher(client, oauth_kind, access_token, account_id)
+        return await _run_fetcher(client, oauth_kind, access_token, account_id, creds=oauth_creds)
     if api_key and api_kind is not None:
         return await _run_fetcher(client, api_kind, api_key, account_id)
     return None
@@ -1338,6 +1557,8 @@ async def _run_fetcher(
     kind: FetcherKind,
     secret: str,
     account_id: str | None,
+    *,
+    creds: dict[str, Any] | None = None,
 ) -> UsageReport | None:
     """One fetcher by kind. Split out so the credential choice above stays legible."""
     if kind == "openrouter":
@@ -1354,6 +1575,14 @@ async def _run_fetcher(
         return await fetch_deepseek_balance(client, secret)
     if kind == "xai-oauth":
         return await fetch_xai_oauth(client, secret)
+    if kind == "qwencloud-token-plan":
+        # Split-token provider: the wire bearer is the sk-sp key, but quota
+        # needs the management token from the raw row. ``secret`` is the
+        # mapped (wire) key, so only rows carrying ``access`` can report.
+        management = (creds or {}).get("access")
+        if not management:
+            return None
+        return await fetch_qwencloud_token_plan(client, management)
     return None
 
 
