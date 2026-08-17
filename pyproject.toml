@@ -164,14 +164,17 @@ profile = "black"
 reportMissingTypeArgument = true
 strictListInference = true
 reportPrivateImportUsage = false
-# Resolve imports against the project venv rather than whatever interpreter
-# pyright happens to find. Without this a bare `pyright` run reports hundreds
-# of spurious "import could not be resolved" errors (it picks up the system
-# Python, which has none of the dependencies), so the real errors are buried
-# and the gate looks broken to anyone who runs it without the documented
-# `--pythonpath .venv/bin/python`. Both forms agree now.
-venvPath = "."
-venv = ".venv"
+# NOTE: venvPath/venv are deliberately NOT set here, though a bare local
+# `pyright` run resolves the system interpreter and reports spurious
+# "import could not be resolved" errors. Pinning them fixes the local run and
+# BREAKS CI: `.github/workflows/ci.yml` installs with `pip install -e ".[dev]"`
+# into the runner's own interpreter and never creates a `.venv`, so pyright
+# would warn ".venv subdirectory not found" and fall back to an interpreter
+# without the dependencies — turning the type-check gate into import noise
+# that hides real errors. Verified by removing `.venv` locally and re-running.
+#
+# Use the documented invocation instead (see AGENTS.md):
+#   .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 [tool.pytest.ini_options]
 addopts = "-vv -s"
