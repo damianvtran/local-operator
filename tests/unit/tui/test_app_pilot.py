@@ -3872,8 +3872,8 @@ async def test_context_command_renders_wire_schema_breakdown() -> None:
         block = app._context_block()
         assert block is not None
         listing = _renderable_plain(block.renderable)
-        assert "Context" in listing
-        assert "Tool schemas" in listing and "6.6k" in listing
-        assert "Messages" in listing and "10.9k" in listing
-        assert "Total" in listing and "10.1%" in listing
-        assert "Last cache read" in listing and "12.8k" in listing
+        assert "Estimated next request" in listing
+        assert "Tool schemas" in listing and "~6.6k" in listing
+        assert "Messages" in listing and "~10.9k" in listing
+        assert "Total" in listing and "~20.1k / 200k (10.1%)" in listing
+        assert "Last cache read (exact)" in listing and "12.8k" in listing

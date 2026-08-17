@@ -120,6 +120,7 @@ from local_operator.tui.widgets.status_line import (
     SubagentBand,
     format_context_tokens,
     format_cost,
+    format_window,
 )
 from local_operator.tui.widgets.subagent_panel import (
     JobStats,
@@ -5534,22 +5535,30 @@ class OperatorApp(App[None]):
             total = data["total"]
             window = max(data["context_window"], 1)
             pct = total / window * 100
+
+            def estimated(value: int) -> str:
+                return f"~{format_context_tokens(value)}"
+
             items = [
-                ("Instructions", format_context_tokens(data["instructions"])),
-                ("Tool inventory", format_context_tokens(data["tool_inventory"])),
-                ("Tool schemas", format_context_tokens(data["tool_schemas"])),
-                ("Environment", format_context_tokens(data["environment"])),
-                ("Skills / MCP / goal", format_context_tokens(data["knowledge_mcp_goal"])),
-                ("Messages", format_context_tokens(data["messages"])),
+                ("Instructions", estimated(data["instructions"])),
+                ("Tool inventory", estimated(data["tool_inventory"])),
+                ("Tool schemas", estimated(data["tool_schemas"])),
+                ("Environment", estimated(data["environment"])),
+                ("Skills / MCP / goal", estimated(data["knowledge_mcp_goal"])),
+                ("Messages", estimated(data["messages"])),
                 (
                     "Total",
-                    f"{format_context_tokens(total)} / "
-                    f"{format_context_tokens(window)} ({pct:.1f}%)",
+                    f"{estimated(total)} / {format_window(window)} ({pct:.1f}%)",
                 ),
             ]
             if data["cache_read"]:
-                items.append(("Last cache read", format_context_tokens(data["cache_read"])))
-            return RichBlock(_tree_listing(items, "Context"))
+                items.append(
+                    (
+                        "Last cache read (exact)",
+                        format_context_tokens(data["cache_read"]),
+                    )
+                )
+            return RichBlock(_tree_listing(items, "Estimated next request", detail_token="muted"))
         except Exception:
             return None
 
@@ -6299,7 +6308,9 @@ def _partial_text(partial_result) -> str:
     return ""
 
 
-def _tree_listing(items: list[tuple[str, str]], caption: str) -> Group:
+def _tree_listing(
+    items: list[tuple[str, str]], caption: str, *, detail_token: str = "dim"
+) -> Group:
     """Tree-glyph section: ├─ / └─, name in the string tint, detail dim (D4).
 
     ``caption`` names WHAT the tree lists, on a dim row above it. It exists
@@ -6324,6 +6335,7 @@ def _tree_listing(items: list[tuple[str, str]], caption: str) -> Group:
         return Group()
     name_style = Style(color=theme_mod.semantic_color("string"))
     dim = Style(color=theme_mod.semantic_color("dim"))
+    detail_style = Style(color=theme_mod.semantic_color(detail_token))
     lines: list[Text] = [Text(caption, style=dim)]
     last_index = len(items) - 1
     for index, (name, detail) in enumerate(items):
@@ -6332,7 +6344,7 @@ def _tree_listing(items: list[tuple[str, str]], caption: str) -> Group:
         line.append(branch, style=dim)
         line.append(name, style=name_style)
         if detail:
-            line.append("  " + detail, style=dim)
+            line.append("  " + detail, style=detail_style)
         lines.append(line)
     return Group(*lines)
 
