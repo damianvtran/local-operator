@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import urllib.parse
 from datetime import datetime, timezone
@@ -674,6 +675,51 @@ async def test_every_paste_key_provider_can_actually_be_logged_into() -> None:
         login = definition.login
         assert login is not None, definition.id
         assert await login(callbacks) == "sk-pasted-key", definition.id
+
+
+def test_cli_hides_an_api_key_and_echoes_an_oauth_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 1 F2: an API key must not be echoed into the terminal scrollback.
+
+    ``CredentialManager`` and the web-search CLI already read this same class of
+    value through ``getpass``; the login prompt used ``input()``, and making the
+    paste-a-key providers work is what made that path reachable for nine real
+    provider keys.
+
+    The OAuth code branch deliberately stays echoed: it is single-use, expires
+    in minutes, and is a long opaque string the user needs to read back to check
+    the paste landed whole. Asserting BOTH is what makes this a discriminating
+    test rather than one that would pass on a blanket change either way.
+    """
+    import getpass as getpass_mod
+
+    from local_operator.providers.auth_cli import _callbacks_interactive
+    from local_operator.providers.registry import get_provider_definition
+
+    used: list[str] = []
+    monkeypatch.setattr(getpass_mod, "getpass", lambda *a, **k: used.append("getpass") or "sk-x")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: used.append("input") or "code#state")
+
+    key_def = get_provider_definition("alibaba")
+    assert key_def is not None
+    prompt = _callbacks_interactive(key_def).on_manual_code_input
+    assert prompt is not None
+    assert asyncio.run(_maybe(prompt())) == "sk-x"
+    assert used == ["getpass"], used
+
+    used.clear()
+    code_def = get_provider_definition("anthropic")
+    assert code_def is not None
+    prompt = _callbacks_interactive(code_def).on_manual_code_input
+    assert prompt is not None
+    assert asyncio.run(_maybe(prompt())) == "code#state"
+    assert used == ["input"], used
+
+
+async def _maybe(value: Any) -> Any:
+    """Await ``value`` when it is awaitable; the prompts are coroutines."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 async def test_paste_key_login_treats_an_empty_paste_as_a_cancel() -> None:

@@ -2563,7 +2563,7 @@ class OperatorApp(App[None]):
         Cancelling (``None``) rather than submitting whatever was half typed:
         a partial key is not a credential, and storing one would write a
         credential row that shadows a working environment key. Unlike the ask
-        picker \u2014 where a partial answer still tells the agent something \u2014 there
+        picker — where a partial answer still tells the agent something — there
         is no useful partial value here.
         """
         block = self._key_prompt
@@ -2907,6 +2907,14 @@ class OperatorApp(App[None]):
         # but NOT latched: /clear does not stop the turn, and latching here
         # denied every later write/exec tool of the run with no prompt.
         self._settle_live_approval()
+        # The login key prompt is the same hazard and was the worse one: the
+        # widget goes with the transcript, but the login worker parked on its
+        # future is not a turn, so nothing else here reached it. Ctrl+L during
+        # a login left the future pending AND `_login_lock` held, so every
+        # later `/login` in the session reported "a login is already in
+        # progress" and offered no prompt — the session could never log in
+        # again. Cancelling frees both.
+        self._settle_key_prompt()
         self._exit_hint = None  # its widget went with the transcript
         self._streaming_block = None
         self._tool_cards = {}
@@ -5770,9 +5778,21 @@ class OperatorApp(App[None]):
             return LoginCallbacks(on_auth_url=on_auth_url, on_progress=on_progress)
 
         label = getattr(definition, "name", None) or getattr(definition, "id", "this provider")
+        # WHICH value the prompt is reading, which decides both its wording and
+        # whether it masks. ``requires_paste_prompt`` means the paste IS the
+        # login and the value is a long-lived API key; the only other way to
+        # reach here is Anthropic's optional fallback, whose paste is a
+        # single-use OAuth ``code#state`` the user needs to read back.
+        secret = bool(getattr(definition, "paste_prompt_required", False))
 
         async def on_manual_code_input() -> str | None:
-            return await self._request_login_key(str(label))
+            # ``sole_path`` tracks ``secret`` here and is a DIFFERENT question
+            # that happens to have the same answer for every provider in the
+            # registry: "is the paste the only way this login can finish?".
+            # Anthropic's is not (the loopback callback is still listening and a
+            # declined paste re-parks), so declining must not be reported as a
+            # cancelled login.
+            return await self._request_login_key(str(label), secret=secret, sole_path=secret)
 
         return LoginCallbacks(
             on_auth_url=on_auth_url,
@@ -5780,7 +5800,9 @@ class OperatorApp(App[None]):
             on_manual_code_input=on_manual_code_input,
         )
 
-    async def _request_login_key(self, provider_label: str) -> str | None:
+    async def _request_login_key(
+        self, provider_label: str, *, secret: bool = True, sole_path: bool = True
+    ) -> str | None:
         """Put a paste prompt in the transcript and await the key.
 
         Awaited by the login flow on this app's own loop (``_login_flow`` runs
@@ -5801,16 +5823,20 @@ class OperatorApp(App[None]):
         # the same reason.
         self._close_subagent_view()
         self._close_aside()
-        block = KeyPromptBlock(provider_label)
+        block = KeyPromptBlock(provider_label, secret=secret, sole_path=sole_path)
         self._key_prompt = block
         self._append_block(block)
         try:
             return await block.wait()
         except asyncio.CancelledError:
-            # The login was cancelled out from under the prompt (teardown, a
-            # reload). Settle it so the block does not sit in the transcript
-            # holding focus for a flow that no longer exists.
-            block.resolve(None)
+            # The prompt task was cancelled. Two different situations arrive
+            # here and the block cannot tell them apart from the cancellation
+            # alone, so it is told: for Anthropic the paste RACES the loopback
+            # callback, and a browser redirect that wins cancels this task on
+            # the SUCCESS path (``LoopbackFlow._await_code`` cancels every
+            # waiter in a ``finally``). Reporting that as a cancelled login put
+            # "login cancelled" directly above the success notice.
+            block.resolve(None, superseded=True)
             raise
         finally:
             block.restore_focus()

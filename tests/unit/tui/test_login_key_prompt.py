@@ -334,6 +334,292 @@ async def test_every_paste_provider_gets_a_prompt_from_the_tui(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_tab_cannot_move_focus_off_a_live_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design round 1 D1: one Tab used to send the API key to the MODEL.
+
+    Textual's default Tab moves focus to the next focusable widget, which is the
+    composer. The prompt went on looking live (its unfocused and focused grounds
+    differ by ~1.04:1, which nobody perceives), so the user kept typing, pressed
+    Enter, and the key was submitted as a chat message: into the transcript in
+    plain text and into the provider's logs. Verified end to end before the
+    guard existed.
+
+    The last assertion is the one that matters. Asserting focus alone would pass
+    on a widget that keeps focus and drops the characters.
+    """
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: True)
+    controller = _controller(tmp_path)
+    session = _LoginSession()
+    app = OperatorApp(lambda: _factory(session), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _run_login(pilot, app, "alibaba")
+        prompt = app._key_prompt
+        assert prompt is not None and prompt.has_focus
+
+        for key in ("tab", "shift+tab", "tab"):
+            await pilot.press(key)
+        await pilot.pause()
+        assert prompt.has_focus, "Tab moved focus off a prompt the app is parked on"
+
+        for char in "sk-live9f3c":
+            await pilot.press(char)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if prompt.answered:
+                break
+
+        assert app.query_one(Editor).text == "", "the key was typed into the composer"
+        assert session.prompts == [], "the API key was sent to the model"
+        assert prompt.wait().result() == "sk-live9f3c"
+
+
+@pytest.mark.asyncio
+async def test_declining_anthropics_paste_is_not_reported_as_a_cancelled_login() -> None:
+    """Design round 1 D2: the receipt claimed a cancel while the login ran on.
+
+    Anthropic's paste races the loopback callback, and `_await_code` RE-PARKS on
+    a declined paste by design — the browser flow is still listening. Reporting
+    "login cancelled" told the user something false, and their next `/login` was
+    then refused with "a login is already in progress".
+    """
+    app = _PromptHost()
+    async with app.run_test() as pilot:
+        fallback = KeyPromptBlock("Anthropic (Claude Pro/Max)", secret=False, sole_path=False)
+        await app.mount(fallback)
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+
+        receipt = _rendered(fallback)
+        assert "cancelled" not in receipt, receipt
+        assert "still waiting for the browser" in receipt, receipt
+
+        # Non-zero control: where the paste IS the only path, the same gesture
+        # still reports a cancelled login, so the assertion above is about
+        # `sole_path` and not about the widget never saying "cancelled".
+        sole = await app.open_prompt("Alibaba Cloud")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert "cancelled" in _rendered(sole)
+
+
+@pytest.mark.asyncio
+async def test_receipts_stay_distinguishable_when_the_row_is_truncated() -> None:
+    """Design round 1 D5: success and cancel rendered byte-identical at 10-27
+    columns, so the narrowest terminals could not tell a stored credential from
+    a cancelled login. The glyph carries the outcome, as it does on the sibling
+    approval card."""
+    for width in (100, 27, 20, 14, 10):
+        app = _PromptHost()
+        async with app.run_test(size=(width, 20)) as pilot:
+            stored = KeyPromptBlock("Alibaba Cloud (Qwen)")
+            await app.mount(stored)
+            await pilot.pause()
+            stored.resolve("sk-abc123")
+
+            cancelled = KeyPromptBlock("Alibaba Cloud (Qwen)")
+            await app.mount(cancelled)
+            await pilot.pause()
+            cancelled.resolve(None)
+            await pilot.pause()
+
+            assert _rendered(stored) != _rendered(cancelled), width
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_names_the_provider_once() -> None:
+    """Design round 1 D3: `Paste your xAI (Grok API key) API key`.
+
+    Registry names carry a parenthetical that disambiguates rows in a LIST; in
+    this sentence it names the credential twice. The user has already chosen the
+    provider by typing it.
+    """
+    app = _PromptHost()
+    async with app.run_test(size=(100, 20)) as pilot:
+        block = await app.open_prompt("xAI (Grok API key)")
+        await pilot.pause()
+        assert "Paste your xAI API key" in _rendered(block)
+
+        # A name that is nothing but a parenthetical keeps it rather than
+        # collapsing to an empty provider name.
+        odd = await app.open_prompt("(unnamed)")
+        await pilot.pause()
+        assert "(unnamed)" in _rendered(odd)
+
+
+@pytest.mark.asyncio
+async def test_hint_row_sheds_whole_choices_and_keeps_submit_longest() -> None:
+    """Design round 1 D6: the row cut mid-word (`esc ca…`), teaching a key that
+    does not exist. It sheds whole choices instead, and `enter submit` is the
+    last to go: a prompt that only tells you how to give up is one you cannot
+    get past."""
+    seen = []
+    for width in (100, 24, 16, 12):
+        app = _PromptHost()
+        async with app.run_test(size=(width, 20)) as pilot:
+            block = await app.open_prompt("Alibaba Cloud")
+            await pilot.pause()
+            lines = _rendered(block).split("\n")
+            hint = [line for line in lines if "submit" in line or "cancel" in line]
+            seen.append((width, hint))
+            for line in hint:
+                assert "ca…" not in line and "canc…" not in line, (width, line)
+
+    assert any("cancel" in "".join(h) for _w, h in seen), seen
+    assert any(h and "cancel" not in "".join(h) for _w, h in seen), seen
+
+
+@pytest.mark.asyncio
+async def test_a_long_paste_reports_its_length_at_narrow_widths() -> None:
+    """Design round 1 D4: past the bar's useful length the COUNT is the message.
+
+    Written bar-first it was truncated away, so at 40 columns a 33-character and
+    a 300-character paste rendered as the same row and "did the whole key
+    arrive" stopped being answerable exactly where the bar had stopped answering
+    it.
+    """
+    from textual.events import Paste
+
+    for width in (100, 40, 24, 16):
+        app = _PromptHost()
+        async with app.run_test(size=(width, 20)) as pilot:
+            short = KeyPromptBlock("Alibaba Cloud")
+            await app.mount(short)
+            await pilot.pause()
+            short.post_message(Paste("k" * 33))
+
+            long = KeyPromptBlock("Alibaba Cloud")
+            await app.mount(long)
+            await pilot.pause()
+            long.post_message(Paste("k" * 300))
+            await pilot.pause()
+
+            assert "33 chars" in _rendered(short), width
+            assert "300 chars" in _rendered(long), width
+            assert _rendered(short) != _rendered(long), width
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_transcript_frees_the_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 1 F1: Ctrl+L during a login used to wedge `/login` for the session.
+
+    The widget goes with the transcript, but the login worker parked on its
+    future is NOT a turn, so neither the approval settle nor anything else in
+    the clear hook reached it. The future stayed pending and `_login_lock`
+    stayed held, so every later `/login` answered "a login is already in
+    progress" and offered no prompt — unrecoverable without restarting.
+
+    The second login at the end is the part that matters: settling the future
+    alone would satisfy a weaker assertion while leaving the lock held.
+    """
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: True)
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(_LoginSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _run_login(pilot, app, "alibaba")
+        block = app._key_prompt
+        assert block is not None
+
+        await pilot.press("ctrl+l")
+        for _ in range(30):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+
+        assert block.answered, "the login is parked on a future nothing will resolve"
+        assert block.wait().result() is None
+        assert app._login_lock is None or not app._login_lock.locked()
+
+        await _run_login(pilot, app, "xai")
+        assert len(list(app.query(KeyPromptBlock))) == 1, "a later /login must still work"
+
+
+@pytest.mark.asyncio
+async def test_an_oauth_code_paste_is_echoed_and_named_a_code() -> None:
+    """Round 1 F3: the prompt must not call an OAuth code an "API key".
+
+    Anthropic's fallback pastes a single-use `code#state`, not a key. Calling it
+    a key sends the user hunting a credential Anthropic never issued, and
+    masking it hides a long opaque string they need to read back to check the
+    paste landed whole. It is spent on redemption, so echoing costs nothing.
+    """
+    app = _PromptHost()
+    async with app.run_test() as pilot:
+        block = KeyPromptBlock("Anthropic (Claude Pro/Max)", secret=False)
+        await app.mount(block)
+        await pilot.pause()
+        text = _rendered(block)
+        assert "authorization code" in text, text
+        assert "API key" not in text, text
+
+        for char in "abc123":
+            await pilot.press(char)
+        await pilot.pause()
+        # Echoed, not masked — the opposite of the API-key case.
+        assert "abc123" in _rendered(block)
+        assert MASK_CHAR not in _rendered(block)
+
+
+@pytest.mark.asyncio
+async def test_secret_and_code_prompts_are_wired_from_the_registry(tmp_path: Path) -> None:
+    """The `secret` choice is the registry's, not a per-call guess.
+
+    Non-zero control on both sides: a paste-a-key provider masks, Anthropic's
+    fallback echoes, so neither answer can be a constant.
+    """
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(_LoginSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        alibaba = controller.provider("alibaba")
+        anthropic = controller.provider("anthropic")
+        assert alibaba is not None and anthropic is not None
+        assert alibaba.paste_prompt_required and not anthropic.paste_prompt_required
+        # Both are offered a prompt; they differ only in what it reads.
+        assert app._login_callbacks(alibaba).on_manual_code_input is not None
+        assert app._login_callbacks(anthropic).on_manual_code_input is not None
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_prompt_does_not_claim_a_cancel() -> None:
+    """Round 1 F4: a SUCCESSFUL Anthropic login painted "login cancelled".
+
+    The paste races the loopback callback; when the browser redirect wins,
+    `_await_code` cancels every waiter in a `finally`, so the prompt task is
+    cancelled on the success path. Resolving that as a plain `None` printed
+    "login cancelled" directly above the success notice.
+    """
+    app = _PromptHost()
+    async with app.run_test() as pilot:
+        block = await app.open_prompt("Anthropic (Claude Pro/Max)")
+        await pilot.pause()
+        block.resolve(None, superseded=True)
+        await pilot.pause()
+
+        receipt = _rendered(block)
+        assert "cancelled" not in receipt, receipt
+        assert "no longer needed" in receipt, receipt
+        # Still a cancel to the flow: no value was pasted.
+        assert block.wait().result() is None
+
+        # And the ordinary cancel still says cancelled, or the assertion above
+        # would pass on a block that never says it either way.
+        other = await app.open_prompt("Alibaba Cloud")
+        await pilot.pause()
+        other.resolve(None)
+        await pilot.pause()
+        assert "cancelled" in _rendered(other)
+
+
+@pytest.mark.asyncio
 async def test_teardown_settles_a_live_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

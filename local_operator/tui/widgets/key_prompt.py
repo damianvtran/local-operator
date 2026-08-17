@@ -71,6 +71,11 @@ MASK_MAX_CELLS = 32
 #: ``ApprovalBlock.CHOICES``. Ordered enter -> esc: the affirmative is what the
 #: user came here to do, and the hint row sheds whole choices from the right,
 #: so the key that submits survives to the narrowest terminals.
+#: Cells between two choices on the hint row. Three spaces, matching the gap
+#: ``ApprovalBlock`` puts between its own key hints, so the two prompts the app
+#: parks on read as one surface rather than two.
+HINT_SEPARATOR = "   "
+
 CHOICES: tuple[tuple[str, str], ...] = (
     ("enter", "submit"),
     ("esc", "cancel"),
@@ -80,6 +85,27 @@ CHOICES: tuple[tuple[str, str], ...] = (
 #: ``approval.SPINE_FLOOR_WIDTH``: an alignment edge that only some blocks
 #: honour is not an edge, so the whole transcript sheds it together.
 SPINE_FLOOR_WIDTH = 24
+
+
+def _short_label(label: str) -> str:
+    """A registry name reduced to the company, for use inside a sentence.
+
+    Registry names carry a parenthetical qualifier that exists to disambiguate
+    ROWS IN A LIST (``xAI (Grok API key)``, ``Anthropic (Claude Pro/Max)``,
+    ``QwenCloud Token Plan (usage OAuth)``). Dropped into this prompt's sentence
+    they read as nonsense — ``Paste your xAI (Grok API key) API key`` names the
+    credential twice and parenthesises the wrong half. The user has already
+    chosen the provider by typing it, so the qualifier has no work left to do
+    here; the sentence needs the company.
+
+    Only the trailing parenthetical is removed, and only when something is left:
+    a name that is nothing but a parenthetical keeps it rather than becoming
+    empty.
+    """
+    head, sep, _tail = label.partition(" (")
+    if sep and head.strip():
+        return head.strip()
+    return label
 
 
 class KeyPromptBlock(TranscriptBlock):
@@ -122,20 +148,50 @@ class KeyPromptBlock(TranscriptBlock):
         provider_label: str,
         instructions: str | None = None,
         on_settled: Callable[[], None] | None = None,
+        *,
+        secret: bool = True,
+        sole_path: bool = True,
     ) -> None:
+        """``secret`` says WHICH kind of value this prompt is reading.
+
+        ``True`` (the default, and every paste-a-key provider): a long-lived API
+        key. It is masked, and the prompt asks for a "key".
+
+        ``False``: an OAuth authorization code, which is Anthropic's optional
+        paste fallback. It is single-use and expires in minutes, and it is a
+        long opaque ``code#state`` string a user needs to SEE to check their
+        paste landed whole, so it is echoed. Masking it would cost real
+        legibility to protect a value that is spent on redemption — and calling
+        it an "API key" would send the user hunting a key Anthropic never
+        issued them.
+
+        ``sole_path`` is whether declining ENDS the login. True for a
+        paste-a-key provider: there is nothing else to wait for. False for
+        Anthropic, where the loopback callback is still listening and
+        ``LoopbackFlow._await_code`` re-parks on a declined paste by design, so
+        the login carries on in the browser. Only the receipt depends on it, and
+        it must: reporting "login cancelled" for a login that is still running
+        told the user something false, and their next `/login` was refused with
+        "a login is already in progress".
+        """
         super().__init__()
         self.add_class("key-prompt-card")
+        self.secret = secret
+        self.sole_path = sole_path
         # Both strings come from the provider registry rather than from a model,
         # but they are stripped on the same principle the approval prompt
         # applies to tool arguments: anything reaching a real terminal is
         # stripped at exactly one place, so a later registry entry (or an
         # embedder's own provider definition) cannot introduce CSI that erases
         # the rows above this prompt and repaints a forged one over them.
-        self.provider_label = strip_control_sequences(provider_label)
+        self.provider_label = _short_label(strip_control_sequences(provider_label))
         self.instructions = strip_control_sequences(instructions or "")
         self._typed: list[str] = []
         self._settled = False
         self._submitted: str | None = None
+        #: Set when the prompt was retired because the login completed another
+        #: way (see :meth:`resolve`), so the receipt does not claim a cancel.
+        self._superseded = False
         # `get_running_loop`, not `get_event_loop`: the future must belong to the
         # loop that awaits it, and stating that precondition turns a construction
         # from a sync context into an immediate error rather than a future nobody
@@ -160,16 +216,25 @@ class KeyPromptBlock(TranscriptBlock):
         tests and the renderer both need the length and neither needs the key."""
         return len(self._typed)
 
-    def resolve(self, value: str | None) -> None:
+    def resolve(self, value: str | None, *, superseded: bool = False) -> None:
         """Settle the prompt (idempotent) and repaint it as a receipt.
 
         Idempotent because several paths end one prompt — enter, escape, an
         abort, a transcript clear, unmount — and a second ``set_result`` on a
         settled future raises. Losing that race must not take the app down.
+
+        ``superseded`` means the prompt was retired because the login finished
+        some OTHER way, and it exists because the block cannot tell the two
+        apart from ``value is None`` alone. For Anthropic the paste races the
+        loopback callback: when the browser redirect wins, the paste task is
+        cancelled and this resolves with ``None`` — a SUCCESSFUL login that
+        painted "login cancelled" underneath its own success notice, telling
+        the user their completed login had been cancelled.
         """
         if self._settled:
             return
         self._settled = True
+        self._superseded = superseded
         self._submitted = value
         # The buffer is dropped as soon as the value has been handed over, so a
         # settled block sitting in the transcript is not still holding the
@@ -239,6 +304,23 @@ class KeyPromptBlock(TranscriptBlock):
             return
         if event.key in ("enter", "escape"):
             return
+        if event.key in ("tab", "shift+tab"):
+            # Tab is SWALLOWED while the prompt is live, and this is a security
+            # boundary rather than a focus preference. Textual's default Tab
+            # moves focus to the next focusable widget, which is the composer:
+            # the prompt went on saying it was waiting (its ground differs from
+            # the focused ground by ~1.04:1, which nobody perceives), the user
+            # kept typing their key into the composer, and Enter SENT THE API
+            # KEY TO THE MODEL as a chat message — where it lands in the
+            # transcript in plain text and in the provider's logs. Verified end
+            # to end before this guard existed.
+            #
+            # A prompt the app is parked on owns the keyboard until it is
+            # answered; both ways out (enter, escape) are on this block and are
+            # advertised in its hint row.
+            event.stop()
+            event.prevent_default()
+            return
         if event.key == "backspace":
             if self._typed:
                 self._typed.pop()
@@ -305,9 +387,19 @@ class KeyPromptBlock(TranscriptBlock):
         count = len(self._typed)
         if count == 0:
             return ""
+        if not self.secret:
+            # An OAuth code is echoed: see the ``secret`` note on __init__. The
+            # row's own truncation keeps a long one inside the card.
+            return "".join(self._typed)
         if count <= MASK_MAX_CELLS:
             return MASK_CHAR * count
-        return f"{MASK_CHAR * MASK_MAX_CELLS} {count} chars"
+        # Past the bar's useful length the COUNT is the message, so it is
+        # written first and the bar takes what is left. Written bar-first, the
+        # row helper truncated the count away at narrow widths — at 40 columns a
+        # 33-character and a 300-character paste rendered as the same row, so
+        # "did the whole key arrive" stopped being answerable exactly where the
+        # bar had already stopped answering it.
+        return f"{count} chars {MASK_CHAR * MASK_MAX_CELLS}"
 
     def _build(self) -> RenderableType:
         width = max((self.size.width or 80) - 2, 10)
@@ -315,6 +407,8 @@ class KeyPromptBlock(TranscriptBlock):
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         accent = Style(color=theme_mod.semantic_color("accent"))
+        success = Style(color=theme_mod.semantic_color("success"))
+        danger = Style(color=theme_mod.semantic_color("danger"))
         # The transcript's shared left edge, given up as a whole below the width
         # where it stops being affordable — see ``SPINE_FLOOR_WIDTH``.
         pad = " " * SPINE_INDENT if width >= SPINE_FLOOR_WIDTH else ""
@@ -346,15 +440,38 @@ class KeyPromptBlock(TranscriptBlock):
             # of unanswered-looking prompts is how a user loses track of which
             # one the app is actually waiting on. The submitted key's LENGTH is
             # the receipt, never the key.
+            # The GLYPH carries the outcome, not the sentence, and that is what
+            # makes the two receipts distinguishable when the row is truncated:
+            # at 10-27 columns "… key received" and "… login cancelled" both cut
+            # to the provider name and rendered byte-identical, so the narrowest
+            # terminals could not tell a stored credential from a cancelled one.
+            # Same device and the same two characters ``ApprovalBlock`` uses for
+            # its own settled receipt, and the same pair the transcript's
+            # success/error notices use.
+            if self._superseded:
+                # Says only what this BLOCK knows: it stopped being needed. The
+                # login's own outcome notice, success or failure, follows it.
+                return row(("· ", dim), (f"{self.provider_label} paste no longer needed", muted))
             if self._submitted is None:
-                return row(("· ", dim), (f"{self.provider_label} login cancelled", muted))
+                if not self.sole_path:
+                    # Declining here does not end the login (see ``sole_path``):
+                    # the browser flow is still live, so the receipt says what
+                    # was actually declined and what is still running. Not a
+                    # failure glyph: nothing failed.
+                    return row(
+                        ("· ", dim),
+                        (f"{self.provider_label} paste skipped ", muted),
+                        ("— still waiting for the browser", dim),
+                    )
+                return row(("✗ ", danger), (f"{self.provider_label} login cancelled", muted))
             return row(
-                ("· ", dim),
-                (f"{self.provider_label} key received ", muted),
+                ("✓ ", success),
+                (f"{self.provider_label} {'key' if self.secret else 'code'} received ", muted),
                 (f"({len(self._submitted)} chars)", dim),
             )
 
-        lines = [row(("? ", accent), (f"Paste your {self.provider_label} API key", fg))]
+        noun = "API key" if self.secret else "authorization code"
+        lines = [row(("? ", accent), (f"Paste your {self.provider_label} {noun}", fg))]
         if self.instructions:
             lines.append(row(("  ", dim), (self.instructions, dim)))
         mask = self._mask()
@@ -364,13 +481,30 @@ class KeyPromptBlock(TranscriptBlock):
             # The empty state says what to do rather than leaving a bare caret,
             # because this prompt appears right after the browser opened and the
             # user's attention was somewhere else entirely.
-            lines.append(row(("  ", dim), ("paste or type the key, then press enter", dim)))
+            hint_noun = "key" if self.secret else "code"
+            lines.append(
+                row(("  ", dim), (f"paste or type the {hint_noun}, then press enter", dim))
+            )
 
+        # The hint row sheds WHOLE choices from the right rather than letting
+        # the last one be cut mid-word: `enter submit   esc ca…` teaches a key
+        # that does not exist, and a half-word is not a shorter way of saying
+        # the same thing. Built by measuring rather than by truncating, which is
+        # what the row helper alone would do. ``CHOICES`` is ordered so the key
+        # that SUBMITS survives longest: a prompt that only tells you how to
+        # give up is one you cannot get past.
         hint_parts: list[tuple[str, Style]] = []
+        used = 0
         for index, (key, label) in enumerate(CHOICES):
-            if index:
-                hint_parts.append(("   ", dim))
+            separator = HINT_SEPARATOR if index else ""
+            width_needed = cell_len(separator) + cell_len(key) + cell_len(f" {label}")
+            if used + width_needed > body:
+                break
+            if separator:
+                hint_parts.append((separator, dim))
             hint_parts.append((key, accent))
             hint_parts.append((f" {label}", muted))
-        lines.append(row(*hint_parts))
+            used += width_needed
+        if hint_parts:
+            lines.append(row(*hint_parts))
         return Group(*lines)
