@@ -236,9 +236,7 @@ def _unknown_symbol_error(
     DO exist so the next call can be made without a round trip through
     grep."""
     candidates = _outline_names(script, lines)
-    listed = ", ".join(
-        f"{n.name} (L{n.line}, {n.type})" for n in candidates[:LSP_CANDIDATE_LIMIT]
-    )
+    listed = ", ".join(f"{n.name} (L{n.line}, {n.type})" for n in candidates[:LSP_CANDIDATE_LIMIT])
     more = (
         f" … and {len(candidates) - LSP_CANDIDATE_LIMIT} more"
         if len(candidates) > LSP_CANDIDATE_LIMIT
@@ -252,9 +250,7 @@ def _unknown_symbol_error(
     )
 
 
-def _no_symbol_at_position_error(
-    tool_call_id: str, params: LspParams, display: str
-) -> ToolResult:
+def _no_symbol_at_position_error(tool_call_id: str, params: LspParams, display: str) -> ToolResult:
     where = f"{display}:{params.line}"
     if params.column is not None:
         where += f":{params.column}"
@@ -303,9 +299,7 @@ def _definitions_result(
             continue
         target_lines = _source_lines(Path(target.module_path), cache)
         snippet = (
-            target_lines[target.line - 1].strip()
-            if 0 < target.line <= len(target_lines)
-            else ""
+            target_lines[target.line - 1].strip() if 0 < target.line <= len(target_lines) else ""
         )
         rows.append(f"{_display_path(Path(target.module_path), root)}:{target.line}: {snippet}")
     elided = len(rows) - LSP_DEFINITION_LIMIT
