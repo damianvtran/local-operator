@@ -60,7 +60,7 @@ by :data:`_CACHE_LOCK`. The lock deliberately covers only the dict/singleton
 bookkeeping (sub-microsecond) and never ``encode`` itself, so concurrent
 estimates still tokenize in parallel. Because the encode runs unlocked, an
 invalidation can land between a computation and its insert; that race is
-closed by :data:`_ESTIMATE_GENERATION` rather than by widening the lock.
+closed by :data:`_INFLIGHT_ESTIMATES` rather than by widening the lock.
 """
 
 from __future__ import annotations

@@ -447,7 +447,8 @@ class TestThreadSafetyForOffloadedEstimation:
         count describing the PRE-mutation message. Nothing ever clears it, so
         the stale value survives for the life of the process.
 
-        Reproduced at 295/300 before `_ESTIMATE_GENERATION` existed. This is
+        Reproduced at 295/300 before the in-flight ticket bookkeeping existed.
+        This is
         the exact silent-staleness the module contract forbids, and the
         compaction gate's cheap upper-bound early return depends on it not
         happening.
@@ -549,8 +550,16 @@ class TestThreadSafetyForOffloadedEstimation:
             message.content = [TextContent(text="blanked")]
             invalidate_message_cache(message)
 
-            # Churn the cache past its bound so any per-id state would recycle.
+            # Re-cache at the CURRENT content BEFORE churning. This step is
+            # what makes the test able to fail: with per-id race state, this
+            # insert is what created the entry whose later eviction recycled
+            # the id's counter back to its initial value — the value the
+            # stalled worker recorded — reviving the stale insert. Without it
+            # there is nothing for the churn to evict, and the buggy
+            # implementation passes too.
             mod._compute_tokens = real_compute
+            estimate_tokens(message)
+            # Churn the cache past its bound so any per-id state would recycle.
             for i in range(mod._ESTIMATE_CACHE_MAX + 500):
                 estimate_tokens(Message.user(f"churn {i}"))
             worker.join(timeout=5)
