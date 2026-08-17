@@ -191,6 +191,205 @@ async def test_jobs_lists_ids_labels_and_statuses(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_jobs_reports_how_long_a_running_job_has_been_going(tmp_path):
+    """The elapsed column read ``now - now`` and printed 0.0s for every live
+    job, whatever its real age.
+
+    That is the one number this tool exists to report: a caller polling
+    ``jobs`` uses it to tell a subagent that is progressing from one that is
+    wedged, and a six-minute child was indistinguishable from one launched a
+    second ago. Asserted against a job whose ``start_time`` is backdated,
+    because a fresh job is genuinely ~0s and cannot tell the two apart.
+    """
+    manager = AsyncJobManager()
+    running_id = manager.register("task", "beta", _slow_runner)
+    job = manager.get(running_id)
+    assert job is not None
+    job.start_time -= 373.0  # a child that has been running 6m13s
+
+    # Let the runner actually start before dispose cancels it; registration
+    # only SCHEDULES it (``ensure_future``), so without a yield its coroutine
+    # is never awaited and the test leaves a RuntimeWarning behind.
+    await asyncio.sleep(0)
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    tools = _tools(context)
+    result = await _call(tools, "jobs", {}, context)
+
+    row = next(line for line in result.text.splitlines() if running_id in line)
+    seconds = float(row.split()[2].rstrip("s"))
+    assert seconds >= 373.0, f"a long-running job reported {seconds}s: {row!r}"
+    # The number is useless without which quantity it is: this column also
+    # carries "settled N seconds ago" for a settled row, in the same shape.
+    assert row.split()[3] == "up", f"a running job's age is not marked as uptime: {row!r}"
+
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_jobs_says_which_quantity_each_age_is(tmp_path):
+    """One column, two facts: a running row's age is uptime, a settled row's
+    is time since it settled.
+
+    Adjacent rows were identical in presentation — ``running  373.0s`` and
+    ``failed  287.5s`` — while the first counts up from launch and the second
+    counts up from the end. A reader comparing a settled row against the
+    subagent panel (which reports the job's own DURATION) got two numbers with
+    no way to reconcile them.
+    """
+    manager = AsyncJobManager()
+    running_id = manager.register("task", "alpha", _slow_runner)
+    settled_id = manager.register("task", "beta", _quick_runner)
+
+    def _settled() -> bool:
+        job = manager.get(settled_id)
+        return job is not None and job.status != "running"
+
+    await wait_for(_settled)
+    settled = manager.get(settled_id)
+    assert settled is not None and settled.settled_at is not None
+    settled.settled_at -= 287.5  # finished nearly five minutes ago
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    result = await _call(_tools(context), "jobs", {}, context)
+    rows = {line.split()[0]: line for line in result.text.splitlines()}
+
+    assert rows[running_id].split()[3] == "up"
+    assert rows[settled_id].split()[3] == "ago"
+    assert float(rows[settled_id].split()[2].rstrip("s")) >= 287.5
+
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_jobs_never_says_up_beside_a_settled_status(tmp_path):
+    """The sense follows the STATUS, not the clock.
+
+    Sharing one test let a settled row with no ``settled_at`` print ``up``
+    beside a ``completed`` or ``cancelled`` — a contradiction no reader can
+    reconcile. It is reachable through the real manager, in the window inside
+    ``cancel()``'s await where the status is set and the settle stamp is not
+    yet, so this drives exactly that: a cancelled row with the stamp withheld.
+    """
+    manager = AsyncJobManager()
+    job_id = manager.register("task", "probe", _slow_runner)
+    # Let the runner begin, then cancel; the row is settled the moment cancel
+    # returns, and the settle stamp arrives from the runner's own teardown.
+    await asyncio.sleep(0)
+    await manager.cancel(job_id)
+    job = manager.get(job_id)
+    assert job is not None and job.status == "cancelled"
+    job.settled_at = None  # the window, held open
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    result = await _call(_tools(context), "jobs", {}, context)
+    row = next(line for line in result.text.splitlines() if line.startswith(job_id))
+
+    assert "cancelled" in row
+    assert row.split()[3] != "up", row
+
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_jobs_says_wait_for_a_job_that_has_not_been_admitted(tmp_path):
+    """A parked job is ``running`` with ``queued=True`` and a runner that has
+    never been entered, so ``up`` presented its wait as uptime — the same
+    misreport this PR was filed to stop, on the third surface."""
+    manager = AsyncJobManager(max_running=1)
+    gate = asyncio.Event()
+
+    async def blocked(job_id, signal, report_progress):
+        await gate.wait()
+        return "ok"
+
+    running_id = manager.register("task", "alpha", blocked)
+    parked_id = manager.register("task", "parked", blocked, queued=True)
+    await asyncio.sleep(0)
+    parked = manager.get(parked_id)
+    assert parked is not None and parked.queued and parked.started_at is None
+    parked.start_time -= 215.0
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    result = await _call(_tools(context), "jobs", {}, context)
+    rows = {line.split()[0]: line for line in result.text.splitlines()}
+    row = rows[parked_id]
+
+    assert "215.0s" in row, row
+    assert row.split()[3] == "wait", row
+    # ``wait`` is four cells where every other sense is at most three. The
+    # field must budget for the widest vocabulary entry or the one parked row
+    # shears its label one cell right of the entire table.
+    assert row.index("parked") == rows[running_id].index("alpha"), rows
+
+    gate.set()
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_jobs_keeps_its_columns_aligned_at_any_age(tmp_path):
+    """A day-old running job must not shear the grid.
+
+    ``6.1f`` fits through ``9999.9s`` and overflows at 2h46m40s, pushing that
+    row's label one cell right of every other row's and its decimal point out
+    of the column. An overnight ``bash`` watcher reaches that in an ordinary
+    session — retention only sweeps SETTLED rows — and before the age column
+    carried a real number for running jobs it was unreachable.
+    """
+    manager = AsyncJobManager()
+    ages = (0.0, 12.3, 373.0, 3600.0, 86400.0)
+    ids = [manager.register("task", f"job {age}", _slow_runner) for age in ages]
+    await asyncio.sleep(0)
+    for job_id, age in zip(ids, ages):
+        job = manager.get(job_id)
+        assert job is not None
+        job.start_time -= age
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    result = await _call(_tools(context), "jobs", {}, context)
+    lines = result.text.splitlines()
+
+    label_columns = {line.index("job ") for line in lines}
+    assert len(label_columns) == 1, f"the label column sheared: {lines!r}"
+    decimals = {line.index(".", 12) for line in lines}
+    assert len(decimals) == 1, f"the decimal point sheared: {lines!r}"
+
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_jobs_says_unknown_rather_than_zero_for_a_row_with_no_clock(tmp_path):
+    """``JobManagerProtocol.list()`` is typed ``list[Any]``, so an embedder may
+    hand this tool a row with no ``start_time``.
+
+    Rendering that as ``0.0s`` is byte-identical to a job launched this
+    instant — the exact unreadable reading this column was fixed to stop
+    printing, and worse for being a number a caller will act on.
+    """
+
+    class NoClock:
+        id = "aaaaaaaaaaaa"
+        type = "task"
+        status = "running"
+        settled_at = None
+        label = "embedder row"
+
+    class OneRow(AsyncJobManager):
+        def list(self, *, owner_id: str | None = None) -> list[Any]:
+            return [NoClock()]
+
+    manager = OneRow()
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    result = await _call(_tools(context), "jobs", {}, context)
+
+    row = result.text.splitlines()[0]
+    assert result.is_error is False
+    assert "unknown" in row, f"a row with no clock reported a number: {row!r}"
+    assert "0.0s" not in row
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
 async def test_jobs_empty_manager(tmp_path):
     manager = AsyncJobManager()
     context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)

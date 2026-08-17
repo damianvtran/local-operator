@@ -52,6 +52,30 @@ def test_window_is_abbreviated_and_unknown_is_blank() -> None:
     assert format_window(-1) == ""
 
 
+def test_a_name_that_only_recases_the_id_is_not_printed_beside_it() -> None:
+    """The parenthetical exists to add what the selector did not say.
+
+    ChatGPT's Codex catalogue titles its display names off the slug
+    (``gpt-5.6-luna`` -> ``GPT-5.6-Luna``), so an exact comparison let every row
+    in that family spend ~16 cells restating its own id. A name that genuinely
+    differs keeps its parenthetical: that is the half a case-insensitive test
+    could break, so both are pinned here.
+    """
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(
+        [
+            ModelRow("openai", "gpt-5.6-luna", "GPT-5.6-Luna", 272_000, 1.25, 10.0, True),
+            ModelRow("openai", "gpt-4.1-mini", "GPT-4.1 mini", 128_000, 0.4, 1.6, True),
+        ],
+        current=None,
+    )
+    picker.open("")
+    painted = picker.render_text(100).plain
+
+    assert "(GPT-5.6-Luna)" not in painted, painted
+    assert "(GPT-4.1 mini)" in painted, painted
+
+
 def test_a_large_price_keeps_its_decimal() -> None:
     """Rounding is not free in a price column: `$18.75` rendered as `$19` reads as
     a real quoted rate the provider does not charge."""

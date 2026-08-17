@@ -298,6 +298,13 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     resolved_name = getattr(info, "name", "") if info is not None else ""
     if not isinstance(resolved_name, str):
         resolved_name = ""
+    # The shared unknown-model singleton is named "Unknown". That word is a
+    # STATUS, not a model: a live listing that fills the window but not the
+    # name used to paint the status band ``Unknown`` for every unshipped id
+    # (Grok 4.6 was the reported case). Treat it as no name so the band falls
+    # back to the selector the operator typed.
+    if resolved_name.casefold() == "unknown":
+        resolved_name = ""
     resolved_id = getattr(info, "id", None)
     describes_this_model = isinstance(resolved_id, str) and _normalised_id(
         resolved_id
@@ -750,7 +757,7 @@ def _catalogue_api_key(provider: str) -> str:
 
 
 def _env_secret_is_oauth(secret: str) -> bool:
-    """True when ``secret`` was picked up out of an OAuth-named env variable.
+    """True when ``secret`` came ONLY out of OAuth-named env variables.
 
     The callable ``env_keys`` resolvers can hand back either kind of credential —
     ``_anthropic_env_key`` prefers ``ANTHROPIC_OAUTH_TOKEN`` over
@@ -762,16 +769,27 @@ def _env_secret_is_oauth(secret: str) -> bool:
     Matching on the variable NAME keeps this a general rule instead of a second
     place that knows about Anthropic specifically, and it runs at most once per
     model id per TTL bucket.
+
+    ``all`` and not ``any``, because the two misclassifications do not cost the
+    same. A plain ``OPENAI_API_KEY`` whose value happens to equal that of any
+    other variable with OAUTH in its name was reported as an OAuth token, and
+    OpenAI's OAuth route needs a ChatGPT account id that an env key cannot
+    supply — so the provider became unlistable outright, silently and for as
+    long as the variables stayed set. An OAuth token misread as a key costs one
+    401 on one provider and falls back to the bundled registry. When a value
+    appears under both kinds of name it is genuinely ambiguous, and this resolves
+    the ambiguity toward the cheaper mistake.
     """
-    return any(value == secret and "OAUTH" in name.upper() for name, value in os.environ.items())
+    names = [name.upper() for name, value in os.environ.items() if value == secret]
+    return bool(names) and all("OAUTH" in name for name in names)
 
 
-def _catalogue_credential(provider: str) -> tuple[str, bool]:
-    """``(secret, is_oauth)`` for a listing call, preferring an explicit key.
+def _catalogue_credential(provider: str) -> tuple[str, bool, str | None]:
+    """``(secret, is_oauth, account_id)`` for a listing call.
 
-    The flag matters and is not cosmetic: Anthropic authenticates an API key with
-    ``x-api-key`` and an OAuth token with ``Authorization: Bearer``, so sending the
-    wrong header shape is a 401 and therefore a model that cannot be described.
+    The OAuth flag selects provider-specific auth, while OpenAI additionally
+    requires the stored ChatGPT account id to authorize its current Codex
+    catalogue. Explicit keys keep precedence and are not account-scoped.
 
     Order is env, then the credential file, then the OAuth store — an explicit
     variable is the operator overriding config for one run, which is the same
@@ -781,12 +799,12 @@ def _catalogue_credential(provider: str) -> tuple[str, bool]:
     """
     key = _catalogue_api_key(provider)
     if key:
-        return key, _env_secret_is_oauth(key)
+        return key, _env_secret_is_oauth(key), None
     return _oauth_listing_token(provider)
 
 
-def _oauth_listing_token(provider: str) -> tuple[str, bool]:
-    """The newest stored token for ``provider``, or ``("", False)``.
+def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
+    """The newest stored token and account scope, or ``("", False, None)``.
 
     Best-effort by construction: an unreadable store, a missing table or a row
     without a token all mean "no listing", never an exception. Opened and closed
@@ -805,7 +823,12 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool]:
         for row in reversed(rows):
             token = str(row.data.get("access") or "")
             if token:
-                return token, row.credential_type == "oauth"
+                account_id = row.data.get("account_id") or row.data.get("org_id")
+                return (
+                    token,
+                    row.credential_type == "oauth",
+                    (str(account_id) if account_id else None),
+                )
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not read a stored %s token for the listing: %s", provider, exc)
     finally:
@@ -814,7 +837,7 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool]:
                 store.close()
             except Exception:  # noqa: BLE001 - closing a broken handle is not fatal
                 pass
-    return "", False
+    return "", False, None
 
 
 def _normalised_id(model_id: str) -> str:
@@ -866,11 +889,12 @@ def _info_from_discovery(
     try:
         from local_operator.model.discovery import DEFAULT_TIMEOUT_S, available_models
 
-        secret, is_oauth = _catalogue_credential(provider)
+        secret, is_oauth, account_id = _catalogue_credential(provider)
         rows, status = available_models(
             provider,
             api_key=secret or None,
             is_oauth=is_oauth,
+            account_id=account_id,
             timeout=DEFAULT_TIMEOUT_S if timeout is None else timeout,
         )
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
@@ -1156,6 +1180,13 @@ def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
     owns those two fields itself, because only it knows whether the match was the
     same model under another spelling (keep the real name) or a newer generation
     inheriting limits (the name would be a lie).
+
+    The same overwrite applies to the global ``unknown_model_info`` singleton.
+    Returning it as-is is how a live xAI listing that carries a 500k window and
+    no display name painted the status band ``Unknown``: discovery copies the
+    fallback, fills the window, and keeps the placeholder's name because an
+    empty listing name is treated as "no name" rather than "this model is
+    called Unknown". The id is this model's; the name must be too.
     """
     try:
         info = get_model_info(provider, model_id)
@@ -1173,7 +1204,7 @@ def _registry_fallback(provider: str, model_id: str) -> ModelInfo:
     if template is not None:
         return template.model_copy(deep=True, update={"id": model_id, "name": model_id})
     if info is not None:
-        return info
+        return info.model_copy(deep=True, update={"id": model_id, "name": model_id})
     return ModelInfo(id=model_id, name=model_id, description="Unknown model")
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -2144,6 +2145,138 @@ async def test_the_model_list_offers_what_the_user_can_actually_run() -> None:
     assert offered == {"openrouter/deepseek/deepseek-chat", "ollama/qwen3:8b"}, offered
 
 
+class _PruningController(_AccessController):
+    """A catalogue that withdrew the model the session is running.
+
+    This is what an authoritative account-scoped listing does: the account's own
+    catalogue replaces the bundled ids, so a session started on a bundled id has
+    no entry in the list at all. The registry still describes it and ``/model``
+    still accepts it, which is exactly the disagreement the rescue exists to
+    close.
+    """
+
+    def static_catalogue(self):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="openrouter",
+                model_id="deepseek/deepseek-chat",
+                label="DeepSeek Chat",
+                context_window=64_000,
+                input_price=0.14,
+                output_price=0.28,
+                connected=True,
+                aggregated=True,
+            )
+        ]
+
+    def entry_for(self, provider, model_id):
+        from local_operator.providers.controller import CatalogueEntry
+
+        if (provider, model_id) != ("test", "model"):
+            return None
+        return CatalogueEntry(
+            provider=provider,
+            model_id=model_id,
+            label="Test Model",
+            context_window=128_000,
+            input_price=1.0,
+            output_price=2.0,
+            connected=True,
+        )
+
+
+class _PruningWithHiddenController(_PruningController):
+    """One usable row, one filtered row, and one rescued row not in either."""
+
+    def static_catalogue(self):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="openrouter",
+                model_id="deepseek/deepseek-chat",
+                label="DeepSeek Chat",
+                context_window=64_000,
+                input_price=0.14,
+                output_price=0.28,
+                connected=True,
+                aggregated=True,
+            ),
+            CatalogueEntry(
+                provider="anthropic",
+                model_id="claude-opus-5",
+                label="Claude Opus 5",
+                context_window=1_000_000,
+                input_price=15.0,
+                output_price=75.0,
+                connected=False,
+            ),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_rescued_row_does_not_hide_a_real_hidden_catalogue_entry() -> None:
+    """``hidden`` counts catalogue rows filtered out, not final rows painted.
+
+    A rescued current row was never in ``entries``. Subtracting it anyway made
+    one real filtered catalogue entry disappear from the footer; flooring at
+    zero prevented ``-1`` but did not preserve what the count means.
+    """
+    ctrl = _PruningWithHiddenController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.selector for row in picker.rows()}
+        chrome = picker.render_text(90).plain
+
+    assert offered == {"openrouter/deepseek/deepseek-chat", "test/model"}, offered
+    assert "1 hidden — /login <provider>" in chrome, chrome
+
+
+@pytest.mark.asyncio
+async def test_the_running_model_is_offered_even_when_the_listing_withdrew_it() -> None:
+    """The band names the model; the list must not deny it.
+
+    An authoritative listing may prune bundled ids, and exempting the current row
+    from the credential filter does not help when no entry arrives to exempt. The
+    session read `test/model` on the band while the picker showed no current row
+    and typing the id answered "no matching models" — the list disagreeing with
+    the set `/model` accepts, with the list being the discovery surface.
+    """
+    ctrl = _PruningController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.selector for row in picker.rows()}
+        chrome = picker.render_text(90).plain
+
+    assert "test/model" in offered, offered
+    # The `●` is the whole point: it is what answers "what am I on", and a row
+    # without it would leave the band and the list contradicting each other.
+    assert "test/model" in chrome and "●" in chrome, chrome
+    # And the count stays honest: the rescued row is not one of the catalogue's
+    # entries, so a naive subtraction reports a NEGATIVE number of hidden rows.
+    assert not re.search(r"-\d+\s+hidden", chrome), chrome
+
+
+@pytest.mark.asyncio
+async def test_a_host_facade_without_the_rescue_still_paints_the_list() -> None:
+    """The provider facade is duck-typed, so an embedding host need not implement
+    ``entry_for``. A missing courtesy must never cost the picker."""
+    ctrl = _AccessController()  # no entry_for at all
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.selector for row in picker.rows()}
+
+    assert offered == {"openrouter/deepseek/deepseek-chat", "ollama/qwen3:8b"}, offered
+
+
 @pytest.mark.asyncio
 async def test_the_hidden_models_are_counted_with_the_command_that_reveals_them() -> None:
     """Discoverability was the whole argument for the old show-everything list.
@@ -2264,6 +2397,77 @@ async def test_a_hidden_model_is_still_reachable_by_typing_its_selector() -> Non
         text = _transcript_text(app)
     assert session.model_label == "anthropic/claude-opus-5"
     assert "anthropic needs login — /login anthropic" in text, text
+
+
+class _OpenAILiveController(_AccessController):
+    """Logged into OpenAI with the account-scoped Codex catalogue, not the
+    shipped gpt-4o/o3 registry. That is the ChatGPT OAuth path: the public
+    ``/v1/models`` 403s a subscription token, so gpt-5.6 only exists here."""
+
+    def __init__(self) -> None:
+        super().__init__(stored=("openai",))
+
+    def login_providers(self):
+        return [
+            _FakeDef("openai", "OpenAI", None, ("gpt",)),
+            _FakeDef("anthropic", "Anthropic", None, ("claude",)),
+        ]
+
+    def static_catalogue(self):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="openai",
+                model_id="gpt-4o",
+                label="GPT-4o",
+                context_window=128_000,
+                input_price=2.5,
+                output_price=10.0,
+                connected=True,
+            )
+        ]
+
+    async def live_catalogue(self, *, ttl_s=None):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="openai",
+                model_id=model_id,
+                label=label,
+                context_window=272_000,
+                input_price=0.0,
+                output_price=0.0,
+                connected=True,
+            )
+            for model_id, label in (
+                ("gpt-5.6-sol", "GPT-5.6-Sol"),
+                ("gpt-5.6-terra", "GPT-5.6-Terra"),
+                ("gpt-5.6-luna", "GPT-5.6-Luna"),
+                ("gpt-5.5", "GPT-5.5"),
+            )
+        ], {"openai": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_oauth_offers_the_live_gpt_5_family() -> None:
+    """The reported `/model gpt-5.6` miss. A ChatGPT login whose live
+    catalogue is the Codex list must surface those slugs, not the shipped
+    gpt-4o/o3 registry that the public API would have left behind."""
+    ctrl = _OpenAILiveController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        editor = app.query_one(Editor)
+        editor.text = "/model gpt-5.6"
+        await pilot.pause()
+        offered = {row.model_id for row in picker.suggestions()}
+        chrome = picker.render_text(90).plain
+    assert {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} <= offered, offered
+    assert "gpt-4o" not in offered
+    assert "no matching models" not in chrome
 
 
 @pytest.mark.asyncio

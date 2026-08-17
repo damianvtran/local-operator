@@ -644,12 +644,22 @@ def test_an_env_api_key_beats_a_stored_oauth_row_and_keeps_its_kind(monkeypatch)
     from local_operator.model import configure as configure_mod
 
     monkeypatch.setattr(
-        configure_mod, "_oauth_listing_token", lambda _provider: ("oauth-access-token", True)
+        configure_mod,
+        "_oauth_listing_token",
+        lambda _provider: ("oauth-access-token", True, None),
     )
-    assert configure_mod._catalogue_credential("anthropic") == ("oauth-access-token", True)
+    assert configure_mod._catalogue_credential("anthropic") == (
+        "oauth-access-token",
+        True,
+        None,
+    )
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-explicit")
-    assert configure_mod._catalogue_credential("anthropic") == ("sk-ant-explicit", False)
+    assert configure_mod._catalogue_credential("anthropic") == (
+        "sk-ant-explicit",
+        False,
+        None,
+    )
 
 
 def test_an_oauth_token_from_the_environment_is_not_sent_as_an_api_key(monkeypatch) -> None:
@@ -661,7 +671,60 @@ def test_an_oauth_token_from_the_environment_is_not_sent_as_an_api_key(monkeypat
     monkeypatch.setenv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
 
-    assert configure_mod._catalogue_credential("anthropic") == ("sk-ant-oat-token", True)
+    assert configure_mod._catalogue_credential("anthropic") == (
+        "sk-ant-oat-token",
+        True,
+        None,
+    )
+
+
+def test_a_plain_api_key_is_not_read_as_oauth_because_a_value_collides(monkeypatch) -> None:
+    """The kind is inferred from variable NAMES, and a value can sit under several.
+
+    Any variable with OAUTH in its name holding the same string flipped the flag,
+    and for OpenAI that is not a cosmetic misread: the OAuth route needs a ChatGPT
+    account id an env key cannot supply, so the provider became unlistable
+    outright — silently, and for as long as both variables stayed set. An OAuth
+    token misread the other way costs one 401 and falls back to the registry, so
+    an ambiguous value resolves to the cheaper mistake.
+    """
+    from local_operator.model import configure as configure_mod
+
+    monkeypatch.setattr(configure_mod, "_oauth_listing_token", lambda _provider: ("", False, None))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-shared")
+    monkeypatch.setenv("SOME_TOOL_OAUTH_TOKEN", "sk-proj-shared")
+
+    assert configure_mod._catalogue_credential("openai") == ("sk-proj-shared", False, None)
+
+    # And a value that appears ONLY under an OAuth-named variable is still OAuth,
+    # which is the case the name test exists for.
+    monkeypatch.delenv("OPENAI_API_KEY")
+    monkeypatch.setenv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat-only")
+    assert configure_mod._catalogue_credential("anthropic") == ("sk-ant-oat-only", True, None)
+
+
+def test_stored_openai_oauth_account_scope_reaches_model_discovery(tmp_path, monkeypatch) -> None:
+    from local_operator.model import configure as configure_mod
+    from local_operator.providers.auth_store import AuthStore
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    store = AuthStore()
+    store.upsert_credential(
+        "openai",
+        {
+            "access": "chatgpt-token",
+            "refresh": "refresh-token",
+            "account_id": "acct-42",
+        },
+    )
+    store.close()
+
+    assert configure_mod._catalogue_credential("openai") == (
+        "chatgpt-token",
+        True,
+        "acct-42",
+    )
 
 
 def test_no_key_anywhere_still_resolves(tmp_path, monkeypatch) -> None:
@@ -1141,6 +1204,43 @@ def test_the_memo_can_be_dropped_when_the_cause_of_a_bad_answer_is_fixed(monkeyp
 
     configure_mod.invalidate_model_info_cache()
     assert configure_mod.resolve_model_info("anthropic", future).name == "Claude Opus 9"
+
+
+def test_an_unshipped_xai_id_does_not_keep_the_unknown_placeholder_name(monkeypatch) -> None:
+    """The reported Grok 4.6 band.
+
+    xAI's listing quotes a 500k window and no display name. Resolution used to
+    start from the shared ``unknown_model_info`` singleton (``name="Unknown"``)
+    and keep that word when the listing had nothing to overwrite it with, so
+    the status band painted ``Unknown`` for a model that was running fine.
+    The fallback must describe THIS id, and a nameless listing must not invent
+    one.
+    """
+    from local_operator.model import configure as configure_mod
+    from local_operator.model.discovery import DiscoveredModel
+    from local_operator.model.registry import unknown_model_info, xai_models
+
+    model_id = "grok-4.6"
+    assert model_id not in xai_models, "the id this test treats as unshipped now ships"
+
+    _stub_discovery(
+        monkeypatch,
+        [DiscoveredModel(id=model_id, name="", context_window=500_000)],
+    )
+    configure_mod.invalidate_model_info_cache()
+    info = configure_mod.resolve_model_info("xai", model_id)
+    spec = configure_mod.build_model_spec("xai", model_id, info)
+
+    assert info is not unknown_model_info
+    assert info.id == model_id
+    assert info.name == model_id
+    assert info.name != "Unknown"
+    assert info.context_window == 500_000
+    # The id wearing a name's clothes is refused by the band (see naming.py),
+    # so the operator sees ``grok-4.6`` rather than the placeholder word.
+    assert spec.display_name in ("", model_id)
+    assert spec.display_name != "Unknown"
+    assert spec.context_window == 500_000
 
 
 @pytest.mark.parametrize(

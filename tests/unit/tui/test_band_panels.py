@@ -165,6 +165,11 @@ class _Job:
         self.status = status
         self.label = label
         self.start_time = 1_700_000_000.0
+        # Mirrors ``AsyncJob.started_at``: when the runner actually began, or
+        # ``None`` if it never did. Defaulted to ``None`` so a fixture that
+        # does not think about it says "never ran" — the same default the real
+        # model carries, and the discriminator ``cancel()`` stamps on.
+        self.started_at: float | None = None
         self.result_text: str | None = None
         self.error_text: str | None = None
         self.settled_at: float | None = None

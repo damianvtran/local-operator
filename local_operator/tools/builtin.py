@@ -5156,8 +5156,57 @@ async def execute_jobs(
     for job in rows:
         # A settled job is reported by when it SETTLED (the useful fact: "it
         # finished N seconds ago"); a running one by how long it has been going.
-        elapsed = job.settled_at if job.status != "running" and job.settled_at else now
-        lines.append(f"{job.id}  {job.status:<9}  {now - elapsed:6.1f}s  {job.label}")
+        #
+        # The running case read ``now - now`` and printed 0.0s for EVERY live
+        # job, whatever its real age — the one number this tool exists to
+        # report, and the reading a caller uses to decide whether a subagent is
+        # progressing or wedged. A six-minute child and one launched a second
+        # ago were indistinguishable.
+        #
+        # Two quantities in one column, so each row says WHICH with a sense
+        # word: ``up`` is "has been running this long", ``ago`` is "settled
+        # this long ago". Without it the two readings are identical in shape
+        # and a reader comparing a settled row against the subagent panel
+        # (which reports the job's own duration) gets two numbers and no way
+        # to reconcile them.
+        #
+        # Eight cells, not six: a running bash job in a long session reaches
+        # 2h46m40s, at which point ``6.1f`` overflows its field and shears the
+        # label column one cell for that row alone. Eight covers 11.5 days.
+        # ``start_time`` is guarded because ``JobManagerProtocol.list()`` is
+        # typed ``list[Any]``, so a third-party embedder may hand this loop a
+        # duck-typed row without one. The guard covers ONLY that attribute:
+        # ``id``/``status``/``settled_at``/``label`` are read unguarded on the
+        # same row, so a row missing any of those still raises.
+        # The SENSE follows the status, never the clock. Sharing one test let
+        # a settled row with no ``settled_at`` print ``up`` beside a
+        # ``completed`` or ``cancelled`` — a contradiction a reader cannot
+        # reconcile, reachable through the real manager in the window inside
+        # ``cancel()``'s await where the status is set and the settle stamp is
+        # not yet. A settled row with no clock says ``old``: settled, and when
+        # is not known.
+        running = job.status == "running"
+        reference = (
+            job.settled_at if not running and job.settled_at else getattr(job, "start_time", None)
+        )
+        # A PARKED job is ``running`` with ``queued=True`` and a runner that
+        # has never been entered, so ``up`` would present its wait as uptime —
+        # the same misreport this PR was filed to stop, on the third surface.
+        # ``waiting`` names what the number is: time spent at the gate. The
+        # check is guarded like ``start_time`` because this row may be
+        # duck-typed by an embedder.
+        if running and getattr(job, "queued", False):
+            sense = "wait"
+        elif running:
+            sense = "up"
+        else:
+            sense = "ago" if job.settled_at else "old"
+        # A row with no clock says so. Printing 0.0s made it byte-identical to
+        # a job launched this instant — the exact unreadable number this tool
+        # was fixed to stop printing. Both branches are nine cells, so the
+        # grid holds either way.
+        age = f"{max(now - reference, 0.0):8.1f}s" if reference else f"{'unknown':>9}"
+        lines.append(f"{job.id}  {job.status:<9}  {age} {sense:<4}  {job.label}")
     return _text(
         tool_call_id,
         "jobs",
@@ -5174,7 +5223,10 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
         label="List jobs",
         description=(
             "List running and recently-settled background jobs (task/bash) "
-            "with their id, status and elapsed time."
+            "with their id, status and age — 'up' is how long a running job "
+            "has been going, 'wait' is how long a parked one has been waiting "
+            "for a slot, 'ago' is how long since a settled one finished, and "
+            "'old' is a settled job whose finish time was not recorded."
         ),
         parameters=JobsParams.model_json_schema(),
         approval_tier="read",

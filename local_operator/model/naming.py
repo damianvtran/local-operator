@@ -221,6 +221,11 @@ def _unambiguous_name(provider: str, model_id: str, selector: str, name: str) ->
     for candidate in (name, (curated.name if curated else "").strip()):
         if not candidate or _echoes_id(candidate, model_id):
             continue
+        # "Unknown" is the shipped placeholder's identity, not a model. A
+        # listing that leaves the name blank used to keep that word and paint
+        # it on the band for every unshipped id.
+        if candidate.casefold() == "unknown":
+            continue
         if _names_one(_full_index(), candidate, selector):
             return candidate
     return ""

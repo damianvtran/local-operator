@@ -400,6 +400,65 @@ class ProviderController:
                 )
         return entries
 
+    def entry_for(
+        self,
+        provider: str,
+        model_id: str,
+        *,
+        spec: ModelSpec | None = None,
+    ) -> CatalogueEntry | None:
+        """One entry for ``provider``/``model_id``, or ``None`` if unknown here.
+
+        Exists for the model a session is ALREADY RUNNING. A picker must offer
+        it whatever the catalogue says, and after an authoritative listing it
+        may not be in the catalogue at all: the account's live list is allowed
+        to prune bundled ids, so a session started on one of those ids had its
+        own model disappear from the list while the status band still named it,
+        and typing the id answered "no matching models".
+
+        ``spec`` is the session's already-resolved active model. It matters for
+        aggregators: they deliberately have no ENUMERABLE static catalogue, so
+        ``static_models("openrouter")`` is empty even for a model the session
+        is running. Re-listing here would put synchronous network/cache work
+        back on the TUI thread; the spec already carries the name and context
+        that session startup resolved. Prices are unknown on ``ModelSpec`` and
+        stay unknown rather than being invented.
+
+        Built here rather than in the caller because the normalization is this
+        module's job (see :class:`CatalogueEntry`): a caller reaching into the
+        registry itself would have to know that a context window of ``-1`` and
+        ``0`` both mean unknown, and would spell the price rules a second time.
+        ``None`` means neither the registry nor the active spec describes this
+        pair, which is a real answer for a model an operator configured by hand.
+        """
+        definition = get_provider_definition(provider)
+        if definition is None:
+            return None
+        info = static_models(definition.id).get(model_id)
+        if info is not None:
+            name = info.name or ""
+            context_window = max(0, info.context_window or 0)
+            input_price = _price(info.input_price, definition)
+            output_price = _price(info.output_price, definition)
+        elif spec is not None and spec.provider == definition.id and spec.model_id == model_id:
+            name = spec.display_name
+            context_window = max(0, spec.context_window)
+            input_price = -1.0
+            output_price = -1.0
+        else:
+            return None
+        usable = self.usable_providers()
+        return CatalogueEntry(
+            provider=definition.id,
+            model_id=model_id,
+            label=model_label(definition.id, model_id, name).full,
+            context_window=context_window,
+            input_price=input_price,
+            output_price=output_price,
+            connected=usable is None or definition.id in usable,
+            aggregated=definition.id in AGGREGATOR_PROVIDERS,
+        )
+
     async def live_catalogue(
         self, *, ttl_s: float | None = None
     ) -> tuple[list[CatalogueEntry], dict[str, str]]:
@@ -425,12 +484,17 @@ class ProviderController:
             connected = usable is None or definition.id in usable
             api_key: str | None = None
             is_oauth = False
+            account_id: str | None = None
             if connected:
                 try:
-                    api_key, is_oauth = await self._listing_credential(definition.id)
+                    api_key, is_oauth, account_id = await self._listing_credential(definition.id)
                 except Exception:  # noqa: BLE001 — one provider's auth is not fatal
-                    api_key, is_oauth = None, False
-            kwargs: dict[str, Any] = {"api_key": api_key, "is_oauth": is_oauth}
+                    api_key, is_oauth, account_id = None, False, None
+            kwargs: dict[str, Any] = {
+                "api_key": api_key,
+                "is_oauth": is_oauth,
+                "account_id": account_id,
+            }
             if ttl_s is not None:
                 kwargs["ttl_s"] = ttl_s
             # Off the event loop: discovery is synchronous httpx by design (it is
@@ -453,29 +517,42 @@ class ProviderController:
                 )
         return entries, statuses
 
-    async def _listing_credential(self, provider: str) -> tuple[str | None, bool]:
-        """``(secret, is_oauth)`` for a model LISTING call.
+    async def _listing_credential(self, provider: str) -> tuple[str | None, bool, str | None]:
+        """``(secret, is_oauth, account_id)`` for a model listing call.
 
-        Separate from the usage path because the two want different things from the
-        same store: usage needs a billing key and gives up without one, while a
-        listing is happy with either an OAuth access token or an API key and is
-        worth attempting with whichever exists. The OAuth branch is reported as
-        such because Anthropic switches header shape on it — `x-api-key` for keys,
-        `Authorization: Bearer` for tokens — and sending the wrong one is a 401.
+        The account id is part of OpenAI's ChatGPT authorization boundary; the
+        current Codex catalogue rejects a subscription token without it. Other
+        providers ignore the value, while ``is_oauth`` still selects Anthropic's
+        bearer header instead of its API-key header.
+
+        The lookup follows ``store_credentials_as``, because the credential a
+        login flavour needs is not stored under its own id. ``openai-device``
+        and ``xai-oauth`` are login flavours of ``openai`` and ``xai`` -- the
+        registry says so, and ``discovery._static_rows`` already follows it for
+        the bundled rows -- and the login writes ONE row, under the aliased
+        name. Asking ``AuthStore`` for the literal id (its ``WHERE provider = ?``
+        is exact) therefore found nothing, so the flavour listed anonymously:
+        for ``openai-device`` that meant no OAuth, no account scope, no
+        account-scoped catalogue, and the picker offering that logged-in
+        ChatGPT account the bundled ``gpt-4o``/``o3`` rows under a second
+        prefix -- the very ids this listing exists to stop presenting as
+        current.
         """
-        access = await self.auth_store.get_oauth_access(provider)
+        definition = get_provider_definition(provider)
+        credential_id = (definition.store_credentials_as or provider) if definition else provider
+        access = await self.auth_store.get_oauth_access(credential_id)
         if access is not None and access.kind == "oauth" and access.access_token:
-            return access.access_token, True
+            return access.access_token, True, access.account_id or access.org_id
         if access is not None and access.access_token:
-            return access.access_token, False
+            return access.access_token, False, None
         try:
-            stored = await self.auth_store.get_api_key(provider)
+            stored = await self.auth_store.get_api_key(credential_id)
         except Exception:  # noqa: BLE001 — a refresh failure just means no listing
             stored = None
         # The environment is the last tier of the same cascade the stream uses, so
         # a key set there has to reach the listing too: otherwise the provider a
         # session is ACTUALLY RUNNING ON is the one whose catalogue stays empty.
-        return stored or resolve_env_key(provider), False
+        return stored or resolve_env_key(credential_id), False, None
 
     async def _fetch_one(
         self,
@@ -522,6 +599,10 @@ class ProviderController:
             api_key=api_key,
             access_token=access_token,
             account_id=account_id,
+            # The raw row lets split-token providers (QwenCloud Token Plan:
+            # sk-sp inference key vs. OAuth usage token) spend the right one,
+            # where access_token is already the wire-mapped key.
+            oauth_creds=access.raw if access is not None and access.kind == "oauth" else None,
         )
         if report is not None and not report.identity and access is not None:
             # Whose account this is. The field existed and no fetcher ever set it, so
