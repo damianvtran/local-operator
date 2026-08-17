@@ -1924,9 +1924,19 @@ xai_models: Dict[str, ModelInfo] = {
 
 #: Z.AI's GLM family.
 #:
-#: Prices are USD per MILLION tokens, taken from Z.AI's published coding-plan
-#: rates and cross-checked against the `z-ai/*` listings on OpenRouter
-#: (2026-08-17). They are carried STATICALLY because Z.AI's `/models` endpoint
+#: Prices are USD per MILLION tokens and are Z.AI's own DIRECT list rates,
+#: transcribed from the bundled catalogue omp ships for this provider.
+#:
+#: They deliberately do NOT match OpenRouter's `z-ai/*` listings, which quote
+#: less for most GLM ids (e.g. `glm-5.2` at $0.462/$1.452 against Z.AI's
+#: $1.40/$4.40). That is a real price difference, not a transcription error:
+#: OpenRouter resells through its own discounted arrangements, and a user
+#: billed by Z.AI directly is charged the direct rate. Quoting the aggregator's
+#: number on the direct route would under-report every session's cost, so the
+#: direct rate is the one carried here and `_AGGREGATOR_NAMESPACE`'s OpenRouter
+#: fallback only ever fills a model this table does not price at all.
+#:
+#: They are carried STATICALLY because Z.AI's `/models` endpoint
 #: returns bare `{id, object, created, owned_by}` rows with no pricing, context
 #: window, or capability data at all — discovery alone would report every GLM as
 #: free and unpriced, so a live listing is merged OVER these rows rather than

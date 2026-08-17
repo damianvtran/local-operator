@@ -56,6 +56,7 @@ code path here owns a client.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -561,11 +562,16 @@ ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
 #: values observed on live coding-plan accounts are mapped; anything else falls
 #: through to a generic label rather than being guessed at, because mislabelling
 #: a monthly cap as hourly would make an exhausted plan look like it resets soon.
-_ZAI_WINDOW_UNITS: dict[int, tuple[str, float]] = {
-    3: ("hour", 3600.0),
-    4: ("day", 86_400.0),
-    5: ("month", 30 * 86_400.0),
-    6: ("week", 7 * 86_400.0),
+#: Only the NAME is carried. An earlier revision paired each unit with a
+#: duration in seconds, which nothing read: the reset time arrives as an
+#: absolute ``nextResetTime`` from the vendor, so a locally derived window
+#: length would be a second, unreconciled answer to a question already
+#: answered — and the one that drifts if a window is redefined.
+_ZAI_WINDOW_UNITS: dict[int, str] = {
+    3: "hour",
+    4: "day",
+    5: "month",
+    6: "week",
 }
 
 
@@ -578,14 +584,24 @@ def _zai_window(item: dict[str, Any]) -> tuple[str, int | None]:
     disambiguated by magnitude, matching how the other fetchers here treat
     ambiguous vendor timestamps.
     """
+    # `_num` rather than a bare cast throughout: a quota fetcher must never
+    # raise (the caller drops the report on None, but an exception escapes to
+    # the UI). `int()` is the trap — `json.loads` accepts bare NaN and Infinity,
+    # and both blow up on conversion (ValueError / OverflowError) rather than
+    # returning something odd, so the vendor could crash the panel with a field
+    # we only ever read for a LABEL. Strings are coerced too, since a vendor
+    # that starts quoting `"unit": "3"` would otherwise silently lose the window
+    # name while still reporting the numbers.
     count = _num(item.get("number")) or 1
-    unit = item.get("unit")
-    mapped = _ZAI_WINDOW_UNITS.get(int(unit)) if isinstance(unit, (int, float)) else None
+    unit = _num(item.get("unit"))
+    mapped = None
+    if unit is not None and math.isfinite(unit):
+        mapped = _ZAI_WINDOW_UNITS.get(int(unit))
     if mapped is None:
         label = "quota"
     else:
-        name, _seconds = mapped
-        label = f"{int(count)} {name}"
+        count_int = int(count) if math.isfinite(count) else 1
+        label = f"{count_int} {mapped}"
     reset = _num(item.get("nextResetTime"))
     resets_ms: int | None = None
     if reset is not None and reset > 0:
@@ -673,7 +689,15 @@ async def fetch_zai_quota(client: httpx.AsyncClient, api_key: str) -> UsageRepor
                 if isinstance(details, list)
                 else set()
             )
-            is_feature = {"search-prime", "web-reader", "zread"} <= codes
+            # ANY of the feature codes, not all three. Requiring the full set
+            # fails OPEN if Z.AI ever adds or renames one: the row would be
+            # reclassified as the account-wide request cap and marked
+            # ``shared=True``, which `usage_health` then applies to EVERY model
+            # — a depleted zread bucket would read as a depleted plan and stop
+            # work that is not actually blocked. Failing closed (treating an
+            # unrecognised feature mix as the feature bucket) only mislabels a
+            # row nobody is gated on.
+            is_feature = bool(codes & {"search-prime", "web-reader", "zread"})
             if percentage is None and used is None:
                 continue
             amount = UsageAmount(
@@ -692,8 +716,21 @@ async def fetch_zai_quota(client: httpx.AsyncClient, api_key: str) -> UsageRepor
                         if is_feature
                         else f"zai:requests:{window.replace(' ', '')}"
                     ),
-                    label=("Zread feature quota" if is_feature else "Request quota")
-                    + f" ({window})",
+                    # "Zread quota", not "Zread feature quota": the usage
+                    # panel caps its label column at 24 cells (a third of the
+                    # panel's own 76-cell maximum), so the longer form truncated
+                    # mid-parenthesis at EVERY terminal width and the window was
+                    # unreachable — the only row on the panel that could not say
+                    # which period it resets over. The word "feature" is the
+                    # redundant one: the tier indent and the dimmed label ramp
+                    # already say this is not the account-wide cap.
+                    #
+                    # The bucket actually covers search-prime, web-reader AND
+                    # zread (all three must be present to match), so the label
+                    # names one member of a set. Kept because "Zread" is the name
+                    # Z.AI's own plan page gives this allowance, so it is the
+                    # word a user will recognise from their dashboard.
+                    label=("Zread quota" if is_feature else "Request quota") + f" ({window})",
                     amount=amount,
                     window=window,
                     resets_at_ms=resets_ms,
@@ -702,6 +739,13 @@ async def fetch_zai_quota(client: httpx.AsyncClient, api_key: str) -> UsageRepor
                 )
             )
 
+    # Two rows of the same type and window collide on a generated id, and a
+    # duplicate id renders as two identical panel rows that disagree about
+    # nothing — the same defensive dedupe `fetch_xai_oauth` applies, for the
+    # same reason: the id is derived from vendor fields, so uniqueness is the
+    # vendor's promise rather than ours. First occurrence wins.
+    seen: set[str] = set()
+    limits = [limit for limit in limits if not (limit.id in seen or seen.add(limit.id))]
     if not limits:
         return None
     level = data.get("level")

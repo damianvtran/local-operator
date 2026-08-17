@@ -352,10 +352,90 @@ async def test_zai_zread_bucket_is_a_tier_not_the_account_cap() -> None:
 
 
 @pytest.mark.asyncio
+async def test_zai_hostile_window_fields_do_not_raise() -> None:
+    """A quota fetcher must never raise: the caller drops a ``None`` report, but
+    an exception escapes to the UI.
+
+    ``json.loads`` accepts bare ``NaN``/``Infinity``, and ``int()`` rejects both
+    (ValueError / OverflowError) — so a vendor could crash the usage panel with
+    a field that is only ever read to build a LABEL. A quoted ``"unit"`` must
+    also still resolve its window name rather than silently degrading.
+    """
+    # Served as RAW BYTES, not through the JSON-encoding helper: `json.dumps`
+    # refuses to emit NaN/Infinity, so round-tripping the payload would destroy
+    # the very values under test. This is what the vendor can actually put on
+    # the wire — `json.loads` parses both without complaint.
+    body = b"""
+        {"success": true, "code": 200, "data": {"limits": [
+            {"type": "TOKENS_LIMIT", "unit": NaN, "number": 5, "percentage": 10},
+            {"type": "TOKENS_LIMIT", "unit": Infinity, "number": NaN, "percentage": 20},
+            {"type": "TOKENS_LIMIT", "unit": "3", "number": "5", "percentage": 30}
+        ]}}
+        """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(client, "zai", api_key="zai-key")
+    assert report is not None
+    # Unmappable units degrade to the generic label; a quoted unit still maps.
+    # Only TWO rows survive: both unmappable rows generate the id
+    # `zai:tokens:quota`, and the dedupe keeps the first rather than rendering
+    # two identical panel rows.
+    labels = [lim.label for lim in report.limits]
+    assert labels == ["Token quota (quota)", "Token quota (5 hour)"]
+    assert [lim.id for lim in report.limits] == ["zai:tokens:quota", "zai:tokens:5hour"]
+
+
+@pytest.mark.asyncio
+async def test_zai_labels_fit_the_usage_panel_label_column() -> None:
+    """A label the panel cannot render is a window the user can never read.
+
+    The panel caps its label column at a third of its content width, and the
+    panel itself is capped at ``PANEL_MAX_WIDTH``, so the ceiling is a constant
+    24 cells no matter how wide the terminal is. `Zread feature quota (1 month)`
+    needed 31 and truncated mid-parenthesis at EVERY width, leaving the only row
+    on the panel whose reset period was unavailable. Pinned here rather than in
+    the TUI tests because the label is written in this module.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.tui.widgets.usage_panel import (
+        PANEL_MAX_WIDTH,
+        PANEL_PADDING_CELLS,
+        TIER_INDENT,
+    )
+
+    cap = max(12, (PANEL_MAX_WIDTH - PANEL_PADDING_CELLS) // 3)
+    client = _client_for(_ZAI_QUOTA_PAYLOAD)
+    async with client:
+        report = await fetch_usage(client, "zai", api_key="zai-key")
+    assert report is not None
+    for limit in report.limits:
+        width = cell_len(limit.label) + (len(TIER_INDENT) if limit.tier else 0)
+        assert width <= cap, f"{limit.label!r} needs {width} cells, panel caps at {cap}"
+
+
+@pytest.mark.asyncio
 async def test_zai_business_failure_on_a_200_is_not_a_report() -> None:
     """The envelope reports business-level failure with an HTTP 200, so a
-    successful transport is not by itself a usable quota reading."""
-    client = _client_for({"code": 401, "msg": "unauthorized", "success": False})
+    successful transport is not by itself a usable quota reading.
+
+    The payload deliberately carries a FULL, well-formed ``data.limits`` block
+    that would parse into real rows if it were trusted. An unsuccessful body
+    with no ``data`` key would bail at the later structural guard instead, so
+    the test would pass with the envelope check deleted and prove nothing.
+    """
+    client = _client_for(
+        {
+            "code": 401,
+            "msg": "unauthorized",
+            "success": False,
+            "data": _ZAI_QUOTA_PAYLOAD["data"],
+        }
+    )
     async with client:
         report = await fetch_usage(client, "zai", api_key="bad")
     assert report is None

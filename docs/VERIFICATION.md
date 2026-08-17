@@ -1971,10 +1971,14 @@ calls and usage correctly.
 with bare `{id, object, created, owned_by}` — no pricing, no context window, no
 capabilities. Discovery therefore merges live ids OVER the static `glm_models`
 rows rather than replacing them; a listing-only catalogue would report every GLM
-as free, non-caching and 0-context. Prices are USD per million tokens, taken
-from Z.AI's published coding-plan rates and cross-checked against the `z-ai/*`
-listings on OpenRouter (2026-08-17), which is also the `_AGGREGATOR_NAMESPACE`
-fallback for ids the static table does not carry.
+as free, non-caching and 0-context. Prices are USD per million tokens and are
+Z.AI's own DIRECT list rates. They deliberately do not match OpenRouter's
+`z-ai/*` listings, which quote less for most GLM ids (`glm-5.2` at
+$0.462/$1.452 against Z.AI's $1.40/$4.40) because the aggregator resells at its
+own discounted rates — a user billed directly by Z.AI pays the direct rate, so
+quoting the aggregator's number here would under-report every session. The
+OpenRouter namespace remains registered only as the fallback for ids this table
+does not price at all.
 
 **Quota shape, verified against a live account.** `GET
 /api/monitor/usage/quota/limit` returns a `{code,msg,data,success}` envelope
