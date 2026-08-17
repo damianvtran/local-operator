@@ -49,15 +49,23 @@ def _launcher(label: str, prompt: str) -> str:
     return "job-fake"
 
 
+async def _ask_user(questions: list[Any]) -> dict[str, list[str]] | None:
+    return None
+
+
 def _engine_context(**kwargs) -> ToolContext:
     """A context carrying every capability the default surface reads, so the
-    whole table can build: the wake scheduler, the subagent launcher and the
-    job manager."""
+    whole table can build: the wake scheduler, the subagent launcher, the job
+    manager, and the ask hook plus the ``has_ui`` flag ``ask`` needs (it is
+    gated on both — the hook is what a subagent lacks, the flag is what a
+    headless host declares)."""
     base: dict[str, Any] = dict(
         wake_scheduler=_FakeScheduler(),
         subagent_launcher=_launcher,
         jobs=_FakeJobs(),
         subagent_comms=_FakeComms(),
+        has_ui=True,
+        ask_user=_ask_user,
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -85,6 +93,32 @@ def test_default_set_drops_wake_without_scheduler() -> None:
     tools = create_tools(_engine_context(wake_scheduler=None))
     names = [tool.name for tool in tools]
     assert names == [name for name in DEFAULT_TOOL_NAMES if name != "wake"]
+
+
+def test_default_set_drops_ask_without_a_host_that_can_answer_it() -> None:
+    """The mirror of the wake case, and the one that keeps SUBAGENTS out: a child
+    session inherits ``has_ui`` from its parent and is built with no ask handler,
+    so the hook's absence is what stops a delegated agent from advertising a
+    question it could only block on.
+
+    Asserted as a DELTA against the fully-capable surface rather than against
+    ``DEFAULT_TOOL_NAMES``: two other entries (``lsp``, ``browser``) are gated on
+    the host's own dependencies, so comparing to the declared list would make
+    this test's verdict depend on whether ``jedi`` happens to be installed
+    instead of on the gate it is about.
+    """
+    withhook = [tool.name for tool in create_tools(_engine_context())]
+    without = [tool.name for tool in create_tools(_engine_context(ask_user=None))]
+    assert "ask" in withhook
+    assert without == [name for name in withhook if name != "ask"]
+
+
+def test_default_set_drops_ask_without_a_ui_to_draw_it_on() -> None:
+    """A host declaring no UI is asserting it cannot mount a prompt, and the tool
+    believes that over a handler somebody left installed."""
+    withui = [tool.name for tool in create_tools(_engine_context())]
+    without = [tool.name for tool in create_tools(_engine_context(has_ui=False))]
+    assert without == [name for name in withui if name != "ask"]
 
 
 def test_every_tool_has_schema_and_metadata() -> None:

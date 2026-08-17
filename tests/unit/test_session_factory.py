@@ -243,6 +243,81 @@ async def test_dict_compaction_config_flows_through_prompt(
     assert code == 0  # the turn completed end-to-end
 
 
+@pytest.mark.asyncio
+async def test_trigger_knobs_are_settable_in_config_yml(tmp_config_dir: Path) -> None:
+    """Both trigger knobs reach the session from ``config.yml``, and the
+    resolved threshold is the smaller of them.
+
+    The knobs are only real if a user can set them in the file they actually
+    edit: a percentage trigger for small windows and an absolute ceiling for
+    huge ones. 0.5 x 1M = 500k against a 250k ceiling resolves to 250k.
+    """
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n"
+        "values:\n"
+        "  hosting: test\n"
+        "  model_name: test-model\n"
+        "  compaction:\n"
+        "    threshold_percent: 0.5\n"
+        "    threshold_tokens: 250000\n",
+        encoding="utf-8",
+    )
+    from local_operator.agents import AgentRegistry
+    from local_operator.compaction.thresholds import resolve_threshold_tokens
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    session = await create_session(
+        _args(hosting="test", model="test-model", yolo=True),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    settings = cast(Session, session)._compaction_settings
+    assert settings is not None
+    assert settings.threshold_percent == 0.5
+    assert settings.threshold_tokens == 250_000
+    assert resolve_threshold_tokens(1_000_000, settings) == 250_000
+    assert resolve_threshold_tokens(200_000, settings) == 100_000  # percent governs
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_default_config_compacts_at_600k_on_a_1m_model(tmp_config_dir: Path) -> None:
+    """No ``compaction`` block at all: a 1M-context session must not compact
+    at ~235k (23% of its window — three quarters of the usable context thrown
+    away per pass), it must wait for min(80% x 1M, 600k) = 600k."""
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: test-model\n",
+        encoding="utf-8",
+    )
+    from local_operator.agents import AgentRegistry
+    from local_operator.compaction.thresholds import CompactionSettings, should_compact
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    session = await create_session(
+        _args(hosting="test", model="test-model", yolo=True),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    # No block in the file: the session runs on the shipped defaults.
+    settings = cast(Session, session)._compaction_settings or CompactionSettings()
+    assert should_compact(234_800, 1_000_000, settings) is False
+    assert should_compact(600_001, 1_000_000, settings) is True
+    await session.dispose()
+
+
+def test_coerce_compaction_reads_legacy_max_threshold_tokens() -> None:
+    """A config still carrying the superseded ceiling key keeps working: it is
+    the same knob under the min() rule, and dropping it silently would let a
+    session sail past a proxy's real serving limit."""
+    settings = coerce_compaction_settings({"max_threshold_tokens": 250_000})
+    assert settings is not None
+    assert settings.threshold_tokens == 250_000
+
+
 # --- Train gating (CL-02) ----------------------------------------------------------
 
 

@@ -20,6 +20,7 @@ a real estimator produced them.
 from __future__ import annotations
 
 import asyncio
+import base64
 
 import pytest
 
@@ -29,12 +30,18 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     CustomMessage,
+    ImageContent,
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
+    TextContent,
 )
-from local_operator.session.session import Session
+from local_operator.session.session import Session, _render_compaction_marker
 from local_operator.session.transcript import Transcript
+
+#: PNG signature. A replayed frame that does not start with it is our own
+#: double-encoding, not a provider being fussy.
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 #: Vision-capable and text-only halves of the same model, so the ONLY input to
 #: the strategy split is the capability flag.
@@ -112,8 +119,10 @@ async def test_a_vision_model_compacts_into_a_snapcompact_archive(tmp_path):
     # bounded source text and the frame shape it will render into, and the
     # language pass stores nothing at all (asserted in the sibling test).
     # Rendered PNGs appear once the source outgrows the plain-text edges
-    # (2 x 3 frames x 13 916 chars) — see tests/unit/compaction/test_snapcompact.py
-    # for the imaging itself.
+    # (2 x 3 frames x 13 916 chars), which this history does NOT: the empty
+    # frames list below is a property of the fixture, not coverage of the
+    # imaged path — test_an_archive_with_frames_replays_as_valid_pngs covers
+    # that, and this assertion is why the doubly-encoded frames shipped.
     assert archive["text"] and archive["shape_id"]
     assert archive["frames"] == []
     marker = session._context.messages[0]
@@ -123,6 +132,69 @@ async def test_a_vision_model_compacts_into_a_snapcompact_archive(tmp_path):
     # so a resume and the running session see one history.
     assert marker.details["preserve_data"]["snapcompact"]["text"] == archive["text"]
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_archive_with_frames_replays_as_valid_pngs(tmp_path):
+    """The sibling above deliberately compacts a history too small to image,
+    which is exactly why CI never executed the path that mattered.
+
+    With enough history to render frames, the marker's archive is a dump that
+    the converter revives and replays on the VERY NEXT request — in this live
+    process, not only after a resume. That round trip encoded base64 twice and
+    decoded it never, so every post-compaction request shipped
+    ``base64(base64(png))`` as ``image/png``; providers answered 400 and the
+    session's image-rejection backstop then dropped the whole compacted
+    history. The PNG magic on the replayed block is the assertion that closes
+    it (corrupt frames decode to ASCII ``iVBO`` = ``6956424f``).
+    """
+    stream = ScriptedStream(["reply"] * 8)
+    session = make_session(tmp_path, stream, model=VISION_MODEL)
+    # Past 2 x HQ_EDGE_FRAMES x 13 916 chars of plain-text edges, so the middle
+    # is actually imaged instead of kept verbatim.
+    for index in range(6):
+        await session.prompt(f"question {index} " + "detail " * 3000)
+
+    outcome = await session.compact_now()
+
+    assert outcome.strategy == "snapcompact"
+    entry = [e for e in session._transcript.entries() if e.type == "compaction"][0]
+    persisted = entry.payload["preserve_data"]["snapcompact"]
+    assert persisted["frames"] and all(isinstance(f, str) for f in persisted["frames"])
+    assert base64.b64decode(persisted["frames"][0]).startswith(PNG_MAGIC)
+
+    # The live wire history, i.e. what the next request would actually send.
+    replayed = session._render_history(list(session._context.messages))
+    images = [
+        block
+        for message in replayed
+        for block in message.content
+        if isinstance(block, ImageContent)
+    ]
+    assert images, "the compacted history must replay as images, not vanish"
+    for image in images:
+        assert image.mime_type == "image/png"
+        assert base64.b64decode(image.data).startswith(PNG_MAGIC)
+    await session.dispose()
+
+
+def test_a_malformed_archive_degrades_to_the_text_summary():
+    """A frames list that is not base64 is now a validation error, and the
+    marker renderer's degrade path is what keeps that from ending the turn:
+    the summary text still reaches the model, minus the frames."""
+    marker = CustomMessage(
+        custom_type="compaction_summary",
+        details={
+            "summary": "what happened earlier",
+            "preserve_data": {"snapcompact": {"frames": ["not base64 at all!!"], "text": "t"}},
+        },
+    )
+
+    rendered = _render_compaction_marker(marker)
+
+    assert not any(isinstance(block, ImageContent) for block in rendered.content)
+    texts = [block.text for block in rendered.content if isinstance(block, TextContent)]
+    assert texts and "what happened earlier" in texts[0]
 
 
 @pytest.mark.asyncio

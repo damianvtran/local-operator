@@ -54,7 +54,12 @@ from local_operator.harness.intent import (
 # module level, so this adds no work to the boot path the lazy-import
 # discipline protects. The aside builds the request-scoped turns it hands to
 # `complete_aside` out of these two.
-from local_operator.harness.types import AgentMessage, ImageContent, Message
+from local_operator.harness.types import (
+    AgentMessage,
+    AskQuestion,
+    ImageContent,
+    Message,
+)
 from local_operator.logger import current_log_file
 
 # A leaf table (`re` and `dataclasses` only), so importing it here costs the
@@ -97,6 +102,7 @@ from local_operator.tui.markdown_theme import (
 from local_operator.tui.terminal_title import TerminalTitle, terminal_title_enabled
 from local_operator.tui.widgets.approval import ApprovalBlock
 from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
+from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
@@ -353,7 +359,10 @@ DOUBLE_INTERRUPT_WINDOW_S = 1.5
 #: opening it never costs more than a few dozen short transcript reads.
 RESUME_PICKER_LIMIT = 50
 
-#: The working line's PHASE while a turn is parked on a tool-approval prompt.
+#: The working line's PHASE while a turn is parked on something the USER owes —
+#: a tool-approval prompt, or an `ask` picker waiting for a decision. One phase
+#: for both because the two waits are the same fact to every surface that reads
+#: it: the agent is not working, and the person is.
 #: A named constant because two surfaces now branch on it — the working line
 #: and the terminal title's `attention` state — and a phase compared against a
 #: string literal in one place and produced as one in another is a rename away
@@ -744,6 +753,14 @@ class OperatorApp(App[None]):
         # stopped (a queued asker wakes when the front prompt settles, and
         # without the latch it would mount a fresh question for a dead turn).
         self._approval: ApprovalBlock | None = None
+        # The one live `ask` picker and the future the tool call is parked on.
+        # Held as a PAIR because settling one without the other is the failure
+        # both halves exist to prevent: a dismissed screen whose future is still
+        # pending leaves the turn waiting on an answer that can no longer be
+        # given, and a resolved future whose screen is still up asks the user to
+        # answer a question that has already been reported.
+        self._ask_screen: AskPickerScreen | None = None
+        self._ask_pending: asyncio.Future[dict[str, list[str]] | None] | None = None
         self._approve_all: bool = False
         # What a NEW session opens in, read from config at mount and rewritten
         # by `/approvals default <mode>`. Held beside `_approve_all` rather than
@@ -1017,6 +1034,11 @@ class OperatorApp(App[None]):
         # default gate reads stdin, which this app has taken over, so leaving it
         # installed hangs the first write/exec tool call forever.
         session.set_approval_handler(self.request_tool_approval)
+        # And this is what makes the `ask` tool EXIST for this session: its
+        # createIf builder gates on the hook, so a front end that can draw a
+        # picker gets the tool and every host that cannot (the server, exec
+        # mode, a subagent) never advertises a question nobody could answer.
+        session.set_ask_handler(self.request_user_choice)
         self._controller = EventController(session, self)
         self._controller.subscribe()
         assert self._status is not None
@@ -1311,6 +1333,10 @@ class OperatorApp(App[None]):
         # with a parked question stalled for the whole 5s dispose budget while
         # unmount with the identical turn returned immediately.
         self._deny_queued_approvals()
+        # And the picker, for the same reason and with the same urgency: the ask
+        # tool's call is parked on a future only this app resolves, so a live
+        # question would hold the dispose it is waiting behind.
+        self._settle_ask_picker()
         # The working line belongs to the turn being thrown away. Left standing
         # it does two kinds of damage: the widget goes on animating a turn that
         # no longer exists, and the stale `_working_block` reference makes
@@ -2286,6 +2312,10 @@ class OperatorApp(App[None]):
         # callback returns, so the prompt is denied first: aborting alone would
         # leave the engine waiting on a future nobody is going to answer.
         self._deny_queued_approvals()
+        # Identically for a live `ask` picker: the tool call is parked on a
+        # future, and an abort it cannot see leaves the turn waiting on a
+        # question the user has just asked to stop.
+        self._settle_ask_picker()
         if self._session is not None:
             self._session.abort("interrupted")
 
@@ -2403,6 +2433,93 @@ class OperatorApp(App[None]):
             if self._approval is block:
                 self._approval = None
             self._refresh_working_activity()
+
+    # -- the agent's own questions --------------------------------------------
+    async def request_user_choice(
+        self, questions: list[AskQuestion]
+    ) -> dict[str, list[str]] | None:
+        """The ``ask`` tool's surface while this app owns the terminal.
+
+        Awaited by the tool on this app's own loop (the harness awaits the tool
+        inline), so the picker is pushed directly here rather than marshalled
+        across threads — the same reason :meth:`request_tool_approval` mounts its
+        card inline.
+
+        Returns ``question id -> chosen strings``, or ``None`` when the user
+        answered nothing. Both are ANSWERS, not failures: the tool reports the
+        empty case as "the user did not answer" so the model falls back to its
+        own recommendation.
+
+        A future rather than ``push_screen_wait``, which requires a worker: this
+        coroutine is the tool call, and moving it into a worker would put the
+        answer on the far side of a second hop with nothing gained.
+        """
+        while self._ask_pending is not None:
+            # Unreachable through the advertised tool — `ask` is `exclusive`, so
+            # the loop never runs two at once — and cheap to be right about:
+            # two modal pickers stacked would leave the lower one unanswerable
+            # while its tool call went on waiting. Shielded because a cancel of
+            # THIS call must not cancel the future the other one is parked on.
+            await asyncio.shield(self._ask_pending)
+        future: asyncio.Future[dict[str, list[str]] | None] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+        def answered(result: dict[str, list[str]] | None) -> None:
+            # Guarded: a cancelled tool call (steering, abort, teardown) resolves
+            # the future on the way out, and the dismissal that follows would
+            # otherwise raise InvalidStateError out of Textual's callback.
+            if not future.done():
+                future.set_result(result)
+
+        screen = AskPickerScreen(questions)
+        self._ask_screen = screen
+        self._ask_pending = future
+        self.push_screen(screen, answered)
+        # The turn is parked on the user, and the working line and terminal
+        # title say so — the same treatment an unanswered approval gets, for the
+        # same reason: a spinner over a wait the agent is not responsible for is
+        # how a session gets abandoned.
+        self._refresh_working_activity()
+        try:
+            return await future
+        except asyncio.CancelledError:
+            # The tool call was cancelled out from under the question (steering,
+            # a stop, or teardown). Take the picker off screen: a modal left up
+            # for a call that no longer exists holds the keyboard hostage.
+            self._settle_ask_picker()
+            raise
+        finally:
+            if self._ask_pending is future:
+                self._ask_pending = None
+                self._ask_screen = None
+            self._refresh_working_activity()
+
+    def _settle_ask_picker(self) -> None:
+        """Take down a live ``ask`` picker, answering with whatever was chosen.
+
+        Called by the paths that END the turn (stop, teardown) and by a cancelled
+        tool call. Dismissing with the partial answers rather than ``None`` is
+        the same rule the screen's own Escape follows: a user who answered two
+        of three questions has told the agent something, and throwing that away
+        because the third was never reached would be a worse report than an
+        honest partial one.
+        """
+        screen = self._ask_screen
+        self._ask_screen = None
+        pending = self._ask_pending
+        self._ask_pending = None
+        if pending is not None and not pending.done():
+            pending.set_result(screen.answers_so_far() if screen is not None else None)
+        if screen is not None and screen.is_attached:
+            # `pop_screen` rather than `dismiss`: the callback would resolve a
+            # future that is already settled above, and this path can run while
+            # the app is being torn down, where dismiss's own mount checks are
+            # the ones that raise.
+            try:
+                self.pop_screen()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("ask picker was already gone", exc_info=True)
 
     def _latch_approval_answer(self, answer: str) -> None:
         """What an answer means beyond the one call. Runs BEFORE the future.
@@ -2849,6 +2966,9 @@ class OperatorApp(App[None]):
         # Before disposing the session: dispose awaits teardown, and a turn
         # parked on an unanswered approval would never reach it.
         self._deny_queued_approvals()
+        # Same window, same hazard: the ask tool's future is resolved by nothing
+        # but this app, so a question still on screen would hold the dispose.
+        self._settle_ask_picker()
         # First, and synchronously: the restore is one write on a driver that
         # is still up, and everything below it can await. An exception in
         # session teardown would otherwise leave the user's shell wearing this
@@ -5949,6 +6069,11 @@ class OperatorApp(App[None]):
         the last two, and a turn between two tool batches falls back to
         "thinking", which is the honest description of a model call in flight.
         """
+        if self._ask_pending is not None and not self._ask_pending.done():
+            # FIRST, above the approval prompt: the picker is a modal drawn over
+            # everything, so it is what the user is looking at even if a card
+            # underneath is also waiting.
+            return ("waiting for your answer", ACTIVITY_APPROVAL)
         if self._approval is not None and not self._approval.answered:
             # Nothing is running: the turn is parked on the question on screen,
             # and "thinking" under an unanswered prompt blames the model for a

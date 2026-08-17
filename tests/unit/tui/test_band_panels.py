@@ -79,6 +79,11 @@ class FakeSession:
     def set_approval_handler(self, handler: Any | None) -> None:
         self.approval_handler = handler
 
+    def set_ask_handler(self, handler: Any | None) -> None:
+        # The TUI installs the `ask` tool's picker surface on boot; fakes only
+        # need to accept it.
+        self.ask_handler = handler
+
     def abort(self, reason: str = "interrupted") -> None:
         self.aborts.append(reason)
 
@@ -245,6 +250,66 @@ async def test_todo_panel_renders_items_with_done_and_pending() -> None:
         assert "wiretheband" in body_plain
         assert "captureframes" in body_plain
         assert "1/2" in body_plain
+
+
+@pytest.mark.asyncio
+async def test_todo_panel_renders_blocked_and_dropped_and_counts_resolved() -> None:
+    """All four statuses, in the tool's own marks, with the header counting
+    progress toward a FINISHED list: done and dropped need no more work, while
+    blocked stays visibly open (with what it waits on) because it is the one row
+    the user has to act on. A blocked item counted as complete is how a stalled
+    list reads as a finished one."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 28)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = [
+            {"text": "wire the band", "status": "done"},
+            {"text": "pick a domain", "status": "blocked", "reason": "needs the user"},
+            {"text": "old plan", "status": "dropped"},
+            {"text": "capture frames", "status": "pending"},
+            {"text": "from the future", "status": "unheard-of"},
+        ]
+        app._refresh_band()
+        await pilot.pause()
+        todo = app.query_one(TodoPanel)
+        body = str(todo._body.content)
+
+        assert "- [x] wire the band" in body
+        assert "- [~] pick a domain — blocked: needs the user" in body
+        assert "- [-] old plan" in body
+        assert "- [ ] capture frames" in body
+        # An unknown future status renders as OPEN, never as complete.
+        assert "- [ ] from the future" in body
+        # done + dropped out of five; blocked, pending and the unknown are open.
+        assert "2/5" in body
+
+
+@pytest.mark.asyncio
+async def test_todo_panel_repaints_when_only_a_blocker_reason_changes() -> None:
+    """The equality guard keys on the reason too: re-blocking an item with a new
+    reason changes what the row says, and a guard blind to it would leave the
+    stale wait on screen."""
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 28)) as pilot:
+        await pilot.pause()
+        builtin.TODO_STORE["sess"] = [
+            {"text": "pick a domain", "status": "blocked", "reason": "waiting on legal"}
+        ]
+        app._refresh_band()
+        await pilot.pause()
+        todo = app.query_one(TodoPanel)
+        assert "waiting on legal" in str(todo._body.content)
+
+        builtin.TODO_STORE["sess"][0]["reason"] = "waiting on the user"
+        app._refresh_band()
+        await pilot.pause()
+        assert "waiting on the user" in str(todo._body.content)
 
 
 @pytest.mark.asyncio

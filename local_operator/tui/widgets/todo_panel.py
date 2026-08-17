@@ -10,11 +10,11 @@ Reading that module table therefore reads the LIVE state; the import is
 deliberately local to the accessor so merely composing the panel cannot pull
 the tool registry into a reduced host.
 
-The tool's list is FLAT (``init``/``done``/``view``; items carry ``text`` and
-``status`` only — no phases). The row model still routes every item through
-one builder (:meth:`TodoPanel._item_row`) so a phase header could drop in
-later without restructuring the render — but the tool schema is not extended
-to get there.
+The tool's list is FLAT (``init``/``add``/``done``/``block``/``drop``/``view``;
+items carry ``text`` and ``status``, plus a ``reason`` on a blocked item — no
+phases). The row model still routes every item through one builder
+(:meth:`TodoPanel._item_row`) so a phase header could drop in later without
+restructuring the render — but the tool schema is not extended to get there.
 
 The panel sits above the input and must stay SHORT: long lists collapse to a
 dim ``… N more todos`` line rather than pushing the composer off screen.
@@ -43,6 +43,19 @@ from local_operator.tui import theme as theme_mod
 #: trying to read it. Eight keeps the longest plausible plan on screen and
 #: stays out of the way.
 MAX_TODO_ROWS = 8
+
+#: Checkbox mark per status, matching the todo tool's ``view`` op
+#: (``local_operator.tools.builtin._TODO_MARKS``) mark for mark: the band and
+#: the transcript receipt describe one list, so they must not spell it two ways.
+#: Restated here rather than imported because reading the store is the only
+#: reason this module ever touches the tools package, and it does that behind a
+#: function-local import (see :func:`todo_items`).
+STATUS_MARKS = {"pending": " ", "done": "x", "blocked": "~", "dropped": "-"}
+
+#: Statuses needing no further work. ``blocked`` is absent deliberately — it is
+#: open work waiting on a decision, and counting it would make a stalled list
+#: read as a finished one.
+RESOLVED_STATUSES = ("done", "dropped")
 
 
 def todo_items(session_id: str) -> list[dict[str, str]]:
@@ -82,10 +95,10 @@ class TodoPanel(Container):
     def __init__(self) -> None:
         super().__init__(id="todo-panel", classes="band-slot")
         self._body = Static(classes="band-body", id="todo-body")
-        #: Fingerprint of what is painted, so the 1 Hz poll repaints only when
-        #: the list actually changed — an equality guard, same discipline as
-        #: the assistant flush.
-        self._shown: tuple[tuple[str, str], ...] | None = None
+        #: Fingerprint of what is painted — ``(text, status, reason)`` per row —
+        #: so the 1 Hz poll repaints only when the list actually changed: an
+        #: equality guard, same discipline as the assistant flush.
+        self._shown: tuple[tuple[str, str, str], ...] | None = None
         # Hidden until the first todo exists: an empty panel is not content.
         self.display = False
 
@@ -104,8 +117,16 @@ class TodoPanel(Container):
         try:
             session_id = getattr(session, "session_id", "") or ""
             items = todo_items(session_id)
+            # The reason rides IN the fingerprint: re-blocking an item with a
+            # new reason changes what the row says, and an equality guard blind
+            # to it would leave the old wait on screen.
             fingerprint = tuple(
-                (str(item.get("text", "")), str(item.get("status", "pending"))) for item in items
+                (
+                    str(item.get("text", "")),
+                    str(item.get("status", "pending")),
+                    str(item.get("reason", "")),
+                )
+                for item in items
             )
             if fingerprint == self._shown:
                 return  # equality guard — identical list = no work
@@ -119,26 +140,31 @@ class TodoPanel(Container):
             self.display = False
 
     # -- rendering -----------------------------------------------------------
-    def _build(self, rows: tuple[tuple[str, str], ...]) -> RenderableType:
+    def _build(self, rows: tuple[tuple[str, str, str], ...]) -> RenderableType:
         # No width budget is threaded through: every row clips itself with
         # the no_wrap/ellipsis pair (one cell-aware model), never a
         # hand-measured count.
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
 
-        done = sum(1 for _text, status in rows if status == "done")
+        # The counter is progress toward a FINISHED list, so it counts every
+        # item that needs no more work: done plus dropped (the tool's ``n/total
+        # resolved`` receipt counts the same way). ``blocked`` stays outside the
+        # numerator on purpose — it is work waiting on an answer, and letting it
+        # read as complete is how a stalled list looks finished.
+        resolved = sum(1 for _text, status, _reason in rows if status in RESOLVED_STATUSES)
         header = Text(no_wrap=True, overflow="ellipsis")
         header.append("Todos", style=muted)
         header.append(" · ", style=dim)
-        header.append(f"{done}/{len(rows)}", style=dim)
+        header.append(f"{resolved}/{len(rows)}", style=dim)
 
         lines = [header]
         # Every item routes through ONE row builder: the tool's list is flat
         # today, but a phase header later drops in beside this call rather
         # than restructuring the render.
         visible = rows[:MAX_TODO_ROWS]
-        for text, status in visible:
-            lines.append(self._item_row(text, status))
+        for text, status, reason in visible:
+            lines.append(self._item_row(text, status, reason))
         hidden = len(rows) - len(visible)
         if hidden > 0:
             overflow = Text(no_wrap=True, overflow="ellipsis")
@@ -146,25 +172,30 @@ class TodoPanel(Container):
             lines.append(overflow)
         return Text("\n").join(lines)
 
-    def _item_row(self, text: str, status: str) -> Text:
-        """One ``- [ ]``/``- [x]`` row — the tool's own vocabulary (its ``view``
-        op renders exactly these marks), so the panel and the transcript
-        receipt read identically.
+    def _item_row(self, text: str, status: str, reason: str = "") -> Text:
+        """One ``- [ ]``/``- [x]``/``- [~]``/``- [-]`` row — the tool's own
+        vocabulary (its ``view`` op renders exactly these marks), so the panel
+        and the transcript receipt read identically.
 
-        Ink by state: pending is readable ``muted``; done drops to ``dim`` AND
-        strikethrough, because a finished item is a record, not an instruction
-        — the same "settled things go quiet" trade the tool ledger makes.
+        Ink by state: pending is readable ``muted``; done and dropped go quiet
+        (``dim`` + strikethrough), because a settled item is a record, not an
+        instruction — the same trade the tool ledger makes. Blocked stays
+        READABLE and carries its reason: it is the one row the user has to act
+        on. An unrecognised status falls back to the open rendering, never the
+        settled one: a future status must not silently read as finished.
         """
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
-        done = status == "done"
+        settled = status in RESOLVED_STATUSES
         row = Text(no_wrap=True, overflow="ellipsis")
-        row.append("- [x] " if done else "- [ ] ", style=dim)
+        row.append(f"- [{STATUS_MARKS.get(status, ' ')}] ", style=dim)
         # Model-controlled text reaches a real terminal: stripped like every
         # other untrusted string this app renders (same discipline as the
         # approval prompt and the tool cards).
         row.append(
             strip_control_sequences(text),
-            style=Style(color=theme_mod.semantic_color("dim"), strike=True) if done else muted,
+            style=Style(color=theme_mod.semantic_color("dim"), strike=True) if settled else muted,
         )
+        if status == "blocked" and reason:
+            row.append(f" — blocked: {strip_control_sequences(reason)}", style=dim)
         return row

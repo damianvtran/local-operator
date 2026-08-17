@@ -47,6 +47,7 @@ import difflib
 import fnmatch
 import io
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -68,6 +69,7 @@ from local_operator.harness.types import (
     AgentTool,
     AgentToolUpdate,
     ApprovalDescribeFn,
+    AskQuestion,
     BrowserSurface,
     BrowserSurfaceProtocol,
     ImageContent,
@@ -95,6 +97,8 @@ from local_operator.tools.spill import (
     get_store,
     parse_handle,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Shared limits and helpers
@@ -3571,21 +3575,58 @@ TODO_STORE: dict[str, list[dict[str, str]]] = {}
 #: as a string, so every todo store in this module has one key type.
 _CONTEXT_TODO_STORE: dict[str, list[dict[str, str]]] = {}
 
+#: The custom-message type the session's continuation guardrail injects at the
+#: yield boundary (``Session._todo_continuation``). It lives beside the store
+#: because the todo feature owns the vocabulary and session.py imports it —
+#: the same shape as ``HUB_MESSAGE_TYPE`` (harness/comms.py) and
+#: ``WAKE_PROMPT_MESSAGE_TYPE`` (harness/wake.py), neither of which is defined
+#: in the session that renders them.
+TODO_REMINDER_MESSAGE_TYPE = "todo_reminder"
+
+#: Statuses that no longer need work. ``blocked`` is NOT here: a blocked item
+#: is unfinished work waiting on someone, and counting it as progress would
+#: let a stalled list read as a finished one.
+_TODO_RESOLVED = ("done", "dropped")
+
+#: Checkbox marks per status, shared by ``view`` and the error path. The TUI
+#: panel renders the same four marks (tui/widgets/todo_panel.py) so the
+#: transcript receipt and the dock band cannot describe one list differently.
+_TODO_MARKS = {"pending": " ", "done": "x", "blocked": "~", "dropped": "-"}
+
 
 class TodoParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["init", "done", "view"] = Field(
-        description="init: set the list; done: mark one item done; view: show the list."
+    op: Literal["init", "add", "done", "block", "drop", "view"] = Field(
+        description=(
+            "init: replace the whole list; add: append newly discovered work "
+            "without rewriting the list; done: mark items finished; block: "
+            "mark items that cannot proceed until a user decides or an "
+            "external service answers (requires 'reason'); drop: abandon "
+            "items that are no longer needed; view: show the list."
+        )
     )
     items: list[str] = Field(
         default_factory=list,
-        description="Todo texts (required for 'init', item text for 'done').",
+        description=(
+            "Todo texts. Required for every op except 'view'. For "
+            "done/block/drop each entry must repeat an existing item's text "
+            "exactly; several items may be resolved in one call."
+        ),
+    )
+    reason: str = Field(
+        default="",
+        description=(
+            "Required for 'block', ignored otherwise: what the item is waiting "
+            "on (the decision the user must make, the service that is down). "
+            "Use 'drop' instead when the work is simply not needed any more."
+        ),
     )
 
 
 #: Every todo store — host-attached or module-level — maps one owner key to
-#: that owner's list of ``{"text": ..., "status": ...}`` items.
+#: that owner's list of ``{"text": ..., "status": ...}`` items. A ``blocked``
+#: item carries one extra key, ``reason``.
 TodoStore = dict[str, list[dict[str, str]]]
 
 
@@ -3601,6 +3642,119 @@ def _todo_store_and_key(context: ToolContext | None) -> tuple[TodoStore, str]:
     if context is not None and context.session_id:
         return TODO_STORE, context.session_id
     return _CONTEXT_TODO_STORE, str(id(context))
+
+
+def open_todos(session_id: str) -> list[dict[str, str]]:
+    """Copies of the ``pending`` items for ``session_id`` (``[]`` when there
+    are none, or the id is unknown).
+
+    THE single definition of "open" that the session's continuation guardrail
+    (``Session._todo_continuation``) fires on, so the tool and the guardrail
+    cannot disagree about whether a turn may end. ``blocked`` is excluded on
+    purpose: it is the escape hatch that lets a model stop honestly instead of
+    marking work done it did not do, and nudging it would defeat that.
+
+    Mirrors only the SESSION-ID branch of :func:`_todo_store_and_key`. A host
+    that attaches its own store to ``ToolContext.todos`` (harness/types.py:449;
+    ``Session._build_tool_context`` never does) writes there instead and would
+    have to feed the guardrail itself. Copies because the ops mutate their item
+    dicts in place, and a caller holding the originals would read a list that
+    changed under it.
+    """
+    items = TODO_STORE.get(session_id)
+    if not items:
+        return []
+    return [dict(item) for item in items if item.get("status") == "pending"]
+
+
+def todo_fingerprint(session_id: str) -> tuple[tuple[str, str], ...]:
+    """``(text, status)`` for EVERY item of ``session_id``'s list, in order.
+
+    What the guardrail's no-progress latch compares between two yields. The
+    FULL list, not the pending subsequence: an item moving from ``done`` to
+    ``dropped`` changes only the settled part of the list, and a latch blind to
+    that would call a list that did move unchanged. Store knowledge stays in
+    this module — :func:`open_todos`'s note about a host-attached
+    ``ToolContext.todos`` store applies here identically.
+    """
+    items = TODO_STORE.get(session_id) or ()
+    return tuple((str(item.get("text", "")), str(item.get("status", "pending"))) for item in items)
+
+
+def _todo_progress(current: list[dict[str, str]]) -> str:
+    """``n/total`` counting RESOLVED items (done or dropped).
+
+    The TUI panel header counts the same way, so the receipt the model reads
+    and the band the user reads describe one list identically.
+    """
+    resolved = sum(1 for item in current if item.get("status") in _TODO_RESOLVED)
+    return f"{resolved}/{len(current)}"
+
+
+def _todo_rows(items: list[dict[str, str]]) -> list[str]:
+    """One ``- [mark] text`` row per item, blocked rows carrying their reason."""
+    rows: list[str] = []
+    for item in items:
+        status = item.get("status", "pending")
+        row = f"- [{_TODO_MARKS.get(status, ' ')}] {item['text']}"
+        if status == "blocked":
+            reason = item.get("reason", "")
+            row += f" — blocked: {reason}" if reason else " — blocked"
+        rows.append(row)
+    return rows
+
+
+def _match_todos(
+    current: list[dict[str, str]], texts: list[str], *, target: str
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Resolve item texts to items: ``(matched, missing_texts)``.
+
+    One lookup shared by done/block/drop so the three cannot drift in what
+    counts as a match. Exact text match (the model is echoing text it was
+    handed); among same-text duplicates the first item not ALREADY in the
+    target status wins, so re-issuing an op is idempotent instead of an error
+    — a retried tool call must not read as a mistake the model then tries to
+    correct.
+    """
+    matched: list[dict[str, str]] = []
+    missing: list[str] = []
+    for text in texts:
+        candidates = [item for item in current if item["text"] == text]
+        if not candidates:
+            missing.append(text)
+            continue
+        matched.append(
+            next((item for item in candidates if item.get("status") != target), candidates[0])
+        )
+    return matched, missing
+
+
+def _todo_miss_error(
+    tool_call_id: str,
+    op: str,
+    applied: list[dict[str, str]],
+    missing: list[str],
+    current: list[dict[str, str]],
+) -> ToolResult:
+    """The partial-match failure: name the texts that missed AND show what is
+    still open.
+
+    Whatever DID match stays applied — real progress must not be rolled back
+    because one text was mistyped. The open items ride along so the model can
+    correct itself in its next call instead of spending a round trip on
+    ``view``.
+    """
+    lines = []
+    if applied:
+        lines.append(f"Applied '{op}' to: {', '.join(item['text'] for item in applied)}.")
+    lines.append(f"No todo matching: {', '.join(repr(text) for text in missing)}.")
+    still_open = [item for item in current if item.get("status") in ("pending", "blocked")]
+    if still_open:
+        lines.append("Open items:")
+        lines.extend(_todo_rows(still_open))
+    else:
+        lines.append("No open items remain.")
+    return _error(tool_call_id, "todo", "\n".join(lines))
 
 
 @_guard("todo")
@@ -3629,24 +3783,67 @@ async def execute_todo(
         )
 
     current = store.get(key, [])
-    if params.op == "done":
+
+    if params.op == "add":
         if not params.items:
-            return _error(tool_call_id, "todo", "'done' requires items with the item text")
-        target = params.items[0]
-        for item in current:
-            if item["text"] == target and item["status"] != "done":
-                item["status"] = "done"
-                done = sum(1 for i in current if i["status"] == "done")
-                return _text(
-                    tool_call_id,
-                    "todo",
-                    f"Marked done: {target} ({done}/{len(current)} complete).",
-                )
-        return _error(
+            return _error(tool_call_id, "todo", "'add' requires a non-empty items list")
+        # Skip texts already tracked as pending: a retried call (or a model
+        # restating the requirement it just recorded) must not double the list,
+        # which would leave a phantom item the guardrail keeps nudging on
+        # forever. The running set also collapses duplicates WITHIN one call.
+        open_texts = {item["text"] for item in current if item.get("status") == "pending"}
+        added: list[str] = []
+        for text in params.items:
+            if text in open_texts:
+                continue
+            open_texts.add(text)
+            added.append(text)
+        current = [*current, *({"text": text, "status": "pending"} for text in added)]
+        # Reassign: ``store.get(key, [])`` hands back a fresh list when this
+        # owner has no list yet, so an `add` before any `init` must bind it.
+        store[key] = current
+        if not added:
+            return _text(
+                tool_call_id,
+                "todo",
+                f"Already tracked, nothing added ({_todo_progress(current)} resolved).",
+            )
+        return _text(
             tool_call_id,
             "todo",
-            f"No pending todo matching '{target}'. Use todo view to see current items.",
+            f"Added {len(added)} item(s): {', '.join(added)} "
+            f"({_todo_progress(current)} resolved).",
         )
+
+    if params.op in ("done", "block", "drop"):
+        if not params.items:
+            return _error(tool_call_id, "todo", f"'{params.op}' requires items with the item text")
+        reason = params.reason.strip()
+        if params.op == "block" and not reason:
+            return _error(
+                tool_call_id,
+                "todo",
+                "'block' requires a non-empty reason: without it a blocked item "
+                "is indistinguishable from abandoned work. Say what it waits on, "
+                "or use 'drop' if it is no longer needed.",
+            )
+        target = {"done": "done", "block": "blocked", "drop": "dropped"}[params.op]
+        matched, missing = _match_todos(current, params.items, target=target)
+        for item in matched:
+            item["status"] = target
+            if target == "blocked":
+                item["reason"] = reason
+            else:
+                # A resolved item keeps no stale blocker: the reason described
+                # a wait that is over, and the panel would still render it.
+                item.pop("reason", None)
+        if missing:
+            return _todo_miss_error(tool_call_id, params.op, matched, missing, current)
+        verb = {"done": "Marked done", "block": "Blocked", "drop": "Dropped"}[params.op]
+        text = f"{verb}: {', '.join(item['text'] for item in matched)}"
+        if target == "blocked":
+            text += f" — reason: {reason}"
+        return _text(tool_call_id, "todo", f"{text} ({_todo_progress(current)} resolved).")
 
     # op == "view"
     if not current:
@@ -3657,22 +3854,20 @@ async def execute_todo(
             useless=True,
             details={"useless": True},
         )
-    marks = {"done": "x", "pending": " "}
-    lines = [f"- [{marks.get(item['status'], ' ')}] {item['text']}" for item in current]
-    return _text(tool_call_id, "todo", "\n".join(lines))
+    return _text(tool_call_id, "todo", "\n".join(_todo_rows(current)))
 
 
 def build_todo_tool() -> AgentTool:
     return AgentTool(
         name="todo",
         label="Todo",
-        description="Track a visible task list (init / done / view).",
+        description="Track a visible task list (init / add / done / block / drop / view).",
         parameters=TodoParams.model_json_schema(),
         # read tier exemption: todo mutates only session-local bookkeeping
         # (no files, no autonomous turns), so it stays auto-approved.
         approval_tier="read",
-        # init rewrites the whole list; concurrent calls would lose one,
-        # so the tool runs exclusive despite being cheap.
+        # init rewrites the whole list and add appends to it; concurrent calls
+        # would lose one, so the tool runs exclusive despite being cheap.
         concurrency="exclusive",
         interruptible=False,
         execute=execute_todo,
@@ -4107,9 +4302,30 @@ def cmux_browser_available() -> bool:
 
     Never raises: an unreadable PATH or environment degrades to "no browser",
     which the createIf builder handles by not advertising the tool at all.
+
+    That degradation is silent to the MODEL by design (advertising a tool
+    whose every action errors is worse), which makes it invisible to whoever
+    has to explain the absence later. So the one anomalous shape — a session
+    carrying cmux's ``CMUX_*`` markers, i.e. plainly running inside cmux, yet
+    resolving no CLI — is logged with the markers it saw. A PATH rebuilt by a
+    login shell or a ``sudo -i`` is exactly how that happens, and the
+    alternative to a log line is diagnosing it from the agent's behaviour
+    afterwards. Nothing is logged on an ordinary non-cmux host: absence there
+    is normal, and a warning per session start would be noise.
     """
     try:
-        return _cmux_binary() is not None
+        if _cmux_binary() is not None:
+            return True
+        markers = sorted(name for name in os.environ if name.startswith("CMUX_"))
+        if markers:
+            logger.warning(
+                "cmux markers present (%s) but no cmux CLI resolved: not on PATH and "
+                "CMUX_BUNDLED_CLI_PATH=%r is not an executable file. The browser tool "
+                "will not be advertised this session.",
+                ", ".join(markers),
+                os.environ.get("CMUX_BUNDLED_CLI_PATH", ""),
+            )
+        return False
     except Exception:  # noqa: BLE001 — detection must never break session start
         return False
 
@@ -4843,7 +5059,9 @@ async def execute_browser(
             tool_call_id,
             "browser",
             "CMUX browser not available: no cmux binary on PATH and no "
-            "CMUX_BUNDLED_CLI_PATH. This host cannot drive a browser.",
+            "CMUX_BUNDLED_CLI_PATH. This host cannot drive a browser. Do not "
+            "install or script one instead — say screenshots are unavailable "
+            "and why.",
         )
     # Before the state lookup and before every subprocess, including the
     # liveness probe below: see _validate_browser_args.
@@ -5039,6 +5257,17 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     purpose. A host without cmux therefore has no browser tool at all, which
     is honest, and the agent still reaches static pages through `bash` and
     curl.
+
+    The DESCRIPTION says what the surface is, not just which verbs it takes,
+    because a verb list gave the model no reason to prefer it. Measured: a
+    session that needed before/after screenshots of a local dev server wrote a
+    playwright script and spent 23 s on `playwright install chromium` while
+    this tool sat in its inventory, and then — told outright to "use the cmux
+    browser instead" — still shelled the cmux CLI through `bash` rather than
+    calling it. The deciding fact is persistence: this drives the browser the
+    user is looking at, so its cookies and logins survive between calls and
+    between sessions and the user can sign in by hand when asked, which is
+    exactly what a freshly downloaded headless Chromium can never do.
     """
     if not cmux_browser_available():
         return None
@@ -5047,8 +5276,14 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         label="Browser",
         describe_approval=_describe_browser_approval,
         description=(
-            "Drive the CMUX browser: open/goto a URL, read page text, snapshot "
-            "the accessibility tree for click refs, click, type, screenshot, close."
+            "Drive the user's REAL browser (the CMUX browser panel in their "
+            "terminal): open/goto a URL, read page text, snapshot the "
+            "accessibility tree for click refs, click, type, screenshot, close. "
+            "Cookies and logins persist across calls and across sessions, and "
+            "the user can sign in by hand when you ask them to, so this reaches "
+            "authenticated pages a throwaway headless browser cannot. Use it for "
+            "every screenshot and page interaction; never install or script a "
+            "browser engine instead."
         ),
         parameters=BrowserParams.model_json_schema(),
         # Navigates and can write a screenshot file, so it rides the write
@@ -5743,4 +5978,143 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
         concurrency="exclusive",
         interruptible=True,
         execute=execute_hub,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ask
+# ---------------------------------------------------------------------------
+#
+# Why this tool exists: without it a model that needs a decision writes the
+# options as PROSE — observed verbatim as "(A) Drop email … (B) Escalate it
+# properly … (C) You have context I don't" — and the user then has to retype an
+# answer the agent has to re-parse. The transcript is a stream, not a form, so
+# lettered prose is the only shape a model has; this gives it a real one.
+
+
+class AskParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    questions: list[AskQuestion] = Field(
+        min_length=1,
+        description="The questions to ask, put to the user one screen at a time.",
+    )
+
+
+#: What the tool reports when the user closed the picker without choosing.
+#: Deliberately NOT an error result: refusing to answer is a decision, and a
+#: model that read it as a tool failure would either retry the same question or
+#: stop. The last sentence is what makes the outcome actionable — a model that
+#: marked an option ``recommended`` has already stated what it would do.
+ASK_UNANSWERED_TEXT = (
+    "The user closed the question without answering, so nothing was chosen. "
+    "Do not ask again: decide yourself (take your recommended option where you "
+    "gave one), then say in one line what you assumed and carry on."
+)
+
+
+def _ask_report(questions: list[AskQuestion], answers: dict[str, list[str]]) -> str:
+    """The answers as text the model can act on, keyed by the ids it chose.
+
+    Each question is echoed with its answer rather than only the id: the ask
+    may be several turns back by the time the model reads this, and an id on
+    its own ("purge: Drop them") does not say what was agreed to.
+    """
+    lines: list[str] = []
+    for question in questions:
+        chosen = [text for text in answers.get(question.id, []) if text.strip()]
+        lines.append(f"{question.id} — {question.question}")
+        lines.append(f"  answer: {'; '.join(chosen) if chosen else '(not answered)'}")
+    return "The user answered:\n" + "\n".join(lines)
+
+
+def build_ask_tool(context: ToolContext) -> AgentTool | None:
+    """CreateIf builder: the tool exists only where a human can answer it.
+
+    Gated on the HOOK, not on ``has_ui``: a subagent inherits ``has_ui`` from
+    its parent and has no human at its keyboard, so gating on the flag alone
+    would let a delegated child mount a question on the parent's screen — for
+    work the person watching it never asked about — and block on it. A child
+    session is built without an ask handler, which makes the hook's absence the
+    honest signal for every unanswerable case at once: server, exec mode,
+    scheduler runs and subagents.
+
+    ``has_ui`` is still required, and not as a duplicate of that check: a host
+    declaring no UI is asserting it cannot mount a prompt, and a tool must
+    believe that over a handler somebody left installed.
+    """
+    if context.ask_user is None or not context.has_ui:
+        return None
+    return AgentTool(
+        name="ask",
+        label="Ask",
+        description=(
+            "Ask the user to choose. Use it whenever you need a decision only they can "
+            "make — which of two approaches to take, whether to do the risky thing, "
+            "which of several things they meant — INSTEAD of writing lettered options "
+            "into your reply and waiting. Give each question at least two options, put "
+            "the consequence of each in its description, and mark the one you recommend. "
+            "Every question also offers the user a free-text answer, so the options do "
+            "not have to be exhaustive. Ask everything you need in ONE call: the user "
+            "answers the questions back to back rather than once per turn."
+        ),
+        parameters=AskParams.model_json_schema(),
+        # read tier: asking a question changes nothing. Gating it behind the
+        # approval prompt would put one question in front of another.
+        approval_tier="read",
+        # Exclusive because it blocks on a HUMAN: one picker owns the keyboard,
+        # and a second question mounted beside it would be unanswerable. It
+        # would also hold a shared slot for as long as the user takes.
+        concurrency="exclusive",
+        # Interruptible because this call is parked on a HUMAN, and nothing else
+        # can settle it. A non-interruptible tool is cancelled by nothing but
+        # its own return (the approval gate documents that failure: an abort
+        # landed while a turn sat on the prompt and the runner went on waiting),
+        # so a stop or a steering message arriving while the question is up has
+        # to be able to end the call — the loop's steering poll cancels it and
+        # the host takes the picker off screen. Esc remains how the user
+        # DECLINES to answer: that returns a result, and is not a cancellation.
+        interruptible=True,
+        execute=execute_ask,
+    )
+
+
+@_guard("ask")
+async def execute_ask(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Put the questions to the user and report what they chose."""
+    try:
+        params = AskParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "ask", exc)
+    ask_user = context.ask_user if context else None
+    if ask_user is None:
+        # Unreachable through the advertised tool (the builder above refuses to
+        # create it without a hook), so this is a host wiring fault rather than
+        # a user decision — and it must not be reported as one, or the model
+        # would "fall back to its recommendation" on a session where the user
+        # was never shown anything.
+        return _error(
+            tool_call_id,
+            "ask",
+            "No interactive surface is attached to this session, so the user cannot "
+            "be asked. Decide without them.",
+        )
+    answers = await ask_user(params.questions)
+    if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):
+        # One outcome, whether the host answered None (escaped) or handed back
+        # a mapping with nothing in it (confirmed an empty multi-select): the
+        # user chose nothing, and splitting that into two results would give the
+        # model a distinction it cannot act on differently.
+        return _text(tool_call_id, "ask", ASK_UNANSWERED_TEXT)
+    return _text(
+        tool_call_id,
+        "ask",
+        _ask_report(params.questions, answers),
+        details={"answers": {key: list(value) for key, value in answers.items()}},
     )

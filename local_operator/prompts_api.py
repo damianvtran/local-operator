@@ -240,6 +240,27 @@ def _render_tool_inventory(tools: Sequence[AgentTool]) -> str:
     return "\n".join(lines)
 
 
+#: Appended to the tool inventory when the session has no browser tool. The
+#: builder is createIf-gated (a browser needs cmux, and this package ships no
+#: browser engine), so on a host without cmux the model can only observe an
+#: ABSENCE — and an absence reads as "arrange your own". Measured: asked for
+#: before/after screenshots of a local dev server, a session wrote a playwright
+#: script and spent 23 s on ``playwright install chromium``. A downloaded
+#: browser cannot carry the user's logins and the user cannot reach into it, so
+#: it is not a smaller version of the real thing; it is a dead end that looks
+#: like progress. Naming the absence and the reason costs three lines and only
+#: ships when the tool is genuinely missing — the inventory is never told about
+#: a tool that cannot work.
+_NO_BROWSER_NOTE = (
+    "\n\nThis session has NO browser tool: browser automation here runs through "
+    "the cmux terminal, and no cmux CLI is reachable on this host. Do not "
+    "substitute one — never install or script a browser engine (playwright, "
+    "puppeteer, a downloaded Chromium) to load a page or capture a screenshot. "
+    "For page text use `bash` with curl; when a task genuinely needs a rendered "
+    "screenshot, say it is unavailable and why."
+)
+
+
 def build_system_blocks(
     tools: Sequence[AgentTool],
     skills_block: str,
@@ -301,6 +322,11 @@ def build_system_blocks(
             f"<user_instructions>\n{safe}\n</user_instructions>"
         )
     inventory = f"## Available tools\n\n{_render_tool_inventory(tools)}"
+    # Membership, not visibility: a hidden tool is still callable, and telling
+    # the model a browser does not exist while one answers would be worse than
+    # saying nothing.
+    if not any(tool.name == "browser" for tool in tools):
+        inventory = f"{inventory}{_NO_BROWSER_NOTE}"
     env_block = f"Today is {date_str}."
     if env_details:
         env_block = f"{env_block}\n\n{env_details}"

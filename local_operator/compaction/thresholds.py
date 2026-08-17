@@ -1,14 +1,13 @@
 """Compaction settings and trigger-threshold math.
 
 The numbers here are cache-economics, not cosmetics:
+- :func:`resolve_threshold_tokens` is the ONE place a compaction trigger is
+  derived: ``min(threshold_percent x window, threshold_tokens)``. Two knobs,
+  one resolved number, no caller re-deriving it.
 - The reserve keeps room for the model's next output + tool calls after a
   compaction; it is floored at 15% of the window so small windows do not
-  compact down to nothing. A DEFAULTED reserve that is impossible for a small
-  window is recovered to the proportional 15% reserve
-  (``resolveBudgetReserveTokens``); an explicit reserve is always honored.
-- With no explicit threshold/percent/reserve, the trigger is the
-  ``docs/REWRITE.md`` §C default: the lesser of 80% of the window and
-  600 000 tokens.
+  compact down to nothing. As a trigger input it can only pull the trigger
+  EARLIER (see :func:`resolve_threshold_tokens`).
 - ``should_compact`` fires strictly *above* the resolved threshold so a
   context sitting exactly on the threshold does not thrash.
 - :data:`RECOVERY_BAND` is the anti-thrash hysteresis added after a live
@@ -20,44 +19,54 @@ The numbers here are cache-economics, not cosmetics:
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_RESERVE_TOKENS",
-    "DEFAULT_THRESHOLD_CAP_TOKENS",
+    "DEFAULT_THRESHOLD_PERCENT",
+    "DEFAULT_THRESHOLD_TOKENS",
     "CompactionSettings",
     "RECOVERY_BAND",
     "cleared_headroom",
     "compaction_context_tokens",
     "effective_reserve_tokens",
-    "resolve_budget_reserve_tokens",
     "resolve_strategy",
+    "resolve_threshold_cap_tokens",
+    "resolve_threshold_percent",
     "resolve_threshold_tokens",
     "should_compact",
 ]
 
 #: Reserve floor applied when ``reserve_tokens`` is unset
 #: (``DEFAULT_RESERVE_TOKENS``). ``reserve_tokens is None`` — not comparing
-#: values against this default — is what marks the reserve as *defaulted*,
-#: which :func:`resolve_budget_reserve_tokens` needs to recover impossible
-#: defaults.
+#: values against this default — is what marks the reserve as *defaulted*.
 DEFAULT_RESERVE_TOKENS = 16384
 
-#: docs/REWRITE.md §C default threshold: the lesser of 80% of the model
-#: context window and this absolute ceiling.
-DEFAULT_THRESHOLD_CAP_TOKENS = 600_000
+#: Percentage trigger default: compact once the context passes 80% of the
+#: model's context window. Expressed as a FRACTION; ``0.80`` and ``80`` are
+#: both accepted in config and mean the same thing (see
+#: :func:`resolve_threshold_percent`).
+DEFAULT_THRESHOLD_PERCENT = 0.80
+
+#: Absolute trigger default: compact once the context passes 600k tokens even
+#: when that is a small fraction of a very large window.
+DEFAULT_THRESHOLD_TOKENS = 600_000
 
 
 class CompactionSettings(BaseModel):
     """Compaction knobs, mirrored from ``config.yml`` ``values.compaction.*``.
 
-    ``threshold_tokens`` and ``threshold_percent`` are negative by default,
-    meaning "unset" — resolution then falls back to the reserve/default-based
-    threshold. ``reserve_tokens`` is ``None`` when unset: that provenance (not
-    the value) marks the reserve as defaulted, and a defaulted reserve that is
-    impossible for the window falls back to the 15% proportional reserve.
+    Two knobs decide WHEN a pass fires — ``threshold_percent`` (fraction of
+    the model's context window) and ``threshold_tokens`` (absolute ceiling) —
+    and :func:`resolve_threshold_tokens` is the only thing that combines them.
+    ``reserve_tokens`` is ``None`` when unset: that provenance (not the value)
+    marks the reserve as defaulted, and only an explicit reserve constrains
+    the trigger.
     """
 
     enabled: bool = True
@@ -71,30 +80,28 @@ class CompactionSettings(BaseModel):
     reserve_tokens: int | None = Field(
         default=None,
         description=(
-            "Min headroom kept after compaction. None = defaulted: an impossible"
-            " default recovers to the 15% proportional reserve; an explicit"
-            " reserve is always honored."
+            "Min headroom kept after compaction. None = defaulted (the 15%"
+            " proportional floor). An EXPLICIT reserve also caps the trigger at"
+            " window - reserve, so it can only make compaction fire earlier."
         ),
     )
     keep_recent_tokens: int = Field(
         default=20000, description="Tokens of recent history kept verbatim across a compaction."
     )
     threshold_percent: float = Field(
-        default=-1.0, description="Percent-of-window trigger; <= 0 means reserve-based."
+        default=DEFAULT_THRESHOLD_PERCENT,
+        description=(
+            "Percentage trigger, as a fraction of the model context window."
+            " 0.80 and 80 both mean 80%. Out of range (<= 0 or > 100) falls back"
+            " to 0.80 with a warning."
+        ),
     )
     threshold_tokens: int = Field(
-        default=-1, description="Explicit token trigger; > 0 wins over percent."
-    )
-    max_threshold_tokens: int = Field(
-        default=600_000,
+        default=DEFAULT_THRESHOLD_TOKENS,
         description=(
-            "Ceiling on the RESOLVED default threshold when no explicit trigger"
-            " is set. Providers routinely advertise a context window far larger"
-            " than the aggregate serving path can actually sustain (a 1.05M"
-            " advertisement whose requests start aborting around 250k is the"
-            " case that motivated this knob), and the default threshold of"
-            " min(window*0.8, 600k) inherits the advertisement's optimism. This"
-            " caps the threshold before that optimism reaches the trigger math."
+            "Absolute token trigger. The resolved trigger is the SMALLER of"
+            " this and the percentage trigger. Non-positive falls back to"
+            " 600000 with a warning."
         ),
     )
     auto_continue: bool = Field(
@@ -104,6 +111,96 @@ class CompactionSettings(BaseModel):
     mid_turn_enabled: bool = Field(
         default=True, description="Allow threshold compaction at safe tool-loop boundaries."
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_keys(cls, data: Any) -> Any:
+        """Read the superseded ``max_threshold_tokens`` key as ``threshold_tokens``.
+
+        ``max_threshold_tokens`` was a ceiling applied on top of a separate
+        absolute trigger. Under the single ``min(percent x window, tokens)``
+        rule the absolute knob IS the ceiling, so two keys meant one thing —
+        the exact "two competing notions of when to compact" that let a
+        resolved trigger disagree with itself. A config carrying the old key
+        keeps working (silently dropping a user's explicit ceiling is how a
+        session sails past a provider's real serving limit), and the warning
+        names the rename so it can be fixed once.
+        """
+        if not isinstance(data, dict) or "max_threshold_tokens" not in data:
+            return data
+        data = dict(data)  # never mutate the caller's config dict
+        legacy = data.pop("max_threshold_tokens")
+        if "threshold_tokens" in data:
+            logger.warning(
+                "values.compaction.max_threshold_tokens is superseded by threshold_tokens; "
+                "ignoring the legacy key because threshold_tokens is set as well"
+            )
+        else:
+            data["threshold_tokens"] = legacy
+            logger.warning(
+                "values.compaction.max_threshold_tokens is superseded by "
+                "threshold_tokens (same meaning: the absolute trigger ceiling); "
+                "reading it as threshold_tokens: %s — rename it in config.yml",
+                legacy,
+            )
+        return data
+
+
+#: Settings whose out-of-range values have already been reported, so a
+#: misconfigured session warns once instead of on every turn (the trigger is
+#: resolved at every tool-loop boundary).
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, message: str, *args: Any) -> None:
+    """``logger.warning`` de-duplicated per (setting, value) for the process."""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    logger.warning(message, *args)
+
+
+def resolve_threshold_percent(settings: CompactionSettings) -> float:
+    """Validated percentage trigger as a fraction in ``(0, 1]``.
+
+    Two spellings are accepted on purpose: ``0.80`` (the field default, a
+    fraction) and ``80`` (what a key named ``*_percent`` invites a user to
+    write). Values above 1 are read as percentages, values at or below 1 as
+    fractions. Without this, ``threshold_percent: 80`` would resolve to 8000%
+    of the window (a trigger that never fires) or ``threshold_percent: 0.8``
+    to 0.8% (a session that compacts every turn) depending on which spelling
+    the code picked.
+
+    Anything outside ``(0, 100]`` — zero, negative, 250 — falls back to the
+    documented default with a warning rather than breaking the session, the
+    same posture the config coercion takes for an invalid block.
+    """
+    raw = float(settings.threshold_percent)
+    if raw <= 0.0 or raw > 100.0:
+        _warn_once(
+            f"threshold_percent={raw}",
+            "values.compaction.threshold_percent=%s is out of range (0 < p <= 100); "
+            "using the default %s",
+            raw,
+            DEFAULT_THRESHOLD_PERCENT,
+        )
+        return DEFAULT_THRESHOLD_PERCENT
+    return raw / 100.0 if raw > 1.0 else raw
+
+
+def resolve_threshold_cap_tokens(settings: CompactionSettings) -> int:
+    """Validated absolute trigger in tokens (positive)."""
+    raw = int(settings.threshold_tokens)
+    if raw <= 0:
+        _warn_once(
+            f"threshold_tokens={raw}",
+            "values.compaction.threshold_tokens=%s is not a positive token count; "
+            "using the default %s",
+            raw,
+            DEFAULT_THRESHOLD_TOKENS,
+        )
+        return DEFAULT_THRESHOLD_TOKENS
+    return raw
 
 
 def effective_reserve_tokens(window_tokens: int, settings: CompactionSettings) -> int:
@@ -119,70 +216,48 @@ def effective_reserve_tokens(window_tokens: int, settings: CompactionSettings) -
     return max(int(window_tokens * 0.15), reserve)
 
 
-def resolve_budget_reserve_tokens(window_tokens: int, settings: CompactionSettings) -> int:
-    """Reserve used to derive the trigger threshold
-    (``resolveBudgetReserveTokens``).
-
-    The default absolute reserve predates small bundled windows and can leave
-    no practical budget there; recover a DEFAULTED reserve that is impossible
-    for the window (>= window, or would push the threshold below the 15%
-    floor) to the proportional ``max(1, floor(w * 0.15))`` reserve so small
-    windows stay usable. Explicit reserves — including one that happens to
-    equal the default — always win, because they intentionally shrink the
-    usable prompt budget; provenance is ``reserve_tokens is None``, never a
-    value comparison against the default. Only a reserve >= window falls back
-    for explicit reserves too (the threshold must stay strictly below the
-    window).
-    """
-    reserve = effective_reserve_tokens(window_tokens, settings)
-    proportional = max(1, int(window_tokens * 0.15))
-    reserve_was_defaulted = settings.reserve_tokens is None
-    default_reserve_impossible = reserve_was_defaulted and reserve >= window_tokens - proportional
-    reserve_exceeds_window = reserve >= window_tokens
-    if default_reserve_impossible or reserve_exceeds_window:
-        return proportional
-    return reserve
-
-
 def resolve_threshold_tokens(window_tokens: int, settings: CompactionSettings) -> int:
-    """Context size at which compaction triggers for this window.
+    """Context size at which compaction triggers for this window — THE rule.
 
-    Precedence (first match wins):
+    ``min(threshold_percent x window, threshold_tokens)``, clamped to
+    ``[1, window - 1]``.
 
-    1. ``threshold_tokens > 0`` — explicit override, clamped to ``[1, w-1]``.
-    2. ``threshold_percent > 0`` — ``max(1, floor(w * clamp(pct, 1, 99) / 100))``.
-    3. Otherwise:
-       - explicit ``reserve_tokens`` — ``clamp(w - resolve_budget_reserve_tokens(w, s), 1, w-1)``;
-         an explicit reserve always defines the usable prompt budget and
-         bypasses the §C default;
-       - defaulted reserve that is impossible for this window — the 15%
-         proportional recovery (same clamp);
-       - defaulted reserve, feasible window — the docs/REWRITE.md §C default:
-         ``clamp(min(int(w * 0.8), 600_000, max_threshold_tokens), 1, w - 1)``;
-         the ``max_threshold_tokens`` tail caps a provider-advertised window
-         whose practical serving ceiling is far lower than the raw
-         advertisement (the LO-on-LO session that stalled at ~250k on a
-         1.05M-advertised model motivated it).
+    ``min`` is deliberate: the EARLIER of the two thresholds wins, because the
+    two knobs guard different failure modes and each is only meaningful on one
+    side of the window-size range.
+
+    - The percentage keeps a small-context model compacting in proportion to
+      what it can actually hold: 80% of a 200k window is 160k, and an absolute
+      600k trigger there could never fire at all.
+    - The absolute ceiling stops a very large window from letting one session
+      grow to a size that is slow and expensive on every single request even
+      though it technically still fits: at 600k of a 1M window every turn is
+      re-sending 600k tokens.
+
+    Which is why a resolved trigger must never be re-derived by a caller. A
+    session on a 1M-context model was observed compacting at ~235k — a
+    defensive ceiling on top of a second absolute trigger had collapsed to
+    23% of the window — throwing away three quarters of its usable context
+    per pass, and every one of those unnecessary passes was also an
+    opportunity for a compaction bug (the snapcompact image-replay path) to
+    destroy the session's history outright.
+
+    An EXPLICIT ``reserve_tokens`` (never the 16384 default, whose provenance
+    is ``reserve_tokens is None``) additionally caps the trigger at
+    ``window - effective_reserve_tokens``, so a user who demands more
+    post-compaction headroom than the percentage leaves gets it. It can only
+    pull the trigger earlier; a reserve at or above the window is impossible
+    to honour and is ignored rather than resolving to "never compact".
     """
     if window_tokens <= 0:
         return 0
-    if settings.threshold_tokens > 0:
-        return max(1, min(settings.threshold_tokens, window_tokens - 1))
-    if settings.threshold_percent > 0:
-        pct = min(max(settings.threshold_percent, 1.0), 99.0)
-        return max(1, int(window_tokens * pct / 100.0))
+    percent = resolve_threshold_percent(settings)
+    trigger = min(int(window_tokens * percent), resolve_threshold_cap_tokens(settings))
     if settings.reserve_tokens is not None:
-        reserve = resolve_budget_reserve_tokens(window_tokens, settings)
-        return max(1, min(window_tokens - reserve, window_tokens - 1))
-    effective = effective_reserve_tokens(window_tokens, settings)
-    proportional = max(1, int(window_tokens * 0.15))
-    if effective >= window_tokens - proportional or effective >= window_tokens:
-        # Defaulted reserve is impossible for this window: 15% recovery.
-        return max(1, min(window_tokens - proportional, window_tokens - 1))
-    default_threshold = min(
-        int(window_tokens * 0.8), DEFAULT_THRESHOLD_CAP_TOKENS, settings.max_threshold_tokens
-    )
-    return max(1, min(default_threshold, window_tokens - 1))
+        reserve = effective_reserve_tokens(window_tokens, settings)
+        if 0 < reserve < window_tokens:
+            trigger = min(trigger, window_tokens - reserve)
+    return max(1, min(trigger, window_tokens - 1))
 
 
 def should_compact(context_tokens: int, window_tokens: int, settings: CompactionSettings) -> bool:

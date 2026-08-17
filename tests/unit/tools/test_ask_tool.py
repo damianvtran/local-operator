@@ -1,0 +1,252 @@
+"""The ``ask`` tool: what it advertises, what it validates, what it reports.
+
+The tool replaced PROSE. Without it a model that needs a decision writes its
+options into the reply — observed verbatim as "(A) Drop email … (B) Escalate it
+properly … (C) You have context I don't" — which nobody can click, nobody can
+key-select, and the agent then has to re-parse from free text.
+
+So the contracts pinned here are the ones that keep it from regressing into that
+surface or into something worse than it: the tool must not EXIST where no human
+can answer it, a refusal to answer must not read as a failure, and the free-text
+answer must survive the round trip, because "an answer that was not on the list"
+is what the prose version was reaching for with its third option.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from local_operator.harness.types import AgentTool, AskQuestion, ToolContext, ToolResult
+from local_operator.tools import builtin
+from local_operator.tools.registry import create_tools
+
+
+def _questions(*, multi: bool = False, recommended: int | None = None) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "stale",
+            "question": "What should happen to the stale rows?",
+            "options": [
+                {"label": "Drop them", "description": "nothing reads the column"},
+                {"label": "Backfill from the audit log", "description": "slower, keeps history"},
+            ],
+            "multi": multi,
+            "recommended": recommended,
+        }
+    ]
+
+
+def _context(hook: Any | None, *, has_ui: bool = True) -> ToolContext:
+    return ToolContext(cwd=".", session_id="s", has_ui=has_ui, ask_user=hook)
+
+
+def _tools(context: ToolContext) -> dict[str, AgentTool]:
+    return {tool.name: tool for tool in create_tools(context)}
+
+
+async def _call(context: ToolContext, args: dict[str, Any]) -> ToolResult:
+    tool = _tools(context)["ask"]
+    return await tool.execute("call-1", args, None, None, context)  # type: ignore[operator]
+
+
+async def _answer_with(result: dict[str, list[str]] | None):
+    """A host hook that records the questions it was given and answers ``result``."""
+    seen: list[list[AskQuestion]] = []
+
+    async def hook(questions: list[AskQuestion]) -> dict[str, list[str]] | None:
+        seen.append(questions)
+        return result
+
+    return hook, seen
+
+
+# --- availability -----------------------------------------------------------
+
+
+def test_ask_exists_when_a_host_can_actually_answer_it() -> None:
+    async def hook(questions: list[AskQuestion]) -> dict[str, list[str]] | None:
+        return None
+
+    assert "ask" in _tools(_context(hook))
+
+
+def test_ask_is_absent_without_a_ui_to_draw_the_question_on() -> None:
+    """A server, exec mode or a scheduler run has nobody at a keyboard. An
+    advertised tool that can only fail to be answered is worse than none: the
+    model spends a call finding out what the tool list could have told it."""
+
+    async def hook(questions: list[AskQuestion]) -> dict[str, list[str]] | None:
+        return None
+
+    assert "ask" not in _tools(_context(hook, has_ui=False))
+
+
+def test_ask_is_absent_without_an_ask_hook_even_when_a_ui_is_claimed() -> None:
+    """This is the case that keeps SUBAGENTS out. A child inherits ``has_ui``
+    from its parent and is built with no ask handler, so the hook's absence — not
+    the flag — is what stops a delegated agent from mounting a question on the
+    parent's screen and blocking on a human who was never shown it."""
+    assert "ask" not in _tools(_context(None))
+
+
+# --- schema validation ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_question_with_one_option_is_refused() -> None:
+    """A single-option question is an announcement. Rendering it as a picker
+    asks the user to ratify a decision that has already been made."""
+    hook, seen = await _answer_with({"stale": ["Drop them"]})
+    context = _context(hook)
+    args = _questions()
+    args[0]["options"] = [{"label": "Drop them"}]
+
+    result = await _call(context, {"questions": args})
+
+    assert result.is_error is True
+    assert "invalid arguments" in result.text
+    assert seen == []  # nothing was put on screen
+
+
+@pytest.mark.asyncio
+async def test_a_recommendation_outside_the_options_is_refused() -> None:
+    """Not clamped: a clamp would preselect and visibly endorse a DIFFERENT
+    option than the model meant to, which is worse than an error the model can
+    correct."""
+    hook, seen = await _answer_with({"stale": ["Drop them"]})
+    result = await _call(_context(hook), {"questions": _questions(recommended=5)})
+
+    assert result.is_error is True
+    assert "recommended" in result.text
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_question_list_is_refused() -> None:
+    hook, seen = await _answer_with(None)
+    result = await _call(_context(hook), {"questions": []})
+
+    assert result.is_error is True
+    assert "invalid arguments" in result.text
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_valid_recommendation_reaches_the_host() -> None:
+    """The index is what the picker preselects, so it has to survive parsing."""
+    hook, seen = await _answer_with({"stale": ["Drop them"]})
+    result = await _call(_context(hook), {"questions": _questions(recommended=1)})
+
+    assert result.is_error is False
+    assert seen[0][0].recommended == 1
+    assert [option.label for option in seen[0][0].options] == [
+        "Drop them",
+        "Backfill from the audit log",
+    ]
+
+
+# --- results ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_single_choice_comes_back_as_the_label_under_its_question() -> None:
+    """The report echoes the QUESTION as well as its id: the ask may be several
+    turns back by the time the model reads it, and ``stale: Drop them`` alone
+    does not say what was agreed to."""
+    hook, _seen = await _answer_with({"stale": ["Drop them"]})
+    result = await _call(_context(hook), {"questions": _questions()})
+
+    assert result.is_error is False
+    assert "stale — What should happen to the stale rows?" in result.text
+    assert "answer: Drop them" in result.text
+    assert result.details == {"answers": {"stale": ["Drop them"]}}
+
+
+@pytest.mark.asyncio
+async def test_a_multi_select_answer_keeps_every_label() -> None:
+    hook, _seen = await _answer_with(
+        {"stale": ["Drop them", "Backfill from the audit log"]},
+    )
+    result = await _call(_context(hook), {"questions": _questions(multi=True)})
+
+    assert result.is_error is False
+    assert "answer: Drop them; Backfill from the audit log" in result.text
+
+
+@pytest.mark.asyncio
+async def test_free_text_comes_back_verbatim_although_no_option_carried_it() -> None:
+    """The whole reason the picker offers an "Other" row. The prose surface this
+    replaces needed one constantly — its third option was literally "You have
+    context I don't" — and an answer reported as an option INDEX could not carry
+    it at all."""
+    typed = "neither — archive them to S3 first"
+    hook, _seen = await _answer_with({"stale": [typed]})
+    result = await _call(_context(hook), {"questions": _questions()})
+
+    assert result.is_error is False
+    assert f"answer: {typed}" in result.text
+    assert result.details == {"answers": {"stale": [typed]}}
+
+
+@pytest.mark.asyncio
+async def test_answering_nothing_is_a_result_and_not_an_error() -> None:
+    """Refusing to answer is a decision. Reported as an error the model either
+    retries the same question or stops; reported as this text it takes its own
+    recommendation and says what it assumed."""
+    hook, _seen = await _answer_with(None)
+    result = await _call(_context(hook), {"questions": _questions()})
+
+    assert result.is_error is False
+    assert result.text == builtin.ASK_UNANSWERED_TEXT
+    assert "closed the question without answering" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_mapping_with_nothing_in_it_reads_as_answering_nothing() -> None:
+    """A confirmed-but-empty multi-select and an escape are the same outcome to
+    a model: nothing was chosen. Two different results would offer a
+    distinction it cannot act on differently."""
+    hook, _seen = await _answer_with({"stale": [], "other": ["   "]})
+    result = await _call(_context(hook), {"questions": _questions()})
+
+    assert result.is_error is False
+    assert result.text == builtin.ASK_UNANSWERED_TEXT
+
+
+@pytest.mark.asyncio
+async def test_a_question_the_user_skipped_is_reported_as_not_answered() -> None:
+    """Escaping out of question three does not discard the answer to question
+    one, so a partial mapping has to render honestly."""
+    questions = _questions() + [
+        {
+            "id": "timing",
+            "question": "When should this ship?",
+            "options": [{"label": "Now"}, {"label": "After the backfill"}],
+        }
+    ]
+    hook, _seen = await _answer_with({"stale": ["Drop them"]})
+    result = await _call(_context(hook), {"questions": questions})
+
+    assert result.is_error is False
+    assert "answer: Drop them" in result.text
+    assert "timing — When should this ship?" in result.text
+    assert "answer: (not answered)" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_missing_host_hook_is_an_error_not_a_user_refusal() -> None:
+    """Unreachable through the advertised tool, and it must not be reported as
+    "the user declined": that would have the model act as though a person had
+    seen the question on a session where nothing was ever drawn."""
+    hook, _seen = await _answer_with(None)
+    # Built WITH a hook (the builder refuses to create it without one) and then
+    # executed against a context that has none — the only way this session's
+    # tool list and its executor can disagree.
+    tool = builtin.build_ask_tool(_context(hook))
+    assert tool is not None
+    result = await tool.execute("call-1", {"questions": _questions()}, None, None, _context(None))
+
+    assert result.is_error is True
+    assert "cannot" in result.text

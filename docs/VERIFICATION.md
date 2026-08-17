@@ -1273,6 +1273,9 @@ unrecoverable at the time; it's since been fixed.
   session compacts before the provider's ~250k abort knee. Capped replay of
   the stuck session would now compact at exactly 250_000 instead of 600k.
 - Regression `test_thresholds.py::test_max_threshold_tokens_caps_the_section_c_default`.
+- Superseded 2026-08-17 — the cap became a second definition of "when to
+  compact" and resolved to 25% of a 1M window; see "Compaction fired at 23% of
+  a 1M window" below. The key now lives on as `threshold_tokens`.
 - Review: round 1 approved with **no blockers**, round 2 APPROVE (MCP-capability
   wipe bug found and fixed in the same PR — see below).
 
@@ -1711,3 +1714,78 @@ the transcript ground, picker overflow row, picker closed under a stationary
 pointer and a dismissed toast. A hover frame from the real `OperatorApp` is
 byte-identical before and after (the rule paints no pixels); the shape is the
 behavioural contract, which is what the tests hold.
+## Compaction fired at 23% of a 1M window (2026-08-17)
+
+A live session on `anthropic/claude-opus-5` (`context_window=1_000_000`,
+registry line 372-377) printed
+`context compacted · 234.8k → 33.2k tokens (86% smaller), via snapcompact`,
+and a second pass at 183.4k. 234.8k is 23% of the window: the session threw
+away three quarters of its usable context per pass, and every unnecessary pass
+was also an exposure to the snapcompact image-replay bug that destroyed that
+session's history.
+
+### Root cause: two knobs, two thresholds
+
+The shipped default was already `min(int(w * 0.8), 600_000)` = 600k for a 1M
+window. What resolved to 250k was a SECOND absolute knob:
+`values.compaction.max_threshold_tokens`, a defensive ceiling added for a
+radient-advertised 1.05M model whose requests aborted near 250k, which the
+user's `~/.local-operator/config.yml` sets to `250000`. Two independent
+notions of "when to compact" meant the resolved trigger was 25% of the window
+on a model that never had the abort problem.
+
+The receipt's 234.8k is a second, separate fact: the gate compares
+`compaction_context_tokens` = `max(provider-reported, local estimate)`, while
+the receipt quotes `_CompactionPlan.tokens_before`, the LOCAL estimate. The
+transcript entries for the passes on this machine record the gate's figure —
+261k, 269k, 332k, 402k, 475k — all above the 250k trigger the receipt appeared
+to undercut.
+
+### Fix: one resolver, `min(percent x window, absolute)`
+
+`compaction.thresholds.resolve_threshold_tokens` is the only place a trigger is
+derived; the session gate no longer pre-bakes a threshold into the settings it
+passes to `should_compact`. Two config knobs, defaults 80% and 600k:
+
+```yaml
+values:
+  compaction:
+    threshold_percent: 0.80   # 80 means the same thing
+    threshold_tokens: 600000
+```
+
+The SMALLER wins: the percentage keeps a small-context model compacting in
+proportion to what it can hold (80% of 200k = 160k, where a 600k absolute
+trigger could never fire), and the absolute ceiling stops a very large window
+from letting one session grow to a size that is slow and expensive on every
+request even though it fits. Resolved figures, shipped defaults:
+
+| window | trigger | % of window |
+|---|---|---|
+| 32,000 | 25,600 | 80.0% |
+| 128,000 | 102,400 | 80.0% |
+| 200,000 | 160,000 | 80.0% |
+| 750,000 | 600,000 | 80.0% |
+| 1,000,000 | 600,000 | 60.0% |
+| 2,000,000 | 600,000 | 30.0% |
+
+`max_threshold_tokens` is superseded (same meaning as `threshold_tokens` under
+`min`) and is read as it with a rename warning, so an existing config keeps its
+explicit ceiling instead of silently sailing past a proxy's real limit — a
+config still carrying `max_threshold_tokens: 250000` still resolves to 250k and
+must be edited to get the 600k default. Out-of-range values fall back to the
+default with a de-duplicated `logger.warning` (the trigger resolves at every
+tool-loop boundary). An explicit `reserve_tokens` now caps the trigger at
+`window - reserve` instead of bypassing the rule: it can only pull a pass
+earlier.
+
+Evidence: `tests/unit/compaction/test_thresholds.py` (17 tests: the min rule,
+the 235k regression, small-window inertness, the legacy key, validation
+fallbacks, warning de-duplication) and
+`tests/unit/session/test_compaction_trigger.py` (5 tests through the real gate
+with real `compaction.api`: no pass at 234.8k on a 1M window, a pass at
+600,001, a 200k model still firing at 160,001, the provider-vs-estimate ruler
+split, and both knobs moving the gate), plus
+`tests/unit/test_session_factory.py::test_trigger_knobs_are_settable_in_config_yml`
+and `::test_default_config_compacts_at_600k_on_a_1m_model` for the config.yml
+path.

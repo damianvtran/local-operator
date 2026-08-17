@@ -202,18 +202,24 @@ Skills (deliberate design choices, user-requested):
 - Compaction (`compaction/`): strategies `context-full` and `snapcompact`,
   auto-selected: snapcompact when the active model supports image input,
   else context-full.
-  - **Default threshold**: the lesser of 80% of the model context window and
-    600,000 tokens (user-configurable via `values.compaction.threshold_tokens`
-    / `threshold_percent`), and additionally capped by
-    `values.compaction.max_threshold_tokens` (default 600_000) — a defensive
-    ceiling for providers that advertise a window far larger than the serving
-    path sustains (a 1.05M-advertised model whose requests start aborting
-    around 250k is the case that motivated it; set it to your proxy's real
-    ceiling and long sessions compact before the stall point).
+  - **Trigger threshold**: `min(threshold_percent * context_window,
+    threshold_tokens)`, resolved in exactly one place
+    (`compaction.thresholds.resolve_threshold_tokens`). Defaults: 80% and
+    600,000 tokens. The SMALLER of the two wins — the percentage keeps a
+    small-context model compacting in proportion to what it can hold (80% of
+    200k = 160k, where a 600k absolute trigger could never fire), and the
+    absolute ceiling stops a very large window from letting one session grow
+    to a size that is slow and expensive on every request even though it fits
+    (600k of a 1M window). An explicit `reserve_tokens` additionally caps the
+    trigger at `window - reserve`, so it can only pull a pass earlier.
+    Out-of-range values fall back to the default with a `logger.warning`.
   - Settings in config.yml `values.compaction.*`: enabled (true),
-    strategy (auto), reserve_tokens (16384), keep_recent_tokens (20000),
-    threshold_percent (-1), threshold_tokens (-1), max_threshold_tokens
-    (600000), auto_continue (true), mid_turn_enabled (true).
+    strategy (auto), reserve_tokens (unset → 15% proportional floor),
+    keep_recent_tokens (20000), threshold_percent (0.80; `80` is accepted and
+    means the same), threshold_tokens (600000), auto_continue (true),
+    mid_turn_enabled (true). The former `max_threshold_tokens` ceiling is
+    superseded by `threshold_tokens` (same meaning under `min`) and is read as
+    it with a rename warning.
   - `should_compact`/`resolve_threshold_tokens` math;
     `COMPACTION_RECOVERY_BAND = 0.8`.
   - `find_cut_point`: walk backwards accumulating estimated tokens, never cut
