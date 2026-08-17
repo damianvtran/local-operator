@@ -519,6 +519,27 @@ async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() 
 
 
 @pytest.mark.asyncio
+async def test_the_exit_survives_a_terminal_too_small_to_draw_the_card() -> None:
+    """Below three body rows there is no drawable card, so the question is what
+    it gives up. Round 2 found that a 1-2 row budget still rendered as three
+    lines, and the line lost was the footer — the one row ``_allocate`` buys
+    first, because it is the only statement of how to leave a card the turn is
+    parked on. ``MIN_BODY_ROWS`` makes the card overflow a terminal this size
+    instead, which is visible and recoverable by resizing; a silently amputated
+    exit is neither."""
+    for size in ((40, 4), (40, 3), (30, 2), (20, 1)):
+        app, screen = await _real_app_card(size, [_long_question()])
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            app.push_screen(screen)
+            await pilot.pause()
+            await pilot.pause()
+            lines = screen.render_lines_for_test()
+            assert "esc" in lines[-1] or "enter" in lines[-1], (size, lines)
+            assert len(screen.visible_rows) >= 1, size
+
+
+@pytest.mark.asyncio
 async def test_a_recommended_option_never_widens_the_card_past_the_screen() -> None:
     """`virtual_size` over `size` is the condition AGENTS.md calls always a bug
     on this app. The 15-cell tag used to be appended on top of the label's

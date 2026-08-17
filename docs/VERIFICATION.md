@@ -1714,6 +1714,7 @@ the transcript ground, picker overflow row, picker closed under a stationary
 pointer and a dismissed toast. A hover frame from the real `OperatorApp` is
 byte-identical before and after (the rule paints no pixels); the shape is the
 behavioural contract, which is what the tests hold.
+
 ## Compaction fired at 23% of a 1M window (2026-08-17)
 
 A live session on `anthropic/claude-opus-5` (`context_window=1_000_000`,
@@ -1789,3 +1790,136 @@ split, and both knobs moving the gate), plus
 `tests/unit/test_session_factory.py::test_trigger_knobs_are_settable_in_config_yml`
 and `::test_default_config_compacts_at_600k_on_a_1m_model` for the config.yml
 path.
+
+## A turn that ended with every todo still open (2026-08-17)
+
+Reported as an early yield: a requirement typed mid-turn, an acknowledgement in
+prose, and the turn over reading `Todos · 0/6`.
+
+Steering was not the cause — the loop injects a steered message and continues.
+The break is one hop later: the model treated its answer to the steering
+message as its final word, `has_more_tool_calls` went false, and `AgentLoop`
+reached `break` with the whole list outstanding. `harness/loop.py` already
+implemented "inject at the yield boundary and re-enter"; no host had ever wired
+`LoopConfig.get_follow_up_messages`, so nothing re-asserted the work.
+
+`Session._todo_continuation` now fills that hook, injecting a `todo_reminder`
+`CustomMessage` while the list is still MOVING. Two byte-identical yields mean
+the model cannot proceed — usually it wants a decision only the user can make —
+and nudging it again would spend the loop's continuation budget and delay the
+question. Invisible to the user by construction rather than by a flag:
+`_drain_pending` emits no event, follow-ups never enter `new_messages`, and the
+TUI's resume replay branches on a `role` a `CustomMessage` does not have.
+
+Live evidence (real model, `anthropic/claude-opus-5`, headless `exec`, prompt
+engineered to stop early): **2 provider requests before, 4 after**. The model
+tried to yield at request 2, the guardrail put it back, and it resolved the list
+with `todo drop` — the honest exit — rather than falsely marking work done.
+
+A false negative worth recording, because it cost an hour and recurred later in
+the same change: the first live runs showed no guardrail at all. The `.venv` in
+a worktree is a symlink whose editable install points at the MAIN checkout, so
+`.venv/bin/local-operator` imported `~/local-operator` while `pytest` (which
+puts the rootdir on `sys.path`) exercised the worktree. Testing a worktree
+through the console script needs `PYTHONPATH=$PWD`. The same trap later produced
+a false "these tests fail on origin/main" claim, where the failures were really
+a peer's uncommitted work in that checkout.
+
+Evidence: `tests/unit/session/test_todo_steering_e2e.py` (6 scenarios through
+the real `Session`, real `AgentLoop` and real `todo` tool, with a scripted
+provider that steers WHILE the first tool batch is in flight: a steered
+requirement does not end the turn, the reminder reaches neither the transcript
+nor a replayed history, a stuck model is nudged once then released, `block` ends
+the turn cleanly, progress earns another nudge, and a fresh user turn re-arms),
+`tests/unit/session/test_todo_guardrail.py` (11), and
+`tests/unit/harness/test_loop.py::test_todo_reminder_follow_up_reenters_and_stays_invisible`.
+
+The todo tool grew the ops the guardrail needs to be honest: `add` (a
+requirement arriving mid-turn was previously unrecordable, since `init`
+replaces the list), `block` with a mandatory reason, `drop`, and a fix to
+`done`, which honoured only `items[0]` and silently ignored the rest — so a
+model closing three items watched two stay open and would then be nagged about
+items it believed it had closed.
+
+## Two review rounds' findings, and what they cost to miss (2026-08-17)
+
+Both round-1 reviews requested changes on defects the 4177-test suite was green
+through, which is the entry worth keeping.
+
+The code round's blocker: the `ask` tool was **never advertised to any model**
+in any real host. Its builder is gated on a hook only a session can supply, the
+factory builds the inventory before that hook exists, and the mechanism that
+rescues exactly this class — `_merge_capability_tools` — both omitted `ask` and
+ran once in `__init__`, before the TUI installs the handler. A second link:
+`wire_mcp_into_session` snapshotted its non-MCP base at wiring time, so the
+first MCP activation undid any later merge. The tuple is now the named
+`SESSION_CAPABILITY_TOOLS`, `set_ask_handler` re-merges just `ask` (a full
+re-merge would resurrect the capabilities a subagent deliberately prunes), and
+the MCP base is read back per refresh. The guard against the next occurrence is
+DERIVED, not a second hardcoded list: a test asserts `{tools the session context
+can build} - {tools the factory context can build} == set(SESSION_CAPABILITY_TOOLS)`.
+
+The code round's majors, both from the reminder being the one injection nothing
+persists while still rendering into the planner's history with its own id: a
+reminder AT the compaction cut refused the whole pass as `cut_not_replayable`
+(**30/30 refusals with one open todo against 25/30 committed with none**), and a
+reminder inside the kept window came back from `[marker, *kept]` as a plain user
+message that neither expiry guard could match, asserting items were open after
+they were closed. `Session._render_for_compaction` now renders the
+reminder-free view at both ends of a pass. Measured after: 6 committed / 24
+refused with an open todo, identical to 6 / 24 with none.
+
+The design round's blocker: the ask card **clipped its own footer**, and at
+30x12 every option row — a question with no answers and no way out, on a turn
+parked waiting for one. Three causes, not one: a `max(1, budget - chrome)` floor
+that handed out rows the region did not have, a stylesheet `max-height: 80%`
+acting as a second unaware cap, and a `_screen_size` height floor of 8 rows that
+re-created the identical clip at 20x8. Rows are now paid for in a defended
+order (footer, one option, the windowing line, the question, title, remaining
+options, spacers, descriptions) from one frozen layout per paint. Round 2 found
+the residual by fuzzing heights 1-45 and it is floored at `MIN_BODY_ROWS`.
+
+Evidence: `tests/unit/session/test_late_capability_tools.py` (6),
+`tests/unit/session/test_todo_compaction.py` (the two compaction majors),
+`tests/unit/tui/test_ask_picker.py` (32, including a 90-combination geometry
+sweep asserting `size == virtual_size` with the footer and at least one option
+drawn at every size down to 20x8), `tests/unit/tui/test_ask_settle.py`,
+`tests/unit/tools/test_ask_tool.py`, and `tests/unit/tui/test_band_panels.py`
+for the four-status band. One assertion is worth naming because its first
+version was wrong instructively: it measured the body's own region, and an
+overflowing child still reports the height it WANTED, so it agreed with the clip
+instead of catching it. It measures against the screen now, which is what let
+the 20x8 case be found.
+
+## Post-compaction images were double base64-encoded (2026-08-17)
+
+Every request after a compaction died with `400 ... does not represent a valid
+image`, on three providers in turn, after which the session silently dropped all
+images — and with them the compacted history the frames were standing in for.
+
+Two encodes, zero decodes: `_archive_to_json` encoded PNG bytes for JSON,
+`Archive.model_validate` then UTF-8-**encoded** those strings into `bytes`
+(pydantic's lax `str`→`bytes` coercion is not a base64 decode), and
+`history_blocks` encoded again. The provider decoded once and got ASCII
+`iVBORw0K…`. `Archive` now owns both halves of the contract, so bytes in ==
+bytes out.
+
+Verified on the real archive from the session that 400'd (28 persisted frames):
+`replayed frames: 6, distinct magics: {'89504e47'}` — before the fix every one
+was `6956424f`, the ASCII of the base64 text. Already-persisted transcripts
+store exactly what the validator decodes, so the fix repairs existing sessions
+on resume with no migration.
+
+Why CI was green through a shipped 400: every frame test built the `Archive`
+in-process with real `bytes`, and the one session-level test pinned
+`frames == []`. The new coverage exercises `_archive_to_json` →
+`model_validate` → `history_blocks`, and was falsified by restoring the old
+coercion — exactly the four new tests fail.
+
+The image-rejection backstop stays, since real provider flakes exist, but it now
+logs the first block's mime, base64 length and decoded magic: `89504e47` means a
+provider refused a real PNG, `6956424f` means we corrupted it ourselves.
+
+Evidence: `tests/unit/compaction/test_snapcompact.py` (persistence round trip)
+and `tests/unit/session/test_compact_now.py` (a non-empty archive replaying as
+valid PNGs through the live render path).

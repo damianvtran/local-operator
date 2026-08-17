@@ -81,6 +81,12 @@ CARD_PADDING_ROWS = 2
 #: 100x24 — so the margin yields by the row, and never in a step.
 CARD_FLOAT_MARGIN_SHARE = 5
 
+#: The smallest body :meth:`AskPickerScreen._allocate` can actually express —
+#: one question line, one option row, and the footer. A budget under this is not
+#: a smaller card but a clipped one, and what it clips is the footer (the row
+#: the allocator buys first, being the only statement of how to leave).
+MIN_BODY_ROWS = 3
+
 #: The cursor glyph, matching the ``/resume`` and command pickers. A caret plus
 #: a tinted label rather than a reversed row: an inverted block reads as a
 #: selection the user made rather than the position they are on.
@@ -582,12 +588,22 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
 
         A CAP and not a fill: the body is ``height: auto``, so a card with
         little to say still draws short and still floats.
+
+        Floored at ``MIN_BODY_ROWS`` because :meth:`_allocate` cannot honour a
+        budget below it: the smallest plan it can express is a question line, an
+        option row and the footer, and handed 1 or 2 rows it returns a plan the
+        renderer still draws as three lines — clipping the footer, which is the
+        one row the allocator buys first precisely because it is the only
+        statement of how to leave. Below three rows a card is not drawable at
+        all, so it overflows by design rather than silently losing its exit
+        (found in round 2 by fuzzing heights 1-45; the case is bounded to
+        terminals four rows tall and under, and independent of width).
         """
         _, height = self._screen_size()
         room = max(1, height - CARD_PADDING_ROWS)
         wanted = 2 + question_lines + self.row_count + 1
         margin = min(height // CARD_FLOAT_MARGIN_SHARE, max(0, room - wanted))
-        return max(1, room - margin)
+        return max(MIN_BODY_ROWS, room - margin)
 
     def _layout(self) -> _CardLayout:
         """Divide the body's rows BEFORE anything is drawn into them.
