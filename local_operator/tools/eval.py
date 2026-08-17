@@ -50,8 +50,10 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.tools.builtin import (
-    TRACEBACK_TAIL_CHARS,
     TOOL_OUTPUT_LIMIT_CHARS,
+    TRACEBACK_TAIL_CHARS,
+    _bash_output_summary,
+    _display_target,
     _error,
     _guard,
     _safe_cwd,
@@ -161,7 +163,9 @@ def _retire(kernel: _Kernel) -> None:
 
 def _reap_idle(now: float) -> None:
     """Close kernels unused for :data:`KERNEL_IDLE_SECONDS` (on access)."""
-    stale = [key for key, kernel in _KERNELS.items() if now - kernel.last_used > KERNEL_IDLE_SECONDS]
+    stale = [
+        key for key, kernel in _KERNELS.items() if now - kernel.last_used > KERNEL_IDLE_SECONDS
+    ]
     for key in stale:
         _retire(_KERNELS.pop(key))
 

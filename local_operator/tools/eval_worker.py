@@ -123,9 +123,7 @@ def _format_error(exc: BaseException) -> str:
     """
     if isinstance(exc, SyntaxError):
         return "".join(traceback.format_exception_only(type(exc), exc)).strip()
-    return "".join(
-        traceback.format_exception(type(exc), exc, exc.__traceback__)
-    ).strip()
+    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
 
 
 def _execute(namespace: dict[str, Any], code: str) -> str | None:

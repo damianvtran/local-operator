@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-from local_operator.harness.types import AbortSignal, AgentToolUpdate, ToolContext, ToolResult
+from local_operator.harness.types import (
+    AbortSignal,
+    AgentToolUpdate,
+    ToolContext,
+    ToolResult,
+)
 from local_operator.tools import builtin
 from local_operator.tools import eval as eval_tool
 
@@ -78,7 +83,7 @@ async def test_imports_persist(context) -> None:
     await _call(context, "import json")
     result = await _call(context, "json.dumps({'a': 1})")
     assert result.is_error is False
-    assert 'result: \'{"a": 1}\'' in result.text
+    assert "result: '{\"a\": 1}'" in result.text
 
 
 @pytest.mark.asyncio
