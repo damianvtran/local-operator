@@ -159,6 +159,7 @@ class TestUsageIsPerAccount:
             org_id=None,
             api_endpoint=None,
             kind="oauth",
+            raw=None,
         )
 
     @pytest.mark.asyncio
@@ -169,7 +170,9 @@ class TestUsageIsPerAccount:
         ]
         seen: list[tuple[str, str | None]] = []
 
-        async def fake_fetch(client, provider, *, api_key, access_token, account_id):
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
             seen.append((provider, account_id))
             return UsageReport(provider=provider, limits=[])
 
@@ -188,7 +191,9 @@ class TestUsageIsPerAccount:
             self._account("second@example.com", "acct-2"),
         ]
 
-        async def fake_fetch(client, provider, *, api_key, access_token, account_id):
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
             return UsageReport(provider=provider, limits=[])
 
         monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
@@ -205,7 +210,9 @@ class TestUsageIsPerAccount:
             self._account("fine@example.com", "acct-2"),
         ]
 
-        async def fake_fetch(client, provider, *, api_key, access_token, account_id):
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
             if account_id == "acct-1":
                 raise RuntimeError("quota endpoint exploded")
             return UsageReport(provider=provider, limits=[])
@@ -224,7 +231,9 @@ class TestUsageIsPerAccount:
         store.api_keys["openrouter"] = "sk-or-1"
         calls = 0
 
-        async def fake_fetch(client, provider, *, api_key, access_token, account_id):
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
             nonlocal calls
             calls += 1
             return UsageReport(provider=provider, limits=[])
