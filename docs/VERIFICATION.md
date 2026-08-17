@@ -1594,12 +1594,14 @@ and glob already used):
 Off-loop did NOT mean transaction-free. Review round 1 caught two concurrency
 edges the event loop had serialized accidentally:
 
-- `read`/`edit`/`write` share 64 fixed process-wide filesystem stripes.
-  Existing files key by `(device, inode)`, coalescing symlinks, hardlinks and
-  case aliases; not-yet-created files fall back to a resolved, case-folded
-  path. Read's `stat` + content sniff + cap decision + bytes are one snapshot
-  under that stripe; edit/write hold it across read/decide/write/diff. Fixed
-  stripes bound memory, and a hash collision only serializes unrelated files.
+- `read`/`edit`/`write` share 64 fixed process-wide filesystem stripes. Every
+  transaction holds a resolved, case-folded path stripe, keeping the key
+  stable as a file is created. Existing files additionally hold their
+  `(device, inode)` stripe, coalescing hardlinks. All stripes are acquired in
+  numeric order, so overlapping alias sets cannot deadlock. Read's `stat` +
+  content sniff + cap + bytes are one snapshot; edit/write hold the set across
+  read/decide/write/diff. Fixed stripes bound memory, and hash collisions only
+  serialize unrelated files.
 - Spill content and metadata now stage through unique same-directory temp
   files and atomic replace. Identical content has an identical digest, so the
   old deterministic `<digest>.txt.tmp` let concurrent writers rename one
@@ -1624,12 +1626,16 @@ Round-4's hardlink repro addresses one inode through `shared.txt` and
 `alias.txt`: `cafa34c` returns success for both edits but settles as
 `alpha\nBETA\n` (lost `ALPHA`); inode-keyed stripes settle both aliases as
 `ALPHA\nBETA\n`.
+Round-5's creation-transition repro holds the first writer after it creates
+`new.txt`: `ef687c2` lets the second writer enter on the new inode stripe
+(`peak == 2`); the stable path + optional inode set keeps peak concurrency at
+one until the creator commits.
 
 Evidence: `tests/unit/tools/test_loop_liveness.py` — a 20 ms heartbeat
 running while the tools work. On the fix: max gap under 120 ms. At `d424441`
 (the PR base): **0.649 s** for three concurrent image reads. The refusal
 strings and byte-level framing of `edit`'s ambiguity contract are asserted
-unchanged by the current tools suite (369 tests).
+unchanged by the current tools suite (370 tests).
 
 ## The name that never landed (and the early provider failures)
 

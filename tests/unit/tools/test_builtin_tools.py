@@ -1237,6 +1237,50 @@ async def test_hardlink_aliases_share_one_file_transaction(
 
 
 @pytest.mark.asyncio
+async def test_create_transition_keeps_the_path_transaction_stripe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second writer cannot bypass the creator after the inode appears."""
+    path = tmp_path / "new.txt"
+    created = threading.Event()
+    release_first = threading.Event()
+    state_lock = threading.Lock()
+    active = 0
+    peak = 0
+    real_locked = builtin._write_file_result_locked
+
+    def observed_locked(target: Path, content: str):
+        nonlocal active, peak
+        with state_lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            result = real_locked(target, content)
+            if content == "first":
+                created.set()
+                assert release_first.wait(timeout=2)
+            return result
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(builtin, "_write_file_result_locked", observed_locked)
+    first = asyncio.create_task(asyncio.to_thread(builtin._write_file_result, path, "first"))
+    assert await asyncio.to_thread(created.wait, 1)
+    second = asyncio.create_task(asyncio.to_thread(builtin._write_file_result, path, "second"))
+    try:
+        await asyncio.sleep(0.05)
+        assert peak == 1
+        assert not second.done(), "existing-inode stripe bypassed the creator"
+    finally:
+        release_first.set()
+    await asyncio.gather(first, second)
+
+    assert path.read_text() == "second"
+
+
+@pytest.mark.asyncio
 async def test_edit_whitespace_tolerant_match_reindents(tools, context, tmp_path) -> None:
     """old_text written at the wrong indentation still matches, and the
     replacement is re-indented to the FILE's level — the edit written from a

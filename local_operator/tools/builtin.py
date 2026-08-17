@@ -54,7 +54,7 @@ import signal as signal_module
 import threading
 import time
 import traceback
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -953,24 +953,33 @@ ToolExecutor = Callable[
 _FILE_TRANSACTION_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 
-def _file_transaction_lock(path: Path) -> threading.Lock:
-    """The process-wide transaction stripe for one filesystem object.
+@contextlib.contextmanager
+def _file_transaction(path: Path) -> Iterator[None]:
+    """Lock the canonical path and, when it exists, its filesystem identity.
 
-    Existing files key by device+inode, which coalesces symlinks, hardlinks
-    and case aliases on case-insensitive filesystems. A path that does not
-    exist yet falls back to a resolved, case-folded spelling; case-folding can
-    conservatively serialize two distinct names on a case-sensitive volume,
-    but that is a safe false collision and closes the create-time alias race.
-    Python's randomized hash is fine: only stability inside this process
-    matters.
+    The path stripe is always held, so a transaction that creates a file
+    cannot be bypassed by a second caller that observes the new inode. The
+    inode stripe additionally coalesces hardlinks. Symlink/case aliases share
+    the resolved, case-folded path key. Multiple stripes are acquired in
+    numeric order to make overlapping alias sets deadlock-free.
     """
+    canonical = ("path", str(path.resolve(strict=False)).casefold())
+    keys: list[object] = [canonical]
     try:
         stat = path.stat()
     except OSError:
-        key: object = ("path", str(path.resolve(strict=False)).casefold())
+        pass
     else:
-        key = ("inode", stat.st_dev, stat.st_ino)
-    return _FILE_TRANSACTION_LOCKS[hash(key) % len(_FILE_TRANSACTION_LOCKS)]
+        keys.append(("inode", stat.st_dev, stat.st_ino))
+    indices = sorted({hash(key) % len(_FILE_TRANSACTION_LOCKS) for key in keys})
+    locks = [_FILE_TRANSACTION_LOCKS[index] for index in indices]
+    for lock in locks:
+        lock.acquire()
+    try:
+        yield
+    finally:
+        for lock in reversed(locks):
+            lock.release()
 
 
 def _guard(tool_name: str) -> Callable[[ToolExecutor], ToolExecutor]:
@@ -2098,7 +2107,7 @@ def _read_file_snapshot(path: Path) -> tuple[int, ImageInfo | None, bytes | None
     swapping text for an image (or a small file for an oversized one) between
     the limit/classification checks and the returned bytes.
     """
-    with _file_transaction_lock(path):
+    with _file_transaction(path):
         size = path.stat().st_size
         info = sniff_image_file(str(path))
         limit = READ_IMAGE_LIMIT_BYTES if info else READ_FILE_LIMIT_BYTES
@@ -2565,7 +2574,7 @@ def _edit_file_result(
     anchor_line: int | None,
 ) -> tuple[int, dict[str, Any]] | str:
     """Serialize one file transaction across parent/child AgentLoops."""
-    with _file_transaction_lock(path):
+    with _file_transaction(path):
         return _edit_file_result_locked(path, hunks, anchor_line)
 
 
@@ -2772,7 +2781,7 @@ async def execute_write(
 
 def _write_file_result(path: Path, content: str) -> tuple[bool, dict[str, Any]]:
     """Serialize one overwrite transaction across parent/child AgentLoops."""
-    with _file_transaction_lock(path):
+    with _file_transaction(path):
         return _write_file_result_locked(path, content)
 
 
