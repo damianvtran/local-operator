@@ -499,7 +499,7 @@ class Chrome(Static):
         First line of the answer.
         Second paragraph here.
         ❯
-        ◆ test/model › ⌂ ~/local-operator                     ! auto-approve always
+        ◆ test/model › ⌂ ~/local-operator            ! ‹ Summarise the ingest path
 
     The last two rows are the composer's chevron and the status band — the
     app's own furniture, pasted into the middle of someone's bug report,
@@ -706,6 +706,14 @@ class OperatorApp(App[None]):
         # next substantive message retries, which is bounded by the user's own
         # sends and only ever fires while no name exists to displace.
         self._name_requested: bool = False
+        # The opener-derived label the band and the tab wear until the
+        # generated title lands. Latched to the FIRST substantive message on
+        # purpose: a conversation is identified by what it was opened for, and
+        # a label that rewrote itself on every follow-up would walk the tab bar
+        # through the session's history instead of naming the session. Held
+        # here and not on the session because it is a DISPLAY stand-in, not a
+        # stored title — see :meth:`_show_provisional_name`.
+        self._provisional_name: str = ""
         # Ownership token for the latch above. Turn start can supersede an
         # in-flight naming worker synchronously, then schedule its replacement
         # from the follow-up message before cancellation has unwound; only the
@@ -1508,6 +1516,10 @@ class OperatorApp(App[None]):
         # session. A `/reload` that continues this conversation re-derives the
         # name from the session it boots, exactly as a `--resume` launch does.
         self._name_requested = False
+        # The opener-derived label goes with the attempt it stood in for: it
+        # describes the conversation that just died, and a swap that kept it
+        # would put the dead session's first sentence on the new session's tab.
+        self._provisional_name = ""
         # The old conversation's turn can no longer settle anything for the
         # new one: release any naming errand still waiting on it. Its
         # session-identity guard then drops the stale attempt, and the reset
@@ -3156,7 +3168,7 @@ class OperatorApp(App[None]):
         self.workers.cancel_group(self, "naming")
 
     def _maybe_name_conversation(self, text: str) -> None:
-        """Schedule the one auto-naming call for this conversation.
+        """Name this conversation: the opener now, the model's title later.
 
         Skipping a low-signal opener does NOT spend the attempt: "hi" is
         usually followed by the actual request, and latching on the greeting
@@ -3172,11 +3184,48 @@ class OperatorApp(App[None]):
         self._name_requested = True
         self._name_generation += 1
         generation = self._name_generation
+        # The band and the tab stop saying `lo › <cwd>` HERE, from the opener,
+        # with no provider call at all. The errand below cannot ask for a title
+        # until the turn settles — it shares the turn's provider lane, and two
+        # simultaneous requests at minute zero 429 both — and a first turn on
+        # this product routinely runs for minutes. Measured against a real
+        # provider before this line existed: a 29.7-second opening turn, the
+        # cwd fallback on the tab for all 29.7 of those seconds, and the title
+        # stored 1.8 seconds after the answer was already on screen. That is
+        # the whole reported bug ("the tab never becomes a title"): the title
+        # did arrive, just after everyone had stopped waiting for it.
+        self._show_provisional_name(text)
         self.run_worker(
             self._name_conversation_worker(session, text, generation),
             thread=False,
             group="naming",
         )
+
+    def _show_provisional_name(self, text: str) -> None:
+        """Wear an opener-derived label until the generated title arrives.
+
+        DISPLAY-only, deliberately: ``session.conversation_name`` stays the
+        store of record and stays empty. Every gate in the naming errand below
+        reads that string to mean "something already named this conversation,
+        do not displace it" — a restored session, an explicit rename — so
+        writing a stand-in into it would have the errand cancel the very call
+        this label is standing in for, and the conversation would keep the
+        excerpt forever. Keeping the stand-in on the host also means the
+        precedence rules on ``ConversationName`` need no third state.
+
+        The band already substitutes the working directory in this slot when
+        there is no name (see ``StatusLine._sync_terminal_title``), so this is
+        a better answer inside an existing fallback rather than a new kind of
+        state: the slot has always held "the best label we have", and the
+        opening request beats the directory at describing a conversation.
+        """
+        if self._provisional_name or self._status is None:
+            return
+        label = naming.provisional_title(text)
+        if not label:
+            return
+        self._provisional_name = label
+        self._status.update(conversation_name=label)
 
     async def _name_conversation_worker(
         self, session: SessionProtocol, text: str, generation: int
@@ -3189,6 +3238,14 @@ class OperatorApp(App[None]):
         ``complete_once`` preempts decoration and cannot overlap it. There is
         deliberately no timeout on the turn-settled wait: a title may be
         absent, but a courtesy call must never make a user request worse.
+
+        That wait is unbounded and can therefore be minutes long, which is
+        exactly what made this errand look broken from the outside. It is no
+        longer VISIBLE, because ``_maybe_name_conversation`` has already put
+        the opener's own words on the band and the tab before scheduling this
+        worker; what lands here is an upgrade, not the first label. The wait
+        stays because the reason for it has not changed — the turn owns the
+        provider lane and a second simultaneous request 429s both.
 
         The generation owns the shared latch. A follow-up supersedes it
         synchronously before scheduling the replacement worker, so cancellation
@@ -3236,10 +3293,16 @@ class OperatorApp(App[None]):
         if not title:
             # Provider failure, cancellation, or "no topic": a later
             # substantive message may retry while the conversation is unnamed.
+            # The opener's excerpt stays on the band and the tab meanwhile —
+            # that is the point of it being a stand-in and not a placeholder.
             if not session.conversation_name:
                 self._name_requested = False
             return
         stored = session.set_conversation_name(title, user_set=False)
+        # Superseded: an answer beats a quote of the question. Cleared rather
+        # than left set so nothing downstream still believes the band is
+        # showing a stand-in.
+        self._provisional_name = ""
         if self._status is not None:
             self._status.update(conversation_name=stored)
 

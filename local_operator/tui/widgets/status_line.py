@@ -94,6 +94,24 @@ ICON_MCP = "⊙"
 #: warning glyph so it reads the same as a warning notice in the transcript.
 ICON_APPROVALS = "!"
 
+#: Cells the session name may occupy in the band's trailing segment, at full
+#: width and after the ladder's shorten step. The name has no natural bound — a
+#: model writes it, or it is an excerpt of whatever the user typed first — and
+#: the band is a fixed two-row box, so an uncapped segment does not wrap, it
+#: evicts the left group. 40 fits every title the naming caps allow
+#: (``MAX_TITLE_CHARS`` is 80, but a 3-7 word answer lands well inside 40) and
+#: leaves the identity group its ordinary width at 120 cells.
+#:
+#: 18 for the stub is a MEASURED choice, not a round number: it sets the width
+#: below which the name cannot appear at all. Swept on a fully populated band
+#: (model, effort, cwd, healthy MCP, context, cost, the alarm) the floor runs
+#: 14 → 90 cells, 18 → 94, 22 → 98, 26 → 101. Anything above 22 loses the name
+#: on a 100-column terminal, which is the width this feature is mostly read at,
+#: and 14 leaves too little of a title to tell two sessions apart. 18 is the
+#: widest stub that still survives 100 columns with everything else on screen.
+NAME_CELLS = 40
+NAME_CELLS_SHORT = 18
+
 #: Separators point INWARD: the left group's chevrons aim right and the right
 #: group's aim left, so both runs converge on the centre gap and frame it. A
 #: symmetric separator (the middot this replaced) left the two groups reading as
@@ -118,15 +136,19 @@ _MIN_GROUP_GAP = 4
 #: The ordering principle: shed what the user already knows or can re-derive,
 #: and protect what predicts their next decision. In order —
 #:
-#: * ``name`` is a label the user typed; they know it.
+#: * ``shorten-name`` is the cheapest useful move in the band: the session name
+#:   is the widest rung, and a stub of it still tells two tiled sessions apart.
 #: * ``duration`` is re-derivable from the transcript.
 #: * ``subagents`` is a counter, but NOT re-derivable without scrolling, which
 #:   is why it outlasts the two above rather than going first.
-#: * the two SHORTEN steps outrank every remaining drop, because they recover
-#:   width while keeping the segment: a basename still answers "where am I" and
-#:   a bare model id still answers "who is replying". Together they free ~35
-#:   cells on a realistic label, more than cost and context cost combined, so
-#:   dropping numbers to preserve a fully-qualified path would be a bad trade.
+#: * the other two SHORTEN steps outrank every remaining drop, because they
+#:   recover width while keeping the segment: a basename still answers "where am
+#:   I" and a bare model id still answers "who is replying". Together they free
+#:   ~35 cells on a realistic label, more than cost and context cost combined,
+#:   so dropping numbers to preserve a fully-qualified path would be a bad trade.
+#: * ``name`` drops once shortening it has stopped paying, ahead of the numbers:
+#:   even a stub is the widest thing left, and a title predicts no action. The
+#:   terminal tab still carries it, which is where it earns its keep anyway.
 #: * ``effort`` is a static setting the user chose. It does not change while
 #:   they watch, so it goes before either live number — an earlier version had
 #:   it OUTLIVING context usage, which meant a band could show `high` but not
@@ -134,9 +156,9 @@ _MIN_GROUP_GAP = 4
 #:   says compaction is coming.
 #: * ``cost``, then ``cwd``, then ``context``, then ``mcp``: context usage is the
 #:   one an operator acts on, and the MCP indicator outlives even that WHEN IT IS
-#:   AN ALARM — it is the cheapest segment to keep and the only one that can turn
-#:   into one. A healthy count is only a courtesy, so it sheds like one; see
+#:   AN ALARM — a healthy count is only a courtesy, so it sheds like one; see
 #:   :func:`drop_ladder`.
+#: * ``approvals`` is last in every variant: one cell, and an alarm. See the rung.
 #:
 #: The brand glyph, the streaming spinner and the model label are NEVER dropped.
 #: When even the irreducible row overflows, ``_render`` emits spinner, glyph and a
@@ -145,15 +167,22 @@ _MIN_GROUP_GAP = 4
 #: reads as broken rather than as compressed, and a streaming band that renders
 #: identically to an idle one is the one thing the colour budget must never allow.
 _DROP_LADDER: tuple[str, ...] = (
-    # A label the user typed and already knows.
-    "name",
     # Re-derivable from the transcript.
     "duration",
-    # Counters. Not re-derivable without scrolling, so they outlast the two
+    # Counters. Not re-derivable without scrolling, so they outlast the one
     # above; jobs go before agents because a backgrounded shell command is
     # visible in the transcript as a tool card, while a subagent is not.
     "jobs",
     "subagents",
+    # The name shortens next, and it is the most productive single step in the
+    # ladder: it is the widest rung, so cutting it to a stub recovers more cells
+    # than dropping any number below, and a stub still does the segment's one
+    # job. `Fix the login redi…` and `Bulk export columns` are as
+    # distinguishable at 18 cells as at 40, which is what a user tiling four
+    # sessions reads it for. It comes AFTER the three drops above rather than
+    # first because those cost the user nothing they cannot re-derive, and
+    # mutilating a label to keep a counter would be the wrong way round.
+    "shorten-name",
     # Shorten before dropping: a basename still answers "where am I" and a bare
     # model id still answers "who is replying".
     "shorten-cwd",
@@ -161,6 +190,16 @@ _DROP_LADDER: tuple[str, ...] = (
     # A static session setting the user chose — it does not change while they
     # watch, so it goes before either live number.
     "effort",
+    # The name's own drop, and it lands HERE by measurement rather than by
+    # argument. Sat two rungs earlier (ahead of `effort`) the walk shed the name
+    # at 100 cells on a fully populated band and then fitted with 19 cells to
+    # spare — the walk is monotone, so it never discovers that keeping an
+    # 18-cell stub and dropping a 7-cell static setting was the better trade.
+    # One rung later the same band keeps `▦ 49.6%/1M ‹ ◈ $73.92 ‹ ! ‹ Add todo
+    # guardrai…` at 100. Below it are only figures an operator acts on, which is
+    # where a title stops competing.
+    "name",
+    # The one figure that is not a live reading of this turn.
     "cost",
     # The working directory goes before the context number. Its shorten step has
     # already reduced it to a basename by now, so what remains is ~7 cells of
@@ -169,31 +208,29 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
-    # Second-to-last, just ahead of mcp — but only while mcp is an ALARM, which
-    # is the one case something here beats it for last place (see
-    # :func:`_narrowest_survivor_last`; in every quiet ladder this rung IS the
-    # last survivor). It only EXISTS while the tool-approval gate is disarmed,
-    # so it is an alarm by the same argument mcp's failure branch is one — but
-    # it is the WIDEST segment in the band (`! auto-approve` is 14 cells against
-    # `⊙ 3 MCP`'s 7), and this ladder sheds by what a drop BUYS. Dropping the
-    # widest alarm first is what lets the narrow one survive to the very last
-    # step, so a cramped terminal keeps saying something rather than falling
-    # straight to the truncated tail. The mode is still not silent when it goes:
-    # `/approvals` reports it, and the notice that latched it is in the
-    # transcript.
-    "approvals",
-    # DEAD LAST *when it is an alarm*, mirroring the reference's
-    # `flexShrink={0}` on this indicator. Two reasons it then outlives even the
-    # context number. It is the narrowest segment in the band — `⊙ 3 MCP` is 7
-    # cells against context's ~9 and a path's 7-plus — so dropping it buys the
-    # least width of anything here. And its failure branch is an ALARM: the
-    # danger-tinted glyph is the only place the band admits the agent is missing
-    # tools it was configured to have, and a cramped terminal is exactly where a
-    # user would otherwise conclude the tools were never configured. Kept in the
-    # ladder rather than omitted from it so the very narrowest widths still get
-    # one graceful aligned step before ``_render`` falls back to the truncated
-    # tail.
+    # Second-to-last. Its failure branch is an ALARM: the danger-tinted glyph is
+    # the only place the band admits the agent is missing tools it was
+    # configured to have, and a cramped terminal is exactly where a user would
+    # otherwise conclude the tools were never configured. Kept in the ladder
+    # rather than omitted from it so the very narrowest widths still get one
+    # graceful aligned step before ``_render`` falls back to the truncated tail.
     "mcp",
+    # DEAD LAST, in every variant. This rung only EXISTS while the tool-approval
+    # gate is disarmed, and it is now a BARE GLYPH — one cell, the narrowest
+    # thing in the band by a factor of seven. Last place goes to the narrowest
+    # bounded rung and an alarm outranks a reading; `!` is both, so it wins
+    # outright and no variant needs a repair to keep it there.
+    #
+    # It used to be first, which looks like the opposite judgement and was the
+    # same one: the segment then spelled out `! auto-approve always` at up to 20
+    # cells, making it the WIDEST rung, and this ladder sheds by what a drop
+    # buys. Shrinking it to the glyph moved it from one end of that argument to
+    # the other. What has not changed is the reason it is here at all: nothing
+    # else in the UI says the gate is disarmed for longer than a scroll — a
+    # saved `tool_approval_mode: auto` is adopted at boot with no notice at all
+    # (see ``_adopt_saved_approvals``), so this is the only standing indication
+    # that no tool will ask before it runs.
+    "approvals",
 )
 
 
@@ -207,44 +244,19 @@ _DROP_LADDER: tuple[str, ...] = (
 _UNBOUNDED_RUNGS = frozenset({"cwd"})
 
 
-def _narrowest_survivor_last(rungs: list[str]) -> list[str]:
-    """Re-seat ``approvals`` off last place — but only when ``mcp`` can take it.
-
-    Every ``_x_before_cwd`` helper below promotes one rung, and promoting a rung
-    leaves whatever FOLLOWED it at the end of the ladder. In this ladder that is
-    reliably ``approvals`` — the 14-cell segment the authored order sheds FIRST,
-    precisely because dropping it buys the most width.
-
-    Last place goes to the narrowest BOUNDED rung, and that rule was written
-    when the only rung competing for it was ``mcp``: 7 cells against 14, and its
-    failure branch is an alarm too, so it wins on both counts. The rule then
-    fired in ladders where ``mcp`` had been promoted away, and handed last place
-    to whatever happened to be there instead — the context percentage — which is
-    not the same trade at all. Measured by a design pass across 13 widths with a
-    healthy MCP: at 56 cells the band read ``◆ Claude Opus 5 › ⣿  ▦ 49.6%/1M ‹ !
-    auto-approve`` and at 48 it read ``◆ Claude Opus 5 › ⣟  ▦ 49.6%/1M``. A
-    narrow terminal quietly stopped saying that every tool runs without asking,
-    in order to keep a compaction forecast.
-
-    So the rule is: last place goes to the narrowest bounded rung, and an ALARM
-    outranks a reading. ``mcp`` is the only rung that beats ``approvals`` on
-    both, so the repair applies exactly when ``mcp`` would land there. Anywhere
-    else the alarm stays last, which also settles a disagreement the two quiet
-    ladders used to have with each other: with an estimated context reading the
-    alarm already survived to the end (the repair was refused there because it
-    would have stranded the unbounded ``cwd`` last), and with an exact one it
-    did not.
-
-    The alarm is not silent when it finally goes: ``/approvals`` reports the
-    mode, and the notice that latched it is in the transcript.
-    """
-    if rungs[-1] != "approvals":
-        return rungs
-    repaired = [step for step in rungs if step != "approvals"]
-    repaired.insert(len(repaired) - 1, "approvals")
-    if repaired[-1] != "mcp":
-        return rungs
-    return repaired
+#: Last place is not repaired any more, and that is worth recording because a
+#: whole helper used to do it. Promoting a rung out of the tail leaves whatever
+#: FOLLOWED it at the end, and while ``approvals`` spelled out
+#: `! auto-approve always` it was the widest rung in the band, authored first,
+#: so every promotion stranded a 20-cell alarm in the one slot reserved for the
+#: narrowest thing that reliably fits. The old fix re-seated it behind ``mcp``
+#: whenever ``mcp`` would have landed last — a rule with an exception, a
+#: docstring longer than the ladder, and four ladder variants to keep honest.
+#:
+#: The alarm is one cell now (see the ``approvals`` rung), which makes it the
+#: narrowest bounded rung outright as well as an alarm — both halves of the rule
+#: last place was always meant to follow. So it is simply authored last, every
+#: promotion leaves it there, and the repair has nothing left to repair.
 
 
 def _mcp_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
@@ -256,7 +268,7 @@ def _mcp_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
     """
     rungs = [step for step in ladder if step != "mcp"]
     rungs.insert(rungs.index("cwd"), "mcp")
-    return tuple(_narrowest_survivor_last(rungs))
+    return tuple(rungs)
 
 
 #: The ladder for a band whose MCP segment is NOT an alarm. Precomputed rather
@@ -278,13 +290,11 @@ def _context_before_cwd(ladder: tuple[str, ...]) -> tuple[str, ...]:
 
     Shedding the estimate first is therefore the same trade ``_mcp_before_cwd``
     exists to make: rank by what the segment is worth RIGHT NOW, not by what
-    its slot is usually worth. It inherits the same tail rule for the same
-    reason — promoting context out of last place in the quiet ladder is exactly
-    what left ``approvals`` stranded there.
+    its slot is usually worth.
     """
     rungs = [step for step in ladder if step != "context"]
     rungs.insert(rungs.index("cwd"), "context")
-    return tuple(_narrowest_survivor_last(rungs))
+    return tuple(rungs)
 
 
 #: Estimate variants of both ladders, precomputed for the same reason.
@@ -1043,7 +1053,7 @@ class StatusLine:
                 target = step.partition("shorten-")[2]
                 (short if target else dropped).add(target or step)
             left = self._left_text(dropped, short, dim, muted, seam, accent)
-            right = self._right_text(dropped, dim, seam)
+            right = self._right_text(dropped, short, dim, seam)
             # The fit test reserves the group gap rather than asking whether the
             # composed row happens to fit. `_compose` pads with `max(1, …)`, so a
             # row could "fit" with the two groups ONE cell apart — tighter than
@@ -1205,8 +1215,8 @@ class StatusLine:
                 left.append(" working", style=dim)
         return left
 
-    def _right_text(self, dropped: set[str], dim: Style, seam: Style) -> Text:
-        """agents ‹ jobs ‹ context ‹ cost ‹ duration ‹ name.
+    def _right_text(self, dropped: set[str], short: set[str], dim: Style, seam: Style) -> Text:
+        """agents ‹ jobs ‹ context ‹ cost ‹ duration ‹ [!] ‹ name.
 
         Colour groups by KIND rather than giving every field its own hue, which
         would be a rainbow: counters share `label`, the two numbers an operator
@@ -1247,33 +1257,58 @@ class StatusLine:
             # 0s task. Any real turn banks at least a few ms.
             if elapsed > 0:
                 parts.append((ICON_DURATION, format_duration(elapsed), dim))
-        if self._conversation_name and "name" not in dropped:
-            parts.append(
-                ("", self._conversation_name, Style(color=theme_mod.semantic_color("muted")))
-            )
         if self._approvals_auto and "approvals" not in dropped:
-            # LAST, so its right edge is the band's right edge: everything else
-            # here is right-ALIGNED as a group, which means a segment placed first
-            # slides left every time a sibling appears (measured: column 86 -> 74
-            # -> 64 -> 51 at a fixed 100 cells). An alarm that moves is an alarm
-            # the eye has to find.
+            # A BARE GLYPH, and second-to-last rather than last. It used to spell
+            # out `! auto-approve always` and own the band's right edge, on the
+            # argument that an alarm which slides left as siblings appear is an
+            # alarm the eye has to hunt for. That argument was sound and the slot
+            # is now spoken for: the session NAME is what an operator reads this
+            # corner for, and 20 cells of prose about a mode that has not changed
+            # since boot was crowding out the one field that says which
+            # conversation this is.
+            #
+            # What survives is the alarm itself, because nothing else in the UI
+            # carries it for longer than a scroll: `/approvals` answers on
+            # demand, the notice that latched the mode scrolls away (and `/clear`
+            # deletes it), and a saved `tool_approval_mode: auto` is adopted at
+            # boot with NO notice at all — see ``OperatorApp._adopt_saved_approvals``.
+            # So `!` alone stays, in the same warning ink and bold, and it still
+            # means exactly what it has always meant here: no tool will ask
+            # before it runs. It no longer distinguishes `auto` from `always`;
+            # that was the answer to "until when", which is a question worth a
+            # command rather than worth the band's last segment.
             #
             # The glyph rides INSIDE the styled text rather than in the icon slot,
             # because the loop below paints icons `dim` — which made the one alarm
             # in the band its quietest mark (4.18:1, against the same `!` at
             # 9.4:1 in the transcript).
-            # `always` when the mode is the SAVED default, and nothing when it is
-            # only this session's. The alarm already answers "is the gate
-            # disarmed"; the one extra word answers the question that follows it,
-            # "until when", which is otherwise only reachable by running a
-            # command. Six cells, and the segment sheds as one unit, so the
-            # narrow-width behaviour is unchanged.
-            armed = f"{ICON_APPROVALS} auto-approve"
             parts.append(
                 (
                     "",
-                    f"{armed} always" if self._approvals_always else armed,
+                    ICON_APPROVALS,
                     Style(color=theme_mod.semantic_color("warning"), bold=True),
+                )
+            )
+        if self._conversation_name and "name" not in dropped:
+            # LAST, so its right edge is the band's right edge — the position the
+            # approval mode used to hold, and the one the user asked for it in.
+            # `muted` and not the accent: the accent budget is spent on "what the
+            # turn is on" (``local_operator.tcss`` enumerates every site), and a
+            # session's name is metadata, so it takes the same secondary ink as
+            # the duration beside it.
+            #
+            # Truncated, never wrapped: the name is model-generated or an excerpt
+            # of the user's opener, so it has no natural bound, and the band is a
+            # fixed two-row box. The ladder shortens it before it drops anything
+            # (see ``_DROP_LADDER``), which is why there are two widths here.
+            parts.append(
+                (
+                    "",
+                    truncate_cells(
+                        self._conversation_name,
+                        NAME_CELLS_SHORT if "name" in short else NAME_CELLS,
+                    ),
+                    Style(color=theme_mod.semantic_color("muted")),
                 )
             )
 

@@ -32,6 +32,7 @@ from local_operator.tui.widgets.status_line import (
     ICON_CWD,
     ICON_MCP,
     ICON_MODEL,
+    NAME_CELLS,
     McpStatus,
     StatusLine,
     drop_ladder,
@@ -336,13 +337,16 @@ def test_the_model_segment_survives_a_terminal_far_too_narrow() -> None:
 # -- overflow priority -------------------------------------------------------
 
 
-def test_the_label_the_user_typed_is_the_first_segment_to_go(monkeypatch) -> None:
-    """The conversation name goes first, and every NUMBER outlives it.
+def test_the_session_name_outlives_the_counters_it_used_to_precede(monkeypatch) -> None:
+    """The name is now the band's TRAILING segment, and it earns its place.
 
-    The name is a label the user typed and already knows; the counters and live
-    figures beside it are not re-derivable at a glance. An earlier order shed the
-    subagent count first, which meant a three-agent fan-out went invisible while
-    a title the user had chosen was still on screen.
+    It used to be the first rung on the ladder, on the reasoning that "the name
+    is a label the user typed and already knows". Both halves of that stopped
+    being true: the name is generated (or excerpted from the opening prompt),
+    and it is the field an operator reads this corner for when four sessions are
+    tiled — which is exactly when the terminal is narrow. So it now outlives the
+    re-derivable duration and the two counters, and sheds only once nothing but
+    live figures is left.
     """
     monkeypatch.setenv("HOME", "/Users/tester")
     status, _clock = _full_band()
@@ -351,19 +355,34 @@ def test_the_label_the_user_typed_is_the_first_segment_to_go(monkeypatch) -> Non
     # Walk down to the first width that sheds it rather than computing it from
     # the 200-cell row. That row is PADDED to the full width (the right group is
     # edge-aligned), so its length is 200 whatever the content measures and
-    # `len(row) - 1` says nothing about when the band overflows.
+    # `len(row) - 1` says nothing about when the band overflows. The stub is
+    # what is probed for: the ladder shortens the name before it drops it.
     for width in range(200, 4, -1):
         tight = status.render_text(width).plain
-        if "Status band enrichment" not in tight:
+        if "Status band enric" not in tight:
             break
     else:  # pragma: no cover - the band always sheds something by width 5
         raise AssertionError("no width shed the conversation name")
 
-    # At the very width that drops the name, everything numeric survives.
-    assert "3 agents" in tight
-    assert "41m1s" in tight
+    # The counters and the duration are already gone by the time the name is:
+    # they are cheap to lose, and this band has stopped shedding the one field
+    # that says which conversation it belongs to in order to keep them.
+    assert "3 agents" not in tight
+    assert "41m1s" not in tight
+    # The live figures an operator acts on do outlive it, which is the half of
+    # the old contract that was right.
     assert "49.6%/1M" in tight
     assert "$12.40" in tight
+
+    # And there is a real band of widths where the name survives and the
+    # counters do not — the whole point of the reorder, not just its rung order.
+    kept = [
+        width
+        for width in range(60, 201)
+        if "Status band enric" in status.render_text(width).plain
+        and "3 agents" not in status.render_text(width).plain
+    ]
+    assert kept, "the name never outlived the subagent counter"
 
 
 def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
@@ -383,7 +402,8 @@ def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
     probes = {
         "subagents": "3 agents",
         "duration": "41m1s",
-        "name": "Status band enrichment",
+        "name-full": "Status band enrichment",
+        "name-short": "Status band enric",
         "cost": "$12.40",
         "context": "49.6%/1M",
         "effort": "high",
@@ -407,12 +427,17 @@ def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
                 order.append(key)
 
     assert order == [
-        "name",  # a label the user typed and already knows
         "duration",  # re-derivable from the transcript
         "subagents",  # a counter, but not re-derivable without scrolling
+        # Shortened to a stub, not dropped: the widest rung, so the cut recovers
+        # more than any drop below it, and a stub still names the session.
+        "name-full",
         "cwd-full",  # shortened to its basename, not dropped
         "model-full",  # shortened to the bare model id, not dropped
         "effort",  # a static setting: it does not change while they watch
+        # Only now does the name go — one rung later than it used to sit in
+        # ENTIRETY, and after everything above it has already been spent.
+        "name-short",
         "cost",
         # The shortened cwd goes BEFORE the context number. By this rung it is a
         # basename — ~7 cells of "where am I" against ~9 cells of "how close is
@@ -818,26 +843,25 @@ def test_a_healthy_mcp_count_sheds_before_the_cwd_and_the_model_label() -> None:
     assert alarm_alone, "a danger count must survive a width the cwd cannot"
 
 
-def test_the_quiet_ladder_moves_mcp_and_leaves_the_alarm_last() -> None:
+def test_the_quiet_ladder_moves_mcp_and_the_alarm_is_last_either_way() -> None:
     """One ordering, two positions for one rung — not two hand-maintained
     ladders that can drift apart on the next reordering.
 
-    Lifting `mcp` out of last place leaves whatever followed it at the end, and
-    that is `approvals`. An earlier pass treated that as damage and re-seated it
-    behind the context number, on the rule "the narrowest bounded rung goes
-    last". That rule was written against `mcp` — 7 cells, and an alarm — and
-    handing last place to a READING instead is not the same trade: with a
-    healthy MCP the band stopped saying `! auto-approve` at 48 cells in order to
-    keep `▦ 49.6%/1M`. An alarm outranks a reading, so the widest alarm stays
-    last in every ladder where `mcp` is not there to take it.
+    Last place goes to the narrowest BOUNDED rung, and an alarm outranks a
+    reading. `approvals` is now both: a bare `!` at one cell against `⊙ 3 MCP`'s
+    seven. So it is authored last and every promotion leaves it there, which is
+    what deleted the repair helper this test used to be about — that helper
+    existed only because the segment then spelled out `! auto-approve always`
+    and was the WIDEST rung in the band.
     """
     assert drop_ladder(McpStatus(configured=2, connected=1, failed=True)) is _DROP_LADDER
     assert drop_ladder(McpStatus(configured=2, connected=2)) is _DROP_LADDER_QUIET
     assert drop_ladder(McpStatus()) is _DROP_LADDER_QUIET
-    assert _DROP_LADDER[-1] == "mcp"
+    assert _DROP_LADDER[-1] == "approvals"
+    assert _DROP_LADDER[-2] == "mcp", "the danger count still outlives every reading"
     assert _DROP_LADDER_QUIET.index("mcp") == _DROP_LADDER_QUIET.index("cwd") - 1
-    # With mcp promoted there is no narrower ALARM to take last place, so the
-    # gate's own alarm keeps it — and outlives the context number.
+    # Promoting mcp cannot dislodge the alarm, because the alarm was never
+    # sitting behind it.
     assert _DROP_LADDER_QUIET[-1] == "approvals"
     assert _DROP_LADDER_QUIET.index("context") < _DROP_LADDER_QUIET.index("approvals")
     # Same rungs in both ladders: the reorder moves things, it never drops one.
@@ -916,11 +940,11 @@ def test_the_last_surviving_rung_is_always_bounded() -> None:
     ladder with a 24-character basename, that cost the alarm across 34-46 cells
     and paid for it with up to 29 blank ones.
 
-    ``approvals`` is kept off the end only where ``mcp`` can take it. At 14
-    cells it is the widest rung, which is why the authored order sheds it first
-    — but "widest" outranks "is an alarm" only when the rung taking last place
-    is an alarm too, and ``mcp`` is the only one that is. In both quiet ladders
-    it has been promoted away, so the gate's alarm goes last there.
+    ``approvals`` takes last place in every variant now: it is a bare ``!``, so
+    it is both the narrowest bounded rung and an alarm, which is the whole rule.
+    It used to be the WIDEST rung (``! auto-approve always``, up to 20 cells) and
+    was authored first for that reason, which is what made a repair helper
+    necessary to keep promotions from stranding it at the end.
     """
     variants = {
         "full": _DROP_LADDER,
@@ -933,11 +957,10 @@ def test_the_last_surviving_rung_is_always_bounded() -> None:
         # A promotion reorders; it never adds or loses a rung.
         assert sorted(ladder) == sorted(_DROP_LADDER), f"{name} changed the rung set"
 
-    # The widest alarm is kept off the end only where the narrower ALARM exists
-    # to take it; a reading never displaces it.
-    assert _DROP_LADDER[-1] == "mcp"
+    # One position, all four variants: nothing needs repairing any more.
+    assert _DROP_LADDER[-1] == "approvals"
     assert _DROP_LADDER_QUIET[-1] == "approvals"
-    assert _DROP_LADDER_ESTIMATE[-1] == "mcp"
+    assert _DROP_LADDER_ESTIMATE[-1] == "approvals"
     assert _DROP_LADDER_QUIET_ESTIMATE[-1] == "approvals"
     assert _DROP_LADDER_QUIET_ESTIMATE.index("context") < _DROP_LADDER_QUIET_ESTIMATE.index(
         "cwd"
@@ -951,6 +974,12 @@ def test_an_armed_alarm_outlives_a_path_that_would_not_have_fitted() -> None:
     failed to fit, so a session with the approval gate DISARMED painted no
     indication of it — a regression against main, where the same terminal keeps
     the alarm because a band with no estimate uses the quiet ladder.
+
+    The alarm is a bare ``!`` now rather than ``! auto-approve``, which is why
+    this probes the glyph as the band's last cell: the word is gone, the warning
+    is not, and it is the ONE thing in the UI that says the gate is disarmed for
+    longer than a scroll (a saved ``tool_approval_mode: auto`` is adopted at boot
+    with no notice at all).
     """
     status, _clock = _full_band()
     status.update(
@@ -959,7 +988,7 @@ def test_an_armed_alarm_outlives_a_path_that_would_not_have_fitted() -> None:
         approvals_auto=True,
         mcp=McpStatus(configured=2, connected=2),
     )
-    armed = [w for w in range(36, 52) if "auto-approve" in status.render_text(w).plain]
+    armed = [w for w in range(36, 52) if status.render_text(w).plain.rstrip().endswith("!")]
     assert armed, "the disarmed-gate alarm vanished at every narrow width"
     for width in armed:
         assert ICON_CWD not in status.render_text(width).plain
@@ -968,6 +997,115 @@ def test_an_armed_alarm_outlives_a_path_that_would_not_have_fitted() -> None:
     # paints nothing, so the path still gets the width.
     status.update(approvals_auto=False)
     assert ICON_CWD in status.render_text(50).plain
+
+
+# -- the trailing segment: the session name ----------------------------------
+
+
+def test_the_session_name_is_the_bands_last_segment() -> None:
+    """The slot the approval mode used to own.
+
+    Asked for directly: "instead of auto approve indicator at the bottom right,
+    let's change that to show the session name which is more valuable than
+    showing the approval status". The right group is edge-aligned, so "last
+    segment" means the last non-blank run in the row.
+    """
+    status, _clock = _full_band()
+    status.update(conversation_name="Add todo guardrails", approvals_auto=False)
+    assert status.render_text(200).plain.rstrip().endswith("Add todo guardrails")
+
+
+def test_the_alarm_sits_beside_the_name_rather_than_replacing_it() -> None:
+    """Both, in a fixed order — the name last, the one-cell alarm before it.
+
+    The alarm is not removed, because nothing else in the UI says the gate is
+    disarmed for longer than a scroll: `/approvals` answers on demand, the
+    notice that latched the mode scrolls away, and a saved
+    ``tool_approval_mode: auto`` is adopted at boot with no notice at all. What
+    it loses is the prose — `auto` and `always` are one glyph now.
+    """
+    status, _clock = _full_band()
+    status.update(
+        conversation_name="Add todo guardrails", approvals_auto=True, approvals_always=True
+    )
+    row = status.render_text(200).plain.rstrip()
+    assert row.endswith("Add todo guardrails")
+    assert "auto-approve" not in row, "the alarm's prose was crowding out the name"
+    assert "always" not in row
+    # The glyph, immediately before the name and after its seam.
+    assert row.endswith("! ‹ Add todo guardrails")
+
+
+def test_an_unnamed_session_leaves_the_trailing_slot_to_whatever_is_left() -> None:
+    """What the segment shows BEFORE a name exists — the decision, pinned.
+
+    The band never invents a label here. It carries no name until the first
+    substantive message, at which point the opener names it (see
+    ``local_operator.session.naming.provisional_title``), so this state lasts
+    seconds rather than the minutes it used to. Meanwhile the trailing slot is
+    simply the next segment along, and NO segment changes meaning: `!` always
+    means the gate is disarmed, and the duration is always the duration. The
+    working directory is not substituted, because the band already carries it in
+    the identity group on the left — the terminal TITLE is the surface with
+    nothing else to fall back on, and that one does substitute the cwd.
+    """
+    status, _clock = _full_band()
+    status.update(conversation_name="", approvals_auto=True)
+    assert status.render_text(200).plain.rstrip().endswith("!")
+    status.update(approvals_auto=False)
+    assert status.render_text(200).plain.rstrip().endswith("41m1s")
+
+
+def test_a_long_name_is_truncated_rather_than_crowding_the_left_group() -> None:
+    """The name is model-generated: it has no natural bound, and the band is a
+    fixed two-row box, so an uncapped segment would evict the identity group
+    instead of wrapping."""
+    status, _clock = _full_band()
+    status.update(conversation_name="x" * 200, approvals_auto=False)
+    row = status.render_text(200).plain
+    # `truncate_cells` spends one of the cells on the ellipsis, so the segment
+    # measures NAME_CELLS in total rather than NAME_CELLS plus a marker.
+    assert "x" * (NAME_CELLS - 1) + "…" in row
+    assert "x" * NAME_CELLS not in row
+    # The left group is intact at a width where an uncapped name would have
+    # pushed the model label off the row entirely.
+    assert ICON_MODEL in row
+
+
+def test_a_late_arriving_name_repaints_the_segment() -> None:
+    """Auto-naming lands asynchronously and a rename can land at any time; both
+    reach the band through the same ``update`` call, so neither needs a
+    restart."""
+    status, _clock = _full_band()
+    status.update(conversation_name="", approvals_auto=False)
+    assert "Fix the login flow" not in status.render_text(200).plain
+    status.update(conversation_name="Fix the login flow")
+    assert status.render_text(200).plain.rstrip().endswith("Fix the login flow")
+    status.update(conversation_name="Something the user typed")
+    assert status.render_text(200).plain.rstrip().endswith("Something the user typed")
+
+
+def test_the_name_never_takes_the_accent() -> None:
+    """The accent budget is spent on "what the turn is on" (``local_operator.tcss``
+    enumerates every site). A session's name is metadata, so it takes the same
+    secondary ink as the numbers beside it."""
+    status, _clock = _full_band()
+    status.update(conversation_name="Add todo guardrails", approvals_auto=False)
+    rendered = status.render_text(200)
+    accent = theme_mod.semantic_color("accent")
+    muted = theme_mod.semantic_color("muted")
+    spans = [
+        span
+        for span in rendered.spans
+        if "Add todo guardrails" in rendered.plain[span.start : span.end]
+    ]
+    assert spans, "the name was not painted as its own span"
+    for span in spans:
+        style = span.style
+        colour = getattr(style, "color", None)
+        assert colour is not None
+        assert colour.name != accent, "the session name took the accent"
+        assert colour.name == muted
 
 
 # -- repaint vs reflow -------------------------------------------------------
