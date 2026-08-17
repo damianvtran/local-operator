@@ -70,6 +70,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -271,8 +272,11 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
             suffix=".tmp",
             delete=False,
         ) as stream:
-            stream.write(data)
+            # Record the name BEFORE the first byte. A full disk can raise
+            # from `write`; the finally block must still remove the partial
+            # file, which is invisible to the store's entry accounting.
             tmp_path = Path(stream.name)
+            stream.write(data)
         os.replace(tmp_path, path)
     finally:
         if tmp_path is not None:
@@ -287,12 +291,18 @@ class SpillStore:
     that cannot be written must not be able to fail a tool call.
     """
 
-    __slots__ = ("_root",)
+    __slots__ = ("_root", "_write_lock")
 
     def __init__(self, root: Path | None = None) -> None:
         # ``None`` means "resolve per call", so an instance built before a test
         # relocated the config dir still follows the relocation.
         self._root = root
+        # One write transaction is content + sidecar + eviction. Worker-thread
+        # spilling made those phases concurrent across tools; serializing the
+        # whole unit prevents one writer's sweep from deleting another's
+        # half-installed or just-installed digest. Oversized spills are rare,
+        # so one store lock is simpler and safer than per-digest lock lifetime.
+        self._write_lock = threading.Lock()
 
     @property
     def root(self) -> Path:
@@ -309,6 +319,18 @@ class SpillStore:
     # -- write -------------------------------------------------------------
 
     def write(self, text: str, *, tool_name: str = "", session_id: str = "") -> SpillMeta | None:
+        """Store one output as an install+evict transaction.
+
+        The lock covers both atomic entry files and the eviction sweep: a
+        concurrent writer's digest cannot be deleted during its
+        content-before-sidecar interval or immediately after installation.
+        """
+        with self._write_lock:
+            return self._write_locked(text, tool_name=tool_name, session_id=session_id)
+
+    def _write_locked(
+        self, text: str, *, tool_name: str = "", session_id: str = ""
+    ) -> SpillMeta | None:
         """Store ``text`` and return its metadata, or ``None`` on failure.
 
         ``None`` is a normal outcome, not an error: a read-only home
@@ -591,6 +613,11 @@ class SpillStore:
         return evicted
 
     def prune_all(self) -> int:
+        """Delete every entry as one transaction; returns the count removed."""
+        with self._write_lock:
+            return self._prune_all_locked()
+
+    def _prune_all_locked(self) -> int:
         """Delete every entry. Returns the count removed (tests, teardown)."""
         removed = 0
         for digest, _size, _recency, _session in self._entries():

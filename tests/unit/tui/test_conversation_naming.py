@@ -33,13 +33,25 @@ class _GatedSession(FakeSession):
         super().__init__()
         self.gate = asyncio.Event()
         self.title = ""
+        self.name_gate: asyncio.Event | None = None
+        self.name_started = asyncio.Event()
+        self.timeline: list[str] = []
 
     async def prompt(self, text: str, images: Any = None) -> None:  # noqa: ANN401
         self.prompts.append(text)
+        self.timeline.append(f"prompt:{text}")
         await self.gate.wait()
 
     async def complete_once(self, system: str, prompt: str) -> str:
         self.completions.append((system, prompt))
+        self.timeline.append("name:start")
+        self.name_started.set()
+        if self.name_gate is not None:
+            try:
+                await self.name_gate.wait()
+            except asyncio.CancelledError:
+                self.timeline.append("name:cancel")
+                raise
         return self.title
 
 
@@ -78,6 +90,29 @@ async def test_naming_waits_for_the_live_turn_to_settle(
         session.gate.set()  # the turn settles
         await _settle()
         assert len(session.completions) == 1, "naming did not fire once the turn settled"
+
+
+@pytest.mark.asyncio
+async def test_follow_up_preempts_an_inflight_naming_call() -> None:
+    """A follow-up provider call starts only after naming cancellation unwinds."""
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    session.name_gate = asyncio.Event()  # hold complete_once inside the provider lane
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._start_turn("opening turn")
+        app._maybe_name_conversation("fix the login flow")
+        await _settle()
+        assert not session.name_started.is_set()
+
+        session.gate.set()  # opening turn settles; naming takes the provider lane
+        await asyncio.wait_for(session.name_started.wait(), timeout=1)
+        app._start_turn("follow-up turn")
+        await _settle()
+
+        assert "name:cancel" in session.timeline
+        assert session.timeline.index("name:cancel") < session.timeline.index(
+            "prompt:follow-up turn"
+        )
 
 
 @pytest.mark.asyncio

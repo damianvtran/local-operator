@@ -1602,14 +1602,19 @@ edges the event loop had serialized accidentally:
 - Spill content and metadata now stage through unique same-directory temp
   files and atomic replace. Identical content has an identical digest, so the
   old deterministic `<digest>.txt.tmp` let concurrent writers rename one
-  another's temp away.
+  another's temp away. The temp path is recorded before the first byte, so a
+  full-disk write removes its partial `delete=False` file. One store lock
+  covers content + sidecar installation and the eviction sweep; `prune_all`
+  takes the same lock, so no writer can delete another's half-installed or
+  just-installed digest near the byte ceiling.
 
 Deterministic review repros at reviewed head `676ba26`: two delayed concurrent
 edits to `alpha\nbeta\n` both returned success but settled as `ALPHA\nbeta\n`
 (lost update); eight identical spill writers returned at least one `None`.
-`test_concurrent_edits_share_one_file_transaction` and
-`test_concurrent_identical_writes_use_distinct_atomic_temps` both fail there
-and pass with the process lock / unique atomic temps.
+Those F1/F3 tests fail there and pass with the process lock / unique atomic
+temps. Round-2 tests additionally hold the store transaction at one active
+entry installer and force a write failure after temp creation, asserting the
+partial temp is removed.
 
 Evidence: `tests/unit/tools/test_loop_liveness.py` — a 20 ms heartbeat
 running while the tools work. On the fix: max gap under 120 ms. At `d424441`
@@ -1632,7 +1637,14 @@ session's terminal title stayed `lo › tmp` forever. Two causes, one fix each:
    never settles may cost its name but must never be made worse by a courtesy
    call. The turn worker's `finally` and reload path release every normal end,
    and the worker re-checks session identity/user naming after the wait.
-2. **A failed attempt was spent forever.** `_name_requested` latched on
+2. **A follow-up could race the title call itself.** After the first turn
+   settled, `complete_once` could run for up to 20 seconds with no lock; a
+   prompt submitted in that window entered `session.prompt` concurrently.
+   Turn and naming now share one app-level provider lock. Turn start cancels
+   naming BEFORE waiting on the lock, so the user request begins only after
+   the courtesy call has actually unwound; naming takes the lock only while
+   `_turn_settled` remains set.
+3. **A failed attempt was spent forever.** `_name_requested` latched on
    schedule, not on success, so the minute-zero failure cost the session its
    name permanently. The latch now releases when an attempt produces no title
    and the conversation is still unnamed; the next substantive message
@@ -1647,12 +1659,12 @@ the 429. Long quota windows still rotate immediately — the 30 s
 `MAX_USAGE_RETRY_AFTER_MS` cap is what keeps an interactive session out of a
 provider's reset window.
 
-Evidence: `tests/unit/tui/test_conversation_naming.py` (3 tests — deferral,
-unlatch-and-retry, store-and-stay-spent; the first two FAIL at the PR base,
-`d424441`),
-`tests/unit/providers/test_failover.py::test_short_rate_limit_retries_twice_per_credential`
-(asserts `k1,k1,k1,k2,k2,k2` with 4 advertised-delay sleeps; the one-retry
-contract it replaces is the test it edited).
+Evidence: `tests/unit/tui/test_conversation_naming.py` (4 tests — opening-turn
+deferral, follow-up preemption, unlatch-and-retry, store-and-stay-spent).
+Deferral/unlatch fail at PR base `d424441`; follow-up preemption fails at
+reviewed head `218308f` because `prompt:follow-up turn` precedes naming
+cancellation. `tests/unit/providers/test_failover.py::test_short_rate_limit_retries_twice_per_credential`
+asserts `k1,k1,k1,k2,k2,k2` with 4 advertised-delay sleeps.
 
 ## The pointer that never changed
 
