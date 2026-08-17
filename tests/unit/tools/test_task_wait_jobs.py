@@ -190,6 +190,34 @@ async def test_jobs_lists_ids_labels_and_statuses(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_jobs_reports_how_long_a_running_job_has_been_going(tmp_path):
+    """The elapsed column read ``now - now`` and printed 0.0s for every live
+    job, whatever its real age.
+
+    That is the one number this tool exists to report: a caller polling
+    ``jobs`` uses it to tell a subagent that is progressing from one that is
+    wedged, and a six-minute child was indistinguishable from one launched a
+    second ago. Asserted against a job whose ``start_time`` is backdated,
+    because a fresh job is genuinely ~0s and cannot tell the two apart.
+    """
+    manager = AsyncJobManager()
+    running_id = manager.register("task", "beta", _slow_runner)
+    job = manager.get(running_id)
+    assert job is not None
+    job.start_time -= 373.0  # a child that has been running 6m13s
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    tools = _tools(context)
+    result = await _call(tools, "jobs", {}, context)
+
+    row = next(line for line in result.text.splitlines() if running_id in line)
+    seconds = float(row.split()[2].rstrip("s"))
+    assert seconds >= 373.0, f"a long-running job reported {seconds}s: {row!r}"
+
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
 async def test_jobs_empty_manager(tmp_path):
     manager = AsyncJobManager()
     context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)

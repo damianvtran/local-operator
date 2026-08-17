@@ -4115,8 +4115,21 @@ async def execute_jobs(
     for job in rows:
         # A settled job is reported by when it SETTLED (the useful fact: "it
         # finished N seconds ago"); a running one by how long it has been going.
-        elapsed = job.settled_at if job.status != "running" and job.settled_at else now
-        lines.append(f"{job.id}  {job.status:<9}  {now - elapsed:6.1f}s  {job.label}")
+        #
+        # The running case read ``now - now`` and printed 0.0s for EVERY live
+        # job, whatever its real age — the one number this tool exists to
+        # report, and the reading a caller uses to decide whether a subagent is
+        # progressing or wedged. A six-minute child and one launched a second
+        # ago were indistinguishable. ``start_time`` is the age's only source;
+        # it is guarded because a replayed or embedder-supplied row may carry
+        # none, and a missing clock is worth 0.0s rather than a traceback.
+        reference = (
+            job.settled_at
+            if job.status != "running" and job.settled_at
+            else getattr(job, "start_time", None)
+        )
+        elapsed = max(now - reference, 0.0) if reference else 0.0
+        lines.append(f"{job.id}  {job.status:<9}  {elapsed:6.1f}s  {job.label}")
     return _text(
         tool_call_id,
         "jobs",

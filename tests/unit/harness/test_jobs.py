@@ -104,6 +104,43 @@ async def test_start_queued_promotes_and_runs():
 
 
 @pytest.mark.asyncio
+async def test_cancelling_a_parked_job_clears_its_queued_flag_and_runner():
+    """``queued`` means "waiting for a slot", and a cancelled job waits for
+    nothing.
+
+    Left set, every reader that branches on the flag reported the job as
+    pending: the subagent panel painted ``⏳ queued`` on a row whose status was
+    ``cancelled``, which reads as work about to start rather than work that
+    was stopped. The parked runner is dropped with it — ``start_queued``
+    refuses a non-running job, so the entry could never run again and only
+    pinned its closure (prompt, parent session, model spec) for the life of
+    the manager.
+    """
+    manager = AsyncJobManager(max_running=1)
+    gate = asyncio.Event()
+
+    async def blocked(job_id, signal, report_progress):
+        await gate.wait()
+        return "ok"
+
+    running = manager.register("task", "running", blocked)
+    parked = manager.register("task", "parked", blocked, queued=manager.at_capacity())
+    assert require_job(manager, parked).queued is True
+
+    assert await manager.cancel(parked) is True
+    job = require_job(manager, parked)
+    assert job.status == "cancelled"
+    assert job.queued is False, "a cancelled job is not waiting for a slot"
+    # The runner is gone, so nothing can promote it and nothing pins its closure.
+    assert parked not in manager._queued_runners
+    assert manager.queued_ids() == []
+
+    gate.set()
+    await wait_for(lambda: require_job(manager, running).status == "completed")
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
 async def test_cancel_aborts_signal_and_sets_status():
     manager = AsyncJobManager()
     gate = asyncio.Event()

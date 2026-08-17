@@ -286,7 +286,8 @@ class SubagentComms:
         if record.child is None:
             if record.settled or not self._is_running(record):
                 return Delivery(job_id, record.label, "failed", self._gone_reason(record))
-            # Parked behind the capacity gate: a course change has to reach a
+            # Not started yet — parked behind the capacity gate, or still
+            # building its session. Either way a course change has to reach a
             # child that has not read its prompt yet, so buffer it as a note.
             # It arrives before any work is done, which is the point.
             record.pending.append(self._to_child_message(text, expects_reply=False, steer=True))
@@ -303,7 +304,7 @@ class SubagentComms:
             reason = (
                 self._gone_reason(record)
                 if record.settled or not self._is_running(record)
-                else "subagent has not started yet (parked behind the job capacity gate)"
+                else self._not_started_reason(record)
             )
             return Reply(job_id, record.label, error=reason)
         if record.ask is not None and not record.ask.done():
@@ -462,6 +463,30 @@ class SubagentComms:
             return False
         job = jobs.get(record.job_id)
         return job is not None and job.status == "running"
+
+    def _not_started_reason(self, record: _ChildRecord) -> str:
+        """Why a running job has no live child yet — and they are not the same.
+
+        Two states reach here and the caller acts on them differently. A job
+        the manager PARKED is waiting for a slot and may not start for
+        minutes, so the honest advice is to stop waiting on it. A job that is
+        running but has not reached ``attach`` yet is mid-construction (the
+        child session is being built: config, tools, MCP wiring) and will take
+        the message the moment it is up.
+
+        Both used to report the capacity gate. That is a false statement about
+        an admitted job, and it is the one an operator acts on: it says
+        "nothing is happening" about a child that is already spending tokens,
+        so a stuck-looking run gets cancelled instead of waited out.
+        """
+        jobs = self._jobs()
+        job = jobs.get(record.job_id) if jobs is not None else None
+        if job is not None and getattr(job, "queued", False):
+            return "subagent has not started yet (parked behind the job capacity gate)"
+        return (
+            f"subagent {record.label} is still starting up (its session is being built); "
+            "retry in a moment"
+        )
 
     def _gone_reason(self, record: _ChildRecord) -> str:
         # ``record.settled`` (set by detach, as the child's runner tears it

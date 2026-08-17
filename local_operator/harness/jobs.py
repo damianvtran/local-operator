@@ -259,6 +259,16 @@ class AsyncJobManager:
         if job.status != "running":
             return False
         job.status = "cancelled"
+        # A job cancelled while still parked stops being queued: ``queued`` is
+        # "waiting for a slot", and a cancelled job is waiting for nothing. Left
+        # set, every reader that branches on it reported the job as still
+        # pending — the panel painted ``⏳ queued`` on a row whose status was
+        # ``cancelled``, which reads as work that is about to start. Its runner
+        # is dropped for the same reason: ``start_queued`` refuses a non-running
+        # job, so the entry could never run again and only kept the closure
+        # (prompt, parent session, model spec) alive for the life of the manager.
+        job.queued = False
+        self._queued_runners.pop(job_id, None)
         signal = self._signals.get(job_id)
         if signal is not None:
             signal.abort("cancelled")

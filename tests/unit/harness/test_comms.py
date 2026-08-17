@@ -62,9 +62,14 @@ async def wait_for(predicate, timeout: float = 10.0) -> None:
 
 
 class FakeJob:
-    def __init__(self, job_id: str, status: str = "running") -> None:
+    def __init__(self, job_id: str, status: str = "running", queued: bool = False) -> None:
         self.id = job_id
         self.status = status
+        #: Mirrors ``AsyncJob.queued``: admitted to the ledger but holding no
+        #: execution slot. Distinct from "running but still building its
+        #: session", which is what a job carries between registration and
+        #: ``attach``.
+        self.queued = queued
 
 
 class FakeJobs:
@@ -236,6 +241,37 @@ def test_send_to_an_unstarted_child_buffers_until_it_attaches():
     comms.attach("job-1", child, tmp_dir())
     [aside] = child.materialize()
     assert "skip the migration" in hub_aside(aside).details["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_starting_child_is_not_reported_as_parked_behind_the_gate():
+    """Two states reach the no-live-child branch and an operator acts on them
+    differently.
+
+    A PARKED job is waiting for a slot and may not start for minutes. A job
+    that is running but has not reached ``attach`` yet is mid-construction —
+    its session is being built — and takes the message moments later. Both
+    used to report the capacity gate, which is a false statement about an
+    admitted job: it says "nothing is happening" about a child that is
+    already spending tokens, so a healthy run reads as stuck and gets
+    cancelled instead of waited out.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+
+    jobs.add("job-starting")  # running, not queued, no child attached yet
+    comms.record_launch("job-starting", "reviewer")
+    starting = await comms.ask("job-starting", "status?", timeout_ms=50)
+
+    jobs.add("job-parked").queued = True
+    comms.record_launch("job-parked", "designer")
+    parked = await comms.ask("job-parked", "status?", timeout_ms=50)
+
+    assert "still starting up" in (starting.error or "")
+    assert "capacity gate" not in (starting.error or "")
+    # The genuinely parked job keeps the message that names its real cause.
+    assert "capacity gate" in (parked.error or "")
+    assert starting.error != parked.error
 
 
 def test_send_to_an_unknown_job_fails_without_raising():
