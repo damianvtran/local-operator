@@ -68,6 +68,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("local_operator.session_factory")
 
+#: Hard cap on the operator's custom instructions, in characters (~16k tokens
+#: at 4 chars/token). Generous for hand-written standing rules, small enough
+#: that a file pasted over by accident cannot silently consume the context
+#: window of every request — the content rides the cached prompt prefix.
+MAX_USER_INSTRUCTIONS_CHARS = 64_000
+
+#: Floor held for the selected agent's own profile prompt, so a large global
+#: file cannot crowd the chosen profile out entirely. A floor and not a fixed
+#: slice: whichever source is smaller than its share leaves the remainder to
+#: the other, so neither is taxed for room the other never uses.
+_AGENT_INSTRUCTIONS_RESERVE = 16_000
+
 
 #: Modules whose import dominates :func:`create_session`, measured rather than
 #: guessed: on this machine ``mcp`` costs 443 ms and ``httpx`` 234 ms to import,
@@ -409,6 +421,18 @@ def load_user_instructions(agent_prompt: str = "") -> str:
     file, because a stray bad byte in a long instructions file should cost the
     operator one glyph and not every preference they wrote. Either way a bad
     edit never costs a session.
+
+    The result is bounded at :data:`MAX_USER_INSTRUCTIONS_CHARS`. This rides
+    the CACHED head block, so it is re-sent as the prefix of every request in
+    every session and every subagent: an accidentally huge file (a log pasted
+    over the wrong path) would otherwise cost context and money on every call,
+    and on a small-context model would fail the session at startup with
+    nothing pointing at the cause. Truncation is explicit — the marker tells
+    the model its instructions were cut rather than letting it act on half a
+    rule — and a warning names the source and the limit.
+
+    ``utf-8-sig`` strips a BOM that a Windows editor writes; without it the
+    ``\ufeff`` survives into the prompt ahead of the first rule.
     """
     # Imported as an alias: ``config_dir`` is a local parameter name in two
     # other functions here, and a module-level import of the same spelling
@@ -416,15 +440,69 @@ def load_user_instructions(agent_prompt: str = "") -> str:
     from local_operator.paths import config_dir as app_config_dir
 
     parts: list[str] = []
+    # ``is_file()`` follows symlinks deliberately: pointing the file at a
+    # dotfiles checkout is a normal way to version instructions.
     path = app_config_dir() / "system_prompt.md"
     try:
         if path.is_file():
-            parts.append(path.read_text(encoding="utf-8", errors="replace"))
+            parts.append(path.read_text(encoding="utf-8-sig", errors="replace"))
     except OSError:
         pass
-    if agent_prompt.strip():
-        parts.append(agent_prompt)
-    return "\n\n".join(part.strip() for part in parts if part.strip())
+
+    # Each source is bounded on its OWN budget before joining. Capping only
+    # the joined string let a full-size global file consume the whole budget
+    # and silently discard the selected agent's profile prompt entirely,
+    # inverting the documented layering: the machine-wide file would discard
+    # the profile the operator explicitly chose.
+    #
+    # The split is a FLOOR each way, never a flat tax. Subtracting the
+    # reserve unconditionally cut a 64k global file to 48k even with no agent
+    # selected, handing the 16k to nobody; capping the profile at the reserve
+    # unconditionally did the mirror image to a large profile when the global
+    # file was small. So each source may spend whatever the other leaves,
+    # down to its own guaranteed share.
+    global_raw = "\n\n".join(part.strip() for part in parts if part.strip())
+    agent_raw = agent_prompt.strip()
+    separator = 2 if agent_raw else 0  # the "\n\n" join, kept inside the cap
+    agent_text = _bound_instructions(
+        agent_raw,
+        "the selected agent's profile",
+        max(
+            _AGENT_INSTRUCTIONS_RESERVE,
+            MAX_USER_INSTRUCTIONS_CHARS - len(global_raw) - separator,
+        ),
+    )
+    global_text = _bound_instructions(
+        global_raw,
+        str(path),
+        MAX_USER_INSTRUCTIONS_CHARS - len(agent_text) - (2 if agent_text else 0),
+    )
+    return "\n\n".join(part for part in (global_text, agent_text) if part)
+
+
+def _bound_instructions(text: str, source: str, limit: int) -> str:
+    """Cap one instruction source so it cannot silently eat the context window.
+
+    ``source`` names the origin in the warning: passing the global path for
+    text that came from an agent profile would send the operator looking for
+    a file that may not even exist. The marker is counted INSIDE ``limit``, so
+    the return value never exceeds it — including when ``limit`` is too small
+    to hold the marker at all, where the marker is dropped rather than
+    appended past the budget.
+    """
+    if len(text) <= limit:
+        return text
+    marker = f"\n\n[... custom instructions truncated at {limit} characters ...]"
+    if limit < len(marker):
+        marker = ""
+    logger.warning(
+        "custom instructions from %s are %d chars; truncating to %d "
+        "(they are re-sent with every request)",
+        source,
+        len(text),
+        limit,
+    )
+    return text[: max(0, limit - len(marker))].rstrip() + marker
 
 
 def _build_variable_store(cwd: str, config_manager: ConfigManager) -> VariableStore:
@@ -886,7 +964,13 @@ async def _prepare(
     if agent is not None:
         try:
             agent_prompt = agent_registry.get_agent_system_prompt(str(agent.id))
-        except (KeyError, OSError):
+        # ``ValueError`` covers ``UnicodeDecodeError``, which is NOT an
+        # ``OSError``: a mis-encoded profile prompt used to raise straight
+        # through here and kill session startup. The registry now reads with
+        # ``errors="replace"`` so that specific route can no longer raise, but
+        # the guard stays for any other decode path a registry might take —
+        # an unreadable profile must never cost the operator their session.
+        except (KeyError, OSError, ValueError):
             agent_prompt = ""
     user_instructions = load_user_instructions(agent_prompt)
 

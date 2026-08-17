@@ -206,6 +206,16 @@ def render_template(name: str, data: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Any spelling of the closing tag that a language model would honour —
+#: including a space either side of the slash, a hyphen for the underscore,
+#: and mixed case — since the consumer is a model rather than a strict parser.
+#: Neutralized before interpolation because an AGENT PROFILE prompt reaches
+#: this string and ``import_agent`` copies that verbatim out of a downloaded
+#: marketplace archive, so a third-party agent could otherwise close the tag
+#: early and have its remainder render as though it were packaged prompt.
+_CLOSING_TAG_RE = re.compile(r"<\s*/\s*user[_-]instructions\s*>", re.IGNORECASE)
+
+
 def _render_tool_inventory(tools: Sequence[AgentTool]) -> str:
     """One compact line per visible tool; schemas ride in the provider tools
     array, so the prompt only needs name + one-line description."""
@@ -258,12 +268,18 @@ def build_system_blocks(
         # standing customization apart from the packaged rules above it, and
         # a delimiter is what stops a long instructions file from reading as
         # a continuation of the persona's final bullet.
+        #
+        # The closing tag is neutralized first. The global file is
+        # self-authored, so escaping it there is only tidiness; the same
+        # string also carries an imported agent profile's prompt, which is
+        # untrusted text.
+        safe = _CLOSING_TAG_RE.sub("<\\/user_instructions>", user_instructions.strip())
         instructions = (
             f"{instructions}\n\n## User's custom instructions\n\n"
             "The operator set these standing preferences for every session on "
             "this machine. Follow them as their default expectations; a "
             "direct instruction in the conversation still wins.\n\n"
-            f"<user_instructions>\n{user_instructions.strip()}\n</user_instructions>"
+            f"<user_instructions>\n{safe}\n</user_instructions>"
         )
     inventory = f"## Available tools\n\n{_render_tool_inventory(tools)}"
     env_block = f"Today is {date_str}."
