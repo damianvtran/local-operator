@@ -4689,13 +4689,71 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
 # never advertise tools that can only error.
 
 
+class TaskItem(BaseModel):
+    """One slice of a task batch. ``agent`` picks the tier: "task" is the
+    full child; "scout" is a read-only research child (lookups only) for
+    investigation that should not pay for — or risk — write tools. ``effort``
+    routes to a configured model tier (values.subagents.models lo/med/hi)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(description="Short label for this subagent (shown in the jobs list).")
+    prompt: str = Field(description="The full instructions this subagent runs.")
+    agent: Literal["task", "scout"] = Field(
+        default="task",
+        description='"task" = full child; "scout" = read-only research child.',
+    )
+    effort: Literal["lo", "med", "hi"] | None = Field(
+        default=None,
+        description="Model tier for this subagent (values.subagents.models).",
+    )
+
+
 class TaskParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    label: str = Field(description="Short label for the subagent (shown in the jobs list).")
-    prompt: str = Field(
-        description="The full instructions the subagent runs in a fresh child session."
+    label: str | None = Field(
+        default=None,
+        description="Single-task form: short label for the subagent.",
     )
+    prompt: str | None = Field(
+        default=None,
+        description="Single-task form: the instructions the subagent runs.",
+    )
+    context: str = Field(
+        default="",
+        description=(
+            "Shared context prepended to EVERY task in the batch — the goal, "
+            "constraints, and interfaces every subagent needs. Stated once "
+            "here instead of copy-pasted into each prompt."
+        ),
+    )
+    tasks: list[TaskItem] = Field(
+        default_factory=list,
+        description=(
+            "Batch form: all items launch as CONCURRENT subagents from this "
+            "one call. Independent slices belong here together — one round "
+            "trip instead of one per task."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _one_form(self) -> "TaskParams":
+        """Single form xor batch form, whole — the pydantic voice keeps the
+        'invalid arguments' contract for a half-supplied call."""
+        if (self.label is None) != (self.prompt is None):
+            raise ValueError("single-task form needs both label and prompt")
+        single = self.label is not None
+        if single and self.tasks:
+            raise ValueError("pass either 'tasks' (batch) or label/prompt, not both")
+        if not single and not self.tasks:
+            raise ValueError("nothing to launch: pass 'tasks' or label/prompt")
+        if not single and not self.context.strip() and len(self.tasks) == 1:
+            # Allowed, but the batch-of-one without context is just the
+            # single form with extra steps; no error, the model learns from
+            # the schema descriptions.
+            pass
+        return self
 
 
 class WaitParams(BaseModel):
@@ -4735,7 +4793,15 @@ async def execute_task(
     on_update: Callable[[AgentToolUpdate], None] | None = None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    """Launch a one-shot subagent as a background job; return its job id."""
+    """Launch one subagent — or a whole batch — as background jobs.
+
+    The batch form exists because fan-out economics are the point: N
+    independent slices cost N sequential model round trips when launched one
+    per call, and one call when launched as ``tasks`` together. The shared
+    ``context`` is prepended to every prompt so the contract (goal,
+    constraints, interfaces) is stated once by the delegator and cannot drift
+    between children.
+    """
     try:
         params = TaskParams(**args)
     except ValidationError as exc:
@@ -4748,16 +4814,40 @@ async def execute_task(
             "task",
             "subagent launching is not available in this session (no engine attached).",
         )
-    try:
-        job_id = launcher(params.label, params.prompt)
-    except Exception as exc:  # noqa: BLE001 — engine failure surfaces as an error result
-        return _error(tool_call_id, "task", f"could not launch subagent: {exc}")
+    items: list[TaskItem] = list(params.tasks)
+    if params.label is not None and params.prompt is not None:
+        items.append(TaskItem(label=params.label, prompt=params.prompt))
+
+    def _full_prompt(item: TaskItem) -> str:
+        if not params.context.strip():
+            return item.prompt
+        return f"{params.context.strip()}\n\n---\n" f"Your task ({item.label}):\n{item.prompt}"
+
+    launched: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for item in items:
+        try:
+            job_id = launcher(item.label, _full_prompt(item), agent=item.agent, effort=item.effort)
+        except Exception as exc:  # noqa: BLE001 — engine failure surfaces as an error result
+            failures.append(f"{item.label}: {exc}")
+            continue
+        launched.append({"job_id": job_id, "label": item.label, "agent": item.agent})
+    if not launched:
+        detail = failures[0] if failures else "no tasks to launch"
+        return _error(tool_call_id, "task", f"could not launch subagent(s): {detail}")
+    lines = [f"- {entry['label']} ({entry['agent']}): job {entry['job_id']}" for entry in launched]
+    body = (
+        f"launched {len(launched)} subagent(s) as concurrent background jobs:\n"
+        + "\n".join(lines)
+        + "\nuse 'wait' (job_id=...) to await one, or 'jobs' to list running work."
+    )
+    if failures:
+        body += "\nfailed to launch: " + "; ".join(failures)
     return _text(
         tool_call_id,
         "task",
-        f"launched subagent job {job_id} ({params.label}); use 'wait' with "
-        f"job_id={job_id} to await it, or 'jobs' to list running work.",
-        details={"job_id": job_id, "label": params.label},
+        body,
+        details={"jobs": launched, "job_id": launched[0]["job_id"], "label": launched[0]["label"]},
     )
 
 
@@ -4769,8 +4859,9 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
         label="Subagent task",
         describe_approval=_describe_task_approval,
         description=(
-            "Launch a one-shot subagent in a fresh child session, running "
-            "in the background; returns a job id to await with 'wait'."
+            "Launch background subagents — one, or a whole concurrent batch "
+            "('tasks' + shared 'context') in a single call. agent='scout' is "
+            "a read-only research child; effort picks a configured model tier."
         ),
         parameters=TaskParams.model_json_schema(),
         # Spawns autonomous child work, so it rides the write gate just like

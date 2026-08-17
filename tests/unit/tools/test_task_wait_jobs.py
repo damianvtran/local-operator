@@ -43,9 +43,10 @@ def _engine_context(tmp_path, manager: AsyncJobManager) -> ToolContext:
     """A context carrying the job manager AND a launcher so both task and
     wait/jobs build. The launcher mimics ``Session._launch_subagent`` by
     registering a ``task``-type job on the same manager."""
-    launcher = lambda label, prompt: manager.register(  # noqa: E731
-        "task", label, _quick_runner, owner_id=None
-    )
+
+    def launcher(label, prompt, *, agent="task", effort=None):
+        return manager.register("task", label, _quick_runner, owner_id=None)
+
     return ToolContext(cwd=str(tmp_path), session_id="s", subagent_launcher=launcher, jobs=manager)
 
 
@@ -228,3 +229,110 @@ def test_wait_jobs_not_advertised_without_job_manager(tmp_path):
     assert "jobs" not in names
     assert builtin.build_wait_tool(context) is None
     assert builtin.build_jobs_tool(context) is None
+
+
+# ---------------------------------------------------------------------------
+# task: batch form, shared context, agent/effort tiers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_task_batch_launches_concurrent_children_with_shared_context(tmp_path):
+    """One call, three jobs: the batch form is the fan-out economics — N
+    independent slices cost N round trips when launched one per call and one
+    when launched together. The shared context is prepended to every prompt
+    verbatim so the delegator's contract cannot drift between children."""
+    launched: list[tuple[str, str, str, str | None]] = []
+
+    def launcher(label, prompt, *, agent="task", effort=None):
+        launched.append((label, prompt, agent, effort))
+        return f"job-{len(launched)}"
+
+    context = ToolContext(
+        cwd=str(tmp_path), session_id="s", subagent_launcher=launcher, jobs=AsyncJobManager()
+    )
+    tools = _tools(context)
+    result = await _call(
+        tools,
+        "task",
+        {
+            "context": "Goal: ship the release. Constraint: no breaking API changes.",
+            "tasks": [
+                {"label": "Docs", "prompt": "Update the changelog."},
+                {"label": "Scan", "prompt": "Audit imports.", "agent": "scout"},
+                {"label": "Build", "prompt": "Run the release build.", "effort": "hi"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is False
+    assert len(launched) == 3
+    labels = [entry[0] for entry in launched]
+    assert labels == ["Docs", "Scan", "Build"]
+    for _label, prompt, _agent, _effort in launched:
+        assert prompt.startswith("Goal: ship the release.")
+        assert "Your task (" in prompt
+    assert launched[1][2] == "scout"
+    assert launched[2][3] == "hi"
+    assert "3 subagent(s)" in result.text
+    assert result.details["jobs"][0]["job_id"] == "job-1"
+
+
+@pytest.mark.asyncio
+async def test_task_single_form_still_works_and_forwards_defaults(tmp_path):
+    launched: list[tuple[str, str, str, str | None]] = []
+
+    def launcher(label, prompt, *, agent="task", effort=None):
+        launched.append((label, prompt, agent, effort))
+        return "job-1"
+
+    context = ToolContext(
+        cwd=str(tmp_path), session_id="s", subagent_launcher=launcher, jobs=AsyncJobManager()
+    )
+    tools = _tools(context)
+    result = await _call(tools, "task", {"label": "Solo", "prompt": "one thing"}, context)
+    assert result.is_error is False
+    assert launched == [("Solo", "one thing", "task", None)]
+
+
+@pytest.mark.asyncio
+async def test_task_rejects_mixed_and_half_forms(tmp_path):
+    context = _engine_context(tmp_path, AsyncJobManager())
+    tools = _tools(context)
+    both = await _call(
+        tools,
+        "task",
+        {"label": "x", "prompt": "y", "tasks": [{"label": "z", "prompt": "w"}]},
+        context,
+    )
+    assert both.is_error is True
+    assert both.text.startswith("invalid arguments:")
+    half = await _call(tools, "task", {"label": "x"}, context)
+    assert half.is_error is True
+    empty = await _call(tools, "task", {}, context)
+    assert empty.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_task_partial_batch_failure_reports_survivors(tmp_path):
+    calls = {"n": 0}
+
+    def launcher(label, prompt, *, agent="task", effort=None):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("engine hiccup")
+        return f"job-{calls['n']}"
+
+    context = ToolContext(
+        cwd=str(tmp_path), session_id="s", subagent_launcher=launcher, jobs=AsyncJobManager()
+    )
+    tools = _tools(context)
+    result = await _call(
+        tools,
+        "task",
+        {"tasks": [{"label": "a", "prompt": "p"}, {"label": "b", "prompt": "p"}]},
+        context,
+    )
+    assert result.is_error is False  # 1 of 2 launched: not a total failure
+    assert "1 subagent(s)" in result.text
+    assert "failed to launch: b" in result.text

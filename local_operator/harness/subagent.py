@@ -127,6 +127,24 @@ logger = logging.getLogger(__name__)
 TRAJECTORY_CAP = 500
 
 
+#: The read-only inventory a ``scout`` child is filtered down to. Allowlist,
+#: not tier-filter: approval tiers drift as tools are added, and a scout's
+#: promise is narrower than "nothing marked write" — it is lookups only, no
+#: side effects at all (browser drives the user's browser; eval executes
+#: code; both are excluded by name for that reason even where a tier alone
+#: would admit them).
+SCOUT_TOOL_ALLOWLIST = frozenset({"read", "glob", "grep", "list_variables", "read_variable"})
+
+#: Preamble stamped onto every scout prompt. The tool filter enforces the
+#: letter; this states the intent, so the scout REPORTS rather than trying to
+#: route around its missing tools.
+SCOUT_PREAMBLE = (
+    "[scout mode: you are a READ-ONLY research agent. Investigate, read, "
+    "search, and report findings with file:line evidence; you cannot edit, "
+    "write, or run anything. Your final message is the deliverable.]\n\n"
+)
+
+
 def run_subagent(
     label: str,
     prompt: str,
@@ -135,6 +153,7 @@ def run_subagent(
     jobs_manager: "AsyncJobManager",
     model_spec: ModelSpec | None = None,
     resume_dir: "Path | None" = None,
+    agent: str = "task",
 ) -> str:
     """Register one child-session run as a background job; return the job id.
 
@@ -160,6 +179,7 @@ def run_subagent(
             jobs_manager=jobs_manager,
             model_spec=model_spec,
             resume_dir=resume_dir,
+            agent=agent,
         ),
         queued=queued,
     )
@@ -190,6 +210,7 @@ def _make_runner(
     jobs_manager: "AsyncJobManager",
     model_spec: ModelSpec | None,
     resume_dir: "Path | None" = None,
+    agent: str = "task",
 ) -> Callable[[str, Any, Callable[[str], None]], Awaitable[str | None]]:
     """Build the JobRunFn for one child run (closure over its launch args)."""
     # The parent seam is private-attribute access on purpose: this module is
@@ -198,6 +219,7 @@ def _make_runner(
     # accessors. ``_emit`` gives the parent's isolated handler fan-out.
     emit = parent_session._emit
     comms = getattr(parent_session, "subagent_comms", None)
+    effective_prompt = SCOUT_PREAMBLE + prompt if agent == "scout" else prompt
 
     async def runner(
         job_id: str, signal: Any, report_progress: Callable[[str], None]
@@ -214,11 +236,12 @@ def _make_runner(
         try:
             child = await _build_child_session(
                 label=label,
-                prompt=prompt,
+                prompt=effective_prompt,
                 parent_session=parent_session,
                 model_spec=model_spec,
                 job_id=job_id,
                 resume_dir=resume_dir,
+                agent=agent,
             )
             if job is not None:
                 # Off the CHILD, not the parent: ``model_spec`` may have put
@@ -593,6 +616,7 @@ async def _build_child_session(
     model_spec: ModelSpec | None,
     job_id: str,
     resume_dir: "Path | None" = None,
+    agent: str = "task",
 ) -> "Session":
     """Compose the child Session directly (see module docstring for why the
     factory is not reused, and for the full inherit/do-not-inherit list)."""
@@ -672,7 +696,12 @@ async def _build_child_session(
         web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
-    if mcp is not None:
+    if agent == "scout":
+        # Scouts get lookups only — MCP tools execute arbitrary server calls,
+        # so they are excluded from the allowlist filter entirely rather than
+        # trusted per tool.
+        tools = [tool for tool in tools if tool.name in SCOUT_TOOL_ALLOWLIST]
+    if mcp is not None and agent != "scout":
         tools = tools + mcp.tools
 
     def system_blocks_provider() -> list[str]:
@@ -752,19 +781,34 @@ async def _build_child_session(
             else None
         ),
     )
-    # Undo ``Session.__init__``'s capability merge. The set is DERIVED, not a
-    # copy of the ``enabled=("task", "wait", "jobs", "wake")`` tuple in
-    # ``_merge_capability_tools``: nothing links a copy to that tuple, so a
-    # fifth session-gated tool would be handed to every child silently — the
-    # exact rot the module docstring says this prune exists to stop. The merge
-    # only appends new names or replaces same-named entries, so whatever the
-    # constructor ADDED to the list we passed in is precisely the set of tools
-    # gated on capabilities only a top-level session should have.
+    # Undo ``Session.__init__``'s capability merge, DEPTH-AWARE. The set is
+    # DERIVED, not a copy of the ``enabled=("task", "wait", "jobs", "wake")``
+    # tuple in ``_merge_capability_tools``: nothing links a copy to that
+    # tuple, so a fifth session-gated tool would be handed to every child
+    # silently — the exact rot the module docstring says this prune exists to
+    # stop. The merge only appends new names or replaces same-named entries,
+    # so whatever the constructor ADDED to the list we passed in is precisely
+    # the set of tools gated on session capabilities.
+    #
+    # A child of a TOP-LEVEL session keeps task/wait/jobs: one further level
+    # of delegation (map-then-fan-out inside a child) is observable through
+    # the child's own jobs/wait tools, and its job manager is disposed with
+    # the child, so a grandchild cannot outlive its lineage. What still never
+    # crosses any boundary: ``wake`` (a child session ends after one prompt,
+    # so a wake armed there would be silently lost) and, one level deeper,
+    # everything again — a grandchild's children would register on a manager
+    # nothing observes and that dies mid-turn. Scouts lose the whole set: a
+    # read-only agent that delegates autonomous work is not read-only.
     #
     # ``refresh_tools`` rather than touching ``_tools``: it is the committed
     # hook and it keeps the loop's ``context.tools`` in step.
     merged_in = {tool.name for tool in child._tools} - {tool.name for tool in tools}
-    child.refresh_tools([tool for tool in child._tools if tool.name not in merged_in])
+    parent_is_child = parent_session._job_id is not None
+    if agent == "scout" or parent_is_child:
+        drop = merged_in
+    else:
+        drop = {name for name in merged_in if name == "wake"}
+    child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
     if mcp is not None:
         mcp.attach(child)
         # Diagnostics only, and BORROWED: unlike attach_mcp_dispose this adds no

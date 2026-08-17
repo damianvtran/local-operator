@@ -1159,7 +1159,9 @@ class Session:
             },
         )
 
-    def _launch_subagent(self, label: str, prompt: str) -> str:
+    def _launch_subagent(
+        self, label: str, prompt: str, *, agent: str = "task", effort: str | None = None
+    ) -> str:
         """Register one one-shot child run on this session's job manager.
 
         The production caller of :func:`run_subagent`: spawn the child against
@@ -1168,13 +1170,50 @@ class Session:
         the child wiring. Installed on the ``ToolContext`` as
         ``subagent_launcher`` every turn so the ``task`` tool can start a
         child. Returns the job id.
+
+        ``agent``/``effort`` select the tier (see ``SubagentLauncher``):
+        effort resolves through ``values.subagents.models`` (``lo``/``med``/
+        ``hi`` -> ``provider/model-id``), so a scout or a cheap bulk task runs
+        on the model the operator picked for that job, not the session's
+        default. An unresolvable tier falls back to the parent's model with a
+        warning — a delegation must not fail because a config key is stale.
         """
+        model_spec = self._resolve_subagent_model(agent, effort)
         return run_subagent(
             label=label,
             prompt=prompt,
             parent_session=self,
             jobs_manager=self.jobs,
+            model_spec=model_spec,
+            agent=agent,
         )
+
+    def _resolve_subagent_model(self, agent: str, effort: str | None) -> ModelSpec | None:
+        """Effort tier -> ModelSpec via config; None keeps the parent's model."""
+        wanted = effort or ("lo" if agent == "scout" else None)
+        if wanted is None:
+            return None
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+            models = raw.get("models", {}) if isinstance(raw, dict) else {}
+            selector = models.get(wanted)
+            if not selector:
+                return None
+            provider, _, model_id = str(selector).partition("/")
+            if not model_id:
+                logger.warning("subagents.models.%s=%r lacks provider/model", wanted, selector)
+                return None
+            from local_operator.model.configure import build_model_spec
+
+            return build_model_spec(provider, model_id)
+        except Exception:  # noqa: BLE001 — stale config must not fail a spawn
+            logger.warning(
+                "subagent model tier %r could not be resolved; using session model", wanted
+            )
+            return None
 
     async def _drain_steering(self) -> list[AgentMessage]:
         """Consume the steering queue. Steering messages are real injected

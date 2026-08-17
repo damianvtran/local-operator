@@ -392,6 +392,26 @@ class JobManagerProtocol(Protocol):
     async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool: ...
 
 
+@runtime_checkable
+class SubagentLauncher(Protocol):
+    """Spawn a one-shot child session on the session's job manager.
+
+    ``agent`` selects the tier: ``"task"`` is the full child, ``"scout"`` a
+    read-only research child (its tool inventory is filtered to read-tier
+    lookups). ``effort`` routes to a configured model tier (``lo``/``med``/
+    ``hi`` in ``values.subagents.models``); None keeps the parent's model.
+    """
+
+    def __call__(
+        self,
+        label: str,
+        prompt: str,
+        *,
+        agent: str = "task",
+        effort: str | None = None,
+    ) -> str: ...
+
+
 class ToolContext(BaseModel):
     """Minimal host-provided context handed to tool execution.
 
@@ -459,7 +479,7 @@ class ToolContext(BaseModel):
     # subagent engine and the task tool is then not advertised at all
     # (createIf) rather than advertised and always failing — the same
     # convention ``wake_scheduler`` uses.
-    subagent_launcher: Callable[[str, str], str] | None = None
+    subagent_launcher: "SubagentLauncher | None" = None
     # The session's background job manager. Declared as a Protocol because
     # the concrete class lives in ``harness.jobs``, which imports this
     # module (import cycle). The ``wait``/``job`` tools read it; ``None``

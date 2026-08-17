@@ -65,8 +65,11 @@ declaration outline with line ranges — re-read the exact ranges you need
 instead of the whole file. `wake` schedules follow-ups when the user asks to
 be reminded or something should happen later.
 
-`task` delegates a self-contained slice to a subagent that runs in the
-background; `jobs` lists what is running and `wait` blocks for a result. A
+`task` delegates to subagents that run in the background — one, or a whole
+batch of independent slices in a single call (`tasks` + a shared `context`
+stating the goal and constraints once). `agent="scout"` is a read-only
+research child for investigation; `effort` picks a configured model tier.
+`jobs` lists what is running and `wait` blocks for a result. A
 running subagent is not out of reach: `hub` sends it a note, asks it a
 question and waits for its answer (use that when one has gone quiet rather
 than guessing whether it is stuck), steers it onto a different course,
