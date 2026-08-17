@@ -678,6 +678,31 @@ def test_an_oauth_token_from_the_environment_is_not_sent_as_an_api_key(monkeypat
     )
 
 
+def test_a_plain_api_key_is_not_read_as_oauth_because_a_value_collides(monkeypatch) -> None:
+    """The kind is inferred from variable NAMES, and a value can sit under several.
+
+    Any variable with OAUTH in its name holding the same string flipped the flag,
+    and for OpenAI that is not a cosmetic misread: the OAuth route needs a ChatGPT
+    account id an env key cannot supply, so the provider became unlistable
+    outright — silently, and for as long as both variables stayed set. An OAuth
+    token misread the other way costs one 401 and falls back to the registry, so
+    an ambiguous value resolves to the cheaper mistake.
+    """
+    from local_operator.model import configure as configure_mod
+
+    monkeypatch.setattr(configure_mod, "_oauth_listing_token", lambda _provider: ("", False, None))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-shared")
+    monkeypatch.setenv("SOME_TOOL_OAUTH_TOKEN", "sk-proj-shared")
+
+    assert configure_mod._catalogue_credential("openai") == ("sk-proj-shared", False, None)
+
+    # And a value that appears ONLY under an OAuth-named variable is still OAuth,
+    # which is the case the name test exists for.
+    monkeypatch.delenv("OPENAI_API_KEY")
+    monkeypatch.setenv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat-only")
+    assert configure_mod._catalogue_credential("anthropic") == ("sk-ant-oat-only", True, None)
+
+
 def test_stored_openai_oauth_account_scope_reaches_model_discovery(tmp_path, monkeypatch) -> None:
     from local_operator.model import configure as configure_mod
     from local_operator.providers.auth_store import AuthStore

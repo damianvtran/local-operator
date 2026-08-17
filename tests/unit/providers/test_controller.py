@@ -253,6 +253,31 @@ async def test_openai_listing_credential_carries_the_chatgpt_account_scope(
     )
 
 
+@pytest.mark.asyncio
+async def test_a_login_flavour_finds_the_row_its_login_actually_wrote(controller, store) -> None:
+    """``openai-device`` is a login flavour of ``openai``, not a second account.
+
+    The ChatGPT device-code login writes ONE credential row, under the aliased
+    name (``store_credentials_as``). Asking ``AuthStore`` for the literal id
+    found nothing — its ``WHERE provider = ?`` is exact — so the flavour listed
+    anonymously: no OAuth, no account scope, no account-scoped catalogue, and a
+    logged-in account was offered the bundled ``gpt-4o``/``o3`` rows under that
+    second prefix. Exactly the ids an authoritative listing exists to withdraw.
+    """
+    store.oauth["openai"] = types.SimpleNamespace(
+        kind="oauth",
+        access_token="chatgpt-token",
+        account_id="acct-42",
+        org_id=None,
+    )
+
+    assert await controller._listing_credential("openai-device") == (
+        "chatgpt-token",
+        True,
+        "acct-42",
+    )
+
+
 def test_usage_enabled_provider_ids(controller) -> None:
     ids = controller.usage_enabled_providers()
     assert "openrouter" in ids

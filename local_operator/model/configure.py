@@ -745,7 +745,7 @@ def _catalogue_api_key(provider: str) -> str:
 
 
 def _env_secret_is_oauth(secret: str) -> bool:
-    """True when ``secret`` was picked up out of an OAuth-named env variable.
+    """True when ``secret`` came ONLY out of OAuth-named env variables.
 
     The callable ``env_keys`` resolvers can hand back either kind of credential —
     ``_anthropic_env_key`` prefers ``ANTHROPIC_OAUTH_TOKEN`` over
@@ -757,8 +757,19 @@ def _env_secret_is_oauth(secret: str) -> bool:
     Matching on the variable NAME keeps this a general rule instead of a second
     place that knows about Anthropic specifically, and it runs at most once per
     model id per TTL bucket.
+
+    ``all`` and not ``any``, because the two misclassifications do not cost the
+    same. A plain ``OPENAI_API_KEY`` whose value happens to equal that of any
+    other variable with OAUTH in its name was reported as an OAuth token, and
+    OpenAI's OAuth route needs a ChatGPT account id that an env key cannot
+    supply — so the provider became unlistable outright, silently and for as
+    long as the variables stayed set. An OAuth token misread as a key costs one
+    401 on one provider and falls back to the bundled registry. When a value
+    appears under both kinds of name it is genuinely ambiguous, and this resolves
+    the ambiguity toward the cheaper mistake.
     """
-    return any(value == secret and "OAUTH" in name.upper() for name, value in os.environ.items())
+    names = [name.upper() for name, value in os.environ.items() if value == secret]
+    return bool(names) and all("OAUTH" in name for name in names)
 
 
 def _catalogue_credential(provider: str) -> tuple[str, bool, str | None]:
