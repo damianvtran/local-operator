@@ -341,6 +341,28 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         base_url="https://api.deepseek.com/v1",
     ),
     ProviderDefinition(
+        id="zai",
+        # Z.AI sells GLM under two names and users type both. "zhipu"/"bigmodel"
+        # are the CN-facing brand for the same models, so a user who came here
+        # for "glm" or "zhipu" finds the provider they actually want.
+        search_aliases=(
+            "glm",
+            "zhipu",
+            "bigmodel",
+            "z-ai",
+        ),
+        name="Z.AI (GLM)",
+        env_keys="ZAI_API_KEY",
+        login=create_api_key_login(
+            "Z.AI", "https://z.ai/manage-apikey/apikey-list", "Paste your Z.AI API key"
+        ),
+        # The CODING-plan path, not the general `/api/paas/v4` endpoint. Requests
+        # sent here consume GLM Coding Plan quota; the general endpoint bills the
+        # account balance instead, which is the same key silently spending the
+        # wrong budget. Mirrors omp's `zhipuCodingPlanModelManagerOptions`.
+        base_url="https://api.z.ai/api/coding/paas/v4",
+    ),
+    ProviderDefinition(
         id="google",
         search_aliases=(
             "gemini",

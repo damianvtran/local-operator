@@ -151,6 +151,7 @@ FetcherKind = Literal[
     "deepseek-balance",
     "xai-oauth",
     "qwencloud-token-plan",
+    "zai-quota",
 ]
 
 #: Provider id (canonical) -> ``(oauth_fetcher, api_key_fetcher)``.
@@ -168,11 +169,12 @@ FetcherKind = Literal[
 #: is what :func:`usage_kinds` reports so the UI can say WHICH credential is
 #: missing instead of showing nothing.
 #:
-#: ``zai`` is absent rather than fixed. It had a working fetcher and a passing
-#: test, but no ``ProviderDefinition`` — so `/login zai` raised, its env var was
-#: never read, and no code path could insert the credential row the fetcher
-#: needed. It was unreachable by construction, and advertising an unreachable
-#: provider is worse than being merely incomplete.
+#: ``zai`` was previously absent for exactly this reason: it had a working
+#: fetcher and a passing test, but no ``ProviderDefinition`` — so `/login zai`
+#: raised, its env var was never read, and no code path could insert the
+#: credential row the fetcher needed. It is present now because the registry
+#: entry, the credential path and this fetcher landed together; the pairing is
+#: the point, and re-adding one without the others would recreate the defect.
 _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
     "openrouter": (None, "openrouter"),
     "anthropic": ("anthropic-oauth", None),
@@ -184,6 +186,10 @@ _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
     "xai-oauth": ("xai-oauth", None),
     "alibaba-token-plan": ("qwencloud-token-plan", None),
     "alibaba-token-plan-oauth": ("qwencloud-token-plan", None),
+    # The coding-plan key is the only credential Z.AI issues for this route, and
+    # the same raw key authenticates both inference and the quota endpoint, so
+    # the api-key slot serves it and there is no OAuth half to route.
+    "zai": (None, "zai-quota"),
 }
 
 #: Providers with a live quota endpoint, for callers that only need the question
@@ -544,6 +550,163 @@ async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> Usa
         return None
     notes = None if payload.get("is_available", True) else "account not available for requests"
     return UsageReport(provider="deepseek", limits=limits, notes=notes)
+
+
+#: Z.AI's coding-plan quota endpoint. Lives on the API host but OUTSIDE the
+#: `/api/coding/paas/v4` inference prefix, so it is spelled absolutely here
+#: rather than derived from the provider's ``base_url``.
+ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+
+#: The `unit` enum Z.AI uses to describe a quota window's period. Only the
+#: values observed on live coding-plan accounts are mapped; anything else falls
+#: through to a generic label rather than being guessed at, because mislabelling
+#: a monthly cap as hourly would make an exhausted plan look like it resets soon.
+_ZAI_WINDOW_UNITS: dict[int, tuple[str, float]] = {
+    3: ("hour", 3600.0),
+    4: ("day", 86_400.0),
+    5: ("month", 30 * 86_400.0),
+    6: ("week", 7 * 86_400.0),
+}
+
+
+def _zai_window(item: dict[str, Any]) -> tuple[str, int | None]:
+    """``(window_label, resets_at_ms)`` for one Z.AI limit row.
+
+    ``unit`` names the period and ``number`` how many of them, so a 5-hour
+    window arrives as ``unit=3, number=5``. ``nextResetTime`` is epoch
+    milliseconds on live payloads, but is accepted in seconds too and
+    disambiguated by magnitude, matching how the other fetchers here treat
+    ambiguous vendor timestamps.
+    """
+    count = _num(item.get("number")) or 1
+    unit = item.get("unit")
+    mapped = _ZAI_WINDOW_UNITS.get(int(unit)) if isinstance(unit, (int, float)) else None
+    if mapped is None:
+        label = "quota"
+    else:
+        name, _seconds = mapped
+        label = f"{int(count)} {name}"
+    reset = _num(item.get("nextResetTime"))
+    resets_ms: int | None = None
+    if reset is not None and reset > 0:
+        resets_ms = int(reset if reset > 1_000_000_000_000 else reset * 1000)
+    return label, resets_ms
+
+
+async def fetch_zai_quota(client: httpx.AsyncClient, api_key: str) -> UsageReport | None:
+    """Z.AI GLM Coding Plan quota from the monitor endpoint.
+
+    Two row types share one payload and mean different things:
+
+    - ``TOKENS_LIMIT`` is the token allowance for a rolling window. On live
+      coding-plan accounts these rows carry ONLY ``percentage`` — no absolute
+      used/limit/remaining — so the report is built from the fraction and the
+      unit is ``percent``. Inventing token counts from a percentage would put a
+      fabricated number in front of the user.
+    - ``TIME_LIMIT`` is a REQUEST allowance despite the name. Its ``usage`` field
+      is the LIMIT and ``currentValue`` is the amount consumed — inverted
+      relative to every other vendor here, which is the trap worth naming.
+
+    A ``TIME_LIMIT`` row whose ``usageDetails`` cover search-prime/web-reader/
+    zread is the separate Zread feature bucket rather than the account-wide
+    request cap, so it is tagged as a tier and NOT marked shared: exhausting it
+    stops those tools, not the plan.
+    """
+    payload = await _get_json(client, ZAI_QUOTA_URL, _bearer(api_key))
+    if payload is None:
+        return None
+    # The envelope reports business-level failure with a 200, so an unsuccessful
+    # body is not a usable report even though the transport succeeded.
+    if payload.get("success") is not True:
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    rows = data.get("limits")
+    if not isinstance(rows, list):
+        return None
+
+    limits: list[UsageLimit] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        row_type = item.get("type")
+        window, resets_ms = _zai_window(item)
+        percentage = _num(item.get("percentage"))
+        used = _num(item.get("currentValue"))
+        limit_value = _num(item.get("usage"))
+        remaining = _num(item.get("remaining"))
+
+        if row_type == "TOKENS_LIMIT":
+            if percentage is None and used is None:
+                continue
+            amount = UsageAmount(
+                used=used,
+                limit=limit_value,
+                remaining=remaining,
+                used_fraction=(
+                    min(max(percentage / 100.0, 0.0), 1.0) if percentage is not None else None
+                ),
+                # Absolute token counts are absent on coding-plan rows, so the
+                # renderer is told to speak in percent unless the vendor gave
+                # real numbers to show.
+                unit="tokens" if limit_value else "percent",
+            )
+            limits.append(
+                UsageLimit(
+                    id=f"zai:tokens:{window.replace(' ', '')}",
+                    label=f"Token quota ({window})",
+                    amount=amount,
+                    window=window,
+                    resets_at_ms=resets_ms,
+                    shared=True,
+                )
+            )
+        elif row_type == "TIME_LIMIT":
+            details = item.get("usageDetails")
+            codes = (
+                {
+                    str(d.get("modelCode"))
+                    for d in details
+                    if isinstance(d, dict) and d.get("modelCode")
+                }
+                if isinstance(details, list)
+                else set()
+            )
+            is_feature = {"search-prime", "web-reader", "zread"} <= codes
+            if percentage is None and used is None:
+                continue
+            amount = UsageAmount(
+                used=used,
+                limit=limit_value,
+                remaining=remaining,
+                used_fraction=(
+                    min(max(percentage / 100.0, 0.0), 1.0) if percentage is not None else None
+                ),
+                unit="requests" if limit_value else "percent",
+            )
+            limits.append(
+                UsageLimit(
+                    id=(
+                        f"zai:features:zread:{window.replace(' ', '')}"
+                        if is_feature
+                        else f"zai:requests:{window.replace(' ', '')}"
+                    ),
+                    label=("Zread feature quota" if is_feature else "Request quota")
+                    + f" ({window})",
+                    amount=amount,
+                    window=window,
+                    resets_at_ms=resets_ms,
+                    tier="zread" if is_feature else "",
+                    shared=not is_feature,
+                )
+            )
+
+    if not limits:
+        return None
+    level = data.get("level")
+    notes = f"coding plan: {level}" if isinstance(level, str) and level else None
+    return UsageReport(provider="zai", limits=limits, notes=notes)
 
 
 def _parse_iso_ms(value: Any) -> int | None:
@@ -1573,6 +1736,8 @@ async def _run_fetcher(
         return await fetch_moonshot_balance(client, secret)
     if kind == "deepseek-balance":
         return await fetch_deepseek_balance(client, secret)
+    if kind == "zai-quota":
+        return await fetch_zai_quota(client, secret)
     if kind == "xai-oauth":
         return await fetch_xai_oauth(client, secret)
     if kind == "qwencloud-token-plan":

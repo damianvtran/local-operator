@@ -265,6 +265,102 @@ async def test_deepseek_reports_a_balance_per_currency() -> None:
     assert units["deepseek:balance:usd"] == "usd"
 
 
+#: A REAL Z.AI coding-plan quota body, captured from
+#: `GET https://api.z.ai/api/monitor/usage/quota/limit` on 2026-08-17. Pinned
+#: verbatim because the shape is the whole contract here: the TOKENS_LIMIT rows
+#: carry ONLY a percentage (no absolute counts), and TIME_LIMIT inverts the
+#: obvious reading of its fields — `usage` is the limit, `currentValue` the
+#: amount consumed. An invented payload would have hidden both.
+_ZAI_QUOTA_PAYLOAD: dict[str, Any] = {
+    "code": 200,
+    "msg": "Operation successful",
+    "data": {
+        "limits": [
+            {
+                "type": "TOKENS_LIMIT",
+                "unit": 3,
+                "number": 5,
+                "percentage": 12,
+                "nextResetTime": 1787009983644,
+            },
+            {
+                "type": "TOKENS_LIMIT",
+                "unit": 6,
+                "number": 1,
+                "percentage": 42,
+                "nextResetTime": 1787542072998,
+            },
+            {
+                "type": "TIME_LIMIT",
+                "unit": 5,
+                "number": 1,
+                "usage": 4000,
+                "currentValue": 0,
+                "remaining": 4000,
+                "percentage": 0,
+                "nextResetTime": 1789615672998,
+                "usageDetails": [
+                    {"modelCode": "search-prime", "usage": 0},
+                    {"modelCode": "web-reader", "usage": 0},
+                    {"modelCode": "zread", "usage": 0},
+                ],
+            },
+        ],
+        "level": "max",
+    },
+    "success": True,
+}
+
+
+@pytest.mark.asyncio
+async def test_zai_reports_token_and_feature_windows() -> None:
+    """The coding plan quotes token windows as a bare percentage, so the report is
+    built from the fraction rather than inventing token counts to display."""
+    client = _client_for(_ZAI_QUOTA_PAYLOAD)
+    async with client:
+        report = await fetch_usage(client, "zai", api_key="zai-key")
+    assert report is not None
+    ids = [lim.id for lim in report.limits]
+    assert ids == ["zai:tokens:5hour", "zai:tokens:1week", "zai:features:zread:1month"]
+
+    five_hour = report.limits[0]
+    assert five_hour.amount.fraction() == pytest.approx(0.12)
+    # No absolute counts in the payload, so the renderer is told to speak percent.
+    assert five_hour.amount.unit == "percent"
+    assert five_hour.amount.used is None
+    assert five_hour.shared is True
+    assert five_hour.resets_at_ms == 1787009983644
+    assert report.notes == "coding plan: max"
+
+
+@pytest.mark.asyncio
+async def test_zai_zread_bucket_is_a_tier_not_the_account_cap() -> None:
+    """Exhausting the search/web-reader/zread bucket stops those tools, not the
+    plan, so it must not be rendered as the umbrella limit that gates every
+    request."""
+    client = _client_for(_ZAI_QUOTA_PAYLOAD)
+    async with client:
+        report = await fetch_usage(client, "zai", api_key="zai-key")
+    assert report is not None
+    zread = report.limits[-1]
+    assert zread.tier == "zread"
+    assert zread.shared is False
+    # TIME_LIMIT inverts the field names: `usage` is the limit, not the usage.
+    assert zread.amount.limit == 4000
+    assert zread.amount.used == 0
+    assert zread.amount.unit == "requests"
+
+
+@pytest.mark.asyncio
+async def test_zai_business_failure_on_a_200_is_not_a_report() -> None:
+    """The envelope reports business-level failure with an HTTP 200, so a
+    successful transport is not by itself a usable quota reading."""
+    client = _client_for({"code": 401, "msg": "unauthorized", "success": False})
+    async with client:
+        report = await fetch_usage(client, "zai", api_key="bad")
+    assert report is None
+
+
 @pytest.mark.asyncio
 async def test_an_unavailable_deepseek_account_says_so() -> None:
     """A zero balance and a suspended account look identical in the numbers."""
@@ -760,10 +856,10 @@ def test_usage_supported() -> None:
     assert usage_supported("openrouter") is True
     assert usage_supported("deepseek") is True
     assert usage_supported("nonsense") is False
-    # `zai` had a working fetcher and no ProviderDefinition, so no code path could
-    # ever supply its credential: `/login zai` raised, its env var was never read,
-    # and the set advertised a provider nobody could reach.
-    assert usage_supported("zai") is False
+    # `zai` previously had a working fetcher and no ProviderDefinition, so no code
+    # path could ever supply its credential. It is supported now because the
+    # registry entry, the credential path and the fetcher landed together.
+    assert usage_supported("zai") is True
 
 
 def test_usage_kinds_distinguishes_no_endpoint_from_no_credential() -> None:
@@ -789,7 +885,7 @@ def test_the_advertised_set_is_the_dispatch_table() -> None:
     from local_operator.providers import usage as usage_mod
 
     assert usage_mod.USAGE_PROVIDERS == frozenset(usage_mod._FETCHERS)
-    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 10
+    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 11
     assert not hasattr(usage_mod, "OAUTH_USAGE_PROVIDERS")
 
 
