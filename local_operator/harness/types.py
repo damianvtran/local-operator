@@ -894,9 +894,20 @@ class LoopConfig(BaseModel):
     before_model_call: Callable[[], Awaitable[bool] | bool] | None = Field(
         default=None, exclude=True
     )
-    on_turn_end: Callable[[list[AgentMessage]], Awaitable[None] | None] | None = Field(
-        default=None, exclude=True
-    )
+    # Called at the safe boundary after each tool batch lands (before the
+    # next model call). May return a replacement ``context.messages`` list —
+    # the loop swaps it in and prunes its own run accumulator to the
+    # replacement's survivors, so a host that compacts mid-run (automatic
+    # mid-turn compaction) never double-persists summarized history. The
+    # replacement must keep surviving messages' ids stable: the accumulator
+    # filter matches by id.
+    on_turn_end: (
+        Callable[
+            [list[AgentMessage]],
+            Awaitable[list[AgentMessage] | None] | list[AgentMessage] | None,
+        ]
+        | None
+    ) = Field(default=None, exclude=True)
     on_before_yield: Callable[[], Awaitable[None] | None] | None = Field(default=None, exclude=True)
 
     # Fallback routing for unknown tool names (e.g. deferred MCP tools).

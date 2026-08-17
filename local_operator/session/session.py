@@ -1004,6 +1004,7 @@ class Session:
                 get_aside_messages=self._drain_asides,
                 resolve_fallback_tool=self._fallback_tool_resolver,
                 interrupt_mode="immediate",
+                on_turn_end=self._on_turn_end,
             )
 
             new_messages: list[AgentMessage] = []
@@ -1239,6 +1240,82 @@ class Session:
             await self._transcript.compact_file()
         except OSError as exc:
             logger.warning("could not journal pruned tool outputs: %s", exc)
+
+    async def _on_turn_end(self, messages: list[AgentMessage]) -> list[AgentMessage] | None:
+        """Mid-turn compaction gate — runs INSIDE the tool loop, at the safe
+        boundary after each tool batch lands and before the next model call.
+
+        Without this, a single long tool run (dozens of calls, no user turn)
+        grows past the window with no relief until the run ends — the next
+        provider request then fails the whole run, and the post-turn pass
+        recovers a turn that never needed to break. The knob
+        (``values.compaction.mid_turn_enabled``) defaults on; the pass itself
+        is the same single plan+commit the post-turn gate and ``/compact``
+        share, so there is no second compaction implementation to drift.
+
+        Returns the replacement context so the loop can prune its run
+        accumulator (see ``LoopConfig.on_turn_end``), or ``None`` when no
+        compaction ran. The replayability guard in ``_plan_compaction``
+        (kept[0] must be a transcript entry) naturally constrains mid-run
+        cuts to already-persisted history, which is where a cut belongs
+        mid-run anyway.
+        """
+        if self._disposed:
+            return None
+        try:
+            from local_operator.compaction.api import CompactionSettings
+        except ImportError:
+            return None
+        settings = self._compaction_settings or CompactionSettings()
+        # getattr: hosts (and the test suite) may inject a duck-typed
+        # settings model that predates the knob; absence means the §C default
+        # (on), same posture as _resolve_strategy's capability probes.
+        if not settings.enabled or not getattr(settings, "mid_turn_enabled", True):
+            return None
+        # The post-run usage scan has not happened yet — the boundary
+        # snapshot carries the assistant message that just finished, whose
+        # usage is the provider's ground truth for the trigger math.
+        for message in reversed(messages):
+            if isinstance(message, Message) and message.usage is not None:
+                self._last_usage = message.usage
+                break
+        # Cheap pre-gate: when the provider just reported its context size and
+        # that figure already fails the trigger, skip the full plan — the
+        # plan renders the whole history to prove the same thing, and this
+        # hook fires at EVERY continuing tool-loop boundary. The threshold
+        # mirror below is 4 lines; _plan_compaction stays the authority for
+        # any context that passes this gate. No provider figure (usage not
+        # yet reported) falls through to the plan, whose own upper-bound
+        # proof is the cheap path there.
+        provider_reported = (
+            self._last_usage.context_tokens if self._last_usage is not None else None
+        )
+        if provider_reported is not None:
+            from local_operator.compaction import api as compaction_api
+
+            gate_settings = settings
+            if (
+                getattr(settings, "threshold_tokens", -1) <= 0
+                and getattr(settings, "threshold_percent", -1) <= 0
+            ):
+                gate_settings = settings.model_copy(
+                    update={
+                        "threshold_tokens": compaction_api.resolve_threshold_tokens(
+                            self._model.context_window, settings
+                        )
+                    }
+                )
+            if not compaction_api.should_compact(
+                provider_reported, self._model.context_window, gate_settings
+            ):
+                return None
+        planned = await self._plan_compaction(respect_threshold=True)
+        if isinstance(planned, CompactionOutcome):
+            return None
+        outcome = await self._run_compaction(planned, reason="mid-turn")
+        if not outcome.ran:
+            return None
+        return list(self._context.messages)
 
     async def _maybe_compact(self) -> None:
         """Post-turn compaction check — the AUTOMATIC trigger.

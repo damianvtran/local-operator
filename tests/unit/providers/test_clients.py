@@ -1355,3 +1355,56 @@ def test_google_sends_no_effort_key() -> None:
     # edit would put the key there.
     assert "thinkingConfig" not in body["generationConfig"]
     assert not any("effort" in key.lower() for key in body["generationConfig"])
+
+
+def _google_sse_parallel_calls() -> bytes:
+    """One Gemini response carrying TWO same-name functionCalls — the exact
+    shape that used to mint identical ids (``fc_read`` twice)."""
+    return _sse(
+        [
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"functionCall": {"name": "read", "args": {"path": "a.py"}}},
+                                {"functionCall": {"name": "read", "args": {"path": "b.py"}}},
+                            ]
+                        },
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
+            }
+        ]
+    )
+
+
+async def test_google_parallel_same_tool_calls_get_unique_ids() -> None:
+    """Two same-tool functionCalls in one Gemini response must survive as two
+    tool calls. The loop dedups tool calls by id (first-wins), so ids minted
+    from the tool name alone silently dropped every call after the first —
+    the model believed two reads ran when only one did. The per-response
+    index is minted alongside the id because it is the stream slot the loop
+    assembles argument deltas into; two calls sharing slot 0 would overwrite
+    each other even with distinct ids."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_google_sse_parallel_calls(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = GoogleClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_spec("google", "gemini-2.5-pro"), messages=[Message.user("hi")]),
+            "g-key",
+        )
+    )
+    calls = [e for e in events if isinstance(e, StreamToolCallDelta)]
+    assert len(calls) == 2
+    assert calls[0].id != calls[1].id
+    assert {calls[0].index, calls[1].index} == {0, 1}
+    assert all(call.name == "read" for call in calls)

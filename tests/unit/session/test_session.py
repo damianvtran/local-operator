@@ -1101,3 +1101,234 @@ async def test_an_ordinary_failure_leaves_images_alone(tmp_path):
     assert not session._images_rejected
     assert _image_blocks(stream.requests[0]) == 1
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_compaction_at_continuing_boundary(tmp_path, monkeypatch):
+    """A tool-loop run that crosses the threshold mid-run compacts at the safe
+    boundary — after the tool batch lands, before the next model call — inside
+    the run's event boundary, and the next model call sees the compacted
+    context. Post-run persistence must not resurrect what the pass summarized:
+    the loop prunes its run accumulator to the replacement's survivors, so the
+    transcript after the compaction entry holds only surviving run messages."""
+    from pydantic import BaseModel, Field
+
+    class CompactionSettings(BaseModel):
+        enabled: bool = True
+        reserve_tokens: int = 16384
+        keep_recent_tokens: int = 20000
+        threshold_percent: float = -1.0
+        threshold_tokens: int = Field(default=-1)
+        max_threshold_tokens: int = 600_000
+        auto_continue: bool = False
+        mid_turn_enabled: bool = True
+
+    compacted = {"done": False}
+
+    def estimate_messages_tokens(messages):
+        return 5_000 if compacted["done"] else 90_000
+
+    def messages_tokens_upper_bound(messages):
+        return 5_500 if compacted["done"] else 95_000
+
+    def prune_tool_outputs(messages, now_ts, last_activity_ts, **kwargs):
+        return list(messages), False
+
+    fake_api = types.ModuleType("local_operator.compaction.api")
+    setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
+    setattr(fake_api, "estimate_messages_tokens", estimate_messages_tokens)
+    setattr(fake_api, "messages_tokens_upper_bound", messages_tokens_upper_bound)
+    setattr(
+        fake_api, "compaction_context_tokens", lambda provider, local: max(provider or 0, local)
+    )
+    # Cut before the run's user prompt: kept = [user, assistant, tool result].
+    # The user prompt is a transcript entry (appended pre-run), so the cut is
+    # replayable; a cut into run-produced-only history is refused by design.
+    setattr(fake_api, "find_cut_point", lambda messages, keep: 3)
+    setattr(
+        fake_api,
+        "resolve_threshold_tokens",
+        lambda window, settings: min(int(window * 0.8), 600_000),
+    )
+    setattr(fake_api, "RECOVERY_BAND", 0.8)
+    setattr(
+        fake_api,
+        "should_compact",
+        lambda ctx_tokens, window, settings: ctx_tokens > settings.threshold_tokens,
+    )
+
+    async def summarize(
+        messages: Sequence[Message | CustomMessage],
+        complete_fn: Callable[[str, str], Awaitable[str]],
+    ) -> str:
+        compacted["done"] = True
+        summary = await complete_fn("sys", "summarize this")
+        return f"SUMMARY({summary})"
+
+    setattr(fake_api, "summarize_messages", summarize)
+
+    fake_pkg = types.ModuleType("local_operator.compaction")
+    setattr(fake_pkg, "api", fake_api)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction", fake_pkg)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.api", fake_api)
+    fake_thresholds = types.ModuleType("local_operator.compaction.thresholds")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.thresholds", fake_thresholds)
+    fake_snap = types.ModuleType("local_operator.compaction.snapcompact")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.snapcompact", fake_snap)
+
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="working"),
+                StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta='{"text":"x"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            # The mid-run one-shot summary call.
+            [StreamTextDelta(delta="compressed"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(
+        tmp_path, stream, tools=[echo_tool(executed)], compaction_settings=CompactionSettings()
+    )
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+
+    # Prime persisted + live history so the cut lands on a replayable entry:
+    # three older user turns exist in both the transcript and the context.
+    primed = [Message.user(f"earlier {i}") for i in range(3)]
+    for message in primed:
+        await session._transcript.append_message(message)
+    session._context.messages.extend(primed)
+
+    await session.prompt("go")
+
+    assert executed == ["echo"]
+
+    # Compaction events fired with the mid-turn reason, INSIDE the run
+    # boundary (between agent_start and agent_end — the streaming contract's
+    # SC-4 pairing rule).
+    kinds = [(type(e).__name__, getattr(e, "reason", None)) for e in events]
+    assert ("CompactionStartEvent", "mid-turn") in kinds
+    start_idx = next(i for i, e in enumerate(events) if isinstance(e, AgentStartEvent))
+    end_idx = next(i for i, e in enumerate(events) if isinstance(e, AgentEndEvent))
+    compact_idx = next(i for i, e in enumerate(events) if isinstance(e, CompactionStartEvent))
+    assert start_idx < compact_idx < end_idx
+
+    # Exactly one compaction ran: the post-turn pass found the compacted
+    # context below threshold and refused.
+    compactions = [e for e in session._transcript.entries() if e.type == "compaction"]
+    assert len(compactions) == 1
+    assert compactions[0].payload["summary"] == "SUMMARY(compressed)"
+
+    # Context rebuilt: marker + kept window (user, assistant, tool result)
+    # plus the final assistant turn the loop went on to produce after the
+    # compaction — the whole point of compacting mid-run instead of failing.
+    assert len(session._context.messages) == 5
+    marker = session._context.messages[0]
+    assert isinstance(marker, CustomMessage)
+    assert marker.custom_type == "compaction_summary"
+
+    # The next model call saw the compacted context: the rendered marker
+    # (a user message carrying the summary) leads the request.
+    third = stream.requests[2]
+    assert "SUMMARY(compressed)" in third.messages[0].text
+
+    # No resurrection: after the compaction entry the transcript holds only
+    # the run's three surviving messages (assistant, tool result, final
+    # assistant) — the primed history the pass summarized never re-lands
+    # after it, and nothing is persisted twice.
+    entries = session._transcript.entries()
+    c_index = next(i for i, e in enumerate(entries) if e.type == "compaction")
+    after = [e for e in entries[c_index + 1 :] if e.type == "message"]
+    assert len(after) == 3
+
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_compaction_disabled_by_setting(tmp_path, monkeypatch):
+    """``mid_turn_enabled=False`` restores the old posture exactly: the
+    boundary hook is a no-op and only the post-turn pass compacts."""
+    from pydantic import BaseModel, Field
+
+    class CompactionSettings(BaseModel):
+        enabled: bool = True
+        reserve_tokens: int = 16384
+        keep_recent_tokens: int = 20000
+        threshold_percent: float = -1.0
+        threshold_tokens: int = Field(default=-1)
+        max_threshold_tokens: int = 600_000
+        auto_continue: bool = False
+        mid_turn_enabled: bool = False
+
+    def prune_tool_outputs(messages, now_ts, last_activity_ts, **kwargs):
+        return list(messages), False
+
+    fake_api = types.ModuleType("local_operator.compaction.api")
+    setattr(fake_api, "CompactionSettings", CompactionSettings)
+    setattr(fake_api, "prune_tool_outputs", prune_tool_outputs)
+    setattr(fake_api, "estimate_messages_tokens", lambda messages: 90_000)
+    setattr(fake_api, "messages_tokens_upper_bound", lambda messages: 95_000)
+    setattr(
+        fake_api, "compaction_context_tokens", lambda provider, local: max(provider or 0, local)
+    )
+    setattr(fake_api, "find_cut_point", lambda messages, keep: 0)
+    setattr(
+        fake_api,
+        "resolve_threshold_tokens",
+        lambda window, settings: min(int(window * 0.8), 600_000),
+    )
+    setattr(fake_api, "RECOVERY_BAND", 0.8)
+    setattr(
+        fake_api,
+        "should_compact",
+        lambda ctx_tokens, window, settings: ctx_tokens > settings.threshold_tokens,
+    )
+
+    async def summarize(
+        messages: Sequence[Message | CustomMessage],
+        complete_fn: Callable[[str, str], Awaitable[str]],
+    ) -> str:
+        return "SUMMARY(post-turn)"
+
+    setattr(fake_api, "summarize_messages", summarize)
+
+    fake_pkg = types.ModuleType("local_operator.compaction")
+    setattr(fake_pkg, "api", fake_api)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction", fake_pkg)
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.api", fake_api)
+    fake_thresholds = types.ModuleType("local_operator.compaction.thresholds")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.thresholds", fake_thresholds)
+    fake_snap = types.ModuleType("local_operator.compaction.snapcompact")
+    monkeypatch.setitem(sys.modules, "local_operator.compaction.snapcompact", fake_snap)
+
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta='{"text":"x"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(
+        tmp_path, stream, tools=[echo_tool(executed)], compaction_settings=CompactionSettings()
+    )
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.prompt("go")
+
+    reasons = [
+        getattr(e, "reason", None)
+        for e in events
+        if isinstance(e, (CompactionStartEvent, CompactionEndEvent))
+    ]
+    # No mid-turn pass; the single pass (if any) is the post-turn one.
+    assert "mid-turn" not in reasons
+    compactions = [e for e in session._transcript.entries() if e.type == "compaction"]
+    assert len(compactions) <= 1
+    await session.dispose()

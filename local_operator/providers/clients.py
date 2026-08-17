@@ -1496,6 +1496,14 @@ class GoogleClient:
             headers["x-goog-api-key"] = api_key
         usage: Usage | None = None
         stop_reason = "stop"
+        # Gemini returns one complete functionCall per part with no ids and
+        # no part indexes, so the harness must mint both. They must be UNIQUE
+        # per response: the loop dedups tool calls by id (first-wins), and a
+        # parallel batch of same-tool calls with a shared id silently drops
+        # every call after the first — the model believes two reads ran when
+        # only one did. The index doubles as the stream slot used to assemble
+        # argument deltas, matching the OpenAI per-index contract.
+        call_index = 0
 
         async with self._http.stream(
             "POST", url, json=self._build_body(request), headers=headers
@@ -1515,12 +1523,14 @@ class GoogleClient:
                             yield StreamTextDelta(delta=text)
                         function_call = part.get("functionCall")
                         if function_call:
+                            name = function_call.get("name")
                             yield StreamToolCallDelta(
-                                index=0,
-                                id=f"fc_{function_call.get('name', 'call')}",
-                                name=function_call.get("name"),
+                                index=call_index,
+                                id=f"fc_{call_index}_{name or 'call'}",
+                                name=name,
                                 argument_delta=json.dumps(function_call.get("args") or {}),
                             )
+                            call_index += 1
                     if candidate.get("finishReason"):
                         reason = str(candidate["finishReason"])
                         stop_reason = {"MAX_TOKENS": "length", "TOOL_USE": "toolUse"}.get(
