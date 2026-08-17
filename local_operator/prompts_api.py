@@ -224,6 +224,7 @@ def build_system_blocks(
     date_str: str,
     goal: str = "",
     user_instructions: str = "",
+    repo_guidance: str = "",
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -253,6 +254,11 @@ def build_system_blocks(
     ahead of every volatile change.
     """
     instructions = render_template("system.md", {})
+    if repo_guidance.strip():
+        # Same head-block, read-once discipline as user_instructions: the
+        # files are part of the project's standing state, edited between
+        # sessions, never within one.
+        instructions = f"{instructions}\n\n{repo_guidance.strip()}"
     if user_instructions.strip():
         # Tagged, not merged: the model must be able to tell the operator's
         # standing customization apart from the packaged rules above it, and

@@ -331,9 +331,7 @@ class AgentLoop:
                             }
                             context.messages[:] = outcome
                             new_messages = [
-                                m
-                                for m in new_messages
-                                if getattr(m, "id", None) in survivors
+                                m for m in new_messages if getattr(m, "id", None) in survivors
                             ]
 
                     pending = await self._collect_inflight_injections(config)

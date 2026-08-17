@@ -678,6 +678,7 @@ def _make_system_blocks_provider(
     cwd: str | None = None,
     goal_state: "GoalState | None" = None,
     user_instructions: str = "",
+    repo_guidance: str = "",
 ) -> Callable[[], Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
@@ -715,6 +716,7 @@ def _make_system_blocks_provider(
             date_str,
             goal=goal,
             user_instructions=user_instructions,
+            repo_guidance=repo_guidance,
         )
 
     return provider
@@ -889,6 +891,15 @@ async def _prepare(
         except (KeyError, OSError):
             agent_prompt = ""
     user_instructions = load_user_instructions(agent_prompt)
+    # Repo guidance (AGENTS.md/CLAUDE.md ancestors) joins the same read-once
+    # contract: the head block must stay byte-stable for the session, so the
+    # filesystem is consulted here and never again.
+    from local_operator.context_files import load_repo_guidance
+
+    try:
+        repo_guidance = load_repo_guidance(effective_cwd)
+    except Exception:  # noqa: BLE001 — never block session construction
+        repo_guidance = ""
 
     system_blocks_provider = _make_system_blocks_provider(
         tools,
@@ -897,6 +908,7 @@ async def _prepare(
         cwd=effective_cwd,
         goal_state=goal_state,
         user_instructions=user_instructions,
+        repo_guidance=repo_guidance,
     )
 
     session_kwargs: dict[str, Any] = dict(

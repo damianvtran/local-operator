@@ -39,6 +39,7 @@ attached a scheduler to the ``ToolContext``.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import contextlib
@@ -58,7 +59,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.types import (
@@ -1327,6 +1328,13 @@ class ReadParams(BaseModel):
             "MATCHES to return, not which lines. Ignored for other internal URLs."
         ),
     )
+    raw: bool = Field(
+        default=False,
+        description=(
+            "Return the verbatim text even where a structural summary is the "
+            "default (Python files read without a range)."
+        ),
+    )
 
 
 _LINE_RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)?$")
@@ -1692,6 +1700,165 @@ def _search_spill(
     return _text(tool_call_id, "read", f"{header}:\n{body}{footer}", details=details)
 
 
+# ---------------------------------------------------------------------------
+# Python structural summaries
+# ---------------------------------------------------------------------------
+
+#: Below this many lines a raw read is already cheap and the summary's
+# overhead (footer, symbol grammar) buys nothing — the default stays raw.
+PYTHON_SUMMARY_MIN_LINES = 80
+#: Hard cap on symbol lines in one summary. A generated module with
+# thousands of definitions would otherwise turn the summary into the very
+# blob it exists to avoid; past the cap the tail is elided with a count.
+PYTHON_SUMMARY_MAX_SYMBOLS = 500
+
+
+def _format_args(args: ast.arguments) -> str:
+    """``name: Ann`` parts in signature order, stdlib-only. Defaults are
+    interleaved onto their parameters (pydantic stores them positionally
+    against the tail of the arg list, so a naive arg walk silently drops
+    every ``= default`` from the summary)."""
+    plain = list(getattr(args, "posonlyargs", [])) + list(args.args)
+    defaults: list[ast.expr] = list(args.defaults)
+    offset = len(plain) - len(defaults)
+    parts: list[str] = []
+    posonly = len(getattr(args, "posonlyargs", []))
+    for i, arg in enumerate(plain):
+        if posonly and i == posonly:
+            parts.append("/")
+        rendered = ast.unparse(arg)
+        j = i - offset
+        if 0 <= j < len(defaults):
+            rendered = f"{rendered}={ast.unparse(defaults[j])}"
+        parts.append(rendered)
+    if args.vararg:
+        parts.append("*" + ast.unparse(args.vararg))
+    elif args.kwonlyargs:
+        parts.append("*")
+    for i, arg in enumerate(args.kwonlyargs):
+        rendered = ast.unparse(arg)
+        if i < len(args.kw_defaults) and args.kw_defaults[i] is not None:
+            rendered = f"{rendered}={ast.unparse(args.kw_defaults[i])}"
+        parts.append(rendered)
+    if args.kwarg:
+        parts.append("**" + ast.unparse(args.kwarg))
+    return ", ".join(parts)
+
+
+def _docstring_first_line(node: ast.AST) -> str | None:
+    body = getattr(node, "body", None)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        doc = body[0].value.value
+        if isinstance(doc, str) and doc.strip():
+            return doc.strip().splitlines()[0][:100]
+    return None
+
+
+def _python_structural_summary_lines(source: str) -> tuple[list[str], int, int] | None:
+    """``(symbol_lines, total_lines, elided_symbols)`` for a Python module.
+
+    Declarations are kept; bodies are elided; every symbol carries its line
+    range so the caller can teach the model exactly which range re-reads the
+    body it just lost. Returns None when the file does not parse (the raw
+    body is the honest answer for a broken file).
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    out: list[str] = []
+
+    def emit(node: ast.AST, depth: int) -> int:
+        """Emit one symbol block; returns how many symbol lines it used."""
+        used = 0
+        pad = "    " * depth
+        start, end = node.lineno, node.end_lineno or node.lineno
+        for dec in getattr(node, "decorator_list", []):
+            name = ast.unparse(dec)
+            out.append(f"{pad}@{name}"[:110])
+            used += 1
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            keyword = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+            returns = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+            out.append(f"{pad}{keyword} {node.name}({_format_args(node.args)}){returns}"[:110])
+        elif isinstance(node, ast.ClassDef):
+            bases = ", ".join(ast.unparse(b) for b in node.bases)
+            head = f"class {node.name}" + (f"({bases})" if bases else "")
+            out.append(f"{pad}{head}:"[:110])
+        used += 1
+        doc = _docstring_first_line(node)
+        if doc:
+            out.append(f'{pad}    "{doc}')
+            used += 1
+        out[-1] = f"{out[-1]}  ·  L{start}-{end}"
+        if isinstance(node, ast.ClassDef):
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    used += emit(child, depth + 1)
+        return used
+
+    module_doc = _docstring_first_line(tree)
+    if module_doc:
+        out.append(f'"{module_doc}')
+    imports = sum(1 for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom)))
+    if imports:
+        out.append(f"[imports: {imports} (elided)]")
+    symbol_count = 0
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbol_count += emit(node, 0)
+    if symbol_count == 0 and not module_doc and not imports:
+        return None
+    total_lines = len(source.splitlines())
+    return out, total_lines, symbol_count
+
+
+def _structural_summary_result(
+    tool_call_id: str, path: Path, source: str, context: ToolContext | None
+) -> ToolResult | None:
+    """The read result for a Python file summarized instead of dumped, or
+    None when the file should fall back to the raw body (parse failure,
+    nothing declarative in it)."""
+    parsed = _python_structural_summary_lines(source)
+    if parsed is None:
+        return None
+    symbol_lines, total_lines, symbol_count = parsed
+    if len(symbol_lines) > PYTHON_SUMMARY_MAX_SYMBOLS:
+        omitted = len(symbol_lines) - PYTHON_SUMMARY_MAX_SYMBOLS
+        symbol_lines = symbol_lines[:PYTHON_SUMMARY_MAX_SYMBOLS] + [
+            f"[…{omitted} more symbol lines elided; narrow with grep, then range-read]"
+        ]
+    full = "\n".join(symbol_lines)
+    # Fit the shown portion inside the char budget line-wholesale — a slice
+    # mid-line would garble the very ranges the footer teaches the model to
+    # use. Whatever does not fit goes to the spill like any other long list.
+    shown_lines: list[str] = []
+    budget = TOOL_OUTPUT_LIMIT_CHARS
+    for line in symbol_lines:
+        if budget - (len(line) + 1) < 0:
+            break
+        shown_lines.append(line)
+        budget -= len(line) + 1
+    shown = "\n".join(shown_lines)
+    body, spill_details = _capped_list_body(full, shown, "read", context)
+    header = f"{path} — structural summary ({total_lines} lines, " f"{symbol_count} symbol lines)"
+    footer = (
+        "\n[declaration-only view; bodies elided. Re-read exact code with "
+        "range='start-end' (e.g. range='40-52'), or raw=true for the full text]"
+    )
+    details: dict[str, Any] = {"path": str(path), "summary": True}
+    if spill_details:
+        details.update(spill_details)
+    return _text(tool_call_id, "read", header + "\n" + body + footer, details=details)
+
+    footer = (
+        f'\n[read around a hit with read(path="{ref.handle}", '
+        f'range="{max(matches[0][0] - 10, 1)}-{matches[0][0] + 30}")]'
+    )
+    return _text(tool_call_id, "read", f"{header}:\n{body}{footer}", details=details)
+
+
 @_guard("read")
 async def execute_read(
     tool_call_id: str,
@@ -1844,6 +2011,21 @@ async def execute_read(
             # 900-1000 blanks an unrelated 1-100 read as "superseded".
             details={"path": str(path), "range": params.range},
         )
+    # Python files read whole get a declaration-only structural summary:
+    # the model sees the symbol table (with line ranges) instead of the full
+    # body, and re-reads only the ranges it needs. The repo's own benchmark
+    # put tool results at 87-96% of context bytes — the read tool is where
+    # those bytes come from. Opt-outs: a range (explicit interest in exact
+    # lines) or raw=true; unparseable files fall back to the body honestly.
+    if (
+        not params.range
+        and not params.raw
+        and path.suffix == ".py"
+        and len(lines) >= PYTHON_SUMMARY_MIN_LINES
+    ):
+        summarized = _structural_summary_result(tool_call_id, path, text, context)
+        if summarized is not None:
+            return summarized
 
     if len(lines) > READ_LINE_CAP:
         body = _number_lines(lines[:READ_LINE_CAP], 1)
@@ -1869,7 +2051,9 @@ def build_read_tool() -> AgentTool:
         label="Read",
         description=(
             "Read a file, line range, or internal URL (skill://, guide://, mcp://). "
-            "PNG/JPEG/GIF/WebP/HEIC files come back as a viewable image."
+            "PNG/JPEG/GIF/WebP/HEIC files come back as a viewable image. "
+            "Python files read whole return a structural summary; use a "
+            "range or raw=true for exact text."
         ),
         parameters=ReadParams.model_json_schema(),
         approval_tier="read",
@@ -1877,6 +2061,278 @@ def build_read_tool() -> AgentTool:
         concurrency="shared",
         interruptible=False,
         execute=execute_read,
+    )
+
+
+# ---------------------------------------------------------------------------
+# edit
+# ---------------------------------------------------------------------------
+
+
+class EditHunk(BaseModel):
+    """One SEARCH/REPLACE hunk. ``old_text`` is matched exactly first, then
+    with a whitespace-tolerant line matcher, so an edit written from a
+    structural summary or from memory does not fail on indentation drift."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    old_text: str = Field(
+        description="Text to find (exact match tried first, then whitespace-tolerant)."
+    )
+    new_text: str = Field(
+        description="Replacement text (re-indented to the file's level on the tolerant path)."
+    )
+    replace_all: bool = Field(
+        default=False,
+        description="Replace every occurrence of this hunk instead of requiring exactly one.",
+    )
+
+
+class EditParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(description="File to edit.")
+    edits: list[EditHunk] = Field(
+        default_factory=list,
+        description=(
+            "Hunks applied in order — the multi-edit form. Prefer this for "
+            "several changes to one file: it costs one call instead of N."
+        ),
+    )
+    old_text: str | None = Field(
+        default=None,
+        description="Single-edit form: exact text to find. Mutually exclusive with 'edits'.",
+    )
+    new_text: str | None = Field(default=None, description="Single-edit form: replacement text.")
+    replace_all: bool = Field(
+        default=False,
+        description="Single-edit form: replace every occurrence instead of requiring exactly one.",
+    )
+    anchor_line: int | None = Field(
+        default=None,
+        description=(
+            "Optional 1-based line that disambiguates a match that occurs in "
+            "several places: the window containing this line wins."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _single_form_is_complete(self) -> "EditParams":
+        """One form or the other, whole — a lone old_text is a modeling
+        mistake pydantic reports in the tool's clean 'invalid arguments'
+        voice rather than a bespoke message the caller cannot predict."""
+        if (self.old_text is None) != (self.new_text is None):
+            raise ValueError("single-edit form needs both old_text and new_text")
+        if self.old_text is not None and self.edits:
+            raise ValueError("pass either 'edits' (list of hunks) or old_text/new_text, not both")
+        if not self.edits and self.old_text is not None and not self.old_text:
+            raise ValueError("old_text must be a non-empty string")
+        return self
+
+
+def _leading_ws(line: str) -> str:
+    return line[: len(line) - len(line.lstrip())]
+
+
+def _match_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
+    """``(start, end, matched_text)`` windows where ``old_text`` occurs.
+
+    Pass 1 is exact substring matching — the anchored, honest form. Pass 2
+    runs only when pass 1 found nothing: a line-based tolerant matcher that
+    compares lines with ``strip()`` equality and returns the matched FILE
+    text so the replacement can be re-indented per line into place.
+    Tolerance is one-directional by design: an exact match is never silently
+    flexed, and a fuzzy match never silently wins over an exact one that
+    exists elsewhere.
+    """
+    windows: list[tuple[int, int, str]] = []
+    start = content.find(old_text)
+    while start != -1:
+        windows.append((start, start + len(old_text), old_text))
+        start = content.find(old_text, start + 1)
+    if windows:
+        return windows
+
+    file_lines = content.splitlines(keepends=True)
+    # Per-line start offsets so a window can be returned as a char span.
+    offsets: list[int] = []
+    at = 0
+    for line in file_lines:
+        offsets.append(at)
+        at += len(line)
+    old_lines = old_text.splitlines()
+    if not old_lines or len(old_lines) > len(file_lines):
+        return []
+
+    def _tolerant(file_line: str, old_line: str) -> bool:
+        return file_line.strip() == old_line.strip()
+
+    for i in range(len(file_lines) - len(old_lines) + 1):
+        window = file_lines[i : i + len(old_lines)]
+        if all(_tolerant(f.rstrip("\r\n"), o) for f, o in zip(window, old_lines)):
+            # The span runs to the end of the last matched line INCLUDING its
+            # newline, so replacing it cannot splice the following line onto
+            # the replacement's final line.
+            last_line = window[-1]
+            end = offsets[i + len(old_lines) - 1] + len(last_line)
+            matched = "".join(window)
+            windows.append((offsets[i], end, matched))
+    return windows
+
+
+def _reindent_new_text(new_text: str, matched: str, old_text: str) -> str:
+    """Re-anchor ``new_text``'s indentation onto the file's actual level.
+
+    The model's old/new pair is internally consistent at ITS indentation; the
+    file holds the same text at a different one. Per line: the model's line
+    sits ``(file_indent - old_indent)`` columns over its reference. Extra new
+    lines (additions with no counterpart in old_text) borrow the delta of the
+    last old line, which is the level the block was written at. Blank lines
+    pass through untouched."""
+    file_lines = matched.splitlines()
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
+    if not old_lines or not file_lines:
+        return new_text
+    out: list[str] = []
+    for i, line in enumerate(new_lines):
+        if not line.strip():
+            out.append("")
+            continue
+        ref = min(i, len(file_lines) - 1, len(old_lines) - 1)
+        file_indent = len(_leading_ws(file_lines[ref]))
+        old_indent = len(_leading_ws(old_lines[ref]))
+        line_indent = len(_leading_ws(line))
+        shift = file_indent + max(line_indent - old_indent, 0)
+        out.append(" " * shift + line.lstrip())
+    return "\n".join(out)
+
+
+def _line_of_offset(content: str, offset: int) -> int:
+    return content.count("\n", 0, offset) + 1
+
+
+@_guard("edit")
+async def execute_edit(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Ordered SEARCH/REPLACE hunks in a file, one call for the whole change.
+
+    Why hunks and not whole-file writes: a ``write`` argument IS the file
+    body, billed as model output (the most expensive token class, and never
+    cacheable) and then re-billed as prompt on every later turn. On build-heavy
+    work that dominates the bill — the repo's own benchmark measured file
+    bodies at 48-74% of task cost. The hunk form prices an edit by what
+    CHANGED.
+
+    Ambiguity is an error, not a guess: a hunk matching more than one place
+    without ``replace_all`` (or a disambiguating ``anchor_line``) refuses,
+    because silently editing the first occurrence is how edits corrupt the
+    wrong site.
+    """
+    try:
+        params = EditParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "edit", exc)
+    if not params.path.strip():
+        return _error(tool_call_id, "edit", "path must be a non-empty string")
+
+    hunks: list[EditHunk] = list(params.edits)
+    if params.old_text is not None and params.new_text is not None:
+        hunks.append(
+            EditHunk(
+                old_text=params.old_text, new_text=params.new_text, replace_all=params.replace_all
+            )
+        )
+    if not hunks:
+        return _error(
+            tool_call_id,
+            "edit",
+            "nothing to edit: pass 'edits' (preferred) or old_text/new_text.",
+        )
+
+    path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
+    if not path.is_file():
+        return _error(tool_call_id, "edit", f"File does not exist: {path}")
+
+    original = path.read_text(encoding="utf-8")
+    current = original
+    total_replacements = 0
+
+    for index, hunk in enumerate(hunks):
+        if hunk.old_text == "":
+            return _error(tool_call_id, "edit", f"hunk {index + 1}: old_text must be non-empty")
+        windows = _match_windows(current, hunk.old_text)
+        if not windows:
+            advice = (
+                f" — or the range around line {params.anchor_line}"
+                if params.anchor_line
+                else " to get the current text"
+            )
+            return _error(
+                tool_call_id,
+                "edit",
+                f"hunk {index + 1}: old_text not found (exact and whitespace-tolerant "
+                f"matchers both failed). Re-read the file{advice} and retry.",
+            )
+        chosen = windows
+        if len(windows) > 1 and not hunk.replace_all:
+            if params.anchor_line is not None:
+                anchored = []
+                for w in windows:
+                    first_line = _line_of_offset(current, w[0])
+                    last_line = _line_of_offset(current, max(w[1] - 1, w[0]))
+                    if first_line <= params.anchor_line <= last_line:
+                        anchored.append(w)
+                if len(anchored) == 1:
+                    chosen = anchored
+            if len(chosen) > 1:
+                return _error(
+                    tool_call_id,
+                    "edit",
+                    f"hunk {index + 1}: old_text matches {len(chosen)} places; include more "
+                    "surrounding context, give anchor_line, or set replace_all=true.",
+                )
+        # Apply back-to-front so earlier offsets stay valid within this hunk.
+        for start, end, matched in sorted(chosen, key=lambda w: w[0], reverse=True):
+            replacement = _reindent_new_text(hunk.new_text, matched, hunk.old_text)
+            if matched.endswith(("\n", "\r")) and not replacement.endswith(("\n", "\r")):
+                replacement += "\n"
+            current = current[:start] + replacement + current[end:]
+            total_replacements += 1
+
+    if current != original:
+        path.write_text(current, encoding="utf-8")
+    details = _diff_details(str(path), original, current)
+    return _text(
+        tool_call_id,
+        "edit",
+        f"Edited {path}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied.",
+        details=details,
+    )
+
+
+def build_edit_tool() -> AgentTool:
+    return AgentTool(
+        name="edit",
+        label="Edit",
+        describe_approval=_describe_path_approval("edit"),
+        description=(
+            "Apply ordered SEARCH/REPLACE hunks to a file ('edits' list for "
+            "several changes in one call; exact match first, then "
+            "whitespace-tolerant; anchor_line disambiguates repeats)."
+        ),
+        parameters=EditParams.model_json_schema(),
+        approval_tier="write",
+        # edit model: two concurrent edits on one file corrupt each
+        # other's match anchors; exclusive serializes the read-modify-write.
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_edit,
     )
 
 
@@ -2014,96 +2470,148 @@ def build_write_tool() -> AgentTool:
 
 
 # ---------------------------------------------------------------------------
-# edit
+# gitignore-aware walking (shared by glob and grep)
 # ---------------------------------------------------------------------------
 
 
-class EditParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class _IgnoreRule:
+    """One compiled .gitignore/.ignore line, scoped to its file's directory.
 
-    path: str = Field(description="File to edit.")
-    old_text: str = Field(description="Exact text to find (must match verbatim).")
-    new_text: str = Field(description="Replacement text.")
-    replace_all: bool = Field(
-        default=False,
-        description="Replace every occurrence instead of requiring exactly one.",
-    )
-
-
-@_guard("edit")
-async def execute_edit(
-    tool_call_id: str,
-    args: dict[str, Any],
-    signal: AbortSignal | None = None,
-    on_update: Callable[[AgentToolUpdate], None] | None = None,
-    context: ToolContext | None = None,
-) -> ToolResult:
-    """Exact-match string replacement in a file.
-
-    Ambiguity is an error, not a guess: with ``old_text`` matching more than
-    once and ``replace_all`` unset the tool refuses, because silently editing
-    the first occurrence is how edits corrupt the wrong site.
+    Semantics follow gitignore(5) closely enough for search pruning: ``*``
+    does not cross ``/``, ``**`` does, a trailing ``/`` matches directories
+    only, a leading or interior ``/`` anchors the pattern to the rule's base
+    directory, otherwise the pattern matches a basename at any depth below
+    it, and a later ``!`` rule re-includes. Why this exists at all: the old
+    fixed prune list covered .git/node_modules & co but never the project's
+    OWN ignored paths — build dirs, vendored trees, virtualenvs under other
+    names — so search results carried exactly the noise the project had
+    already declared dead.
     """
-    try:
-        params = EditParams(**args)
-    except ValidationError as exc:
-        return _validation_error(tool_call_id, "edit", exc)
-    if not params.path.strip():
-        return _error(tool_call_id, "edit", "path must be a non-empty string")
-    if params.old_text == "":
-        return _error(tool_call_id, "edit", "old_text must be a non-empty string")
 
-    path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
-    if not path.is_file():
-        return _error(tool_call_id, "edit", f"File does not exist: {path}")
+    __slots__ = ("regex", "negated", "dir_only", "base")
 
-    content = path.read_text(encoding="utf-8")
-    occurrences = content.count(params.old_text)
-    if occurrences == 0:
-        return _error(
-            tool_call_id,
-            "edit",
-            "old_text not found in the file. Re-read the file to get the exact "
-            "current text (whitespace included) and retry.",
-        )
-    if occurrences > 1 and not params.replace_all:
-        return _error(
-            tool_call_id,
-            "edit",
-            f"old_text matches {occurrences} places; include more surrounding "
-            "context to make it unique, or set replace_all=true.",
-        )
-    # Write-tier approval is the loop's gate; see execute_bash.
-
-    if params.replace_all:
-        updated = content.replace(params.old_text, params.new_text)
-    else:
-        updated = content.replace(params.old_text, params.new_text, 1)
-    path.write_text(updated, encoding="utf-8")
-    replaced = occurrences if params.replace_all else 1
-    details = _diff_details(str(path), content, updated)
-    return _text(
-        tool_call_id,
-        "edit",
-        f"Edited {path}: replaced {replaced} occurrence(s) of old_text.",
-        details=details,
-    )
+    def __init__(self, pattern: str, base: str) -> None:
+        self.negated = pattern.startswith("!")
+        if self.negated:
+            pattern = pattern[1:]
+        self.dir_only = pattern.endswith("/")
+        pattern = pattern.rstrip("/")
+        self.base = base
+        anchored = pattern.startswith("/") or "/" in pattern
+        pattern = pattern.lstrip("/")
+        parts = pattern.split("/")
+        regex = "/".join(".*" if seg == "**" else _glob_segment_regex(seg) for seg in parts)
+        if self.dir_only:
+            # A directory pattern owns its whole subtree, not just the
+            # directory entry: "dist/" must match "dist/out.js" too, or a
+            # post-filtering caller (glob) would admit every file under an
+            # ignored directory the walker (grep) would have pruned.
+            regex += "(/.*)?"
+        if anchored:
+            prefix = re.escape(base + "/") if base else ""
+            self.regex = re.compile("^" + prefix + regex)
+        else:
+            self.regex = re.compile("(^|.*/)" + regex + "$")
 
 
-def build_edit_tool() -> AgentTool:
-    return AgentTool(
-        name="edit",
-        label="Edit",
-        describe_approval=_describe_path_approval("edit"),
-        description="Replace exact text in a file (errors on missing or ambiguous matches).",
-        parameters=EditParams.model_json_schema(),
-        approval_tier="write",
-        # edit model: two concurrent edits on one file corrupt each
-        # other's match anchors; exclusive serializes the read-modify-write.
-        concurrency="exclusive",
-        interruptible=False,
-        execute=execute_edit,
-    )
+def _glob_segment_regex(segment: str) -> str:
+    """One path segment of a gitignore pattern as regex (``*`` stays in-segment)."""
+    out: list[str] = []
+    i = 0
+    while i < len(segment):
+        ch = segment[i]
+        if ch == "*":
+            if segment[i : i + 2] == "**":
+                out.append(".*")
+                i += 2
+                continue
+            out.append("[^/]*")
+            i += 1
+            continue
+        if ch == "?":
+            out.append("[^/]")
+            i += 1
+            continue
+        out.append(re.escape(ch))
+        i += 1
+    return "".join(out)
+
+
+def _load_ignore_rules(directory: Path, rel_dir: str) -> list[_IgnoreRule]:
+    """Rules from a directory's ``.gitignore``/``.ignore``, empty when absent."""
+    rules: list[_IgnoreRule] = []
+    for name in (".gitignore", ".ignore"):
+        file = directory / name
+        if not file.is_file():
+            continue
+        try:
+            raw = file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in raw.splitlines():
+            line = line.rstrip("\r")
+            if not line.strip() or line.startswith("#"):
+                continue
+            rules.append(_IgnoreRule(line, rel_dir))
+    return rules
+
+
+def _ignored(
+    rel: str,
+    is_dir: bool,
+    rules: list[tuple[str, list[_IgnoreRule]]],
+) -> bool:
+    """gitignore last-match-wins evaluation over the ancestor rule stack."""
+    ignored = False
+    for _base, base_rules in rules:
+        for rule in base_rules:
+            if rule.regex.search(rel):
+                ignored = not rule.negated
+    return ignored
+
+
+def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
+    """Depth-first walk pruning VCS/vendor/build trees, dotdirs, symlinks and
+    (when ``respect_ignore``) gitignore-declared paths. Files only.
+
+    Git semantics for directories are honored structurally: an ignored
+    directory's subtree is skipped outright, so a ``!`` rule cannot re-include
+    inside it — exactly git's own behaviour.
+    """
+    files: list[Path] = []
+
+    def _walk(directory: Path, rel_dir: str, rules: list[tuple[str, list[_IgnoreRule]]]) -> None:
+        local_rules = rules
+        if respect_ignore:
+            found = _load_ignore_rules(directory, rel_dir)
+            if found:
+                local_rules = rules + [(rel_dir, found)]
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if entry.is_symlink():
+                continue  # never follow links: cycles and out-of-tree escapes
+            rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+            if entry.is_dir():
+                if entry.name in _GREP_PRUNE_DIRS or entry.name.startswith("."):
+                    continue
+                if respect_ignore and _ignored(rel, True, local_rules):
+                    continue
+                _walk(entry, rel, local_rules)
+            elif entry.is_file():
+                if respect_ignore and _ignored(rel, False, local_rules):
+                    continue
+                files.append(entry)
+
+    _walk(root, "", [])
+    return files
+
+
+def _walk_files(root: Path) -> list[Path]:
+    """The grep file set: the ignore-aware walk."""
+    return _walk_entries(root)
 
 
 # ---------------------------------------------------------------------------
@@ -2117,6 +2625,38 @@ class GlobParams(BaseModel):
     pattern: str = Field(
         description="Glob pattern relative to the working directory ('**/*.py' supported)."
     )
+
+
+def _literal_prefix(pattern: str) -> str:
+    """The leading run of the pattern with no glob metacharacters — the part
+    that names directories the author EXPLICITLY asked to descend into."""
+    out = []
+    for ch in pattern:
+        if ch in "*?[":
+            break
+        out.append(ch)
+    return "".join(out).rstrip("/")
+
+
+def _glob_walk(root: Path, pattern: str) -> list[str]:
+    """The walk half of execute_glob, run in a worker thread.
+
+    Matching still uses pathlib (so explicit hidden/vendor components in the
+    pattern work), then gitignore-declared paths are filtered out — unless
+    the pattern's literal prefix names them, because an author who writes
+    'dist/index.html' into a repo that ignores dist/ means that file."""
+    prefix = _literal_prefix(pattern)
+    rules: list[tuple[str, list[_IgnoreRule]]] = []
+    if root.joinpath(".gitignore").is_file() or root.joinpath(".ignore").is_file():
+        rules = [("", _load_ignore_rules(root, ""))]
+    out = []
+    for p in root.glob(pattern):
+        rel = p.relative_to(root).as_posix()
+        if rules and not rel.startswith(prefix + "/") and rel != prefix:
+            if _ignored(rel, p.is_dir(), rules):
+                continue
+        out.append(rel + ("/" if p.is_dir() else ""))
+    return sorted(out)
 
 
 @_guard("glob")
@@ -2178,7 +2718,10 @@ def build_glob_tool() -> AgentTool:
     return AgentTool(
         name="glob",
         label="Glob",
-        description="Find files and directories by glob pattern ('**' supported).",
+        description=(
+            "Find files and directories by glob pattern ('**' supported); "
+            "gitignore-declared paths are excluded unless the pattern names them."
+        ),
         parameters=GlobParams.model_json_schema(),
         approval_tier="read",
         # Read-only listing; parallel globs are the common batch shape.
@@ -2208,12 +2751,19 @@ class GrepParams(BaseModel):
         ),
     )
     case: bool = Field(default=True, description="Case-sensitive matching.")
-
-
-def _glob_walk(root: Path, pattern: str) -> list[str]:
-    """The walk half of execute_glob, run in a worker thread."""
-    return sorted(
-        p.relative_to(root).as_posix() + ("/" if p.is_dir() else "") for p in root.glob(pattern)
+    context_lines: int = Field(
+        default=0,
+        ge=0,
+        le=10,
+        description=(
+            "Lines of surrounding context per match (like grep -C). Context "
+            "lines render as 'path:line-text' (dash) vs matches 'path:line:text'."
+        ),
+    )
+    skip: int = Field(
+        default=0,
+        ge=0,
+        description="Skip the first N matches (pagination for large result sets).",
     )
 
 
@@ -2223,30 +2773,6 @@ def _glob_matches(rel_path: str, pattern: str) -> bool:
         return True
     name = rel_path.rsplit("/", 1)[-1]
     return fnmatch.fnmatch(name, pattern)
-
-
-def _walk_files(root: Path) -> list[Path]:
-    """Walk ``root`` depth-first, pruning VCS/vendor/build trees and every
-    dotdir (.git history and node_modules are noise the model never wants)."""
-    files: list[Path] = []
-
-    def _walk(directory: Path) -> None:
-        try:
-            entries = sorted(directory.iterdir())
-        except OSError:
-            return
-        for entry in entries:
-            if entry.is_symlink():
-                continue  # never follow links: cycles and out-of-tree escapes
-            if entry.is_dir():
-                if entry.name in _GREP_PRUNE_DIRS or entry.name.startswith("."):
-                    continue
-                _walk(entry)
-            elif entry.is_file():
-                files.append(entry)
-
-    _walk(root)
-    return files
 
 
 #: Wall-clock cap for one grep scan. Bounds the pathological-regex case
@@ -2264,20 +2790,56 @@ GREP_SCAN_DEADLINE_S = 30.0
 GREP_SPILL_MATCH_LIMIT = 5000
 
 
-def _grep_scan(
+#: Engine selection: 'auto' uses ripgrep when the binary is on PATH (native
+#: speed, native gitignore/hidden semantics) and falls back to the Python
+#: scan otherwise; 'python' forces the fallback for deterministic tests.
+#: Read per call, not cached at import, so a test (or a user shell) can pin
+#: the engine without reimporting the module.
+def _grep_engine() -> str:
+    return os.environ.get("LOCAL_OPERATOR_GREP_ENGINE", "auto")
+
+
+_RG_PATH: str | None = None
+_RG_RESOLVED = False
+
+
+def _rg_binary() -> str | None:
+    """Absolute ripgrep path when usable, else None (cached)."""
+    global _RG_PATH, _RG_RESOLVED
+    if not _RG_RESOLVED:
+        import shutil
+
+        _RG_PATH = shutil.which("rg")
+        _RG_RESOLVED = True
+    return _RG_PATH
+
+
+def _use_ripgrep() -> bool:
+    return _grep_engine() == "auto" and _rg_binary() is not None
+
+
+def _match_record(rel: str, lineno: int, line: str, kind: str) -> tuple[str, int, str, str]:
+    return (rel, lineno, line, kind)
+
+
+def _python_grep_scan(
     files: list[Path],
     base: Path,
     regex: re.Pattern[str],
     include: str | None,
-) -> tuple[list[str], int, int]:
-    """The filesystem+regex half of execute_grep, run in a worker thread.
+    context_lines: int,
+) -> tuple[list[tuple[str, int, str, str]], int, int]:
+    """The pure-Python scan, run in a worker thread.
 
-    Returns ``(matches, files_searched, files_skipped)``. Kept synchronous and
-    self-contained so ``asyncio.to_thread`` can carry it off the event loop;
-    the deadline bounds a backtracking pattern without touching the loop.
+    Returns ``(records, files_searched, files_skipped)`` where a record is
+    ``(rel, lineno, text, kind)`` and kind is ``'m'`` (match) or ``'c'``
+    (context). Context records are only produced when ``context_lines`` > 0.
+    Kept synchronous and self-contained so ``asyncio.to_thread`` can carry it
+    off the event loop; the deadline bounds a backtracking pattern without
+    touching the loop.
     """
     deadline = time.monotonic() + GREP_SCAN_DEADLINE_S
-    matches: list[str] = []
+    records: list[tuple[str, int, str, str]] = []
     files_searched = 0
     files_skipped = 0
     for file_path in files:
@@ -2304,14 +2866,176 @@ def _grep_scan(
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             text = data.decode("utf-8", errors="replace")
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            if regex.search(line):
-                matches.append(f"{rel}:{lineno}:{line}")
-                if len(matches) >= GREP_SPILL_MATCH_LIMIT:
-                    break
-        if len(matches) >= GREP_SPILL_MATCH_LIMIT:
+        lines = text.splitlines()
+        hit_lines = [n for n, line in enumerate(lines, start=1) if regex.search(line)]
+        if not hit_lines:
+            continue
+        wanted: set[int] = set()
+        for n in hit_lines:
+            wanted.add(n)
+            if context_lines:
+                wanted.update(
+                    range(max(1, n - context_lines), min(len(lines), n + context_lines) + 1)
+                )
+        for n in sorted(wanted):
+            kind = "m" if n in hit_lines else "c"
+            records.append(_match_record(rel, n, lines[n - 1], kind))
+        if sum(1 for r in records if r[3] == "m") >= GREP_SPILL_MATCH_LIMIT:
             break
-    return matches, files_searched, files_skipped
+    return records, files_searched, files_skipped
+
+
+_RG_LINE_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):(?P<text>.*)$")
+_RG_CONTEXT_RE = re.compile(r"^(?P<path>.+?)-(?P<line>\d+)-(?P<text>.*)$")
+
+
+async def _ripgrep_scan(
+    pattern: str,
+    target: Path,
+    base: Path,
+    include: str | None,
+    case: bool,
+    context_lines: int,
+    signal: AbortSignal | None,
+) -> tuple[list[tuple[str, int, str, str]], int] | None:
+    """Native ripgrep scan; None means "fall back to the Python engine".
+
+    rg's defaults already match this tool's contract — hidden files skipped,
+    .gitignore respected, binary files detected — and ``-g '!dir'`` adds the
+    fixed vendor prune list the Python walker enforces. The subprocess is
+    raced against the abort signal and the same 30s wall clock; output is
+    capped well past the spill limit so a pathological tree cannot stream
+    forever."""
+    rg = _rg_binary()
+    if rg is None:
+        return None
+    rel_target = (target.relative_to(base).as_posix() if base in target.parents else ".") or "."
+    # -H forces the path prefix even for a single explicitly-named file
+    # (rg otherwise prints bare "lineno:text", which this parser and the
+    # shared path:line:text grammar both expect to carry a path).
+    argv = [rg, "--no-heading", "--color", "never", "--max-filesize", "1M", "-n", "-H"]
+    if not case:
+        argv.append("-i")
+    if context_lines:
+        argv += ["-C", str(context_lines)]
+    if include:
+        argv += ["-g", include]
+    for pruned in _GREP_PRUNE_DIRS:
+        argv += ["-g", f"!{pruned}"]
+    argv += ["--", pattern, rel_target]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(base),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except (OSError, ValueError):
+        return None
+
+    records: list[tuple[str, int, str, str]] = []
+    deadline = time.monotonic() + GREP_SCAN_DEADLINE_S
+    output_cap = (GREP_SPILL_MATCH_LIMIT + 1) * 3 + 1000
+    try:
+        assert proc.stdout is not None
+        while len(records) < output_cap:
+            if signal and signal.aborted:
+                proc.kill()
+                return None
+            if time.monotonic() > deadline:
+                proc.kill()
+                break
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
+            except (TimeoutError, asyncio.TimeoutError):
+                continue
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+            if line == "--":
+                continue
+            match = _RG_LINE_RE.match(line)
+            if match:
+                path = match.group("path")
+                if path.startswith("./"):
+                    path = path[2:]
+                records.append(
+                    _match_record(path, int(match.group("line")), match.group("text"), "m")
+                )
+                continue
+            context = _RG_CONTEXT_RE.match(line)
+            if context:
+                path = context.group("path")
+                if path.startswith("./"):
+                    path = path[2:]
+                records.append(
+                    _match_record(path, int(context.group("line")), context.group("text"), "c")
+                )
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except (TimeoutError, asyncio.TimeoutError):
+            proc.kill()
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+    # exit 0 = matches, 1 = none; anything else is an rg-side error (bad
+    # flag, unreadable cwd) the caller should not inherit.
+    if proc.returncode not in (0, 1):
+        return None
+    match_count = sum(1 for r in records if r[3] == "m")
+    return records, match_count
+
+
+def _render_grep_body(
+    records: list[tuple[str, int, str, str]],
+    skip: int,
+    context_lines: int,
+) -> tuple[str, int, int]:
+    """``(body, shown_matches, total_matches)`` with skip + display cap applied.
+
+    Matches paginate (``skip`` then the 200-line display cap); context rides
+    along only for the matches being shown, groups separated by ``--``."""
+    match_indexes = [i for i, r in enumerate(records) if r[3] == "m"]
+    total = len(match_indexes)
+    kept = match_indexes[skip:][:GREP_MATCH_LIMIT]
+    if not kept:
+        return "", 0, total
+    keep_set = set(kept)
+    # Pull in the context records neighbouring each kept match (same file,
+    # within ±context_lines of the match).
+    if context_lines:
+        for i in kept:
+            rel, lineno = records[i][0], records[i][1]
+            j = i - 1
+            while (
+                j >= 0
+                and records[j][0] == rel
+                and records[j][3] == "c"
+                and lineno - records[j][1] <= context_lines
+            ):
+                keep_set.add(j)
+                j -= 1
+            j = i + 1
+            while (
+                j < len(records)
+                and records[j][0] == rel
+                and records[j][3] == "c"
+                and records[j][1] - lineno <= context_lines
+            ):
+                keep_set.add(j)
+                j += 1
+    out: list[str] = []
+    last_line = None
+    last_rel = None
+    for i in sorted(keep_set):
+        rel, lineno, text, kind = records[i]
+        if last_rel is not None and (rel != last_rel or lineno != last_line + 1):
+            out.append("--")
+        out.append(f"{rel}:{lineno}:{text}" if kind == "m" else f"{rel}:{lineno}-{text}")
+        last_rel, last_line = rel, lineno
+    return "\n".join(out), len(kept), total
 
 
 @_guard("grep")
@@ -2322,7 +3046,7 @@ async def execute_grep(
     on_update: Callable[[AgentToolUpdate], None] | None = None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    """Regex search over files; ripgrep-free pure-Python implementation."""
+    """Regex search over files — ripgrep when available, Python otherwise."""
     try:
         params = GrepParams(**args)
     except ValidationError as exc:
@@ -2344,55 +3068,104 @@ async def execute_grep(
         if not await _check_approval(context, "read", description):
             return _error(tool_call_id, "grep", "User declined to search this path.")
 
+    records: list[tuple[str, int, str, str]] = []
+    files_searched = 0
+    files_skipped = 0
+    engine_note = ""
+
     if target.is_file():
-        files: list[Path] = [target]
         base = target.parent
+        files: list[Path] = [target]
     else:
         base = target
         files = _walk_files(target)
 
-    # The scan is FILESYSTEM + REGEX work on model-controlled input; running
-    # it on the event loop would pin the CPU on a backtracking pattern or a
-    # large tree and make Ctrl+C unprocessable. It runs in a worker thread
-    # raced against the abort signal, with a wall-clock cap bounding the
-    # pathological-regex case (regexes are not classified).
-    scan_result, aborted = await _run_with_abort(
-        asyncio.to_thread(_grep_scan, files, base, regex, params.include),
-        signal,
-        lambda: None,
-    )
-    if aborted:
-        return _error(tool_call_id, "grep", "Search aborted.")
-    matches, files_searched, files_skipped = scan_result
+    scan_result = None
+    if _use_ripgrep() and not (target.is_file() and target.stat().st_size > GREP_FILE_LIMIT_BYTES):
+        scan_result = await _ripgrep_scan(
+            params.pattern,
+            target,
+            base,
+            params.include,
+            params.case,
+            params.context_lines,
+            signal,
+        )
+    if scan_result is not None:
+        records, _count = scan_result
+        engine_note = " (ripgrep)"
+        # rg applies --max-filesize silently; recover the count the footer
+        # contract promises from the already-walked file list so both
+        # engines tell the model the same thing.
+        for f in files:
+            try:
+                if f.stat().st_size > GREP_FILE_LIMIT_BYTES:
+                    files_skipped += 1
+            except OSError:
+                continue
+    else:
+        if signal and signal.aborted:
+            return _error(tool_call_id, "grep", "Search aborted.")
+        # The scan is FILESYSTEM + REGEX work on model-controlled input;
+        # running it on the event loop would pin the CPU on a backtracking
+        # pattern or a large tree and make Ctrl+C unprocessable. It runs in a
+        # worker thread raced against the abort signal, with a wall-clock cap
+        # bounding the pathological-regex case (regexes are not classified).
+        py_result, aborted = await _run_with_abort(
+            asyncio.to_thread(
+                _python_grep_scan, files, base, regex, params.include, params.context_lines
+            ),
+            signal,
+            lambda: None,
+        )
+        if aborted:
+            return _error(tool_call_id, "grep", "Search aborted.")
+        records, files_searched, files_skipped = py_result
 
+    matches = [r for r in records if r[3] == "m"]
     if not matches:
         skipped_note = (
             f" ({files_skipped} file(s) skipped over the 1MB cap)" if files_skipped else ""
         )
+        where = f"in {files_searched} file(s)" if not engine_note else ""
         return _text(
             tool_call_id,
             "grep",
-            f"No matches for '{params.pattern}' in {files_searched} " f"file(s){skipped_note}.",
+            f"No matches for '{params.pattern}'{where}{skipped_note}{engine_note}.",
             useless=True,
             details={"useless": True},
         )
-    total = len(matches)
-    shown = matches[:GREP_MATCH_LIMIT]
-    body, spill_details = _capped_list_body("\n".join(matches), "\n".join(shown), "grep", context)
-    header = f"{len(shown)} match(es) for '{params.pattern}'"
-    if total > len(shown):
+
+    body, shown, total = _render_grep_body(records, params.skip, params.context_lines)
+    # The spill holds every MATCH line (context excluded — it is render-time
+    # decoration, recoverable by re-running with a narrower pattern/range).
+    spill_lines = [f"{rel}:{lineno}:{text}" for rel, lineno, text, _kind in matches]
+    shown_block = body
+    body_text, spill_details = _capped_list_body(
+        "\n".join(spill_lines), shown_block, "grep", context
+    )
+    header = f"{shown} match(es) for '{params.pattern}'"
+    if total > shown:
         header += f" of {total}{'+' if total >= GREP_SPILL_MATCH_LIMIT else ''}"
-        header += f" (showing first {GREP_MATCH_LIMIT})"
+        header += f" (use skip={params.skip + shown} for the next page)"
+    if params.skip:
+        header += f" (skipped {params.skip})"
     if files_skipped:
         header += f" ({files_skipped} file(s) skipped over the 1MB cap)"
-    return _text(tool_call_id, "grep", header + ":\n" + body, details=spill_details)
+    return _text(
+        tool_call_id, "grep", header + ":\n" + body_text + engine_note, details=spill_details
+    )
 
 
 def build_grep_tool() -> AgentTool:
     return AgentTool(
         name="grep",
         label="Grep",
-        description="Regex search across files, returning 'path:line:text' matches.",
+        description=(
+            "Regex search across files ('path:line:text' matches; context_lines "
+            "adds surrounding lines, skip paginates; gitignore respected, "
+            "ripgrep-fast when installed)."
+        ),
         parameters=GrepParams.model_json_schema(),
         approval_tier="read",
         # Read-only search; parallel greps are the common batch shape.
