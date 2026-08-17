@@ -2299,31 +2299,47 @@ def _match_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
 
 
 def _reindent_new_text(new_text: str, matched: str, old_text: str) -> str:
-    """Re-anchor ``new_text``'s indentation onto the file's actual level.
+    """Re-anchor a TOLERANT match while retaining the file's line endings.
 
-    The model's old/new pair is internally consistent at ITS indentation; the
-    file holds the same text at a different one. Per line: the model's line
-    sits ``(file_indent - old_indent)`` columns over its reference. Extra new
-    lines (additions with no counterpart in old_text) borrow the delta of the
-    last old line, which is the level the block was written at. Blank lines
-    pass through untouched."""
-    file_lines = matched.splitlines()
-    old_lines = old_text.splitlines()
-    new_lines = new_text.splitlines()
+    Exact matches bypass this function and insert ``new_text`` byte-for-byte.
+    On the tolerant path, indentation follows the file window and every model
+    newline adopts the corresponding file line's CRLF/LF spelling. Extra
+    inserted lines borrow the final matched line's indentation and EOL.
+    """
+    file_lines = matched.splitlines(keepends=True)
+    old_lines = old_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
     if not old_lines or not file_lines:
         return new_text
+
+    def split_ending(line: str) -> tuple[str, str]:
+        body = line.rstrip("\r\n")
+        return body, line[len(body) :]
+
     out: list[str] = []
     for i, line in enumerate(new_lines):
-        if not line.strip():
-            out.append("")
+        body, model_ending = split_ending(line)
+        if not body.strip():
+            ref = min(i, len(file_lines) - 1)
+            _file_body, file_ending = split_ending(file_lines[ref])
+            out.append(file_ending if model_ending else "")
             continue
         ref = min(i, len(file_lines) - 1, len(old_lines) - 1)
-        file_indent = len(_leading_ws(file_lines[ref]))
-        old_indent = len(_leading_ws(old_lines[ref]))
-        line_indent = len(_leading_ws(line))
-        shift = file_indent + max(line_indent - old_indent, 0)
-        out.append(" " * shift + line.lstrip())
-    return "\n".join(out)
+        file_body, file_ending = split_ending(file_lines[ref])
+        old_body, _old_ending = split_ending(old_lines[ref])
+        file_indent = _leading_ws(file_body)
+        old_indent = _leading_ws(old_body)
+        line_indent = _leading_ws(body)
+        if line_indent.startswith(old_indent):
+            indentation = file_indent + line_indent[len(old_indent) :]
+        else:
+            # Mixed tab/space model indentation with no literal prefix: keep
+            # the file's anchor and conservatively express only the extra
+            # relative depth as spaces.
+            indentation = file_indent + " " * max(len(line_indent) - len(old_indent), 0)
+        ending = (file_ending or model_ending) if model_ending else ""
+        out.append(indentation + body.lstrip(" \t") + ending)
+    return "".join(out)
 
 
 def _line_of_offset(content: str, offset: int) -> int:
@@ -2377,7 +2393,8 @@ async def execute_edit(
     if not path.is_file():
         return _error(tool_call_id, "edit", f"File does not exist: {path}")
 
-    original = path.read_text(encoding="utf-8")
+    with path.open("r", encoding="utf-8", newline="") as stream:
+        original = stream.read()
     current = original
     total_replacements = 0
 
@@ -2417,14 +2434,24 @@ async def execute_edit(
                 )
         # Apply back-to-front so earlier offsets stay valid within this hunk.
         for start, end, matched in sorted(chosen, key=lambda w: w[0], reverse=True):
-            replacement = _reindent_new_text(hunk.new_text, matched, hunk.old_text)
-            if matched.endswith(("\n", "\r")) and not replacement.endswith(("\n", "\r")):
-                replacement += "\n"
+            exact = matched == hunk.old_text
+            replacement = (
+                hunk.new_text
+                if exact
+                else _reindent_new_text(hunk.new_text, matched, hunk.old_text)
+            )
+            if (
+                not exact
+                and matched.endswith(("\n", "\r"))
+                and not replacement.endswith(("\n", "\r"))
+            ):
+                replacement += "\r\n" if matched.endswith("\r\n") else "\n"
             current = current[:start] + replacement + current[end:]
             total_replacements += 1
 
     if current != original:
-        path.write_text(current, encoding="utf-8")
+        with path.open("w", encoding="utf-8", newline="") as stream:
+            stream.write(current)
     details = _diff_details(str(path), original, current)
     return _text(
         tool_call_id,

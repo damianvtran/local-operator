@@ -117,3 +117,38 @@ def test_cap_keeps_nearest_most_specific_files(tmp_path: Path) -> None:
     bodies = [file.read_text() for file in files]
     # Prompt order is farthest->nearest, but the retained SET is the nearest 5.
     assert bodies == [f"guidance {i}\n" for i in range(2, 7)]
+
+
+def test_symlinked_guidance_is_never_discovered_or_rendered(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    secret = tmp_path / "outside-secret.txt"
+    secret.write_text("DO NOT SEND")
+    link = repo / "AGENTS.md"
+    link.symlink_to(secret)
+
+    assert discover_context_files(repo) == []
+    # Render repeats the no-follow check: a link swapped in after discovery
+    # cannot exploit the gap between the two bounded reads.
+    assert render_context_files([link], repo) == ""
+
+
+def test_guidance_cap_bounds_ingestion_before_hash_and_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.context_files import MAX_FILE_BYTES
+
+    repo = _make_repo(tmp_path)
+    guidance = repo / "AGENTS.md"
+    guidance.write_bytes(b"x" * (MAX_FILE_BYTES + 10_000_000))
+
+    def forbidden(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("unbounded Path read API used")
+
+    # The old implementation used both and allocated the whole file twice.
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    rendered = load_repo_guidance(repo)
+
+    assert rendered.count("x") == MAX_FILE_BYTES
+    assert "truncated at 64KiB" in rendered
+    assert len(rendered.encode()) < MAX_FILE_BYTES + 1_000

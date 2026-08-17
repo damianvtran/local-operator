@@ -1468,3 +1468,51 @@ async def test_glob_respects_nested_gitignore(tools, context, tmp_path) -> None:
     result = await _call(tools, "glob", {"pattern": "**/*.py"}, context)
     assert "packages/a/visible.py" in result.text
     assert "packages/a/generated/hidden.py" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_exact_match_preserves_tabs_verbatim(tools, context, tmp_path) -> None:
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("target:\n\told\nnext:\n", newline="")
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "Makefile", "old_text": "\told\n", "new_text": "\tnew\n"},
+        context,
+    )
+    assert result.is_error is False
+    assert makefile.read_bytes() == b"target:\n\tnew\nnext:\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_exact_match_preserves_requested_trailing_newline(
+    tools, context, tmp_path
+) -> None:
+    path = tmp_path / "exact.txt"
+    path.write_text("needle-after", newline="")
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "exact.txt", "old_text": "needle", "new_text": "replacement\n"},
+        context,
+    )
+    assert result.is_error is False
+    assert path.read_bytes() == b"replacement\n-after"
+
+
+@pytest.mark.asyncio
+async def test_edit_tolerant_match_keeps_crlf_line_endings(tools, context, tmp_path) -> None:
+    path = tmp_path / "crlf.txt"
+    path.write_bytes(b"if ok:\r\n\told()\r\nnext()\r\n")
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "crlf.txt",
+            "old_text": "    old()\n",
+            "new_text": "    new()\n    added()\n",
+        },
+        context,
+    )
+    assert result.is_error is False
+    assert path.read_bytes() == b"if ok:\r\n\tnew()\r\n\tadded()\r\nnext()\r\n"

@@ -9,6 +9,7 @@ and per-session kernel isolation.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -354,3 +355,42 @@ def test_worker_caps_stdout_stderr_display_and_repr_before_json() -> None:
     # reprlib truncates one huge value before it reaches the display-channel
     # aggregate cap; either path is bounded without building a giant payload.
     assert "..." in payload["display"][0]
+
+
+@pytest.mark.asyncio
+async def test_timeout_kills_eval_descendant_process_group(context, tmp_path) -> None:
+    marker = tmp_path / "descendant-leaked.txt"
+    child = (
+        "import time; from pathlib import Path; "
+        f"time.sleep(1); Path({str(marker)!r}).write_text('leaked')"
+    )
+    code = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+        "time.sleep(60)"
+    )
+    result = await _call(context, code, timeout=0.2)
+    assert result.is_error is True
+    assert "TIMEOUT" in result.text
+    if eval_tool._CLOSING:
+        await asyncio.gather(*list(eval_tool._CLOSING))
+    await asyncio.sleep(1.1)
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_raw_stdout_protocol_overflow_retires_kernel_and_recovers(context) -> None:
+    result = await _call(
+        context,
+        "import os\nos.write(1, b'x' * 100_000 + b'\\n')\n42",
+        timeout=5,
+    )
+    assert result.is_error is True
+    assert "protocol" in result.text.lower()
+    assert not eval_tool._KERNELS
+    if eval_tool._CLOSING:
+        await asyncio.gather(*list(eval_tool._CLOSING))
+
+    fresh = await _call(context, "1 + 1")
+    assert fresh.is_error is False
+    assert "result: 2" in fresh.text

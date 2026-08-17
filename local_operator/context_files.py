@@ -20,7 +20,8 @@ Discovery contract:
 - Keep at most :data:`MAX_CONTEXT_FILES` files, the NEAREST ones — a deep
   monorepo can nest more levels than the prompt should carry, and the
   nearest files are the most specific.
-- Byte-identical files collapse to one (symlinked or vendored duplicates).
+- Prompt-identical bounded file contents collapse to one. Symlinks are never
+  followed: automatic guidance cannot cross the repository's trust boundary.
 
 Rendering contract: the files ride the byte-stable HEAD of the system prompt
 (read once at session start, exactly like the operator's own instructions),
@@ -38,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from pathlib import Path
 
 #: How many guidance files ride one system prompt. Nearest wins; deeper
@@ -54,6 +56,31 @@ MAX_FILE_BYTES = 64 * 1024
 CANDIDATE_NAMES = ("AGENTS.md", "CLAUDE.md")
 
 
+def _read_bounded(path: Path) -> tuple[bytes, bool]:
+    """Read one regular file without following links or exceeding the cap.
+
+    ``Path.is_symlink`` followed by ``open`` has a swap window. ``O_NOFOLLOW``
+    makes the kernel enforce the trust boundary at the actual read, while the
+    ``MAX_FILE_BYTES + 1`` probe determines truncation without ingesting the
+    rest of an attacker-controlled file.
+    """
+    if path.is_symlink():
+        raise OSError(f"refusing symlinked guidance: {path}")
+    flags = os.O_RDONLY
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"not a regular file: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            probe = stream.read(MAX_FILE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    return probe[:MAX_FILE_BYTES], len(probe) > MAX_FILE_BYTES
+
+
 def _git_root(start: Path) -> Path | None:
     """Nearest enclosing directory containing ``.git`` (file or dir — both
     worktrees and submodules use the file form), or None."""
@@ -66,7 +93,7 @@ def _git_root(start: Path) -> Path | None:
 def _file_for(directory: Path) -> Path | None:
     for name in CANDIDATE_NAMES:
         candidate = directory / name
-        if candidate.is_file():
+        if not candidate.is_symlink() and candidate.is_file():
             return candidate
     return None
 
@@ -84,9 +111,13 @@ def discover_context_files(cwd: str | Path) -> list[Path]:
         found_here = _file_for(directory)
         if found_here is not None:
             try:
-                digest = hashlib.sha256(found_here.read_bytes()).hexdigest()
+                bounded, truncated = _read_bounded(found_here)
+                digest_state = hashlib.sha256()
+                digest_state.update(bounded)
+                digest_state.update(b"\x01" if truncated else b"\x00")
+                digest = digest_state.hexdigest()
             except OSError:
-                digest = None  # unreadable: skip rather than partially trust
+                digest = None  # unreadable/link/non-regular: never inject
                 found_here = None
             if found_here is not None and digest is not None and digest not in seen_digests:
                 seen_digests.add(digest)
@@ -108,11 +139,12 @@ def render_context_files(files: list[Path], cwd: str | Path) -> str:
     parts: list[str] = []
     for path in files:
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            bounded, truncated = _read_bounded(path)
         except OSError:
             continue
-        if len(text.encode("utf-8")) > MAX_FILE_BYTES:
-            text = text[:MAX_FILE_BYTES] + "\n[...truncated at 64KiB; read the file for the rest]"
+        text = bounded.decode("utf-8", errors="replace")
+        if truncated:
+            text += "\n[...truncated at 64KiB; read the file for the rest]"
         try:
             shown = str(path.relative_to(base))
         except ValueError:

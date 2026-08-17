@@ -33,6 +33,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import signal as process_signal
 import sys
 import time
 import uuid
@@ -137,13 +139,33 @@ def _session_key(context: ToolContext | None) -> str:
 
 
 async def _close_kernel(kernel: _Kernel) -> None:
-    """Kill the worker, reap it, release the transport (no ResourceWarnings)."""
-    if kernel.process.returncode is None:
+    """Kill/reap the worker process GROUP, then release its transport.
+
+    Evaluated code can spawn descendants. The worker is a process-group leader
+    by construction, so killing only the interpreter would leave those
+    descendants running after a timeout, abort, eviction, or session close.
+    """
+    process = kernel.process
+    killed_group = False
+    if hasattr(os, "killpg"):
+        try:
+            # Attempt this even when the leader has already exited: its
+            # descendants keep the original process group alive.
+            os.killpg(process.pid, process_signal.SIGKILL)
+            killed_group = True
+        except (ProcessLookupError, PermissionError):
+            pass
+    if process.returncode is None and not killed_group:
         with contextlib.suppress(ProcessLookupError):
-            kernel.process.kill()
-    with contextlib.suppress(TimeoutError):
-        await asyncio.wait_for(kernel.process.wait(), timeout=1.0)
-    transport = getattr(kernel.process, "_transport", None)
+            process.kill()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2.0)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(process.wait(), timeout=1.0)
+    transport = getattr(process, "_transport", None)
     if transport is not None:
         transport.close()
 
@@ -235,12 +257,19 @@ async def _exchange(kernel: _Kernel, request: dict[str, Any], request_id: str) -
     stdout = kernel.process.stdout
     assert stdout is not None  # piped at spawn
     while True:
-        line = await stdout.readline()
+        try:
+            line = await stdout.readline()
+        except (ValueError, asyncio.LimitOverrunError, OSError) as exc:
+            # ``readline`` raises ValueError when untrusted fd-1 output exceeds
+            # StreamReader's line limit. Turn every protocol read failure into
+            # the crash path so the popped kernel is killed rather than lost
+            # outside the registry.
+            raise _WorkerCrash(f"eval protocol stream failed: {type(exc).__name__}: {exc}") from exc
         if not line:
             raise _WorkerCrash(await _read_crash_stderr(kernel))
         try:
             response = json.loads(line)
-        except ValueError:
+        except (ValueError, UnicodeError):
             continue
         if isinstance(response, dict) and response.get("id") == request_id:
             return response
@@ -311,6 +340,7 @@ async def execute_eval(
     crash: _WorkerCrash | None = None
     timed_out = False
     aborted = False
+    externally_cancelled = False
     try:
         waiters: list[asyncio.Task[Any]] = [exchange]
         if abort_waiter is not None:
@@ -321,10 +351,15 @@ async def execute_eval(
                 response = exchange.result()
             except _WorkerCrash as exc:
                 crash = exc
+            except Exception as exc:  # noqa: BLE001 - protocol failures retire state
+                crash = _WorkerCrash(f"eval protocol exchange failed: {type(exc).__name__}: {exc}")
         elif abort_waiter is not None and abort_waiter in done:
             aborted = True
         else:
             timed_out = True
+    except asyncio.CancelledError:
+        externally_cancelled = True
+        raise
     finally:
         if response is None:
             exchange.cancel()
@@ -334,6 +369,8 @@ async def execute_eval(
             abort_waiter.cancel()
             with contextlib.suppress(BaseException):
                 await abort_waiter
+        if externally_cancelled:
+            _retire(kernel)
 
     if aborted or timed_out:
         # The code may be mid-run inside the kernel: reuse is not an option.
