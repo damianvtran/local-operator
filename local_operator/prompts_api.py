@@ -206,14 +206,27 @@ def render_template(name: str, data: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-#: Any spelling of the closing tag that a language model would honour —
-#: including a space either side of the slash, a hyphen for the underscore,
-#: and mixed case — since the consumer is a model rather than a strict parser.
-#: Neutralized before interpolation because an AGENT PROFILE prompt reaches
-#: this string and ``import_agent`` copies that verbatim out of a downloaded
-#: marketplace archive, so a third-party agent could otherwise close the tag
-#: early and have its remainder render as though it were packaged prompt.
-_CLOSING_TAG_RE = re.compile(r"<\s*/\s*user[_-]instructions\s*>", re.IGNORECASE)
+#: Spellings of the closing tag that a language model reads as a close, since
+#: the consumer is a model rather than a strict parser: mixed case, whitespace
+#: either side of the slash, a hyphen or space or repeat for the underscore, and
+#: a trailing self-closing slash. Neutralized before interpolation because an
+#: AGENT PROFILE prompt reaches this string and ``import_agent`` copies that
+#: verbatim out of a downloaded marketplace archive, so a third-party agent
+#: could otherwise close the tag early and have its remainder render as though
+#: it were packaged prompt.
+#:
+#: NOT exhaustive, and deliberately not claimed to be: a blocklist of spellings
+#: is a losing game against homoglyphs. Zero-width separators inside the name
+#: are covered below; a fullwidth or Cyrillic lookalike letter is not, and
+#: normalizing the operator's own prose to catch it costs more than it buys.
+#: The escape is defence-in-depth on prompt text, not an authorization
+#: boundary; nothing downstream trusts the delimiter for a security decision.
+_ZERO_WIDTH = r"\u200b-\u200f\u2060\ufeff"
+_CLOSING_TAG_RE = re.compile(
+    rf"<[\s{_ZERO_WIDTH}]*/[\s{_ZERO_WIDTH}]*user[\s{_ZERO_WIDTH}_-]*instructions"
+    rf"[\s{_ZERO_WIDTH}]*/?[\s{_ZERO_WIDTH}]*>",
+    re.IGNORECASE,
+)
 
 
 def _render_tool_inventory(tools: Sequence[AgentTool]) -> str:

@@ -463,7 +463,11 @@ def load_user_instructions(agent_prompt: str = "") -> str:
     # down to its own guaranteed share.
     global_raw = "\n\n".join(part.strip() for part in parts if part.strip())
     agent_raw = agent_prompt.strip()
-    separator = 2 if agent_raw else 0  # the "\n\n" join, kept inside the cap
+    # The "\n\n" join is only emitted when BOTH sources survive, so the two
+    # characters are only withheld then. Keyed off the agent text alone, a
+    # profile that fits the documented cap exactly was truncated by two
+    # characters while a global file of the same size passed whole.
+    separator = 2 if (agent_raw and global_raw) else 0
     agent_text = _bound_instructions(
         agent_raw,
         "the selected agent's profile",
@@ -475,7 +479,7 @@ def load_user_instructions(agent_prompt: str = "") -> str:
     global_text = _bound_instructions(
         global_raw,
         str(path),
-        MAX_USER_INSTRUCTIONS_CHARS - len(agent_text) - (2 if agent_text else 0),
+        MAX_USER_INSTRUCTIONS_CHARS - len(agent_text) - separator,
     )
     return "\n\n".join(part for part in (global_text, agent_text) if part)
 
@@ -970,7 +974,19 @@ async def _prepare(
         # ``errors="replace"`` so that specific route can no longer raise, but
         # the guard stays for any other decode path a registry might take —
         # an unreadable profile must never cost the operator their session.
-        except (KeyError, OSError, ValueError):
+        # Logged rather than swallowed in silence. The guard is deliberately
+        # broader than its motivating decode error, because a profile prompt is
+        # not worth a failed session whatever the registry raises reading it --
+        # but a session that quietly drops the agent the operator selected
+        # looks like the profile was empty, so the reason has to be findable.
+        except (KeyError, OSError, ValueError) as exc:
+            logger.warning(
+                "could not read the system prompt for agent %s (%s: %s); "
+                "continuing without the profile's own instructions",
+                agent.id,
+                type(exc).__name__,
+                exc,
+            )
             agent_prompt = ""
     user_instructions = load_user_instructions(agent_prompt)
 
