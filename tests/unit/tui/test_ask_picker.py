@@ -19,8 +19,10 @@ from rich.cells import cell_len
 from textual.app import App, ComposeResult
 
 from local_operator.harness.types import AskOption, AskQuestion
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import (
     ASK_MAX_WIDTH,
+    CARD_PADDING_ROWS,
     OTHER_LABEL,
     RECOMMENDED_TAG,
     AskPickerScreen,
@@ -337,10 +339,10 @@ async def test_the_position_is_shown_only_when_there_is_more_than_one_question()
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
-        assert "Question 1/2" in "\n".join(screen.render_lines_for_test())
+        assert "Question 1 of 2" in "\n".join(screen.render_lines_for_test())
         await pilot.press("enter")
         await pilot.pause()
-        assert "Question 2/2" in "\n".join(screen.render_lines_for_test())
+        assert "Question 2 of 2" in "\n".join(screen.render_lines_for_test())
         assert "When?" in "\n".join(screen.render_lines_for_test())
 
 
@@ -414,7 +416,7 @@ async def test_a_short_terminal_drops_descriptions_before_it_drops_options() -> 
         assert len(screen.visible_rows) == screen.row_count
 
     app = _AskHost([question])
-    async with app.run_test(size=(100, 20)) as pilot:
+    async with app.run_test(size=(100, 16)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
         cramped = "\n".join(screen.render_lines_for_test())
@@ -435,7 +437,7 @@ async def test_a_terminal_too_short_for_the_list_says_what_it_is_hiding() -> Non
         descriptions=("why a", "why b", "why c", "why d", "why e"),
     )
     app = _AskHost([question])
-    async with app.run_test(size=(100, 14)) as pilot:
+    async with app.run_test(size=(100, 10)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
         text = "\n".join(screen.render_lines_for_test())
@@ -451,3 +453,264 @@ async def test_a_terminal_too_short_for_the_list_says_what_it_is_hiding() -> Non
         await pilot.press("down")  # onto the free-text row, the last one
         assert screen.selected_index == screen.other_row
         assert any(row.startswith("Other") for row in screen.visible_rows)
+
+
+# --- what survives a card with no room --------------------------------------
+#
+# Driven against the REAL ``OperatorApp`` rather than ``_AskHost``: the host
+# above declares no ``CSS_PATH``, so the card has no ``max-height`` and no
+# padding and therefore cannot exhibit a clip at all. These are the sizes the
+# card was clipping its own footer at.
+
+
+SHORT_SIZES = ((100, 14), (100, 16), (54, 14), (30, 12), (24, 10), (20, 8))
+
+
+def _long_question(recommended: int | None = 1) -> AskQuestion:
+    return _question(
+        text="The stale rows still reference the email column. What should happen to them?",
+        labels=("Drop the column and the rows with it", "Backfill from the audit log", "Leave it"),
+        descriptions=("nothing reads it any more", "slower, keeps the history", "cheapest now"),
+        recommended=recommended,
+    )
+
+
+async def _real_app_card(size: tuple[int, int], questions: list[AskQuestion]):
+    """The card pushed onto a real ``OperatorApp``, with the stylesheet applied."""
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession
+
+    session = FakeSession()
+
+    async def factory():
+        return session
+
+    return OperatorApp(lambda: factory()), AskPickerScreen(questions)
+
+
+@pytest.mark.asyncio
+async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() -> None:
+    """The blocker this layout exists for: at 100x14 the card drew a question,
+    one option of four and NO keys, and at 30x12 only the title and the
+    question — zero options and nothing saying how to leave a card the turn is
+    parked on. Chrome the card cannot do without is paid for FIRST now, so a
+    short terminal abbreviates the list instead of amputating the footer."""
+    for size in SHORT_SIZES:
+        app, screen = await _real_app_card(size, [_long_question()])
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            app.push_screen(screen)
+            await pilot.pause()
+            await pilot.pause()
+            lines = screen.render_lines_for_test()
+            card = screen.query_one(".ask-picker")
+            # Every line the card lays out is a line the SCREEN can draw. Not
+            # the body's own region: a child that overflows its container still
+            # reports the height it wanted, so measuring that agreed with the
+            # clip instead of catching it. Textual drops the overflow silently
+            # and nothing else reads back that it happened.
+            room = screen.size.height - CARD_PADDING_ROWS
+            assert len(lines) <= room, (size, len(lines), room)
+            assert card.region.height <= screen.size.height, (size, card.region.height)
+            assert "esc" in lines[-1] or "enter" in lines[-1], (size, lines[-1])
+            assert len(screen.visible_rows) >= 1, size
+            if len(screen.visible_rows) < screen.row_count:
+                assert f"of {screen.row_count}" in "\n".join(lines), (size, lines)
+
+
+@pytest.mark.asyncio
+async def test_a_recommended_option_never_widens_the_card_past_the_screen() -> None:
+    """`virtual_size` over `size` is the condition AGENTS.md calls always a bug
+    on this app. The 15-cell tag used to be appended on top of the label's
+    minimum rather than dropped, which bought two cells of overflow at 30x12 —
+    and only with a recommendation, which is how it was found."""
+    for size in SHORT_SIZES:
+        for recommended in (0, None):
+            app, screen = await _real_app_card(size, [_long_question(recommended)])
+            async with app.run_test(size=size) as pilot:
+                await pilot.pause()
+                app.push_screen(screen)
+                await pilot.pause()
+                await pilot.pause()
+                assert tuple(app.screen.size) == tuple(app.screen.virtual_size), (
+                    size,
+                    recommended,
+                    tuple(app.screen.size),
+                    tuple(app.screen.virtual_size),
+                )
+
+
+# --- the footer's ladder ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_multi_select_keeps_the_only_key_that_can_answer_it() -> None:
+    """`space` is the ONLY key that ticks a box, so a multi-select that dropped
+    it offered five empty boxes and an Enter that does nothing. It outranks even
+    `esc` here, and the words go before any of the keys do."""
+    question = _question(
+        labels=("Unit suite", "Integration suite", "Visual snapshots", "Load test"),
+        descriptions=("2 minutes", "11 minutes", "flaky", "45 minutes"),
+        multi=True,
+    )
+    for width in (46, 40, 34, 30):
+        app = _AskHost([question])
+        async with app.run_test(size=(width, 24)) as pilot:
+            screen = await app.open_picker()
+            await pilot.pause()
+            footer = screen.render_lines_for_test()[-1]
+            assert "space" in footer, (width, footer)
+            assert cell_len(footer) <= width, (width, footer)
+
+
+@pytest.mark.asyncio
+async def test_the_footer_gives_up_words_before_it_gives_up_keys() -> None:
+    """A bare key still names a key that exists; a dropped hint is a key nobody
+    can discover. Narrowing the card should therefore lose `move`, `jump` and
+    `answer` before it loses `↑↓`, `1-9` or `esc` — and `skip` last of the
+    words, because it is the one whose meaning is not guessable from its key."""
+    question = _question(labels=("A", "B"), descriptions=("", ""))
+    app = _AskHost([question])
+    async with app.run_test(size=(100, 24)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert screen.render_lines_for_test()[-1].strip() == (
+            "↑↓ move · 1-9 jump · enter answer · esc skip"
+        )
+
+    app = _AskHost([question])
+    async with app.run_test(size=(32, 24)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        # Every key still on the card, and only the escape route still worded.
+        assert screen.render_lines_for_test()[-1].strip() == "↑↓ · 1-9 · enter · esc skip"
+
+    app = _AskHost([question])
+    async with app.run_test(size=(26, 24)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert screen.render_lines_for_test()[-1].strip() == "↑↓ · 1-9 · enter · esc"
+
+    # Narrower than four keys: hints go in the same order, escape route last.
+    app = _AskHost([question])
+    async with app.run_test(size=(18, 24)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        footer = screen.render_lines_for_test()[-1].strip()
+        assert footer == "enter · esc", footer
+
+
+# --- saying no out loud -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_refused_enter_says_why_and_takes_it_back() -> None:
+    """Refusing to advance is right; saying nothing about it is not. The frame
+    of the rejected press used to be byte-identical to the frame before it."""
+    app = _AskHost([_question()])
+    async with app.run_test(size=(100, 24)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        await pilot.press("3")  # the free-text row, with nothing typed in it
+        before = screen.render_lines_for_test()[-1]
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "type an answer first" in screen.render_lines_for_test()[-1]
+        assert app.answered == []
+        # And it is gone the moment there is an answer to take.
+        await pilot.press("x")
+        await pilot.pause()
+        assert "type an answer first" not in screen.render_lines_for_test()[-1]
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert screen.render_lines_for_test()[-1] == before
+
+
+@pytest.mark.asyncio
+async def test_a_refused_enter_on_a_multi_select_names_the_key_that_answers_it() -> None:
+    app = _AskHost([_question(multi=True)])
+    async with app.run_test(size=(100, 24)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "space toggles" in screen.render_lines_for_test()[-1]
+        await pilot.press("space")
+        await pilot.pause()
+        assert "space toggles" not in screen.render_lines_for_test()[-1]
+
+
+# --- the accent, the badge and the digits -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_accent_marks_what_enter_takes_and_not_where_the_cursor_is() -> None:
+    """One ink, one claim. On a multi-select Enter takes the TICKED rows, so
+    painting the cursor's label green pointed at the row Enter would not take
+    and spent the accent on two different statements in one frame."""
+    app = _AskHost([_question(labels=("A", "B", "C"), descriptions=("", "", ""), multi=True)])
+    async with app.run_test(size=(100, 24)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        await pilot.press("space")  # tick row 1
+        await pilot.press("down")
+        await pilot.press("down")  # cursor now on row 3, unticked
+        await pilot.pause()
+        accent = theme_mod.semantic_color("accent")
+
+        def inks(line) -> set[str]:
+            found = set()
+            for span in line.spans:
+                colour = span.style.color
+                if colour is not None and colour.triplet is not None:
+                    found.add(colour.triplet.hex)
+            return found
+
+        lines = screen._card_text().split("\n")
+        ticked = next(line for line in lines if line.plain.strip().startswith("1."))
+        cursored = next(line for line in lines if line.plain.startswith("❯"))
+        assert accent in inks(ticked), ticked.plain
+        assert accent not in inks(cursored), cursored.plain
+
+
+@pytest.mark.asyncio
+async def test_the_badge_no_longer_shortens_the_option_it_promotes() -> None:
+    """The tag was charged to the label's budget, so the recommended row carried
+    the shortest label on the card — a badge that truncates what it promotes."""
+    label = "Run the whole backfill in one transaction against the primary and eat the lock"
+    app = _AskHost(
+        [
+            _question(
+                labels=(label, label),
+                descriptions=("holds a lock for forty minutes", "same, behind a flag"),
+                recommended=0,
+            )
+        ]
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        lines = [line.rstrip() for line in screen.render_lines_for_test()]
+        promoted = next(line for line in lines if " 1. " in line)
+        sibling = next(line for line in lines if " 2. " in line)
+        assert cell_len(promoted) == cell_len(sibling), (promoted, sibling)
+        assert RECOMMENDED_TAG not in promoted
+        # It moved to the row's own second line, where the prose had room.
+        assert lines[lines.index(promoted) + 1].strip().startswith(RECOMMENDED_TAG)
+
+
+@pytest.mark.asyncio
+async def test_the_free_text_row_keeps_a_key_when_the_list_outruns_the_digits() -> None:
+    """With ten or more options `Other` drew a blank gutter while the footer
+    still offered `1-9 jump`, so the one answer that is not on the list was the
+    one row no digit reached."""
+    labels = tuple(f"Candidate fix number {n}" for n in range(1, 13))
+    app = _AskHost([_question(labels=labels, descriptions=("",) * 12)])
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        text = "\n".join(screen.render_lines_for_test())
+        assert "0. Other" in text, text
+        assert "0-9 jump" in text, text
+        await pilot.press("0")
+        assert screen.selected_index == screen.other_row

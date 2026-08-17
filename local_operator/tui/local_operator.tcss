@@ -25,8 +25,13 @@
  *   - one line per tool action while collapsed; each action is a subtle
  *     background-filled card (elevation = a background step, never a border
  *     or shadow) whose FILL carries the outcome
- *   - the accent green means ONE thing: a turn is live. It is spent on exactly
- *     four sites, and the list is exhaustive — `grep -rn 'accent' local_operator/tui`
+ *   - the accent green means ONE thing: THIS is what the turn is on — the work
+ *     in flight while the agent holds the turn, and the answer the app acts on
+ *     the moment the user takes it back. (It used to say "a turn is live",
+ *     which was not true of site 4 and so was not true of the frames: a picker
+ *     highlight is not liveness, it is the other half of the same sentence.)
+ *     It is spent on exactly four sites, and the list is exhaustive —
+ *     `grep -rn 'accent' local_operator/tui`
  *     plus `$lo-accent` in this file should find no others. Grep the WORD, not
  *     `semantic_color("accent")`: shimmer.py reaches it through its own
  *     `_style("accent")` helper and command_picker.py through
@@ -35,15 +40,21 @@
  *       1. the working line's shimmer crest      (shimmer.py)
  *       2. a running tool's glyph                (widgets/tool_card.py)
  *       3. the status band's streaming spinner   (widgets/status_line.py)
- *       4. a picker's highlighted NAME or label  (widgets/command_picker.py,
+ *       4. what ENTER WILL TAKE in a picker      (widgets/command_picker.py,
  *          widgets/model_picker.py, widgets/ask_picker.py). ONE site, not
- *          three: "this row is the one you are about to take" is the same
- *          statement on all of them, and the ask picker's ticked multi-select
- *          boxes are that statement repeated down the list. The ask picker's
- *          label was the violet `label` token first, which read as another
- *          product's theme; its caret is `muted` for the reason site 4 already
- *          gives in command_picker.py — a second green glyph beside a green
- *          label reads as a duplicated caret.
+ *          three, and stated as what Enter takes rather than as "the
+ *          highlighted row", because on a multi-select those are two different
+ *          rows: the ask picker paints the ticked `[x]` boxes AND their labels,
+ *          and leaves the label under the cursor alone when its box is empty,
+ *          because Enter would not take it. Painted the other way round the ink
+ *          made two claims in one frame — `[x]` on row 1 (chosen) and the label
+ *          of row 3 (merely under the cursor) — and this list was not what the
+ *          frame said (D11, round 1). The cursor is carried by `tint-select`
+ *          and the caret, which is what those are for. The ask picker's label
+ *          was the violet `label` token first, which read as another product's
+ *          theme; its caret is `muted` for the reason site 4 already gives in
+ *          command_picker.py — a second green glyph beside a green label reads
+ *          as a duplicated caret.
  *     It was FIVE until the focused input chevron gave its site back. Focus is
  *     not liveness, and painting both green put a green chevron two rows above
  *     the band's green spinner meaning something else (D5, round 11). Focus is
@@ -1185,7 +1196,18 @@ AskPickerScreen .ask-picker {
     width: auto;
     height: auto;
     max-width: 80;
-    max-height: 80%;
+    /* 100%, not the 80% `/resume` uses, because this card budgets its own
+     * height in Python — `AskPickerScreen._body_rows`, which leaves the same
+     * one-in-`CARD_FLOAT_MARGIN_SHARE` margin behind it whenever it can afford
+     * to. Two caps that each thought they knew the answer is how the card lost
+     * its footer: the widget laid out the rows the share allowed, the
+     * stylesheet clipped to the same share from the outside, and the difference
+     * came off the bottom — the keys, and the only statement of how to leave
+     * (D1). This one is the backstop and nothing else: it says the card may not
+     * leave the screen. The card claims more than the share only when its
+     * content needs the rows, and `height: auto` keeps it short whenever that
+     * content is. */
+    max-height: 100%;
     background: $lo-overlay;
     padding: 1 2;
 }

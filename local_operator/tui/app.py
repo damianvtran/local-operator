@@ -2516,8 +2516,24 @@ class OperatorApp(App[None]):
             # future that is already settled above, and this path can run while
             # the app is being torn down, where dismiss's own mount checks are
             # the ones that raise.
+            #
+            # And only while the picker IS the top screen, because `pop_screen`
+            # takes whatever the stack ends with rather than a named screen: with
+            # anything mounted above the question — a palette or a picker the
+            # user opened while the agent waited on them — this dismissed THAT
+            # screen and left the settled picker mounted, holding the keyboard
+            # on a future nobody is waiting for. Below the top it is cut out of
+            # the stack instead: `remove()` on its own detaches the widget and
+            # leaves the stack entry behind, so the next pop would resume a
+            # screen that no longer exists.
             try:
-                self.pop_screen()
+                stack = self._screen_stack
+                if stack and stack[-1] is screen:
+                    self.pop_screen()
+                else:
+                    if screen in stack:
+                        stack.remove(screen)
+                    screen.remove()
             except Exception:  # pragma: no cover - teardown races only
                 logger.debug("ask picker was already gone", exc_info=True)
 

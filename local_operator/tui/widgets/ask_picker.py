@@ -65,10 +65,21 @@ ASK_PADDING_CELLS = 2
 #: and spending one for the other is a bug waiting for the stylesheet to change.
 CARD_PADDING_ROWS = 2
 
-#: Share of the terminal the card may occupy, mirroring ``max-height: 80%``.
-#: Tracked by hand because Textual clips SILENTLY — rows past the cap are simply
-#: not drawn and nothing reads back that it happened.
-CARD_MAX_HEIGHT_FRACTION = 0.8
+#: The card leaves a margin of conversation visible behind it, so it reads as
+#: floating over the turn rather than replacing it: one row in
+#: ``CARD_FLOAT_MARGIN_SHARE``, which is the ``max-height: 80%`` the ``/resume``
+#: card uses, written as the part it gives back.
+#:
+#: It is written that way round because the margin has to YIELD, row by row, to
+#: what the card actually has to show (:meth:`AskPickerScreen._body_rows`). A
+#: flat share is a band worth having on a tall terminal and two rows of nothing
+#: on a short one, bought with the answers the user is being asked to choose
+#: between: at 100x14 it left three unusable rows under a card showing one
+#: option of four, and at 30x12 the card had no room for its footer at all (D1).
+#: Written instead as a threshold ("take the whole screen below N rows") the
+#: card GREW as the terminal shrank, showing ten options at 100x20 and nine at
+#: 100x24 — so the margin yields by the row, and never in a step.
+CARD_FLOAT_MARGIN_SHARE = 5
 
 #: The cursor glyph, matching the ``/resume`` and command pickers. A caret plus
 #: a tinted label rather than a reversed row: an inverted block reads as a
@@ -82,8 +93,15 @@ GUTTER_CELLS = 2
 #: Cells the ``1``..``9`` jump number occupies, including its trailing space.
 #: Rows past nine get the same indent with no number: the digits are a shortcut,
 #: and re-flowing the list at ten options to reclaim two cells would move every
-#: row under the cursor.
+#: row under the cursor. The free-text row is the exception — see
+#: :data:`OTHER_JUMP_KEY`.
 NUMBER_CELLS = 3
+
+#: The digit that always reaches the free-text row. ``0`` because it is the one
+#: digit the ordinals never claim, and because the row it reaches is the row a
+#: long list pushes past nine — where a blank gutter left the only answer that
+#: is not on the list unreachable by any key (D13).
+OTHER_JUMP_KEY = "0"
 
 #: The multi-select checkbox, including its trailing space. ``[x]``/``[ ]`` and
 #: not a filled glyph pair: this app already says "done/not done" that way in
@@ -127,6 +145,31 @@ class _QuestionState:
     typed: str = ""
 
 
+@dataclass(frozen=True)
+class _CardLayout:
+    """How one paint divides the card's rows, decided before anything is drawn.
+
+    Every renderer below reads this rather than measuring the screen for itself.
+    The header, the question, the spacers, the window and the footer each used
+    to decide independently, and their sum came to more lines than the region
+    had — so the card drew chrome it could not show and Textual clipped whatever
+    was laid out last (D1). One division, one budget, one answer.
+    """
+
+    #: Content cells the card is drawing in, padding excluded.
+    width: int
+    #: The question's wrapped lines that fit, the last marked ``…`` if any were
+    #: cut off.
+    question: tuple[str, ...]
+    #: The title and its rule, which are shown or dropped together.
+    show_title: bool
+    space_above: bool
+    space_below: bool
+    show_descriptions: bool
+    #: Option ROWS the window may draw, whatever each of them costs in lines.
+    page: int
+
+
 class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
     """Put the ``ask`` tool's questions to the user; dismiss with the answers.
 
@@ -158,6 +201,9 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         Binding("space", "toggle_row", "Toggle", show=False),
         Binding("backspace", "backspace", "Edit answer", show=False),
         *[Binding(str(digit), f"jump({digit})", "Jump", show=False) for digit in range(1, 10)],
+        # ``0`` is not an ordinal: it reaches the free-text row, which is the
+        # row a list of ten or more pushes past the digits (D13).
+        Binding(OTHER_JUMP_KEY, "jump_other", "Other", show=False),
     ]
 
     def __init__(self, questions: Sequence[AskQuestion]) -> None:
@@ -185,6 +231,11 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         #: question wrapped; a click resolved by arithmetic landed on the row
         #: below whenever a description wrapped or the question did not.
         self._line_rows: list[int | None] = []
+        #: Set when Enter was pressed on a state that cannot answer, so the
+        #: footer can say WHY rather than the card doing nothing at all (D4).
+        #: Cleared by every key that changes the answer, so the complaint can
+        #: never outlive the state it describes.
+        self._rejected = False
         self._body: Static
 
     # -- state ---------------------------------------------------------------
@@ -211,7 +262,11 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
 
     @property
     def other_row(self) -> int:
-        """Index of the free-text row: always last, so its number never moves."""
+        """Index of the free-text row: always last, so its POSITION never moves.
+
+        Its NUMBER does move, and past nine it has none of its own, which is
+        why :data:`OTHER_JUMP_KEY` is bound to it separately.
+        """
         return self.row_count - 1
 
     @property
@@ -261,6 +316,16 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         if 1 <= number <= self.row_count:
             self._move_to(number - 1)
 
+    def action_jump_other(self) -> None:
+        """``0`` reaches the free-text row from anywhere in the list.
+
+        Its ordinal is past the digits on a list of ten or more, so without this
+        the one row that can express an answer nobody enumerated is the one row
+        no key reaches — on exactly the questions where scanning the list is
+        hardest (D13).
+        """
+        self._move_to(self.other_row)
+
     def action_toggle_row(self) -> None:
         """Space toggles a multi-select row; on a single-select it does nothing.
 
@@ -275,11 +340,13 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
             self.state.checked.discard(index)
         else:
             self.state.checked.add(index)
+        self._rejected = False
         self._repaint()
 
     def action_backspace(self) -> None:
         if self.state.selected == self.other_row and self.state.typed:
             self.state.typed = self.state.typed[:-1]
+            self._rejected = False
             self._repaint()
 
     def action_accept(self) -> None:
@@ -290,10 +357,20 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         user had done nothing, and the model would then act on an answer nobody
         gave; Escape is how a question is left unanswered, and it says so in the
         footer.
+
+        Refusing is only half of the job. The card NAMES this key in its footer,
+        and a named key that does nothing and says nothing leaves the user
+        pressing it again: the exported frame of the rejected press was
+        BYTE-IDENTICAL to the frame before it, in two reachable states (D4). The
+        refusal now answers in the footer's own row — see :meth:`_rejection`,
+        which reverts as soon as there is something to take.
         """
         chosen = self._chosen()
         if not chosen:
+            self._rejected = True
+            self._repaint()
             return
+        self._rejected = False
         self._answers[self.question.id] = chosen
         if self._index + 1 >= len(self._questions):
             self.dismiss(self._answers)
@@ -302,6 +379,24 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         self._offset = 0
         self._hovered = None
         self._repaint()
+
+    def _rejection(self) -> str:
+        """What the footer says instead of the keys, or ``""`` to keep them.
+
+        Derived from the state rather than stored as prose, so the complaint
+        cannot contradict the card it sits on: the moment something is typed or
+        ticked there is an answer, and the keys come back on the next paint.
+
+        Which complaint depends on where the cursor is, not on the mode: a
+        multi-select whose cursor is parked on the free-text row is answered by
+        typing, and telling that user about Space would point at a key that is a
+        letter while the field holds the cursor.
+        """
+        if not self._rejected or self._chosen():
+            return ""
+        if self.state.selected == self.other_row:
+            return "type an answer first"
+        return "nothing ticked — space toggles"
 
     def _chosen(self) -> list[str]:
         """This question's answer as text, or ``[]`` when there is none yet.
@@ -347,6 +442,7 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
             event.stop()
             event.prevent_default()
             self.state.typed += char
+            self._rejected = False
             self._repaint()
 
     # -- mouse ---------------------------------------------------------------
@@ -443,7 +539,13 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
                 size = self.app.size
         except Exception:  # pragma: no cover - only before the app has a screen
             return 80, 24
-        return max(1, size.width), max(8, size.height)
+        # No floor on the HEIGHT. Reporting at least eight rows on a six-row
+        # screen is the same mistake the row budget used to make one level up:
+        # every caller then divides rows the region does not have, and the
+        # difference comes off the bottom silently. At 20x8 that floor alone
+        # clipped the windowing line and the whole footer back off a card that
+        # had budgeted for both (D1). The allocator handles a two-row budget.
+        return max(1, size.width), max(1, size.height)
 
     def _card_width(self) -> int:
         """Content cells the card may use, measured against the terminal.
@@ -467,48 +569,115 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         """
         return wrap_cells(self.question.question, width) or [""]
 
-    def _chrome_rows(self, width: int) -> int:
-        """Rows the card spends on everything that is not an option row.
+    def _body_rows(self, question_lines: int) -> int:
+        """Lines the card's BODY may draw before the container clips them.
 
-        Header, rule, the wrapped question, a blank above the rows, a blank
-        below them, the position line and the footer. The position line is
-        reserved UNCONDITIONALLY, even when the whole list fits: a footer that
-        appeared and vanished as the window scrolled would move the card under
-        the cursor.
-        """
-        return 2 + len(self._question_lines(width)) + 2 + 2
+        The screen, less the margin the card floats in — and the margin yields
+        to what the card has to show, a row at a time, down to nothing. What it
+        yields to is the card WITHOUT its comforts: title, question, one line
+        per option, and the footer. The spacers and the descriptions are left
+        out on purpose, because they are the first things :meth:`_allocate`
+        gives up, and a card should not push the conversation off the screen to
+        keep a blank row.
 
-    def _row_budget(self) -> int:
-        """Lines the option rows may actually use, after chrome is reserved.
-
-        Chrome first and the list second, the discipline the ``/resume`` picker
-        arrived at the hard way: a fixed page let the cursor sit on a row the
-        card never rendered, so Enter answered with an option the user could not
-        see, and let the clip eat the footer — the only statement of how to
-        leave.
+        A CAP and not a fill: the body is ``height: auto``, so a card with
+        little to say still draws short and still floats.
         """
         _, height = self._screen_size()
-        budget = int(height * CARD_MAX_HEIGHT_FRACTION) - CARD_PADDING_ROWS
-        return max(1, budget - self._chrome_rows(self._card_width()))
+        room = max(1, height - CARD_PADDING_ROWS)
+        wanted = 2 + question_lines + self.row_count + 1
+        margin = min(height // CARD_FLOAT_MARGIN_SHARE, max(0, room - wanted))
+        return max(1, room - margin)
 
-    def _show_descriptions(self) -> bool:
-        """Whether every row can afford its second line.
+    def _layout(self) -> _CardLayout:
+        """Divide the body's rows BEFORE anything is drawn into them.
 
-        Descriptions are the first thing given up on a short terminal and the
-        list is the last: a card that dropped ROWS to keep prose would hide
-        answers the user is being asked to choose between. All or nothing, so
-        the rows keep one rhythm — a list where only some entries have their
-        second line reads as broken rather than as abbreviated.
+        The old arithmetic reserved chrome and then handed the options
+        ``max(1, budget - chrome)`` rows — a floor the region did not have. The
+        card then laid out more lines than it could draw and Textual dropped
+        whatever came last, which is the footer: at 100x14 the frame showed a
+        question, one option of four and NO keys, and at 30x12 only the title
+        and the question — zero options and nothing saying how to leave a card
+        the turn is parked on (D1, round 1).
+
+        The fix is an order, not a bigger floor. Nothing is drawn that was not
+        paid for, and it is paid for in the order the card cannot do without it:
+
+        1. the footer — the only statement of how to leave;
+        2. one option row — a question with no answers is not a question;
+        3. the windowing line, whenever the window is short of the list, because
+           a card quietly showing one of four has hidden three;
+        4. the question, every wrapped line of it, marked ``…`` if even that
+           cannot fit;
+        5. the title and its rule, which travel together — a rule under a title
+           is a caption, a rule under nothing is the edge of a box;
+        6. the rest of the option rows;
+        7. the blank spacers, which are rhythm and nothing else;
+        8. the descriptions, all of them or none.
         """
-        return self.row_count * 2 <= self._row_budget()
+        width = self._card_width()
+        question = self._question_lines(width)
+        budget = self._body_rows(len(question))
+        plan = self._allocate(width, question, budget, position=False)
+        if plan.page < self.row_count:
+            # The list windows after all, so the line saying how much is hidden
+            # has to be bought. Taking a row back can only shrink the page, so
+            # this settles in one step rather than looping.
+            plan = self._allocate(width, question, budget, position=True)
+        return plan
 
-    def _rows_per_page(self) -> int:
-        lines_each = 2 if self._show_descriptions() else 1
-        return max(1, self._row_budget() // lines_each)
+    def _allocate(
+        self,
+        width: int,
+        question: list[str],
+        budget: int,
+        *,
+        position: bool,
+    ) -> _CardLayout:
+        """One trial division of ``budget`` body rows, in the order above."""
+        remaining = budget - 2  # the footer, and one option row
+        if position:
+            remaining -= 1
+        kept = list(question[: max(0, remaining)])
+        if len(kept) < len(question) and kept:
+            # Say that the question continues. A silently halved question is
+            # the one clip on this card the reader cannot detect: every other
+            # abbreviation leaves a count, a caret or an empty gutter behind.
+            tail = truncate_cells(kept[-1], max(1, width - 2))
+            # `truncate_cells` marks its OWN cut, and two ellipses in a row read
+            # as a rendering fault rather than as "there is more question".
+            kept[-1] = f"{tail[:-1].rstrip() if tail.endswith('…') else tail} …"
+        remaining -= len(kept)
+        show_title = remaining >= 2
+        if show_title:
+            remaining -= 2
+        extra = max(0, min(self.row_count - 1, remaining))
+        remaining -= extra
+        space_above = remaining >= 1
+        if space_above:
+            remaining -= 1
+        space_below = remaining >= 1
+        if space_below:
+            remaining -= 1
+        rows = 1 + extra
+        # Descriptions are bought last and all at once: they cost one line per
+        # row, and a list where only some entries have their second line reads
+        # as broken rather than as abbreviated.
+        descriptions = rows >= self.row_count and remaining >= self.row_count
+        return _CardLayout(
+            width=width,
+            question=tuple(kept),
+            show_title=show_title,
+            space_above=space_above,
+            space_below=space_below,
+            show_descriptions=descriptions,
+            page=max(1, self.row_count if descriptions else rows),
+        )
 
-    def _window(self) -> list[int]:
+    def _window(self, page: int | None = None) -> list[int]:
         """The row indexes currently drawn, after clamping the scroll offset."""
-        page = self._rows_per_page()
+        if page is None:
+            page = self._layout().page
         offset = max(0, min(self._offset, max(0, self.row_count - page)))
         self._offset = offset
         return list(range(offset, min(self.row_count, offset + page)))
@@ -516,9 +685,11 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
     # -- internals -----------------------------------------------------------
     def _move_to(self, index: int) -> None:
         self.state.selected = max(0, min(self.row_count - 1, index))
+        # Any movement is a new state, so a refused Enter stops describing it.
+        self._rejected = False
         # Scroll only far enough to keep the cursor drawn, so the list is stable
         # while moving through the middle of it.
-        page = self._rows_per_page()
+        page = self._layout().page
         if self.state.selected < self._offset:
             self._offset = self.state.selected
         elif self.state.selected >= self._offset + page:
@@ -565,9 +736,11 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
 
     def _card_text(self) -> Text:
         fg = Style(color=theme_mod.semantic_color("fg"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         faint = Style(color=theme_mod.semantic_color("faint"))
-        width = self._card_width()
+        layout = self._layout()
+        width = layout.width
 
         out = Text()
         lines: list[int | None] = []
@@ -578,52 +751,97 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
                 out.append("\n")
             lines.append(row)
 
-        newline(None)
-        out.append_text(self._header(width, fg, dim))
-        newline(None)
-        # The raised card ground needs the raised hairline: `edge` is tuned
-        # against the app background and nearly vanishes on `overlay`.
-        out.append("─" * width, style=faint)
-        for line in self._question_lines(width):
+        if layout.show_title:
+            newline(None)
+            out.append_text(self._header(width, fg, muted))
+            newline(None)
+            # The raised card ground needs the raised hairline: `edge` is tuned
+            # against the app background and nearly vanishes on `overlay`.
+            out.append("─" * width, style=faint)
+        for line in layout.question:
             newline(None)
             out.append(line, style=fg)
-        newline(None)
+        if layout.space_above:
+            newline(None)
 
-        show_descriptions = self._show_descriptions()
-        window = self._window()
+        window = self._window(layout.page)
         for index in window:
             ground = self._row_ground(index)
             newline(index)
-            out.append_text(self._row_text(index, width, ground, fg, dim, faint))
-            if show_descriptions:
+            out.append_text(self._row_text(index, width, ground, fg, dim, faint, layout))
+            if layout.show_descriptions:
                 newline(index)
-                out.append_text(self._description_text(index, width, ground, dim))
-        newline(None)
+                out.append_text(self._description_text(index, width, ground, muted, dim))
+        if layout.space_below:
+            newline(None)
 
-        # The position line is EMITTED only when the list windows. Its row is
-        # reserved in the height budget either way (so the card cannot start
-        # clipping the moment it appears), but printing an empty line in its
-        # place left two blank rows above the footer and pushed the keys away
-        # from the block they belong to — visible in the first captured frame.
+        # The position line is EMITTED only when the list windows, and its row
+        # is bought in exactly that case, so the two can no longer disagree: the
+        # card used to reserve the row unconditionally and then be clipped out
+        # of drawing it, which is how a window of one in four went unannounced.
         if len(window) < self.row_count:
             newline(None)
-            out.append("showing ", style=faint)
-            out.append(f"{window[0] + 1}–{window[-1] + 1}", style=dim)
-            out.append(" of ", style=faint)
-            out.append(str(self.row_count), style=dim)
+            out.append_text(self._position_row(width, window, muted, dim))
         newline(None)
-        for position, (key, what) in enumerate(self._footer_hints(width)):
-            if position:
-                out.append(" · ", style=faint)
-            out.append(key, style=dim)
-            if what:
-                out.append(f" {what}", style=faint)
+        out.append_text(self._footer_row(width, muted, dim))
         self._line_rows = lines
         return out
 
-    def _header(self, width: int, fg: Style, dim: Style) -> Text:
-        """Title on the left, ``Question n/m`` on the right when there is more
-        than one.
+    def _position_row(self, width: int, window: list[int], muted: Style, dim: Style) -> Text:
+        """``showing 2–3 of 6`` — how much of the list is not on screen.
+
+        Numerals at `muted` and the grammar at `dim`, both a step up: at
+        `faint`, `showing`/`of` measured 1.49:1 on this card's own ground, so
+        the row that says how much is hidden was itself hidden (D5).
+
+        The counts outlive the word: at 20 columns `showing 1–1 of 4` is wider
+        than the whole card, and the card is exactly where the row matters most.
+        `1–1 of 4` says the same thing in half the cells, so the word is what
+        goes rather than the row.
+        """
+        span = f"{window[0] + 1}–{window[-1] + 1}"
+        total = str(self.row_count)
+        row = Text(no_wrap=True, overflow="ellipsis")
+        if cell_len(f"showing {span} of {total}") <= width:
+            row.append("showing ", style=dim)
+        row.append(span, style=muted)
+        row.append(" of ", style=dim)
+        row.append(total, style=muted)
+        return _cut_row(row, width)
+
+    def _footer_row(self, width: int, muted: Style, dim: Style) -> Text:
+        """The key hints — or what the last refused Enter has to say instead.
+
+        One row either way, so a refusal never moves the card under the cursor,
+        and the keys come back the moment the state can answer.
+        """
+        row = Text(no_wrap=True, overflow="ellipsis")
+        rejection = self._rejection()
+        if rejection:
+            row.append(rejection, style=muted)
+            return _cut_row(row, width)
+        for position, (key, what) in enumerate(self._footer_hints(width)):
+            if position:
+                row.append(" · ", style=dim)
+            # Keys at `muted` (6.51:1) and their grammar at `dim` (3.43:1), each
+            # a step up from `dim`/`faint`. The row that explains how to use and
+            # how to leave the card was its least legible text, its words at
+            # 1.49:1 on the `overlay` ground — the same failure this file
+            # diagnosed one method down for the descriptions and left standing
+            # here (D5).
+            row.append(key, style=muted)
+            if what:
+                row.append(f" {what}", style=dim)
+        return _cut_row(row, width)
+
+    def _header(self, width: int, fg: Style, ink: Style) -> Text:
+        """Title on the left, ``Question 1 of 2`` on the right when there is
+        more than one.
+
+        Worded and at ``muted``, not ``1/2`` at ``dim``: this is the only thing
+        on the card saying that more questions follow, and right-aligned at
+        3.43:1 it was the faintest text in the header — two consecutive frames
+        of a two-question run differed in exactly one character (D10).
 
         The counter is dropped before the title when the card is narrow: it says
         how much is left, and the title says what the card IS.
@@ -631,13 +849,15 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         header = Text(no_wrap=True, overflow="ellipsis")
         title = "the agent needs your decision"
         counter = (
-            f"Question {self._index + 1}/{len(self._questions)}" if len(self._questions) > 1 else ""
+            f"Question {self._index + 1} of {len(self._questions)}"
+            if len(self._questions) > 1
+            else ""
         )
         gap = 2
         if counter and cell_len(title) + gap + cell_len(counter) <= width:
             header.append(title, style=fg)
             header.append(" " * (width - cell_len(title) - cell_len(counter)))
-            header.append(counter, style=dim)
+            header.append(counter, style=ink)
         else:
             header.append(truncate_cells(title, width), style=fg)
         return header
@@ -663,6 +883,24 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
             token = "overlay"
         return Style(bgcolor=theme_mod.semantic_color(token))
 
+    def _row_number(self, index: int) -> str:
+        """The digit gutter's contents for one row.
+
+        Rows past nine keep the indent and lose the number: the digits are a
+        shortcut, and re-flowing the list at ten options to reclaim two cells
+        would move every row under the cursor. The free-text row is the
+        exception, because it is the one row a long list ALWAYS pushes past the
+        digits and the one row that can express an answer nobody enumerated —
+        with twelve options it drew a blank gutter while the footer still
+        offered `1-9 jump`, so `Other` was unreachable by digit exactly where
+        scanning the list is hardest (D13).
+        """
+        if index < 9:
+            return f"{index + 1}."
+        if index == self.other_row:
+            return f"{OTHER_JUMP_KEY}."
+        return ""
+
     def _row_text(
         self,
         index: int,
@@ -671,18 +909,25 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         fg: Style,
         dim: Style,
         faint: Style,
+        layout: _CardLayout,
     ) -> Text:
-        """One option row: cursor, number, checkbox, label, recommendation tag.
+        """One option row: cursor, number, checkbox, label.
 
-        The highlighted LABEL is the accent green — the same site the command
-        picker spends it on (a picker's highlighted name), and the same meaning.
-        It was the violet ``label`` token in the first captured frame, which read
-        as another product's theme rather than this one's.
+        The accent green marks WHAT ENTER WILL TAKE — the cursor's row on a
+        single-select, the ticked rows on a multi-select, and neither on a
+        free-text row with nothing typed into it. It used to be the cursor's
+        label in every mode, so one multi-select frame spent the ink on two
+        different claims at once: `[x]` on row 1 (chosen) and the label of row 3
+        (merely under the cursor, its own box empty). The accent's one-thing
+        rule in `local_operator.tcss` was then not what the frame said (D11),
+        and on a multi-select the ink was pointing at the row Enter does NOT
+        take.
 
-        The caret is ``muted``, not the accent, for the reason the command picker
-        records: the accent already says "this row is the one" on the label two
-        columns to the right, and a second green glyph beside it reads as a
-        duplicated caret.
+        The cursor stays unmistakable without it: `tint-select` is a HUE step
+        rather than an elevation one (see theme.py — elevation alone measures
+        1.096:1), and the caret sits two columns to its left. The caret is
+        ``muted`` and not the accent for the reason the command picker records:
+        a second green glyph beside a green label reads as a duplicated caret.
         """
         selected = index == self.state.selected
         accent = ground + Style(color=theme_mod.semantic_color("accent"))
@@ -691,47 +936,61 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
             f"{CURSOR} " if selected else " " * GUTTER_CELLS,
             style=ground + Style(color=theme_mod.semantic_color("muted")),
         )
-        number = f"{index + 1}." if index < 9 else ""
-        row.append(f"{number:<{NUMBER_CELLS}}", style=ground + (dim if selected else faint))
+        row.append(
+            f"{self._row_number(index):<{NUMBER_CELLS}}",
+            style=ground + (dim if selected else faint),
+        )
         spent = GUTTER_CELLS + NUMBER_CELLS
+        typed = bool(self.state.typed.strip())
         if self.question.multi:
-            checked = index in self.state.checked or (
-                index == self.other_row and bool(self.state.typed.strip())
-            )
-            # A ticked box is the accent too: it is the same statement the
-            # highlighted label makes — "this one is chosen" — and a multi-select
-            # confirms several rows at once, so the ticks have to be readable
-            # without moving the cursor over each of them.
+            checked = index in self.state.checked or (index == self.other_row and typed)
+            # A ticked box is the accent: it is the statement the ink is spent
+            # on — "Enter takes this one" — and a multi-select confirms several
+            # rows at once, so the ticks have to be readable without moving the
+            # cursor over each of them.
             row.append(
                 CHECK_ON if checked else CHECK_OFF,
                 style=accent if checked else ground + faint,
             )
             spent += cell_len(CHECK_ON)
+            taken = checked
+        else:
+            taken = selected and (index != self.other_row or typed)
 
-        tag = ""
-        if self.question.recommended == index:
-            tag = f"  · {RECOMMENDED_TAG}"
-        budget = max(LABEL_MIN_CELLS, width - spent - cell_len(tag))
+        budget = max(LABEL_MIN_CELLS, width - spent)
         text = self._row_label(index)
         if index == self.other_row and selected:
             # The typed string keeps its TAIL: a field that truncated the end
             # would hide the characters being typed, which is the only part of
             # it the user is looking at.
             budget -= cell_len(FIELD_CARET)
-            row.append(OTHER_PREFIX, style=accent)
+            row.append(OTHER_PREFIX, style=accent if taken else ground + fg)
             row.append(
                 _tail_cells(self.state.typed, max(1, budget - cell_len(OTHER_PREFIX))),
                 style=ground + fg,
             )
-            row.append(FIELD_CARET, style=accent)
+            row.append(FIELD_CARET, style=accent if taken else ground + dim)
         else:
-            row.append(truncate_cells(text, budget), style=accent if selected else ground + fg)
-        if tag:
-            row.append(tag, style=ground + dim)
-        return _pad_row(row, width, ground)
+            row.append(truncate_cells(text, budget), style=accent if taken else ground + fg)
+        if self.question.recommended == index and not layout.show_descriptions:
+            # No description line to carry the tag, so it rides here — but only
+            # when it fits AFTER the label, rather than out of the label's own
+            # budget. Charged to the budget it made the promoted option the
+            # shortest label on the card, and on a 28-cell screen the label
+            # floor won the arithmetic and the 15-cell tag was appended on top
+            # of the floor anyway, pushing the card two cells past the terminal
+            # (D2/D6). A badge that truncates what it promotes, or that
+            # overflows the screen to fit, is worth less than no badge: the
+            # recommendation is PRESELECTED too, so the cursor is already there.
+            tag = f"  · {RECOMMENDED_TAG}"
+            if cell_len(row.plain) + cell_len(tag) <= width:
+                row.append(tag, style=ground + dim)
+        return _fit_row(row, width, ground)
 
-    def _description_text(self, index: int, width: int, ground: Style, ink: Style) -> Text:
-        """The row's second line, indented under its label.
+    def _description_text(
+        self, index: int, width: int, ground: Style, tag_ink: Style, ink: Style
+    ) -> Text:
+        """The row's second line: the recommendation tag, then the consequence.
 
         Drawn at ``dim`` and NOT at ``faint`` like the footer's grammar words:
         this line is the CONSEQUENCE of choosing the row, which is what the user
@@ -739,33 +998,66 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         ``faint`` on the ``overlay`` ground, where "nothing in the app reads it
         any more" was barely present — the same contrast failure the approval
         prompt's key hints were fixed for.
+
+        The tag lives HERE, ahead of the prose, rather than after the label: on
+        the label line it was paid for out of the label, so the one row the
+        model is pointing at carried the shortest text on the card (D6). At
+        ``muted`` it is the loudest thing on a line of ``dim`` prose and still
+        quieter than the label above it, which is the ranking a hint wants.
         """
         indent = GUTTER_CELLS + NUMBER_CELLS + (cell_len(CHECK_ON) if self.question.multi else 0)
         body = Text(no_wrap=True, overflow="ellipsis")
         body.append(" " * indent, style=ground)
         description = self._row_description(index)
+        room = max(1, width - indent)
+        if self.question.recommended == index:
+            body.append(RECOMMENDED_TAG, style=ground + tag_ink)
+            room -= cell_len(RECOMMENDED_TAG)
+            if description and room > 3:
+                body.append(" · ", style=ground + ink)
+                room -= 3
+            else:
+                description = ""
         if description:
-            body.append(truncate_cells(description, max(1, width - indent)), style=ground + ink)
-        return _pad_row(body, width, ground)
+            body.append(truncate_cells(description, room), style=ground + ink)
+        return _fit_row(body, width, ground)
 
     def _footer_hints(self, width: int) -> list[tuple[str, str]]:
-        """The key hints that fit, dropping the least needed first.
+        """The key hints that fit, shedding WORDS before it sheds KEYS.
+
+        Two passes, and the order between them is the point: a key with no word
+        beside it still names a key that exists, while a dropped hint is a key
+        nobody can discover. Shedding whole hints first took `space toggle` off
+        a 46-column multi-select and kept `esc skip`, leaving five empty boxes
+        and one offered key that does nothing until one of them is ticked (D3).
 
         Three ladders rather than one, because the keys genuinely differ by
         state: a multi-select confirms rather than answers, and while the
         free-text row is selected the digits and Space have become letters, so
-        advertising them there would be a lie. ``enter``/``esc`` are never
-        dropped — between them they are how the card is used and how it is left.
+        advertising them there would be a lie. Each ladder is ordered LEAST
+        defended first and drives both passes, so the last word standing and the
+        last key standing belong to the same hint.
+
+        What sits at the end differs by state, and that is the whole ranking.
+        Normally it is ``esc``: a card with no stated way out is unusable where
+        a card with fewer keys is merely terse, and `skip` is the one word here
+        nobody can guess (it leaves THIS question unanswered, it does not cancel
+        the ones already answered). On a multi-select it is ``space``, which
+        outranks even that: it is the ONLY key that can answer the question, and
+        it used to be dropped while `esc skip` survived.
         """
         if self.state.selected == self.other_row:
             hints = [("type", "your answer"), ("↑↓", "move"), ("enter", "accept")]
-            droppable = ["↑↓", "type"]
+            ladder = ["↑↓", "type", "enter", "esc"]
         elif self.question.multi:
             hints = [("↑↓", "move"), ("space", "toggle"), ("enter", "confirm")]
-            droppable = ["↑↓", "space"]
+            ladder = ["↑↓", "enter", "esc", "space"]
         else:
-            hints = [("↑↓", "move"), ("1-9", "jump"), ("enter", "answer")]
-            droppable = ["1-9", "↑↓"]
+            # `0-9` once the free-text row has taken `0`, because `1-9` then
+            # advertised a range that stopped short of the list (D13).
+            jump = f"{OTHER_JUMP_KEY}-9" if self.other_row >= 9 else "1-9"
+            hints = [("↑↓", "move"), (jump, "jump"), ("enter", "answer")]
+            ladder = ["↑↓", jump, "enter", "esc"]
         hints.append(("esc", "skip"))
 
         def cells(pairs: list[tuple[str, str]]) -> int:
@@ -773,25 +1065,46 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
                 0, len(pairs) - 1
             )
 
-        for key in droppable:
-            if cells(hints) <= width:
-                return hints
-            hints = [pair for pair in hints if pair[0] != key]
-        if cells(hints) <= width:
-            return hints
-        # Even the two survivors will not fit with their labels (a card under
-        # about 20 cells): keep the KEYS. Two bare keys still say which keys
-        # exist, which is more than a clipped row says.
-        return [(key, "") for key, _ in hints]
+        shown = list(hints)
+        if cells(shown) <= width:
+            return shown
+        for key in ladder:
+            shown = [(name, "" if name == key else what) for name, what in shown]
+            if cells(shown) <= width:
+                return shown
+        for key in ladder[:-1]:
+            shown = [pair for pair in shown if pair[0] != key]
+            if cells(shown) <= width:
+                return shown
+        # One bare key left, on a card too narrow for two. It is the one the
+        # ladder defends hardest, and :func:`_cut_row` keeps even that inside
+        # the card rather than letting it widen the screen.
+        return shown
 
 
-def _pad_row(row: Text, width: int, ground: Style) -> Text:
-    """Extend ``row`` to the full card width in its own ground.
+def _cut_row(row: Text, width: int) -> Text:
+    """``row`` cut to the card's width, in the card's own width model.
 
-    Without this the tinted selection ends where the label ends, so the
+    Load-bearing rather than defensive: every one of these Texts is
+    ``append_text``-ed into ONE Text whose overflow governs, so the
+    ``no_wrap``/``ellipsis`` pair they were built with never fires. The body is
+    ``width: auto``, so a line that overshoots simply widens the card — which is
+    how a 15-cell tag pushed the card two cells past a 28-cell screen and gave
+    the app the one condition AGENTS.md calls always a bug (D2).
+    """
+    if cell_len(row.plain) > width:
+        row.truncate(width, overflow="ellipsis")
+    return row
+
+
+def _fit_row(row: Text, width: int, ground: Style) -> Text:
+    """``row`` at exactly the card's width, in its own ground.
+
+    Without the padding the tinted selection ends where the label ends, so the
     highlight is a ragged patch behind the text rather than a row — and the
     shorter of two adjacent options looks less selected than the longer one.
     """
+    _cut_row(row, width)
     remaining = width - cell_len(row.plain)
     if remaining > 0:
         row.append(" " * remaining, style=ground)

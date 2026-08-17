@@ -696,6 +696,71 @@ async def test_mcp_detail_read_activates_exactly_one_schema_in_the_live_session(
 
 
 @pytest.mark.asyncio
+async def test_activating_an_mcp_tool_keeps_a_capability_merged_after_wiring(
+    monkeypatch,
+) -> None:
+    """MCP refresh must not roll the inventory back to what the factory saw.
+
+    The base used to be SNAPSHOTTED here, and session capability tools can join
+    the inventory after this function returns: the TUI installs its ask handler
+    in ``_adopt_session``, which merges ``ask`` in. With a frozen base, the first
+    MCP activation quietly un-advertised it again — the same defect as the
+    one-time capability merge, one layer out.
+    """
+    from local_operator.harness.types import AgentTool
+
+    async def never_execute(*args, **kwargs):
+        raise AssertionError("activation must not execute the MCP tool")
+
+    builtin = AgentTool(
+        name="read",
+        description="read a file",
+        parameters={"type": "object", "properties": {}},
+        approval_tier="read",
+        execute=never_execute,
+    )
+    mcp_tool = AgentTool(
+        name="mcp__linear_get_user",
+        description="Return the authenticated Linear user",
+        parameters={"type": "object", "properties": {}},
+        approval_tier="read",
+        execute=never_execute,
+    )
+    late = AgentTool(
+        name="ask",
+        description="Ask the user to choose",
+        parameters={"type": "object", "properties": {}},
+        approval_tier="read",
+        execute=never_execute,
+    )
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    manager = FakeMcpManager(configured=["linear"], connected=["linear"])
+    manager.tools = [mcp_tool]
+    manager.meta[mcp_tool.name] = {
+        "server_name": "linear",
+        "mcp_tool_name": "get_user",
+        "deferred": False,
+    }
+    hooks = session_factory._KnowledgeHooks()
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [mcp_tool], []
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    await wire_mcp_into_session(session, [builtin], ".", hooks)
+    # The front end resolves its session and installs its ask handler here, long
+    # after the factory returned; the session merges the tool into its own list.
+    session.tools = [builtin, late]
+
+    assert hooks.mcp_resolver is not None
+    hooks.mcp_resolver("mcp://linear/get_user")  # the activation
+
+    assert session.tools == [builtin, late, mcp_tool]
+
+
+@pytest.mark.asyncio
 async def test_mcp_outcome_is_recorded_on_the_session_for_a_ui_to_read(
     monkeypatch,
 ) -> None:
