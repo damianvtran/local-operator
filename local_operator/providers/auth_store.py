@@ -117,6 +117,13 @@ class OAuthAccess:
     org_id: str | None = None
     api_endpoint: str | None = None
     kind: str = "oauth"  # 'oauth' | 'api_key'
+    #: The full stored credential dict, when this row is OAuth. The wire's
+    #: bearer is ``access_token`` (already mapped through the provider's
+    #: ``get_api_key``), but some providers split duties across two tokens —
+    #: the QwenCloud Token Plan infers on a pasted ``sk-sp-…`` key while quota
+    #: needs the OAuth ``access`` — and a usage fetcher must see the raw row
+    #: to spend the right one. None for plain API-key rows.
+    raw: dict[str, Any] | None = None
 
 
 def default_db_path() -> Path:
@@ -565,6 +572,7 @@ class AuthStore:
                 org_id=data.get("org_id"),
                 api_endpoint=data.get("api_endpoint"),
                 kind="oauth",
+                raw=data,
             )
         return OAuthAccess(
             access_token=key, credential_id=row.id if row is not None else 0, kind="api_key"
@@ -638,6 +646,7 @@ class AuthStore:
                     org_id=creds.get("org_id"),
                     api_endpoint=creds.get("api_endpoint"),
                     kind="oauth",
+                    raw=creds,
                 )
             )
         return accesses
