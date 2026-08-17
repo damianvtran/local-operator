@@ -150,12 +150,11 @@ class TodoPanel(Container):
     def __init__(self) -> None:
         super().__init__(id="todo-panel", classes="band-slot")
         self._body = Static(classes="band-body", id="todo-body")
-        #: Fingerprint of what is painted — ``(text, status, reason)`` per row —
-        #: so the 1 Hz poll repaints only when the list actually changed: an
-        #: equality guard, same discipline as the assistant flush.
-        #: What is painted: the row fingerprints AND the row budget they were
-        #: rendered against (see :meth:`sync`). Both, because the same list
-        #: renders differently when the space it has changes.
+        #: What is painted: the ``(text, status, reason)`` fingerprint per row
+        #: AND the row budget they were rendered against (see :meth:`sync`), so
+        #: the 1 Hz poll repaints only when something actually changed — an
+        #: equality guard, same discipline as the assistant flush. Both terms,
+        #: because the same list renders differently when its space changes.
         self._shown: tuple[tuple[tuple[str, str, str], ...], int] | None = None
         # Hidden until the first todo exists: an empty panel is not content.
         self.display = False

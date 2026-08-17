@@ -447,8 +447,16 @@ async def test_todo_row_cap_follows_the_screen_and_the_marker_counts_the_hidden(
         builtin.TODO_STORE["sess"] = [
             {"text": f"step {n} of the plan", "status": "pending"} for n in range(1, 13)
         ]
-        app._refresh_band()
-        await pilot.pause()
+        # Twice, with settling between. `_band_inset_fits` measures the
+        # laid-out band before deciding whether the dock can afford its top
+        # inset, so the first refresh is what produces the layout the second
+        # one reads — and the inset is one of the rows this panel budgets
+        # against. This is the app's own steady state (`_refresh_band` runs on
+        # the 1 Hz poll), not a test-only allowance; a single refresh measures
+        # the frame before the band settled.
+        for _ in range(2):
+            app._refresh_band()
+            await pilot.pause()
         panel = app.query_one(TodoPanel)
         lines = str(panel._body.content).split("\n")
 
@@ -691,3 +699,57 @@ async def test_reordering_skips_a_row_the_list_does_not_own_yet() -> None:
 
         assert orphan not in panel._list.children
         assert [row for row in panel._list.children] == [panel._rows["b"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("height", "children"),
+    [(16, 6), (20, 10), (24, 10), (13, 3), (14, 3)],
+)
+async def test_the_band_inset_never_costs_the_subagent_list_its_screen(
+    height: int, children: int
+) -> None:
+    """The dock's top inset is only taken when there is a row to spare.
+
+    `TodoPanel` charges itself for that row (`_band_inset_rows`), but
+    `SubagentPanel` has NO row budget: it mounts one row per task job
+    unconditionally. So on the subagent side the inset's row is charged to
+    nobody and comes straight out of the transcript — measured at 100x16 with
+    six children as virtual height 15 against a 14-row screen, where the same
+    frame without the inset fits exactly.
+
+    `AGENTS.md` is explicit that a screen whose virtual size exceeds its actual
+    size is always a bug here: `Screen { overflow: hidden }` does not report it,
+    it silently clips a row off the top. So the inset is conditioned on a real
+    fit check rather than on a height threshold, which is the wrong instrument
+    for a panel with no floor to clamp against.
+
+    Driven at MID heights on purpose. The seam suite runs everything at 40 rows,
+    which is why this class of overflow was invisible to it.
+
+    The cases here are the ones where the band FITS without the inset, which is
+    what makes them a statement about the inset. A tall enough list overflows
+    this app on its own — ten children need twelve rows and a 16-row screen
+    cannot hold them beside the composer, on this branch and equally on `main`
+    — and that pre-existing defect (`SubagentPanel` has no row cap of its own,
+    unlike `TodoPanel`) is deliberately out of scope here: the fix is a row
+    budget and an `… N more` line for that panel, not a spacing change.
+    """
+    session = FakeSession()
+    session.jobs = _fake_jobs(*[_Job(f"sub-{i}", f"child task {i}") for i in range(children)])
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, height)) as pilot:
+        await pilot.pause()
+        # Twice, with settling between: `_band_inset_fits` measures the laid-out
+        # band, so the first refresh is the one that produces the layout it
+        # reads. This is the app's own steady state, not a test-only allowance.
+        for _ in range(2):
+            app._refresh_band()
+            for _ in range(4):
+                await pilot.pause()
+
+        screen = app.screen
+        assert tuple(screen.virtual_size) == tuple(screen.size), (
+            f"the band overflowed the screen at {height} rows with {children} children: "
+            f"virtual={tuple(screen.virtual_size)} size={tuple(screen.size)}"
+        )

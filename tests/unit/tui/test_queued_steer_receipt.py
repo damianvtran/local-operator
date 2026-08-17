@@ -27,8 +27,13 @@ import pytest
 from local_operator.harness.types import ImageContent, ModelSpec, SteeringDeliveredEvent
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
-from local_operator.tui.app import QUEUED_STEER_NOTICE, SENT_STEER_NOTICE, OperatorApp
-from local_operator.tui.events import SteeringDelivered
+from local_operator.tui.app import (
+    QUEUED_STEER_NOTICE,
+    SENT_STEER_NOTICE,
+    STOPPED_STEER_NOTICE,
+    OperatorApp,
+)
+from local_operator.tui.events import SteeringDelivered, TurnEnded
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 
@@ -157,6 +162,69 @@ async def test_clearing_the_transcript_drops_the_rows_it_removed() -> None:
         app.post_message(SteeringDelivered(1))
         await pilot.pause()
         assert SENT_STEER_NOTICE not in _notice_texts(app)
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_turn_retires_the_promise_it_can_no_longer_keep() -> None:
+    """Ctrl+C ends the turn before any boundary, so the row must stop promising.
+
+    The receipt only fires when the engine actually drains the queue. A turn
+    that is aborted never reaches a boundary, so without this the row goes on
+    promising delivery for the rest of the session — the same defect the receipt
+    was added to fix, reached by the abort path. It is worse than doing nothing:
+    the message really is still queued, so the NEXT turn's drain would settle a
+    row the user stopped caring about minutes earlier.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "steered into a turn about to be stopped")
+        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+
+        app.post_message(TurnEnded(True, None))
+        await pilot.pause()
+
+        texts = _notice_texts(app)
+        assert STOPPED_STEER_NOTICE in texts
+        assert QUEUED_STEER_NOTICE not in texts
+        assert SENT_STEER_NOTICE not in texts, "nothing was delivered"
+        assert app._queued_steer_notices == []
+
+
+@pytest.mark.asyncio
+async def test_only_the_messages_that_went_are_settled() -> None:
+    """A message that raced into the queue after the drain keeps its promise.
+
+    `_drain_steering` awaits a disk append per message, so a message steered
+    during that await lands after the loop has exited and is NOT in the batch.
+    It is genuinely still queued and goes at the next boundary, so settling its
+    row on this delivery would claim something that has not happened. FIFO, so
+    "the first `count` rows" and "the messages that went" are the same set.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for text in ("first", "second raced in late"):
+            await _submit(pilot, app, text)
+        assert _notice_texts(app).count(QUEUED_STEER_NOTICE) == 2
+
+        # The drain took ONE of them.
+        app.post_message(SteeringDelivered(1))
+        await pilot.pause()
+
+        texts = _notice_texts(app)
+        assert texts.count(SENT_STEER_NOTICE) == 1
+        assert texts.count(QUEUED_STEER_NOTICE) == 1, "the undelivered row still promises"
+        assert len(app._queued_steer_notices) == 1
+
+        # The next boundary takes the straggler.
+        app.post_message(SteeringDelivered(1))
+        await pilot.pause()
+
+        assert _notice_texts(app).count(SENT_STEER_NOTICE) == 2
+        assert QUEUED_STEER_NOTICE not in _notice_texts(app)
 
 
 @pytest.mark.asyncio

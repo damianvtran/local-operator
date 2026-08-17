@@ -48,8 +48,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
 from local_operator.compaction.tokens import (
+    IMAGE_TOKEN_ESTIMATE,
     approx_text_tokens,
-    estimate_messages_tokens,
 )
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
@@ -407,12 +407,41 @@ def _last_reported_usage(messages: Sequence[AgentMessage]) -> Usage | None:
     one that describes the context as it now stands, and a resumed conversation
     can hold hundreds of messages to walk past.
 
-    ``None`` means "no turn in this history ever reported usage", which is a
-    real state and distinct from zero — a brand-new session, a conversation
-    whose only entries are user messages, or a transcript from a provider that
-    reports no usage at all. Callers must not collapse the two: a confident 0 on
-    a resumed session is the empty-context lie this exists to prevent.
+    **Reports nothing at all for a COMPACTED history**, and that exception is
+    the whole reason this is a function rather than a one-line scan. A compacted
+    transcript replays as a summary marker followed by the KEPT WINDOW, and the
+    kept messages still carry the ``usage`` they were given BEFORE the pass —
+    figures describing a context that no longer exists. Nothing ever supersedes
+    them: only a completed turn rewrites this, and a session that compacted and
+    then exited never ran one.
+
+    Seeding from one is not a small error. Measured on a transcript that
+    compacted at 900k of a 1M window, the reading came back 900_000 against a
+    real 1_707 — 527x over, installed as EXACT so the correct local estimate
+    could never replace it, and handed to ``should_compact``, which would then
+    rewrite the user's history on the first turn after the resume.
+    Under-reporting was the bug this seeding fixed; this is the same lie
+    pointing the other way, and the compaction consequence makes it the more
+    expensive of the two.
+
+    Note the marker sits at the HEAD of the replayed list, not between the stale
+    readings and the live ones — the kept window follows it — so a backwards
+    scan meets the stale message first and a "stop at the boundary" rule reads
+    exactly backwards. The presence of the marker anywhere is what disqualifies
+    the whole history, because every reading in it predates the pass.
+
+    ``None`` means "no usable reading here", a real state and distinct from
+    zero: a brand-new session, a conversation of nothing but user messages, a
+    provider that reports no usage, or the compacted case above. Callers must
+    not collapse the two — a confident 0 on a resumed session is the
+    empty-context lie this exists to prevent — and falling through to the local
+    estimate is the right answer for every one of them.
     """
+    if any(
+        isinstance(message, CustomMessage) and message.custom_type == "compaction_summary"
+        for message in messages
+    ):
+        return None
     for message in reversed(messages):
         if isinstance(message, Message) and message.usage is not None:
             return message.usage
@@ -1315,20 +1344,34 @@ class Session:
                 total += approx_text_tokens(tool.description)
                 if tool.parameters:
                     total += approx_text_tokens(json.dumps(tool.parameters, separators=(",", ":")))
-            # ``estimate_messages_tokens`` rather than a hand-rolled walk: it is
-            # the ruler compaction plans against, and a second implementation of
-            # "how big is this history" is how the band and the compaction gate
-            # end up disagreeing about the same conversation. It also counts
-            # images and tool-call arguments, which a naive text sum drops — on a
-            # resumed vision session those are the largest terms there are.
+            # Counted with THIS method's own ruler, deliberately, rather than
+            # with ``estimate_messages_tokens``. That function is the sharper
+            # one — it is what compaction plans against — but it reaches for
+            # cl100k_base, and the two costs this method's docstring refuses are
+            # exactly what that would spend: ~43.6 MB RSS and, on a cold cache, a
+            # network fetch of the ranks, on the boot path, before the user has
+            # typed anything. Measured on an ordinary session: 58 ms and +41 MB
+            # against 0.7 ms and +0 MB for the arithmetic below. The memoization
+            # does not rescue it either, because a session that never approaches
+            # the compaction threshold never tokenizes at all — so this would not
+            # be sharing a cost already paid, it would be creating one.
             #
-            # It prefers cl100k_base when the ``tokenizer`` extra is installed,
-            # which is a sharper ruler than this method's own chars/4 rule but
-            # NOT a new cost: the estimates are memoized per message id, so a
-            # resumed session pays once for history the compaction gate would
-            # have tokenized on its first turn regardless. Without the extra it
-            # degrades to the same chars/4 heuristic as the blocks above.
-            total += estimate_messages_tokens(rendered)
+            # The terms mirror ``_compute_tokens`` so the shape of what is
+            # counted matches the sharper ruler even though the ruler differs:
+            # text, a flat charge per image, and each tool call's name plus its
+            # serialized arguments. Dropping the last two would understate a
+            # resumed vision or tool-heavy session by its largest terms.
+            for message in rendered:
+                for block in message.content:
+                    if isinstance(block, TextContent):
+                        total += approx_text_tokens(block.text)
+                    else:
+                        total += IMAGE_TOKEN_ESTIMATE
+                for call in message.tool_calls:
+                    total += approx_text_tokens(call.name)
+                    total += approx_text_tokens(
+                        call.raw_arguments or json.dumps(call.arguments, sort_keys=True)
+                    )
             return total
 
         return await asyncio.to_thread(count)

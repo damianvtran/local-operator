@@ -194,6 +194,11 @@ PERSIST_HINT = "/model default saves this for new sessions"
 #: the user is actively asking ("did my text just get thrown away?").
 QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
 SENT_STEER_NOTICE = "sent — delivered to the agent mid-turn"
+#: The third outcome, and the one a promise about the future always needs: the
+#: turn ended before the engine reached a boundary to take the message at, so
+#: the delivery this row promised never happened on the turn the user was
+#: steering. `warning`, not `error` — an interrupt is something they did.
+STOPPED_STEER_NOTICE = "not sent — the turn was interrupted"
 
 #: Shortest SCREEN (not terminal — two rows go to the app's own outer padding)
 #: that can afford the dock band's top inset row, ``#band.has-slot``.
@@ -3384,21 +3389,74 @@ class OperatorApp(App[None]):
             screen_height = self.screen.size.height
         except Exception:  # not composed yet (early boot), or no band on this host
             return
-        docked = any(
-            panel is not None and panel.display
-            for panel in (self._subagent_panel, self._todo_panel)
+        slots = [panel for panel in (self._subagent_panel, self._todo_panel) if panel is not None]
+        docked = any(panel.display for panel in slots)
+        # The inset is breathing room, and it is only ever taken when there is a
+        # row to spare. Two independent reasons, because one alone is not enough:
+        #
+        # * `screen_height` floors it. Below a 10-row screen the dock already
+        #   exceeds the terminal on its own — `TodoPanel` sits at its
+        #   `_MIN_BODY_ROWS` floor with nothing left to give back — so the row
+        #   cannot come from anywhere. Measured at 100x12: virtual height 11
+        #   against a 10-row screen.
+        # * The FIT check is what covers the other slot. `TodoPanel` charges
+        #   itself for this row (`_band_inset_rows`), but `SubagentPanel` has no
+        #   row budget at all: it mounts one row per task job unconditionally, so
+        #   the inset's row is charged to nobody and comes straight out of the
+        #   transcript. Measured at 100x16 with six children: virtual 15 against
+        #   a 14-row screen, where the same frame without the inset fits exactly.
+        #   `Screen { overflow: hidden }` does not report that as an error, it
+        #   reports it by silently clipping a row off the top — and on this app a
+        #   scrollable screen is always a bug (AGENTS.md).
+        #
+        # So the row is taken only while the dock, the composer and one row of
+        # conversation still fit beside it. A panel with no budget of its own
+        # then simply does not get the inset when it is too tall for one, rather
+        # than taking a row the transcript needed.
+        band.set_class(
+            docked and screen_height > MIN_BAND_INSET_SCREEN_ROWS and self._band_inset_fits(slots),
+            "has-slot",
         )
-        # The inset is breathing room, and the shortest terminals have none to
-        # spend. `TodoPanel` clamps itself at `_MIN_BODY_ROWS` (header + one
-        # item) and below a 10-row screen the dock already exceeds the terminal
-        # on its own, so there is no row left for the panel to pay this out of —
-        # taken anyway, it pushes the band past the screen and
-        # `Screen { overflow: hidden }` reports that by clipping the panel's own
-        # header off the TOP, which is the exact failure the row budget exists
-        # to prevent. Measured at 100x12: virtual height 11 against a 10-row
-        # screen. One row of rhythm is not worth a clipped list, so below the
-        # threshold the band goes back to its previous flush join.
-        band.set_class(docked and screen_height > MIN_BAND_INSET_SCREEN_ROWS, "has-slot")
+
+    def _band_inset_fits(self, slots: list[Any]) -> bool:
+        """True when one more row still leaves the column something to show.
+
+        Measured off the last layout rather than predicted: the slots' own outer
+        heights already include each slot's rhythm row, and `#input-shell` is the
+        composer plus its status band. What is left after those and the inset has
+        to be at least one row, or the inset is taking the transcript's last row.
+
+        Deliberately CONSERVATIVE about the unknown case: before the first
+        layout every region measures zero, which would read as "everything
+        fits" and apply the inset to a band that may not have room for it —
+        the overflow only becoming visible, and then correcting itself, a tick
+        later. Withholding the row instead costs at most one tick of a missing
+        blank row on a panel that appeared during boot, which is the cheaper of
+        the two mistakes: panels normally appear mid-session, where the layout
+        is long since measured.
+        """
+        try:
+            screen_height = self.screen.size.height
+            shell_rows = self.query_one("#input-shell").outer_size.height
+        except Exception:  # not composed yet; the next tick measures properly
+            return False
+        if screen_height <= 0 or shell_rows <= 0:
+            return False  # nothing measured yet; see the docstring
+        # Per-SLOT heights, never the band's own: the band's height already
+        # contains the inset this is deciding about, so measuring it would ask
+        # "does the row fit given that I already took it" and latch whichever
+        # answer it happened to start with. A slot's `outer_size` covers its
+        # content plus its own rhythm row and excludes the band's padding, so
+        # this term means the same thing whether or not the class is applied.
+        band_rows = sum(slot.outer_size.height for slot in slots if slot.display)
+        if band_rows <= 0:
+            return False  # nothing measured yet; see the docstring
+        # `+ 1` is the inset itself, and the `>= 1` is the transcript's floor:
+        # the conversation keeps at least one row of its own. A band already too
+        # tall for that fails here and simply does not get the row — which is the
+        # honest outcome for a slot with no budget of its own, rather than
+        # spending a row the transcript needed.
+        return screen_height - (band_rows + shell_rows + 1) >= 1
 
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
@@ -3421,10 +3479,24 @@ class OperatorApp(App[None]):
         # at its pre-inset height and lost a row on the following tick.
         #
         # Resolved by paying for a second `sync`: settle visibility, settle the
-        # inset from it, then repaint against the budget that results. The
-        # second pass is nearly free — both panels hold an equality guard over
-        # (contents, budget) and return immediately when neither moved, which is
-        # every tick where this changed nothing.
+        # inset from it, then repaint against the budget that results. Verified
+        # necessary rather than assumed — with a single pass the todo list
+        # paints 4 rows against a settled budget of 3 at 100x14 and corrects on
+        # the next tick, which is a row of visible reflow.
+        #
+        # The second pass is cheap but NOT free, and the difference is worth
+        # stating because a reader will be tempted to delete one of them:
+        # `TodoPanel` holds an equality guard over (contents, budget) and
+        # returns immediately when neither moved, but `SubagentPanel` has no
+        # such guard on its non-empty path — it re-lists the manager and
+        # re-syncs its rows every call (measured ~0.005 ms/pass, so ~2x of a
+        # very small number). The correctness of the first paint is worth that.
+        #
+        # One tick of settling remains on the frame where a panel FIRST
+        # appears: `_band_inset_fits` measures the laid-out band, and before
+        # that layout exists it withholds the row rather than guessing. That is
+        # the conservative direction — a missing blank row for one tick, not an
+        # overflowing screen for one tick.
         for _ in range(2):
             if self._subagent_panel is not None:
                 self._subagent_panel.sync(session)
@@ -6171,10 +6243,23 @@ class OperatorApp(App[None]):
             # this turn's calls as they landed so the segment moves while the
             # agent works; this figure prices the whole turn and supersedes the
             # running one, so adding it whole would count every already-billed
-            # call twice. Floored at zero: the turn total is a sum over the same
-            # calls and cannot legitimately come back smaller, and a negative
-            # correction would walk the session's lifetime spend backwards.
-            self._total_cost += max(0.0, cost - self._turn_accrued_cost)
+            # call twice.
+            remainder = cost - self._turn_accrued_cost
+            if remainder < 0:
+                # The floor is the right BEHAVIOUR — a lifetime spend counter
+                # that walks backwards is worse than one that is slightly high —
+                # but it is not a non-event, so it is not swallowed. It means the
+                # two paths disagreed about the same turn: `agent_end` sums only
+                # the messages it carries, and a mid-turn compaction's survivor
+                # filter can drop messages this app already billed live. Logged
+                # so the accounting bug behind it is discoverable instead of
+                # sitting invisibly on the session's total.
+                logger.debug(
+                    "turn total %.6f is below the %.6f already accrued; keeping the accrued figure",
+                    cost,
+                    self._turn_accrued_cost,
+                )
+            self._total_cost += max(0.0, remainder)
         # The turn is over either way, so the per-call ledger closes here rather
         # than only on the path that priced something: a turn whose cost came
         # back unpriceable must not leave its accrual standing to be subtracted
@@ -6224,6 +6309,8 @@ class OperatorApp(App[None]):
             # N+1 rows when several tools were running.
             self._append_block(NoticeBlock("interrupted", "warning"))
         self._interrupted_cards = 0
+        if message.aborted or message.error:
+            self._settle_queued_steer_notices_unsent()
 
     def _start_working_block(self, *, ends_empty_state: bool = True) -> None:
         """Mount the turn's working line, pinned to the foot of the transcript.
@@ -6624,28 +6711,64 @@ class OperatorApp(App[None]):
     def on_notice_posted(self, message: NoticePosted) -> None:
         self._append_block(NoticeBlock(message.text, message.kind))
 
-    def on_steering_delivered(self, message: SteeringDelivered) -> None:
-        """Settle every queued-steer row into a delivered one.
+    def _settle_queued_steer_notices_unsent(self) -> None:
+        """Retire queued-steer rows whose turn died before the engine took them.
 
-        The engine has taken the messages into context, so the promise those
+        The delivery receipt only fires when ``_drain_steering`` actually takes
+        messages. A turn that is INTERRUPTED (Ctrl+C) or fails never reaches a
+        boundary, so those rows would go on promising a delivery for the rest of
+        the session — the same defect the receipt was added to fix, reached by
+        the abort path instead. Worse than leaving it alone: the message is
+        genuinely still queued, so the NEXT turn drains it and settles a row the
+        user stopped caring about minutes earlier.
+
+        What the row is restated to is deliberately not ``sent``: from the
+        user's point of view the turn they were steering is over. ``warning``
+        rather than ``error`` because nothing failed — they stopped it — and the
+        text says where the words went, since they are still in the composer's
+        world rather than lost.
+        """
+        if not self._queued_steer_notices:
+            return
+        for block in self._queued_steer_notices:
+            try:
+                block.restate(STOPPED_STEER_NOTICE, "warning")
+            except Exception:  # a receipt must never take the app down
+                logger.debug("queued-steer notice could not be retired", exc_info=True)
+        self._queued_steer_notices.clear()
+
+    def on_steering_delivered(self, message: SteeringDelivered) -> None:
+        """Settle the rows for the messages this delivery actually took.
+
+        The engine has taken those messages into context, so the promise those
         rows were making has come true and they say so — in place, in the past
         tense. Appending a second notice instead would leave the stale `queued`
         claim on screen above its own correction, and spend a row doing it.
 
-        ALL held rows settle on one delivery, because that is what actually
-        happened: the queue is drained whole at a single boundary, so three
-        messages typed during one tool call are three promises kept at once.
-        ``count`` is not used to settle a subset for that reason — it would have
-        to guess WHICH rows, and the queue's own answer is "all of them".
+        ``count`` bounds it, and the OLDEST rows settle first, because the drain
+        is not always the whole queue: it awaits a disk append per message, and
+        a message steered during that await lands after the ``while`` has
+        already exited. It is genuinely still queued and will go at the next
+        boundary, so settling its row here would claim a delivery that has not
+        happened. FIFO matches the queue's own order, so "the first ``count``
+        rows" and "the messages that went" are the same set.
         """
         if not self._queued_steer_notices:
             return  # a delivery for rows this app is no longer holding
-        for block in self._queued_steer_notices:
+        # Defensive bounds: a producer that omits `count` (or sends a nonsense
+        # one) must not settle nothing, and must not settle more rows than are
+        # held. One is the floor because a delivery event means at least one
+        # message went.
+        taken = max(1, min(int(getattr(message, "count", 1) or 1), len(self._queued_steer_notices)))
+        settled, self._queued_steer_notices = (
+            self._queued_steer_notices[:taken],
+            self._queued_steer_notices[taken:],
+        )
+        for block in settled:
             try:
                 block.restate(SENT_STEER_NOTICE, "success")
             except Exception:  # a receipt must never take the app down
                 logger.debug("queued-steer notice could not be settled", exc_info=True)
-        self._queued_steer_notices.clear()
 
     def on_compaction_started(self, message: CompactionStarted) -> None:
         self._append_block(NoticeBlock("compacting context…", "info"))

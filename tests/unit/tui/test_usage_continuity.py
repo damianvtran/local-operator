@@ -194,6 +194,75 @@ async def test_a_new_session_restores_nothing_and_keeps_its_estimate(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_a_compacted_resume_reports_nothing_rather_than_the_old_context(
+    tmp_path: Path,
+) -> None:
+    """A compacted history's readings describe a context that no longer exists.
+
+    Replay puts the summary marker at the head and the KEPT WINDOW after it, and
+    those kept messages still carry their pre-compaction ``usage``. Nothing
+    supersedes them, because only a completed turn rewrites the reading and a
+    session that compacted and then exited never ran one.
+
+    Seeding from one is worse than the bug the seeding fixed: measured at 900k
+    against a real ~1.7k, it would install a 527x overstatement as EXACT — which
+    also suppresses the correct local estimate — and hand it to
+    ``should_compact``, rewriting the user's history on the first turn after the
+    resume. ``None`` is the right answer: fall through to the estimate.
+    """
+    transcript = Transcript(tmp_path / "sess")
+    stale = _assistant(output=100, context=900_000)
+    await transcript.append_message(Message.user("q"))
+    await transcript.append_message(stale)
+    await transcript.append_compaction(
+        summary="what happened earlier",
+        first_kept_entry_id=stale.id,
+        tokens_before=900_000,
+    )
+
+    async def _stream(request: Any, signal: Any = None):  # pragma: no cover - never called
+        if False:
+            yield None
+
+    session = Session(
+        model=_spec(),
+        stream_fn=_stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["system"],
+    )
+
+    assert session.restored_usage() is None
+    # And the fallback is sane: the local estimate describes the KEPT window,
+    # nowhere near the pre-compaction figure it refused.
+    assert await session.measure_preloaded_context() < 100_000
+
+
+@pytest.mark.asyncio
+async def test_the_baseline_never_loads_the_tokenizer(tmp_path: Path) -> None:
+    """The boot-path measurement keeps its documented chars/4 contract.
+
+    ``measure_preloaded_context``'s own docstring refuses two costs, and the
+    tokenizer is the first of them: cl100k_base is ~43.6 MB RSS and, on a cold
+    cache, a NETWORK fetch of the ranks — during boot, before the user has
+    typed. Counting the history with the sharper ruler would have spent exactly
+    that (measured: 58 ms and +41 MB against 0.5 ms and +0.1 MB), and the
+    memoization does not amortize it because a session that never approaches the
+    compaction threshold never tokenizes at all.
+    """
+    import local_operator.compaction.tokens as tokens_module
+
+    session = await _session_over(
+        tmp_path / "sess",
+        [Message.user("q" * 5_000), _assistant(output=50, context=10_000)],
+    )
+
+    with patch.object(tokens_module, "_get_encoding", side_effect=AssertionError("loaded")) as gate:
+        assert await session.measure_preloaded_context() > 0
+        assert gate.call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_the_new_session_baseline_counts_what_the_first_request_carries(
     tmp_path: Path,
 ) -> None:

@@ -55,9 +55,17 @@ from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_aside import AsideSession
 
-#: The two frames the seam was measured in: the everyday wide terminal and the
-#: narrow one where the conversation reaches the dock soonest.
-SIZES = [(120, 40), (60, 40)]
+#: The frames the seam is measured in: the everyday wide terminal, the narrow
+#: one where the conversation reaches the dock soonest, and a SHORT one.
+#:
+#: The height matters as much as the width and was missing. Every seam test ran
+#: at 40 rows, where the column has rows to spare, so a whole class of defect —
+#: the dock spending a row the transcript needed — could not be seen here at
+#: all: the band's top inset overflowed the screen at mid heights while this
+#: suite stayed green. 24 rows is the standard short terminal and leaves the
+#: transcript a handful of rows once a panel is docked, which is where that
+#: kind of regression shows up first.
+SIZES = [(120, 40), (60, 40), (100, 24)]
 
 PROSE = (
     "Rebuilt the parser and re-ran the suite; both tails are green now, and the "
@@ -399,8 +407,10 @@ async def test_the_band_join_does_not_double(size: tuple[int, int]) -> None:
             {"text": "wire the band", "status": "done"},
             {"text": "capture frames", "status": "pending"},
         ]
-        app._refresh_band()
-        await _settle(pilot, 6)
+        # Twice: see the note in `_dock` — the inset needs a measured band.
+        for _ in range(2):
+            app._refresh_band()
+            await _settle(pilot, 6)
         transcript = app.query_one(TranscriptView)
         transcript.scroll_end(animate=False)
         await _settle(pilot, 6)
@@ -482,8 +492,10 @@ async def test_the_aside_rests_on_whatever_the_dock_puts_first(size: tuple[int, 
     async with app.run_test(size=size) as pilot:
         await _fill(pilot, app, turns=6)
         builtin.TODO_STORE[session.session_id] = [{"text": "wire the band", "status": "pending"}]
-        app._refresh_band()
-        await _settle(pilot, 6)
+        # Twice: see the note in `_dock` — the inset needs a measured band.
+        for _ in range(2):
+            app._refresh_band()
+            await _settle(pilot, 6)
         app.query_one(Editor).load_text("/btw why is the loop slow?")
         await pilot.press("enter")
         await _settle(pilot, 8)
@@ -540,8 +552,14 @@ async def _dock(pilot: Any, app: OperatorApp, session: Any, todos: bool, subagen
         ]
     if subagents:
         session.jobs = _fake_jobs(_Job("sub-1", "IngestAuditor"))
-    app._refresh_band()
-    await _settle(pilot, 6)
+    # Twice, with settling between. `_band_inset_fits` measures the laid-out
+    # band before deciding whether the dock can afford its top inset, so the
+    # first refresh produces the layout the second one reads. This is the app's
+    # own steady state — `_refresh_band` runs on the 1 Hz poll — not a
+    # test-only allowance.
+    for _ in range(2):
+        app._refresh_band()
+        await _settle(pilot, 6)
     app.query_one(TranscriptView).scroll_end(animate=False)
     await _settle(pilot, 6)
 
