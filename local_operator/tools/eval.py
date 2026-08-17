@@ -35,6 +35,7 @@ import contextlib
 import json
 import os
 import signal as process_signal
+import subprocess
 import sys
 import time
 import uuid
@@ -99,10 +100,18 @@ class EvalParams(BaseModel):
 
 
 class _Kernel:
-    """One live worker process plus its LRU bookkeeping."""
+    """One live worker process plus its process-tree ownership and LRU state."""
 
-    def __init__(self, process: asyncio.subprocess.Process) -> None:
+    def __init__(
+        self,
+        process: asyncio.subprocess.Process,
+        *,
+        windows_job: int | None = None,
+    ) -> None:
         self.process = process
+        # On Windows, closing this Job Object is the process-tree equivalent of
+        # POSIX killpg. It is assigned before any user code can run.
+        self.windows_job = windows_job
         self.last_used = time.monotonic()
 
 
@@ -138,6 +147,143 @@ def _session_key(context: ToolContext | None) -> str:
     return context.session_id or f"ctx-{id(context):x}"
 
 
+def _create_windows_kill_job(pid: int) -> int:
+    """Own ``pid`` with a kill-on-close Windows Job Object.
+
+    The worker initially blocks on stdin, so assignment happens before it can
+    execute user code or spawn descendants. Refusing eval startup when this
+    setup fails is safer than advertising a timeout that leaks child processes.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimitInformation),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    last_error = getattr(ctypes, "get_last_error")
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.SetInformationJobObject.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError(last_error(), "CreateJobObjectW failed")
+    try:
+        limits = ExtendedLimitInformation()
+        limits.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            raise OSError(last_error(), "SetInformationJobObject failed")
+
+        process_handle = kernel32.OpenProcess(
+            0x0100 | 0x0001,  # PROCESS_SET_QUOTA | PROCESS_TERMINATE
+            False,
+            pid,
+        )
+        if not process_handle:
+            raise OSError(last_error(), "OpenProcess failed")
+        try:
+            if not kernel32.AssignProcessToJobObject(job, process_handle):
+                raise OSError(last_error(), "AssignProcessToJobObject failed")
+        finally:
+            kernel32.CloseHandle(process_handle)
+    except BaseException:
+        kernel32.CloseHandle(job)
+        raise
+    return int(job)
+
+
+def _close_windows_job(job: int) -> None:
+    """Terminate the Job tree and close its kill-on-close native handle."""
+    import ctypes
+
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    last_error = getattr(ctypes, "get_last_error")
+    kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    kernel32.TerminateJobObject.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = ctypes.c_void_p(job)
+    terminated = bool(kernel32.TerminateJobObject(handle, 1))
+    terminate_error = last_error()
+    closed = bool(kernel32.CloseHandle(handle))
+    close_error = last_error()
+    # Either operation is sufficient to terminate the owned tree:
+    # TerminateJobObject does it directly; successful CloseHandle triggers the
+    # KILL_ON_JOB_CLOSE limit. Both failing means containment was not honored.
+    if not terminated and not closed:
+        raise OSError(
+            terminate_error or close_error,
+            "TerminateJobObject and CloseHandle(job) both failed",
+        )
+
+
+async def _taskkill_windows_tree(pid: int) -> bool:
+    """Last-resort Windows tree termination if a native Job handle fails."""
+    taskkill = os.path.join(
+        os.environ.get("SystemRoot", r"C:\Windows"),
+        "System32",
+        "taskkill.exe",
+    )
+    try:
+        killer = await asyncio.create_subprocess_exec(
+            taskkill,
+            "/PID",
+            str(pid),
+            "/T",
+            "/F",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        return await asyncio.wait_for(killer.wait(), timeout=5.0) == 0
+    except (OSError, TimeoutError):
+        return False
+
+
 async def _close_kernel(kernel: _Kernel) -> None:
     """Kill/reap the worker process GROUP, then release its transport.
 
@@ -147,7 +293,17 @@ async def _close_kernel(kernel: _Kernel) -> None:
     """
     process = kernel.process
     killed_group = False
-    if hasattr(os, "killpg"):
+    if kernel.windows_job is not None:
+        try:
+            _close_windows_job(kernel.windows_job)
+            killed_group = True
+        except OSError:
+            killed_group = await _taskkill_windows_tree(process.pid)
+        finally:
+            # Never close/reuse a native handle twice, including when close
+            # itself reports an error.
+            kernel.windows_job = None
+    elif hasattr(os, "killpg"):
         try:
             # Attempt this even when the leader has already exited: its
             # descendants keep the original process group alive.
@@ -205,25 +361,44 @@ def _remember(key: str, kernel: _Kernel) -> None:
 
 
 async def _spawn(cwd: str) -> _Kernel:
-    """Start a worker in the session's working directory.
+    """Start a worker with platform-native process-tree ownership.
 
-    ``start_new_session`` detaches the kernel from the harness's process
-    group: a terminal Ctrl-C aimed at the TUI must not SIGINT the kernel and
-    silently destroy the persistence this tool exists to provide (the tool's
-    own timeout/abort paths kill it explicitly).
+    POSIX uses a new session/process group. Windows assigns the worker to a
+    kill-on-close Job Object before the first request is sent.
     """
+    spawn_options: dict[str, Any] = {
+        "stdin": asyncio.subprocess.PIPE,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+        "cwd": cwd,
+    }
+    if sys.platform == "win32":
+        spawn_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        spawn_options["start_new_session"] = True
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-u",
         "-m",
         "local_operator.tools.eval_worker",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-        start_new_session=True,
+        **spawn_options,
     )
-    return _Kernel(process)
+    windows_job: int | None = None
+    if sys.platform == "win32":
+        try:
+            windows_job = _create_windows_kill_job(process.pid)
+        except OSError:
+            # No request has been sent, so the worker cannot have descendants.
+            # Reap this leader and refuse unsafe eval startup.
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            transport = getattr(process, "_transport", None)
+            if transport is not None:
+                transport.close()
+            raise
+    return _Kernel(process, windows_job=windows_job)
 
 
 async def _read_crash_stderr(kernel: _Kernel) -> str:

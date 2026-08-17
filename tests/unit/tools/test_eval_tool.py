@@ -394,3 +394,46 @@ async def test_raw_stdout_protocol_overflow_retires_kernel_and_recovers(context)
     fresh = await _call(context, "1 + 1")
     assert fresh.is_error is False
     assert "result: 2" in fresh.text
+
+
+@pytest.mark.asyncio
+async def test_windows_spawn_assigns_kill_on_close_job_before_use(tmp_path, monkeypatch) -> None:
+    class Transport:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Process:
+        pid = 4242
+        returncode = None
+        _transport = Transport()
+
+        async def wait(self) -> int:
+            return 0
+
+        def kill(self) -> None:
+            raise AssertionError("Job Object should own termination")
+
+    process = Process()
+    spawn_options: dict[str, Any] = {}
+    closed: list[int] = []
+
+    async def spawn(*_args: object, **kwargs: Any) -> Process:
+        spawn_options.update(kwargs)
+        return process
+
+    monkeypatch.setattr(eval_tool.sys, "platform", "win32")
+    monkeypatch.setattr(eval_tool.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(eval_tool, "_create_windows_kill_job", lambda pid: 77)
+    monkeypatch.setattr(eval_tool, "_close_windows_job", closed.append)
+
+    kernel = await eval_tool._spawn(str(tmp_path))
+    assert kernel.windows_job == 77
+    assert "start_new_session" not in spawn_options
+    assert "creationflags" in spawn_options
+
+    await eval_tool._close_kernel(kernel)
+    assert closed == [77]
+    assert kernel.windows_job is None
+    assert process._transport.closed is True
