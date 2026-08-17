@@ -420,6 +420,30 @@ async def test_the_title_says_a_cancelled_child_never_ran() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_narrow_title_shortens_the_state_word_before_losing_it() -> None:
+    """The phrase is 27 cells where the bare word is 9, and a single-rung
+    ladder dropped the state ENTIRELY at the widths between the two.
+
+    At those widths the page showed a glyph and a duration with no word on
+    screen — for the one state whose whole point is being said. The state is
+    shortened before it is dropped, so it is the last thing to go, not the
+    first.
+    """
+    parked = _Job("sub-parked", "flaky test bisect", status="cancelled")
+    parked.settled_at = parked.start_time + 96.0
+    parked.result_text = CANCELLED_BEFORE_START
+    session = FakeSession()
+    session.jobs = _fake_jobs(parked)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(48, 24)) as pilot:
+        view = await _open(pilot, app, parked)
+        title = view.rendered_rows()[0]
+
+    assert "cancelled" in title, title
+    assert CANCELLED_BEFORE_START not in title, "premise: too narrow for the phrase"
+
+
+@pytest.mark.asyncio
 async def test_opening_another_subagent_retargets_the_same_page() -> None:
     """The band stays live under the page precisely so a reader can hop
     between children; hopping must not stack two pages or leave the previous

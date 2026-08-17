@@ -261,6 +261,36 @@ async def test_jobs_says_which_quantity_each_age_is(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_jobs_never_says_up_beside_a_settled_status(tmp_path):
+    """The sense follows the STATUS, not the clock.
+
+    Sharing one test let a settled row with no ``settled_at`` print ``up``
+    beside a ``completed`` or ``cancelled`` — a contradiction no reader can
+    reconcile. It is reachable through the real manager, in the window inside
+    ``cancel()``'s await where the status is set and the settle stamp is not
+    yet, so this drives exactly that: a cancelled row with the stamp withheld.
+    """
+    manager = AsyncJobManager()
+    job_id = manager.register("task", "probe", _slow_runner)
+    # Let the runner begin, then cancel; the row is settled the moment cancel
+    # returns, and the settle stamp arrives from the runner's own teardown.
+    await asyncio.sleep(0)
+    await manager.cancel(job_id)
+    job = manager.get(job_id)
+    assert job is not None and job.status == "cancelled"
+    job.settled_at = None  # the window, held open
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    result = await _call(_tools(context), "jobs", {}, context)
+    row = next(line for line in result.text.splitlines() if line.startswith(job_id))
+
+    assert "cancelled" in row
+    assert row.split()[3] != "up", row
+
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
 async def test_jobs_keeps_its_columns_aligned_at_any_age(tmp_path):
     """A day-old running job must not shear the grid.
 

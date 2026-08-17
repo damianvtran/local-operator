@@ -1095,32 +1095,52 @@ class SubagentView(Vertical):
             # stamps exactly that phrase on the row for both surfaces to spend
             # (`harness/jobs.py`). Matched rather than sniffed: `cancel` is the
             # only writer of `result_text` on a cancelled job.
-            word = CANCELLED_BEFORE_START
+            # Two rungs, not one: the phrase is 27 cells where the bare word
+            # is 9, and a single-rung ladder dropped the STATE entirely at
+            # widths where the bare word still fit — the page then showed a
+            # glyph and a duration with no word on screen. The ladder below
+            # tries every rung with the phrase first, then every rung with the
+            # bare word, so the state is the last thing to go after it has
+            # already been shortened once.
+            word_choices = [CANCELLED_BEFORE_START, "cancelled"]
+        else:
+            word_choices = [word]
         glyph_style = Style(color=theme_mod.semantic_color(token))
         # Most disposable first. The glyph is never dropped: it is the one
         # field that survives a colourless frame and the only one that still
         # answers "is this running" at a width where nothing else fits.
-        tail: list[tuple[str, Style]] = []
-        if tools:
-            tail.append((f" · {tools} tool{'' if tools == 1 else 's'}", dim))
-        tail.append((f" · {self._elapsed}", dim))
-        tail.append((f" {word}", dim))
-        for dropped in range(len(tail) + 1):
-            fields = tail[dropped:]
-            # The label gets whatever the fields do not want, floored at eight
-            # cells so it never vanishes entirely — it is the page's subject.
-            spend = sum(cell_len(text) for text, _ in fields) + 13
-            label = truncate_cells(self._label, max(8, width - spend))
-            row = Text(no_wrap=True, overflow="ellipsis")
-            row.append("Subagent", style=dim)
-            row.append(" · ", style=faint)
-            row.append(label, style=fg)
-            row.append("  ", style=dim)
-            row.append(glyph, style=glyph_style)
-            for text, style in reversed(fields):
-                row.append(text, style=style)
-            if cell_len(row.plain) <= width:
-                return row
+        # Most disposable first, and the state word is shortened before it is
+        # dropped, never the reverse: dropping the word inside one pass would
+        # end the ladder before the shorter variant was ever tried — the exact
+        # widths between the phrase and the bare word then showed a glyph and
+        # a duration with no state on screen. So each pass keeps at least the
+        # word field (``len(tail)`` rungs, not ``len(tail) + 1``), every word
+        # variant is tried in turn, and the wordless rung comes last.
+        for keep_word in (True, False):
+            for word_choice in word_choices if keep_word else [word_choices[-1]]:
+                tail: list[tuple[str, Style]] = []
+                if tools:
+                    tail.append((f" · {tools} tool{'' if tools == 1 else 's'}", dim))
+                tail.append((f" · {self._elapsed}", dim))
+                tail.append((f" {word_choice}", dim))
+                rungs = len(tail) if keep_word else len(tail) + 1
+                for dropped in range(rungs):
+                    fields = tail[dropped:]
+                    # The label gets whatever the fields do not want, floored
+                    # at eight cells so it never vanishes entirely — it is the
+                    # page's subject.
+                    spend = sum(cell_len(text) for text, _ in fields) + 13
+                    label = truncate_cells(self._label, max(8, width - spend))
+                    row = Text(no_wrap=True, overflow="ellipsis")
+                    row.append("Subagent", style=dim)
+                    row.append(" · ", style=faint)
+                    row.append(label, style=fg)
+                    row.append("  ", style=dim)
+                    row.append(glyph, style=glyph_style)
+                    for text, style in reversed(fields):
+                        row.append(text, style=style)
+                    if cell_len(row.plain) <= width:
+                        return row
         # Narrower than the breadcrumb itself: keep the two things that
         # identify the page, and let the label take the ellipsis.
         row = Text(no_wrap=True, overflow="ellipsis")

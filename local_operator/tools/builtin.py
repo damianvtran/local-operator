@@ -4137,10 +4137,18 @@ async def execute_jobs(
         # duck-typed row without one. The guard covers ONLY that attribute:
         # ``id``/``status``/``settled_at``/``label`` are read unguarded on the
         # same row, so a row missing any of those still raises.
-        if job.status != "running" and job.settled_at:
-            reference, sense = job.settled_at, "ago"
-        else:
-            reference, sense = getattr(job, "start_time", None), "up"
+        # The SENSE follows the status, never the clock. Sharing one test let
+        # a settled row with no ``settled_at`` print ``up`` beside a
+        # ``completed`` or ``cancelled`` — a contradiction a reader cannot
+        # reconcile, reachable through the real manager in the window inside
+        # ``cancel()``'s await where the status is set and the settle stamp is
+        # not yet. A settled row with no clock says ``old``: settled, and when
+        # is not known.
+        running = job.status == "running"
+        reference = (
+            job.settled_at if not running and job.settled_at else getattr(job, "start_time", None)
+        )
+        sense = "up" if running else ("ago" if job.settled_at else "old")
         # A row with no clock says so. Printing 0.0s made it byte-identical to
         # a job launched this instant — the exact unreadable number this tool
         # was fixed to stop printing. Both branches are nine cells, so the
