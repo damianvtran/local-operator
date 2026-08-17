@@ -13,7 +13,9 @@ break:
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +114,47 @@ def test_write_is_content_addressed_and_idempotent() -> None:
     assert first.handle == second.handle
     # Identical output written twice must cost ONE entry, not two.
     assert store.entry_count() == 1
+
+
+def test_concurrent_identical_writes_use_distinct_atomic_temps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every writer succeeds when identical digests replace concurrently."""
+    store = spill.get_store()
+    workers = 8
+    barrier = threading.Barrier(workers)
+    real_replace = spill.os.replace
+
+    def synchronized_replace(source, destination) -> None:  # noqa: ANN001
+        # Hold every writer after staging but before each atomic replace. The
+        # old deterministic `<digest>.txt.tmp` gave all eight the SAME source:
+        # the first rename succeeded and seven lost their temp. The barrier is
+        # cyclic, so it also synchronizes the metadata replace.
+        barrier.wait(timeout=5)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(spill.os, "replace", synchronized_replace)
+    payload = "identical\n" + ("x" * 100_000)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                store.write,
+                payload,
+                tool_name="bash",
+                session_id=f"session-{index}",
+            )
+            for index in range(workers)
+        ]
+        metas = [future.result(timeout=10) for future in futures]
+
+    assert all(meta is not None for meta in metas)
+    handles = {meta.handle for meta in metas if meta is not None}
+    assert len(handles) == 1
+    read = store.read_lines(handles.pop())
+    assert read is not None
+    selected, total = read
+    assert total == 2
+    assert selected == payload.splitlines()
 
 
 def test_stat_returns_metadata_without_content() -> None:

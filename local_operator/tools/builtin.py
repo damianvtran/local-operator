@@ -51,6 +51,7 @@ import mimetypes
 import os
 import re
 import signal as signal_module
+import threading
 import time
 import traceback
 from collections.abc import Awaitable, Callable
@@ -940,6 +941,27 @@ ToolExecutor = Callable[
     ],
     Awaitable[ToolResult],
 ]
+
+#: Process-wide path transaction locks shared by ``read``, ``edit`` and
+#: ``write``. Tool ``concurrency="exclusive"`` is scoped to one AgentLoop;
+#: parent/child sessions own separate loops and can otherwise enter two
+#: thread-backed read-modify-write transactions on the same file at once.
+#: Fixed stripes keep the table bounded (no lock per model-controlled path);
+#: a collision only serializes two unrelated mutations, which is a safe,
+#: rare cost. Reads take the same stripe so they cannot observe a truncated
+#: file between a writer's open and close.
+_FILE_TRANSACTION_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+def _file_transaction_lock(path: Path) -> threading.Lock:
+    """The process-wide transaction stripe for ``path``.
+
+    ``resolve(strict=False)`` canonicalizes existing symlinks, so two spellings
+    of one file land on one stripe. Python's randomized hash is fine: only
+    stability inside this process matters.
+    """
+    canonical = os.path.normcase(str(path.resolve(strict=False)))
+    return _FILE_TRANSACTION_LOCKS[hash(canonical) % len(_FILE_TRANSACTION_LOCKS)]
 
 
 def _guard(tool_name: str) -> Callable[[ToolExecutor], ToolExecutor]:
@@ -2059,6 +2081,12 @@ def _list_dir_entries(path: Path) -> list[str]:
     return sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
 
 
+def _read_file_bytes(path: Path) -> bytes:
+    """Read one coherent snapshot, serialized with in-process mutations."""
+    with _file_transaction_lock(path):
+        return path.read_bytes()
+
+
 def _decode_text_lines(data: bytes) -> tuple[str, list[str]]:
     """Decode file bytes as UTF-8 and split, preserving the source too.
 
@@ -2167,7 +2195,7 @@ async def execute_read(
     # an image, then a PIL decode + re-encode that can run for seconds — and
     # the coroutine's loop is the TUI's render loop, so on it this was the
     # whole-screen freeze whenever a batch of reads settled together.
-    data = await asyncio.to_thread(path.read_bytes)
+    data = await asyncio.to_thread(_read_file_bytes, path)
 
     if info:
         try:
@@ -2528,6 +2556,16 @@ def _edit_file_result(
     hunks: list[EditHunk],
     anchor_line: int | None,
 ) -> tuple[int, dict[str, Any]] | str:
+    """Serialize one file transaction across parent/child AgentLoops."""
+    with _file_transaction_lock(path):
+        return _edit_file_result_locked(path, hunks, anchor_line)
+
+
+def _edit_file_result_locked(
+    path: Path,
+    hunks: list[EditHunk],
+    anchor_line: int | None,
+) -> tuple[int, dict[str, Any]] | str:
     """The current multi-hunk edit engine, synchronous for ``to_thread``.
 
     A string is the exact refusal the tool returns. Counting, ambiguity
@@ -2725,6 +2763,12 @@ async def execute_write(
 
 
 def _write_file_result(path: Path, content: str) -> tuple[bool, dict[str, Any]]:
+    """Serialize one overwrite transaction across parent/child AgentLoops."""
+    with _file_transaction_lock(path):
+        return _write_file_result_locked(path, content)
+
+
+def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str, Any]]:
     """The filesystem half of ``write``: read prior, write new, diff both.
 
     Synchronous by design — ``asyncio.to_thread`` is the only caller, and

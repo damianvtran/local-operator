@@ -290,14 +290,21 @@ class SessionPickerScreen(ModalScreen[str | None]):
         return rows[min(self._selected, len(rows) - 1)].id
 
     # -- actions -------------------------------------------------------------
+    def _dismiss_result(self, result: str | None) -> None:
+        """Dismiss after releasing a hovered row's pointer shape."""
+        # The modal leaves without another mouse move; make the inline rule's
+        # observer restore OSC 22 while the screen still owns the pointer.
+        self.styles.pointer = "default"
+        self.dismiss(result)
+
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        self._dismiss_result(None)
 
     def action_choose(self) -> None:
         # Enter on an empty result set is not a choice. Dismissing with None
         # here (rather than ignoring the key) means Enter always closes the
         # picker, which is what a user who has typed a bad filter expects.
-        self.dismiss(self.selected_id())
+        self._dismiss_result(self.selected_id())
 
     def action_move(self, delta: int) -> None:
         self._move_to(self._selected + delta)
@@ -358,7 +365,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         rows = self.visible_rows
         if 0 <= index < len(rows):
             self._selected = index
-            self.dismiss(rows[index].id)
+            self._dismiss_result(rows[index].id)
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
         index = self._index_at(event)

@@ -381,12 +381,15 @@ class ModelPicker(Static):
         self._refilter()
 
     def close(self) -> None:
-        """Hide the list."""
+        """Hide the list and release a row's pointer shape."""
         self._open = False
         self._matches = []
         self._selected = 0
         self._window_start = 0
         self._hovered = None
+        # A stationary pointer gets no mouse-move after this surface leaves;
+        # the style observer updates OSC 22 before `display` hides the node.
+        self.styles.pointer = "default"
         self.display = False
 
     def move(self, delta: int) -> None:

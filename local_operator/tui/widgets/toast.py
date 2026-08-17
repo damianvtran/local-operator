@@ -224,6 +224,9 @@ class Toast(Static):
         self._stop_timer()
         self._message = text.plain if isinstance(text, Text) else text
         self.update(text)
+        # `dismiss_toast` resets the inline pointer before hiding; a reused
+        # toast has to re-arm the whole-card click affordance with its timer.
+        self.styles.pointer = "pointer"
         self.display = True
         self._refit()
         self._timer = self.set_timer(duration_ms / 1000, self.dismiss_toast)
@@ -236,6 +239,11 @@ class Toast(Static):
         on a plain widget is how a future modal refactor breaks quietly.
         """
         self._stop_timer()
+        # The CSS makes the whole visible card a hand-pointer target. Reset
+        # it inline before hiding: a timer/click dismissal under a stationary
+        # pointer otherwise leaves the terminal's OSC 22 shape latched until
+        # the next physical mouse move.
+        self.styles.pointer = "default"
         self.display = False
         self._message = ""
         self.update("")

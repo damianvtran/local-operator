@@ -14,6 +14,7 @@ import io
 import os
 import random
 import struct
+import time
 import zlib
 from pathlib import Path
 from typing import Any
@@ -1105,6 +1106,46 @@ async def test_edit_multi_hunk_applies_all_in_one_call(tools, context, tmp_path)
     assert result.is_error is False
     assert (tmp_path / "m.py").read_text() == "ALPHA\nmiddle\nBETA\nmiddle\nGAMMA\n"
     assert "3 hunk(s)" in result.text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_edits_share_one_file_transaction(
+    tools,
+    context,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Separate AgentLoops cannot both read the same original and lose one edit."""
+    path = tmp_path / "shared.txt"
+    path.write_text("alpha\nbeta\n")
+
+    real_match = builtin._match_windows
+
+    def delayed_match(content: str, old_text: str):
+        # Both unlocked transactions read the original before this sleep and
+        # then overwrite one another. The process-wide path stripe makes the
+        # second transaction enter only after the first has committed.
+        time.sleep(0.05)
+        return real_match(content, old_text)
+
+    monkeypatch.setattr(builtin, "_match_windows", delayed_match)
+    first, second = await asyncio.gather(
+        _call(
+            tools,
+            "edit",
+            {"path": "shared.txt", "old_text": "alpha", "new_text": "ALPHA"},
+            context,
+        ),
+        _call(
+            tools,
+            "edit",
+            {"path": "shared.txt", "old_text": "beta", "new_text": "BETA"},
+            context,
+        ),
+    )
+
+    assert not first.is_error and not second.is_error
+    assert path.read_text() == "ALPHA\nBETA\n"
 
 
 @pytest.mark.asyncio

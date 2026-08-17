@@ -2964,11 +2964,12 @@ class OperatorApp(App[None]):
         exact moment that account is busiest, and the concurrency ceilings
         made BOTH calls fail: the turn showed early provider-failure notices
         and the naming call died, which the once-only latch then turned into
-        a session that never got its title. Waiting costs the title a turn's
-        duration and nothing else; the bound is generous (twice the title
-        call's own timeout) so a wedged turn cannot wedge the name with it —
-        a timeout here just falls through to the attempt, which has its own
-        guards.
+        Waiting costs the title a turn's duration and nothing else. There is
+        deliberately NO timeout on this wait: a title is decoration, so a
+        turn that never settles may cost its name, but must never make the
+        live turn worse. The turn worker's ``finally`` and the reload path
+        both set the event, so every normal end (success, failure, abort, or
+        session switch) releases it.
 
         ``generate_title`` absorbs every failure and bounds its own wait, so
         there is nothing to catch here — a provider that raises or hangs just
@@ -2976,10 +2977,12 @@ class OperatorApp(App[None]):
         substantive message one more attempt rather than the last.
         """
         if session is self._session and not session.conversation_name:
-            try:
-                await asyncio.wait_for(self._turn_settled.wait(), naming.TITLE_TIMEOUT_S * 2)
-            except asyncio.TimeoutError:
-                pass  # a turn that outlives the bound loses the courtesy, not the name
+            await self._turn_settled.wait()
+        # Reload/user rename can happen while the worker is parked. The event
+        # release is not permission to call the OLD session's provider (or
+        # to name over the user's choice); re-check at the side-effect edge.
+        if session is not self._session or session.conversation_name:
+            return
         title = await naming.generate_title(text, session.complete_once)
         if session is not self._session:
             return  # the session was reloaded out from under this attempt

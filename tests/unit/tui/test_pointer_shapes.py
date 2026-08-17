@@ -22,6 +22,7 @@ import pytest
 
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.command_picker import CommandPicker
+from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_command_picker import PickerHarnessApp
@@ -80,3 +81,33 @@ async def test_picker_rows_take_and_release_the_hand_pointer() -> None:
         assert (
             app.screen._pointer_shape == "default"
         ), f"non-row area kept the hand (inline rule now {picker.styles.pointer!r})"
+
+        # Closing the picker under the still pointer must also release the
+        # hand; no mouse move follows a programmatic/keyboard close.
+        landed = await pilot.hover(picker, offset=(10, 0))
+        assert landed
+        await pilot.pause()
+        assert app.screen._pointer_shape == "pointer"
+        picker.close()
+        await pilot.pause()
+        assert app.screen._pointer_shape == "default"
+
+
+@pytest.mark.asyncio
+async def test_dismissing_a_toast_releases_the_hand_pointer() -> None:
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        toast = app.query_one(Toast)
+        toast.show("Saved", duration_ms=60_000)
+        await pilot.pause()
+
+        landed = await pilot.hover(toast)
+        assert landed
+        await pilot.pause()
+        assert app.screen._pointer_shape == "pointer"
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert app.screen._pointer_shape == "default"

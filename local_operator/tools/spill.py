@@ -69,6 +69,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -253,6 +254,31 @@ def _clip_to_entry_cap(text: str, cap: int) -> tuple[str, bool]:
             return "", False
 
 
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Atomically replace ``path`` through a unique same-directory temp.
+
+    Same-directory keeps ``os.replace`` atomic. A unique name is load-bearing
+    now that oversized tool results spill from worker threads: two identical
+    outputs share the same content digest, so the old deterministic
+    ``<digest>.txt.tmp`` let one writer rename the other's temp away.
+    """
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            stream.write(data)
+            tmp_path = Path(stream.name)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
 class SpillStore:
     """Bounded, content-addressed store of full tool outputs.
 
@@ -328,34 +354,29 @@ class SpillStore:
             return None
 
     def _write_entry(self, digest: str, data: bytes, meta: SpillMeta) -> None:
-        """Write content and sidecar. Content first, atomically, then meta.
+        """Write content and sidecar atomically through unique temp names.
 
-        The content is written to a temp name and renamed, so a crash mid-write
-        cannot leave a truncated entry that a later read would serve as if it
-        were whole. The sidecar is written second: an entry with content but no
-        sidecar is invisible to :meth:`stat` and gets swept by the next
-        eviction, whereas a sidecar pointing at absent content would be a
-        handle that resolves to nothing.
+        Content first, then metadata: content without a sidecar is invisible
+        to :meth:`stat` and swept by eviction, while metadata pointing at
+        absent content would create a handle that resolves to nothing. Both
+        files use unique same-directory temps so concurrent writers of the
+        same content digest cannot rename one another's staging file away or
+        interleave a sidecar.
         """
-        content_path = self._content_path(digest)
-        tmp_path = content_path.with_suffix(".txt.tmp")
-        tmp_path.write_bytes(data)
-        os.replace(tmp_path, content_path)
-        self._meta_path(digest).write_text(
-            json.dumps(
-                {
-                    "digest": meta.digest,
-                    "bytes": meta.bytes,
-                    "lines": meta.lines,
-                    "complete": meta.complete,
-                    "tool_name": meta.tool_name,
-                    "session_id": meta.session_id,
-                    "created_ms": meta.created_ms,
-                    "last_read_ms": meta.last_read_ms,
-                }
-            ),
-            encoding="utf-8",
-        )
+        _atomic_write_bytes(self._content_path(digest), data)
+        encoded_meta = json.dumps(
+            {
+                "digest": meta.digest,
+                "bytes": meta.bytes,
+                "lines": meta.lines,
+                "complete": meta.complete,
+                "tool_name": meta.tool_name,
+                "session_id": meta.session_id,
+                "created_ms": meta.created_ms,
+                "last_read_ms": meta.last_read_ms,
+            }
+        ).encode("utf-8")
+        _atomic_write_bytes(self._meta_path(digest), encoded_meta)
 
     # -- read --------------------------------------------------------------
 

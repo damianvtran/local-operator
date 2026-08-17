@@ -1577,7 +1577,7 @@ calls". The tool coroutines ride the SAME asyncio loop that renders the TUI,
 so every synchronous stretch inside one is a stretch the frame does not
 animate — and a batch of calls finishing together put several hundred
 milliseconds back-to-back. The measured offender: three concurrent image
-reads blocked the loop for **645 ms** (one 214 ms decode+re-encode each, on
+reads blocked the loop for **649 ms** (one ~216 ms decode+re-encode each, on
 the loop), which is a freeze by any user's word for it.
 
 The stretches, and where they moved (`asyncio.to_thread`, the pattern grep
@@ -1591,11 +1591,31 @@ and glob already used):
 | `execute_bash` | multi-MB chunk joins+decodes, the oversized-output tail (spill disk write, elide slicing) |
 | `execute_grep`/`execute_glob` | match-list joins, spill write |
 
+Off-loop did NOT mean transaction-free. Review round 1 caught two concurrency
+edges the event loop had serialized accidentally:
+
+- `read`/`edit`/`write` now share 64 fixed process-wide path stripes. Parent
+  and child AgentLoops can run concurrently, but two spellings of one resolved
+  path share a lock across the whole read/decide/write/diff transaction; reads
+  take the same stripe so they cannot observe a truncated writer. Fixed
+  stripes bound memory; a hash collision only serializes unrelated files.
+- Spill content and metadata now stage through unique same-directory temp
+  files and atomic replace. Identical content has an identical digest, so the
+  old deterministic `<digest>.txt.tmp` let concurrent writers rename one
+  another's temp away.
+
+Deterministic review repros at reviewed head `676ba26`: two delayed concurrent
+edits to `alpha\nbeta\n` both returned success but settled as `ALPHA\nbeta\n`
+(lost update); eight identical spill writers returned at least one `None`.
+`test_concurrent_edits_share_one_file_transaction` and
+`test_concurrent_identical_writes_use_distinct_atomic_temps` both fail there
+and pass with the process lock / unique atomic temps.
+
 Evidence: `tests/unit/tools/test_loop_liveness.py` — a 20 ms heartbeat
 running while the tools work. On the fix: max gap under 120 ms. At `d424441`
 (the PR base): **0.649 s** for three concurrent image reads. The refusal
 strings and byte-level framing of `edit`'s ambiguity contract are asserted
-unchanged by the current tools suite (363 tests).
+unchanged by the current tools suite (365 tests).
 
 ## The name that never landed (and the early provider failures)
 
@@ -1607,9 +1627,11 @@ session's terminal title stayed `lo › tmp` forever. Two causes, one fix each:
    concurrently with the first turn's own provider call — two simultaneous
    requests on one OAuth account at its busiest moment, and OAuth concurrency
    ceilings 429 BOTH: the turn surfaced early "provider failure" notices and
-   the naming call died. The errand now waits on `_turn_settled` (bounded at
-   twice the title call's own timeout, so a wedged turn cannot wedge the
-   name) before calling the provider.
+   the naming call died. The errand now waits on `_turn_settled` with NO
+   timeout before calling the provider. A title is decoration: a turn that
+   never settles may cost its name but must never be made worse by a courtesy
+   call. The turn worker's `finally` and reload path release every normal end,
+   and the worker re-checks session identity/user naming after the wait.
 2. **A failed attempt was spent forever.** `_name_requested` latched on
    schedule, not on success, so the minute-zero failure cost the session its
    name permanently. The latch now releases when an attempt produces no title
@@ -1645,12 +1667,16 @@ the default arrow.
 `ToolCard` and `Toast` now carry a static `pointer: pointer` (their whole
 surface is the click target); the command/model/session pickers set the
 inline rule from the row index under the move, so their non-row rows (the
-overflow count, padding) give the arrow back. `set_rule` gates on change, so
-the per-move assignment is a no-op when the shape did not move.
+overflow count, padding) give the arrow back. Picker close/dismiss paths and
+toast dismissal reset the inline rule BEFORE the surface disappears, so a
+stationary pointer cannot leave the terminal's hand cursor latched; a reused
+toast re-arms the click affordance when it shows. `set_rule` gates on change,
+so per-move assignments are no-ops when the shape did not move.
 
 Evidence: `tests/unit/tui/test_pointer_shapes.py` — `pilot.hover` through the
 real mouse-move path, asserting `Screen._pointer_shape` (the exact value
-OSC 22 carries): `pointer` over a card and a picker row, `default` over the
-transcript ground and the picker's overflow row. A hover frame from the real
-`OperatorApp` is byte-identical before and after (the rule paints no pixels);
-the shape is the behavioural contract, which is what the tests hold.
+OSC 22 carries): `pointer` over a card, picker row and toast; `default` over
+the transcript ground, picker overflow row, picker closed under a stationary
+pointer and a dismissed toast. A hover frame from the real `OperatorApp` is
+byte-identical before and after (the rule paints no pixels); the shape is the
+behavioural contract, which is what the tests hold.

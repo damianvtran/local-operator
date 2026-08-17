@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.session import naming
 from local_operator.tui.app import OperatorApp
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -58,8 +59,14 @@ async def _boot(title: str = "") -> tuple[OperatorApp, _GatedSession]:
 
 
 @pytest.mark.asyncio
-async def test_naming_waits_for_the_live_turn_to_settle() -> None:
-    """No second provider request while the opening turn still streams."""
+async def test_naming_waits_for_the_live_turn_to_settle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No second provider request, even beyond the old courtesy timeout."""
+    # The old implementation fell through after 2 × TITLE_TIMEOUT_S and
+    # called the provider while the turn was still live. Shrink that clock so
+    # the regression is deterministic without making the test wait 40s.
+    monkeypatch.setattr(naming, "TITLE_TIMEOUT_S", 0.01)
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()

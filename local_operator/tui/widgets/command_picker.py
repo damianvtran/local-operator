@@ -1024,6 +1024,11 @@ class CommandPicker(Static):
 
     def _close(self) -> None:
         self._reset_rows()
+        # Release the hand BEFORE the surface disappears. Textual only
+        # re-evaluates the pointer on a mouse/style event; removing a picker
+        # under a stationary pointer otherwise leaves OSC 22 at `pointer`
+        # until the person moves again.
+        self.styles.pointer = "default"
         # The notice belonged to the list that is now gone. Esc, a completion and a
         # submission all arrive here, and each one is the user done with it.
         self._notice = ""
