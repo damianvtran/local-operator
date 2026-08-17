@@ -1115,13 +1115,54 @@ class ChatRequest(BaseModel):
     #:
     #: ``False`` for a turn and for an aside: their deltas reach the transcript
     #: as they arrive, and a retry would re-render text the user already read.
-    #: ``True`` for the one-shot errands that collect the whole stream before
-    #: returning a string — the compaction summary and auto-naming — where a
-    #: stalled read (``_guarded_chunks`` gives up after 180s of silence) used to
-    #: be a permanent failure because the driver had already forwarded events it
+    #: ``True`` for the one-shot errand that collects the whole stream before
+    #: returning a string — the compaction summary — where a stalled read
+    #: (``_guarded_chunks`` gives up after 180s of silence) used to be a
+    #: permanent failure because the driver had already forwarded events it
     #: could not take back. A failed compaction is not cosmetic: the context it
-    #: was meant to shrink keeps growing.
+    #: was meant to shrink keeps growing. Auto-naming is the opposite case and
+    #: sets ``isolated`` instead — see below.
     replayable: bool = False
+    #: This call is DECORATION running alongside a user turn, and it must not be
+    #: able to change anything the turn depends on.
+    #:
+    #: Transport policy like ``replayable`` above, and it exists because
+    #: auto-naming stopped waiting for the turn to finish. A title that arrives
+    #: after the work is done is a title nobody needed, so the naming call now
+    #: runs CONCURRENTLY with the turn — and a second in-flight request shares
+    #: more than bandwidth with it. FIVE pieces of session-wide state sit in
+    #: the path of an ordinary request, and each was a live route by which a
+    #: decorative 429 could have degraded the user's turn:
+    #:
+    #: 1. ``FailoverRouteState`` is session-sticky. A naming failure that walked
+    #:    to a fallback target would ``activate`` it with a 60-second cooldown,
+    #:    moving the TURN onto the fallback model — and a naming SUCCESS on the
+    #:    primary would ``clear`` a pin the turn is relying on.
+    #: 2. ``AuthStore.rotate_sibling`` mutates the session's sticky credential,
+    #:    so an auth failure on a title would re-point the turn's account.
+    #: 3. ``SessionStreamFn`` consumes a pending message boundary to classify
+    #:    auto-effort. Whoever arrives first spends it, so a naming call would
+    #:    freeze the turn's effort from ITS prompt and emit an "auto effort"
+    #:    notice for a request the user never made.
+    #: 4. The quota preflight can block a credential and activate a fallback
+    #:    route for the whole session.
+    #: 5. The session's prompt cache key identifies a request PREFIX. A naming
+    #:    call's prefix is a different system block, so sharing the key buys no
+    #:    hit and writes a competing entry under the turn's name.
+    #:
+    #: So an isolated request gets exactly ONE attempt on the model it names:
+    #: no fallback chain, no sticky route read or written, no credential
+    #: rotation, no backoff sleep, no preflight, no boundary classification and
+    #: not the session's cache key. It still resolves credentials under the
+    #: session id — that READ picks the same account the turn is on, which is
+    #: the point; what it cannot do is move off it. It fails fast and alone,
+    #: which is what lets the caller swallow the failure (see
+    #: ``session.naming.generate_title``) without the turn ever knowing a
+    #: second call happened.
+    #:
+    #: Enforced in two places, tested in two: ``stream_with_failover`` (1, 2,
+    #: and the retry budget) and ``SessionStreamFn.__call__`` (3, 4, 5).
+    isolated: bool = False
 
 
 class StreamTextDelta(BaseModel):

@@ -2324,17 +2324,79 @@ class Session:
             return entry.payload.get("summary")
         return None
 
-    async def complete_once(self, system: str, prompt: str) -> str:
-        """One non-tool provider call, exposed for host-side helpers.
+    #: Output cap for :meth:`complete_once`, and the only bound on what a model
+    #: that ignores the output format can bill us for. Not tight, deliberately:
+    #: the cap counts EVERY response token, and on a provider with adaptive
+    #: thinking (Anthropic's ``thinking: adaptive``, which this session sends
+    #: whenever the model has an effort ladder) some of them are thinking. Seven
+    #: measured naming calls emitted 18–38 tokens, so a 64-token cap was running
+    #: at 60% of budget on a title we would then have to REJECT for being
+    #: truncated. Only the tokens produced are billed, so headroom is free.
+    ERRAND_MAX_TOKENS = 128
 
-        Hosts need the session's configured provider and credentials for
-        small side errands — conversation auto-naming is the first — and
+    async def complete_once(self, system: str, prompt: str) -> str:
+        """One CHEAP, ISOLATED, single-attempt provider call for a host errand.
+
+        Hosts need the session's configured provider and credentials for small
+        side errands — conversation auto-naming is the only caller — and
         rebuilding a client from the spec would duplicate the whole auth
-        cascade. The call carries no tools, no history and no abort signal:
-        it is not a turn, must not appear in the transcript, and must never
-        be awaited on the turn's critical path.
+        cascade. The call carries no tools, no history and no abort signal: it
+        is not a turn and must not appear in the transcript.
+
+        It used to be deferred until the turn settled, because a second
+        simultaneous request at minute zero could rate-limit both. It now runs
+        CONCURRENTLY with the turn, so the safety comes from the shape of the
+        request instead of from the timing:
+
+        * ``isolated`` — one attempt, no fallback chain, no credential
+          rotation, no sticky-route read or write, no quota preflight, no
+          effort-boundary classification and not the session's prompt cache
+          key. See the field's docstring for the five pieces of session-wide
+          state that protects, and why each one mattered.
+        * ``replayable=False`` — deliberately the opposite of the compaction
+          errand below. Replay exists so a stalled read does not permanently
+          lose an EXPENSIVE result; a title is worth one attempt and no more.
+        * ``max_tokens`` — bounds a model that ignores the output format.
+        * cheapest route available: the ``lo`` subagent tier when the operator
+          has configured one, otherwise this session's model clamped to the
+          lowest reasoning effort it accepts. Naming is a formatting job, not a
+          thinking job, and thinking tokens are most of what it would bill.
         """
-        return await self._one_shot_complete(system, prompt)
+        model = self._errand_model()
+        request = ChatRequest(
+            model=model,
+            system_blocks=[system],
+            messages=[Message.user(prompt)],
+            tools=[],
+            tool_choice="none",
+            max_tokens=self.ERRAND_MAX_TOKENS,
+            replayable=False,
+            isolated=True,
+        )
+        parts: list[str] = []
+        async for event in self._stream_fn(request, None):
+            if isinstance(event, StreamTextDelta):
+                parts.append(event.delta)
+        return "".join(parts)
+
+    def _errand_model(self) -> ModelSpec:
+        """The cheapest spec this session can reach for a decorative errand.
+
+        Prefers the operator's ``lo`` tier (``values.subagents.models.lo``),
+        which is the same ladder a scout subagent runs on — an operator who has
+        already said "this is my cheap model" should not have to say it twice.
+        With no tier configured this falls back to the session's own model with
+        its reasoning effort clamped to the bottom rung, which is a real saving
+        on a reasoning model (thinking tokens dominate a 10-token answer) and a
+        no-op on a model that exposes no knob.
+        """
+        tier = self._resolve_subagent_model("task", "lo")
+        if tier is not None:
+            return tier
+        efforts = self._model.reasoning_efforts
+        if not efforts or self._model.reasoning_effort == efforts[0]:
+            return self._model
+        return self._model.model_copy(update={"reasoning_effort": efforts[0]})
 
     async def _one_shot_complete(self, system: str, prompt: str) -> str:
         """One non-tool provider call used to produce the compaction summary.

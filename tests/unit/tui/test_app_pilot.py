@@ -20,6 +20,7 @@ import pytest
 
 from local_operator.harness.types import ImageContent, NoticeEvent, TextContent
 from local_operator.session.mcp_status import McpStartupOutcome
+from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
@@ -69,6 +70,11 @@ class FakeSession:
         )
         self.preflight_calls = 0
         self.preflight_notice: str | None = None
+        # The REAL holder, not a bare string: `user_set` precedence (a human
+        # rename outranks every generated title, forever) is behaviour the TUI
+        # relies on, and a fake that reimplements it as a plain assignment
+        # would let a regression in that rule pass every pilot test.
+        self._name_state = ConversationName()
 
     @property
     def session_id(self) -> str:
@@ -139,11 +145,14 @@ class FakeSession:
 
     @property
     def conversation_name(self) -> str:
-        return getattr(self, "_name", "")
+        return self._name_state.text
+
+    @property
+    def conversation_name_state(self) -> ConversationName:
+        return self._name_state
 
     def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
-        self._name = (text or "").strip()
-        return self._name
+        return self._name_state.set(text, user_set=user_set)
 
     async def complete_once(self, system: str, prompt: str) -> str:
         # No title: the naming worker must be inert in the pilot tests, and

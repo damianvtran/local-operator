@@ -1577,3 +1577,173 @@ def test_the_rendered_form_is_gated_on_the_kind_not_on_a_guessed_status() -> Non
     transient = ProviderError(503, "Could not process image")
     assert str(transient).startswith("transient provider error")
     assert not is_image_rejection(str(transient))
+
+
+class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
+    """``ChatRequest.isolated``: decoration runs concurrently with a user turn.
+
+    Auto-naming stopped waiting for the turn to settle, so a title call is now a
+    SECOND in-flight request on the same session. Each test here pins one route
+    by which that call's failure used to be able to reach the turn — and each
+    fails if ``stream_with_failover``'s ``isolated`` branch is removed, because
+    every one of these behaviours is on by default for an ordinary request.
+    """
+
+    @staticmethod
+    def _isolated(provider: str = "openai", model_id: str = "gpt-4o") -> ChatRequest:
+        return ChatRequest(model=ModelSpec(provider=provider, model_id=model_id), isolated=True)
+
+    async def test_it_never_walks_the_model_fallback_chain(self) -> None:
+        """A fallback hop would put the title on a model the turn is not using —
+        and, with a route state, would drag the turn there too."""
+        specs_seen: list[str] = []
+
+        async def client_for(spec: ModelSpec) -> Any:
+            specs_seen.append(spec.model_id)
+            return ScriptedClient(ProviderError(500, "boom", retryable=True))
+
+        settings = {
+            "retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}
+        }
+        auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+        with pytest.raises(ProviderError):
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), auth, settings, client_for
+                )
+            ]
+        assert specs_seen == ["gpt-4o"], "an isolated call walked onto a fallback model"
+
+    async def test_it_never_rotates_the_sessions_credential(self) -> None:
+        """``rotate_sibling`` moves the session's STICKY credential, so an auth
+        failure on a title would re-point the account the turn transacts on."""
+        auth = FakeAuth({"openai": ["bad-key", "good-key"]})
+        used_keys: list[str | None] = []
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                used_keys.append(api_key)
+                return ScriptedClient(
+                    ProviderError(401, "invalid api key", auth_error=True)
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        with pytest.raises(ProviderError):
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), auth, {"retry": {"baseDelayMs": 1}}, client_for
+                )
+            ]
+        assert used_keys == ["bad-key"], "an isolated call retried on a second credential"
+        assert auth.rotations == [], "an isolated call rotated the session's credential"
+
+    async def test_it_neither_pins_nor_clears_the_sticky_route(self) -> None:
+        """The route state is session-wide: a title pinning a fallback would move
+        the TURN's model, and a title CLEARING a pin would send the turn back to
+        a primary the turn already knows is down."""
+        pinned = FallbackTarget("anthropic/claude-opus-5", "high")
+        state = FailoverRouteState()
+        await state.activate(pinned, "an earlier turn failed over")
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+        auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+        _ = [
+            event
+            async for event in stream_with_failover(
+                self._isolated(), auth, None, client_for, route_state=state
+            )
+        ]
+        assert state.active == pinned, "an isolated call cleared the turn's sticky route"
+
+    async def test_it_never_sleeps_on_a_backoff(self) -> None:
+        """A retry budget would hold the naming worker (and its 8-second overall
+        ceiling) open across sleeps for a result nobody is waiting on."""
+        slept: list[float] = []
+
+        async def spy_sleep(delay_ms: float, signal: Any = None) -> None:
+            slept.append(delay_ms)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = spy_sleep  # type: ignore[assignment]
+        try:
+
+            async def client_for(spec: ModelSpec) -> Any:
+                return ScriptedClient(ProviderError(500, "boom", retryable=True))
+
+            auth = FakeAuth({"openai": ["k1"]})
+            with pytest.raises(ProviderError):
+                _ = [
+                    event
+                    async for event in stream_with_failover(
+                        self._isolated(),
+                        auth,
+                        {"retry": {"baseDelayMs": 50, "maxRetries": 3}},
+                        client_for,
+                    )
+                ]
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+        assert slept == [], "an isolated call spent a backoff sleep"
+
+    async def test_one_attempt_is_all_it_gets(self) -> None:
+        """The sum of the four above: exactly one call reaches the wire."""
+        client = ScriptedClient(ProviderError(429, "rate limited", retryable=True))
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return client
+
+        auth = FakeAuth({"openai": ["k1", "k2"]})
+        settings = {
+            "retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}
+        }
+        with pytest.raises(ProviderError):
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), auth, settings, client_for
+                )
+            ]
+        assert client.calls == 1
+
+    async def test_the_same_failure_on_an_ORDINARY_request_does_all_four(self) -> None:
+        """The control. Without this, every assertion above could be passing
+        because the fake never triggers those paths at all."""
+        client = ScriptedClient(ProviderError(500, "boom", retryable=True))
+        specs_seen: list[str] = []
+        slept: list[float] = []
+
+        async def spy_sleep(delay_ms: float, signal: Any = None) -> None:
+            slept.append(delay_ms)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            specs_seen.append(spec.model_id)
+            return client
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = spy_sleep  # type: ignore[assignment]
+        try:
+            auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+            settings = {
+                "retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}
+            }
+            state = FailoverRouteState()
+            with pytest.raises(ProviderError):
+                _ = [
+                    event
+                    async for event in stream_with_failover(
+                        _request(), auth, settings, client_for, route_state=state
+                    )
+                ]
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+        assert specs_seen == ["gpt-4o", "claude-x"], "the chain was not walked"
+        assert slept, "no backoff was spent"
+        assert client.calls > 1, "only one attempt was made"
+        assert state.active is not None, "no route was pinned"

@@ -1733,6 +1733,33 @@ class SessionStreamFn:
     ) -> AsyncIterator[StreamEvent]:
         from local_operator.providers.failover import stream_with_failover
 
+        if request.isolated:
+            # Decoration runs alongside the turn, so it must not consume or move
+            # any of this session's shared state — see ``ChatRequest.isolated``.
+            # Three things are skipped rather than one, and each was a real
+            # route by which a title could have degraded a turn:
+            #
+            # * the message-boundary effort classification, which is CONSUMED by
+            #   whoever reaches it first. A naming call arriving before the turn
+            #   would spend the boundary, freeze `_message_effort` from its own
+            #   prompt, and emit an "auto effort" notice for a request the user
+            #   never made.
+            # * the quota preflight, which can block a credential and activate a
+            #   fallback route for the whole session.
+            # * the session's prompt cache key, which identifies a request
+            #   PREFIX. The naming call's prefix is a different system block, so
+            #   sharing the key buys no hit and dirties the turn's cache entry.
+            async for event in stream_with_failover(
+                request,
+                self._auth_store,
+                self._settings,
+                self._client_for,
+                signal=signal,
+                session_id=self._session_id,
+            ):
+                yield event
+            return
+
         # Classify only at the user-message boundary, then freeze the chosen
         # effort for every tool-loop request under it. The tiny local linear
         # model is sub-millisecond / zero tokens — an extra "small LLM" call

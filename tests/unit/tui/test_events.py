@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.session.naming import ConversationName
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentStartEvent,
@@ -151,11 +152,21 @@ class FakeSession:
 
     @property
     def conversation_name(self) -> str:
-        return getattr(self, "_name", "")
+        return self.conversation_name_state.text
+
+    @property
+    def conversation_name_state(self) -> ConversationName:
+        # The real holder, created on first read: `user_set` precedence (a
+        # human rename outranks every generated title, forever) is behaviour
+        # the TUI reads before it spends a re-title call, so a fake that
+        # reimplemented it as a bare string would hide a regression in it.
+        state = getattr(self, "_name_state", None)
+        if state is None:
+            state = self._name_state = ConversationName()
+        return state
 
     def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
-        self._name = (text or "").strip()
-        return self._name
+        return self.conversation_name_state.set(text, user_set=user_set)
 
     async def complete_once(self, system: str, prompt: str) -> str:
         return ""

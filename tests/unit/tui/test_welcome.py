@@ -28,6 +28,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.color import Color
 
+from local_operator.session.naming import ConversationName
 from local_operator.harness.types import AgentMessage, ImageContent
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
@@ -453,7 +454,6 @@ class FakeSession:
         self.aborts: list[str] = []
         self.disposed = False
         self.model_label = model_label
-        self.conversation_name = ""
         self._handlers: list[Any] = []
         self.asides: list[list[Any]] = []
         self.adopted: list[list[Any]] = []
@@ -487,9 +487,23 @@ class FakeSession:
     async def seed_history(self, messages: list[Any]) -> None:
         pass
 
+    @property
+    def conversation_name(self) -> str:
+        return self.conversation_name_state.text
+
+    @property
+    def conversation_name_state(self) -> ConversationName:
+        # The real holder, created on first read: `user_set` precedence (a
+        # human rename outranks every generated title, forever) is behaviour
+        # the TUI reads before it spends a re-title call, so a fake that
+        # reimplemented it as a bare string would hide a regression in it.
+        state = getattr(self, "_name_state", None)
+        if state is None:
+            state = self._name_state = ConversationName()
+        return state
+
     def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
-        self.conversation_name = text
-        return text
+        return self.conversation_name_state.set(text, user_set=user_set)
 
     async def complete_once(self, system: str, prompt: str) -> str:
         # Parameter names AND order must match SessionProtocol.complete_once:

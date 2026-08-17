@@ -24,6 +24,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.todo_panel import MAX_TODO_ROWS, TodoPanel
+from local_operator.session.naming import ConversationName
 
 
 class FakeSession:
@@ -101,10 +102,21 @@ class FakeSession:
 
     @property
     def conversation_name(self) -> str:
-        return ""
+        return self.conversation_name_state.text
+
+    @property
+    def conversation_name_state(self) -> ConversationName:
+        # The real holder, created on first read: `user_set` precedence (a
+        # human rename outranks every generated title, forever) is behaviour
+        # the TUI reads before it spends a re-title call, so a fake that
+        # reimplemented it as a bare string would hide a regression in it.
+        state = getattr(self, "_name_state", None)
+        if state is None:
+            state = self._name_state = ConversationName()
+        return state
 
     def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
-        return (text or "").strip()
+        return self.conversation_name_state.set(text, user_set=user_set)
 
     async def complete_once(self, system: str, prompt: str) -> str:
         return ""

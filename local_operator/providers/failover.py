@@ -1149,6 +1149,18 @@ async def stream_with_failover(
     primary_selector = _selector_for_request(request)
     primary_target = FallbackTarget(primary_selector, request.model.reasoning_effort)
 
+    if request.isolated:
+        # DECORATION: one attempt on the model it named, and no reach into
+        # anything the concurrent turn depends on. Expressed by disabling retry
+        # rather than by a second code path, because "retry disabled" already
+        # means exactly the three things needed here — no fallback chain below,
+        # no transport-retry budget, and no credential rotation (every rotation
+        # `continue` sits behind a `retry.enabled` raise). Dropping the route
+        # state removes the fourth: a decorative call neither pins the session
+        # to a fallback nor clears a pin the turn is relying on.
+        retry = dataclasses.replace(retry, enabled=False)
+        route_state = None
+
     targets = [primary_target]
     if retry.enabled and retry.model_fallback:
         chain = resolve_chain(primary_selector, retry.fallback_chains)

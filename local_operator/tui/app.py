@@ -341,6 +341,18 @@ LOOP_PROMPT = (
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
 
+#: Minimum seconds between two re-title CHECKS on one conversation. The check
+#: is a provider call (the model, not a keyword rule, judges whether the
+#: subject moved — see :meth:`OperatorApp._maybe_retitle_conversation`), so
+#: unthrottled it would bill once per follow-up. Measured against
+#: anthropic/claude-opus-5 at its lowest effort, one check is 167 input + 18
+#: output tokens — real money at Opus rates on a chatty session, but the
+#: sharper cost is CHURN: a tab label that can change every twenty seconds is
+#: one nobody can read. Two minutes is longer than a burst of follow-ups on
+#: one subject (which then costs exactly one check) and much shorter than the
+#: time it takes a session to genuinely move on to something else.
+RETITLE_MIN_GAP_S = 120.0
+
 #: TUI diagnostics go to the log FILE, never the terminal — stderr belongs to
 #: the rendered app (see ``local_operator.logger.file_logging``).
 logger = logging.getLogger("local_operator.tui.app")
@@ -714,25 +726,22 @@ class OperatorApp(App[None]):
         # here and not on the session because it is a DISPLAY stand-in, not a
         # stored title — see :meth:`_show_provisional_name`.
         self._provisional_name: str = ""
-        # Ownership token for the latch above. Turn start can supersede an
-        # in-flight naming worker synchronously, then schedule its replacement
-        # from the follow-up message before cancellation has unwound; only the
-        # current generation may clear the new latch or store a title.
+        # Ownership token for the latch above. Reload can supersede an
+        # in-flight naming worker synchronously, then let the replacement
+        # session schedule its own attempt before cancellation has unwound;
+        # only the current generation may clear the new latch or store a title.
         self._name_generation: int = 0
-        # Cleared while a turn is live, set the moment it settles. The naming
-        # errand waits on this rather than racing the turn's own provider
-        # call: OAuth accounts enforce low concurrent-request ceilings, and a
-        # second simultaneous request at minute zero was the reliable recipe
-        # for a 429 on BOTH — early "provider failure" notices on the turn
-        # and a dead naming call whose failure the latch above then made
-        # permanent (the `lo › tmp` tab that never became a title).
-        self._turn_settled: asyncio.Event = asyncio.Event()
-        self._turn_settled.set()
-        # The live turn and the decorative title request share one provider
-        # lane. A follow-up can arrive during the title call's own 20-second
-        # timeout; turn start cancels naming, then waits for this lock, so the
-        # user request begins only after cancellation has released the route.
-        # Naming takes it only while the turn-settled event is still set.
+        # Monotonic stamp of the last moment a title was DECIDED — either
+        # stored, or checked against a new message and left alone. The re-title
+        # throttle measures its gap from here; see
+        # :meth:`_maybe_retitle_conversation` for why the gap exists.
+        self._retitle_checked_at: float = 0.0
+        # A turn holds this for its whole provider round trip, and `_dispose`
+        # waits on it so a session is never torn down under a live request.
+        # Naming does NOT take it: the title call is `isolated` (see
+        # `ChatRequest.isolated`) and runs concurrently with the turn on
+        # purpose, so serialising it here would restore the very latency this
+        # feature exists to remove.
         self._turn_provider_lock: asyncio.Lock = asyncio.Lock()
         # Last subagent count painted, so the 1 Hz poll repaints only on a
         # real change instead of every tick.
@@ -1520,11 +1529,11 @@ class OperatorApp(App[None]):
         # describes the conversation that just died, and a swap that kept it
         # would put the dead session's first sentence on the new session's tab.
         self._provisional_name = ""
-        # The old conversation's turn can no longer settle anything for the
-        # new one: release any naming errand still waiting on it. Its
-        # session-identity guard then drops the stale attempt, and the reset
-        # latch lets the fresh conversation schedule its own.
-        self._turn_settled.set()
+        # The throttle is a property of the title that was in force, and that
+        # title just died with its conversation. Left standing, a swap landing
+        # inside the window would make the new conversation's first follow-up
+        # unable to correct a title generated from an opener it never had.
+        self._retitle_checked_at = 0.0
         # The spend ledger is the dead conversation's — unless the reload lands
         # back on the SAME conversation, which `/reload` now does. Reset it here
         # so `/new` and `/resume` cannot inherit a figure they did not spend,
@@ -3116,9 +3125,10 @@ class OperatorApp(App[None]):
             self._maybe_name_conversation(text)
             return
         self._start_turn(text, images)
-        # Detached, and deliberately AFTER the turn is dispatched: the title
-        # is decoration, and decoration must never sit in front of the user's
-        # first reply.
+        # AFTER the turn is dispatched, and then concurrently with it: the
+        # title is decoration, so it must never sit in front of the user's
+        # first reply — but it must also not wait for the whole turn, which is
+        # what used to make it arrive minutes late.
         self._maybe_name_conversation(text)
 
     def _start_turn(self, text: str, images: list[ImageContent] | None = None) -> None:
@@ -3132,18 +3142,14 @@ class OperatorApp(App[None]):
         session = self._session
         if session is None or self._status is None:
             return
-        # A user prompt always outranks decoration. Invalidate the old
-        # worker's latch ownership synchronously so `_submit_prompt` can
-        # schedule this follow-up's replacement naming attempt immediately;
-        # then cancellation + the provider lock ensure the prompt cannot
-        # overlap the old courtesy call.
-        self._cancel_naming_attempt()
+        # Naming is deliberately NOT cancelled here. It used to be, because the
+        # title call took the same provider lane the turn takes and a follow-up
+        # had to be able to evict it. The call is now `isolated` and concurrent,
+        # so an in-flight title cannot delay this prompt — and cancelling it
+        # would throw away a title generated from the OPENER and re-derive one
+        # from the follow-up, which names the conversation after its second
+        # subject. Reload still cancels: see `_cancel_naming_attempt`.
         self._status.update(streaming=True)
-        # Marked busy for the naming errand BEFORE the worker exists: the
-        # worker is scheduled from `_submit_prompt` a moment after this, and
-        # an event cleared only inside the coroutine would race the errand's
-        # first peek at it.
-        self._turn_settled.clear()
 
         async def run_prompt() -> None:
             try:
@@ -3156,44 +3162,52 @@ class OperatorApp(App[None]):
                 # no-op, and this covers sessions that end without agent_end.
                 assert self._status is not None
                 self._status.update(streaming=False)
-                self._turn_settled.set()
 
         self.run_worker(run_prompt(), thread=False, group="turns")
 
     # -- conversation naming --------------------------------------------------
     def _cancel_naming_attempt(self) -> None:
-        """Supersede and cancel the current naming worker, if any."""
+        """Supersede and cancel the current naming worker, if any.
+
+        Reload/dispose only. A live turn no longer calls this: an isolated
+        title call cannot delay the prompt, so the only reason left to cancel
+        one is that the conversation it was naming is going away.
+        """
         self._name_generation += 1
         self._name_requested = False
         self.workers.cancel_group(self, "naming")
 
     def _maybe_name_conversation(self, text: str) -> None:
-        """Name this conversation: the opener now, the model's title later.
+        """Name this conversation, or re-name it when the subject has moved.
 
-        Skipping a low-signal opener does NOT spend the attempt: "hi" is
-        usually followed by the actual request, and latching on the greeting
+        One entry point for both, called from every place a user message is
+        accepted, because "is this conversation named yet" is the only thing
+        that separates the two cases and the caller should not have to know.
+
+        Skipping a low-signal message does NOT spend the naming attempt: "hi"
+        is usually followed by the actual request, and latching on the greeting
         would leave the conversation permanently unnamed.
         """
         session = self._session
-        if session is None or self._name_requested:
+        if session is None or naming.is_low_signal(text):
             return
         if session.conversation_name:
-            return  # already named: a restored session, or an explicit rename
-        if naming.is_low_signal(text):
+            # Already named. The message may still have moved the subject —
+            # that is the re-title path, which has its own throttle.
+            self._maybe_retitle_conversation(text)
+            return
+        if self._name_requested:
             return
         self._name_requested = True
         self._name_generation += 1
         generation = self._name_generation
         # The band and the tab stop saying `lo › <cwd>` HERE, from the opener,
-        # with no provider call at all. The errand below cannot ask for a title
-        # until the turn settles — it shares the turn's provider lane, and two
-        # simultaneous requests at minute zero 429 both — and a first turn on
-        # this product routinely runs for minutes. Measured against a real
-        # provider before this line existed: a 29.7-second opening turn, the
-        # cwd fallback on the tab for all 29.7 of those seconds, and the title
-        # stored 1.8 seconds after the answer was already on screen. That is
-        # the whole reported bug ("the tab never becomes a title"): the title
-        # did arrive, just after everyone had stopped waiting for it.
+        # with no provider call at all. The model's title follows a second or
+        # two later, concurrently with the turn — but not instantly, and the
+        # instant is what this buys. Measured against a real provider on the
+        # version that waited for the turn: a 29.7-second opening turn, the cwd
+        # fallback on the tab for all 29.7 of those seconds, and the title
+        # stored 1.8 seconds after the answer was already on screen.
         self._show_provisional_name(text)
         self.run_worker(
             self._name_conversation_worker(session, text, generation),
@@ -3227,58 +3241,126 @@ class OperatorApp(App[None]):
         self._provisional_name = label
         self._status.update(conversation_name=label)
 
+    def _clock(self) -> float:
+        """Monotonic seconds, as one overridable seam.
+
+        Monotonic and not ``time.time``: the only reader is the re-title
+        throttle, and a wall clock stepped backwards by NTP would silently
+        widen its window. A method rather than a direct call so a test can
+        cross a two-minute gap without sleeping through it.
+        """
+        return time.monotonic()
+
+    def _maybe_retitle_conversation(self, text: str) -> None:
+        """Ask whether ``text`` has moved the subject, at most once per window.
+
+        A long session drifts. It opens as "Fix the login redirect loop" and an
+        hour later it is about the billing importer, and a tab still naming the
+        first subject actively misidentifies the session rather than merely
+        under-describing it. So a named conversation keeps asking — but the
+        asking has to stay cheap, and three gates do that:
+
+        * **The user renamed it.** ``user_set`` outranks everything, forever.
+          Checked HERE as well as at the store, so an explicitly named
+          conversation does not even spend the call.
+        * **Low signal.** Already filtered by the caller; "ok", "thanks" and
+          "continue" are most follow-ups in a long session and none of them
+          can have moved a subject.
+        * **A minimum gap.** ``RETITLE_MIN_GAP_S`` since the title in force was
+          last decided — stamped when a check is DISPATCHED (below) and again
+          by :meth:`_store_title` when a title actually lands. Unthrottled, a
+          40-message session would spend 40 checks; measured on
+          anthropic/claude-opus-5, one check is 167 input + 18 output tokens.
+          The cap is as much about CHURN as money — a tab label that can
+          change every twenty seconds is one nobody can read. A burst of
+          follow-ups on one subject costs exactly one check.
+
+        The decision itself is the MODEL's (see ``naming.generate_retitle``):
+        "the subject has materially changed" is a judgement about meaning, and
+        any keyword rule here would fire on "actually, forget the parser" and
+        miss "right, now the same thing for invoices".
+        """
+        session = self._session
+        if session is None or self._status is None:
+            return
+        if session.conversation_name_state.user_set:
+            return
+        now = self._clock()
+        if now - self._retitle_checked_at < RETITLE_MIN_GAP_S:
+            return
+        # Stamped BEFORE the call, not after it: a second submit arriving while
+        # this one is in flight must be throttled by the attempt already
+        # running, or a fast typist gets one call per message anyway.
+        self._retitle_checked_at = now
+        self._name_generation += 1
+        generation = self._name_generation
+        self.run_worker(
+            self._retitle_conversation_worker(session, session.conversation_name, text, generation),
+            thread=False,
+            group="naming",
+        )
+
+    async def _retitle_conversation_worker(
+        self, session: SessionProtocol, current: str, text: str, generation: int
+    ) -> None:
+        """One isolated re-title call; ``None`` from it means "leave it alone".
+
+        Same shape and the same failure policy as the first naming call: it runs
+        alongside the turn, it is single-attempt and isolated, and every failure
+        resolves to "no change" rather than to a notice. The band therefore
+        never flickers on a failed check — nothing repaints unless a genuinely
+        different title came back.
+        """
+        try:
+            title = await naming.generate_retitle(current, text, session.complete_once)
+        except asyncio.CancelledError:
+            return
+        if not title:
+            return  # unchanged subject, or the call failed: same instruction
+        if generation != self._name_generation or session is not self._session:
+            return
+        # Re-read rather than trusting `current`: a rename or a reload may have
+        # landed during the call, and both outrank a check made against a title
+        # that is no longer in force.
+        if session.conversation_name != current:
+            return
+        self._store_title(session, title)
+
     async def _name_conversation_worker(
         self, session: SessionProtocol, text: str, generation: int
     ) -> None:
-        """Name only while no live turn owns (or is waiting for) the provider.
+        """Ask the model for a title NOW, alongside the turn it decorates.
 
-        The errand first waits for the current turn to settle, then takes the
-        same provider lock every user turn takes. Turn start cancels this
-        worker before waiting on that lock, so a follow-up submitted during
-        ``complete_once`` preempts decoration and cannot overlap it. There is
-        deliberately no timeout on the turn-settled wait: a title may be
-        absent, but a courtesy call must never make a user request worse.
+        This errand used to wait for the turn to settle and then take the same
+        provider lock the turn takes, because two simultaneous requests at
+        minute zero could rate-limit both. That was correct about the risk and
+        wrong about the remedy: a first turn here runs for minutes, so the wait
+        meant the title arrived after the answer, which is to say after anyone
+        still wanted it.
 
-        That wait is unbounded and can therefore be minutes long, which is
-        exactly what made this errand look broken from the outside. It is no
-        longer VISIBLE, because ``_maybe_name_conversation`` has already put
-        the opener's own words on the band and the tab before scheduling this
-        worker; what lands here is an upgrade, not the first label. The wait
-        stays because the reason for it has not changed — the turn owns the
-        provider lane and a second simultaneous request 429s both.
+        So the safety moved from the TIMING into the SHAPE of the request, which
+        is what ``session.complete_once`` now builds: one attempt, no fallback
+        chain, no credential rotation, no sticky-route read or write, no quota
+        preflight, no boundary classification, not the session's prompt cache
+        key, a 128-token cap, the cheapest route the session can reach, and a
+        15-second ceiling. A 429 here is swallowed by ``generate_title`` and
+        cannot have touched anything the turn depends on — see
+        ``ChatRequest.isolated`` for the enumeration.
 
-        The generation owns the shared latch. A follow-up supersedes it
-        synchronously before scheduling the replacement worker, so cancellation
-        from the old attempt cannot clear or store into the new attempt.
-        Reload/user rename are checked after every wait, immediately before
-        the provider side effect.
+        What the user sees: the opener's excerpt the instant they submit, then
+        the model's title about five seconds later (measured against
+        anthropic/claude-opus-5), both while the turn is still running.
+
+        The generation owns the shared latch. Reload supersedes this attempt
+        synchronously (``_cancel_naming_attempt``) before the replacement
+        session can schedule its own, so cancellation from the dead attempt
+        cannot clear or store into the new one. A follow-up TURN does not
+        supersede it: this call is not in the turn's way, and the opener names
+        the conversation better than the second message would. Reload and user
+        rename are re-checked immediately before the store.
         """
         try:
-            if session is self._session and not session.conversation_name:
-                await self._turn_settled.wait()
-            if (
-                generation != self._name_generation
-                or session is not self._session
-                or session.conversation_name
-            ):
-                return
-            async with self._turn_provider_lock:
-                # A follow-up may clear the event while this worker waits for
-                # the lock. Never turn that race into provider concurrency.
-                if (
-                    generation != self._name_generation
-                    or session is not self._session
-                    or session.conversation_name
-                    or not self._turn_settled.is_set()
-                ):
-                    if (
-                        generation == self._name_generation
-                        and session is self._session
-                        and not session.conversation_name
-                    ):
-                        self._name_requested = False
-                    return
-                title = await naming.generate_title(text, session.complete_once)
+            title = await naming.generate_title(text, session.complete_once)
         except asyncio.CancelledError:
             if (
                 generation == self._name_generation
@@ -3298,13 +3380,33 @@ class OperatorApp(App[None]):
             if not session.conversation_name:
                 self._name_requested = False
             return
+        self._store_title(session, title)
+
+    def _store_title(self, session: SessionProtocol, title: str) -> str:
+        """Store a generated title and put it on both surfaces.
+
+        One writer for the first title and for every later re-title, so the
+        band and the terminal tab cannot disagree about which is in force. The
+        store itself owns precedence: ``user_set=False`` means an explicit
+        rename always wins, including one that landed while this call was in
+        flight, so this may store nothing and return the name already there.
+        """
         stored = session.set_conversation_name(title, user_set=False)
+        # A title just took effect, so the re-title window restarts from here
+        # rather than from whenever the last CHECK was dispatched. Without
+        # this, a title landing at the tail of an open window would be eligible
+        # for replacement by the very next message.
+        self._retitle_checked_at = self._clock()
         # Superseded: an answer beats a quote of the question. Cleared rather
         # than left set so nothing downstream still believes the band is
         # showing a stand-in.
         self._provisional_name = ""
         if self._status is not None:
+            # The band's setter also pushes the terminal title (see
+            # `StatusLine._sync_terminal_title`), so both surfaces follow from
+            # this one call and neither can lag the other by a frame.
             self._status.update(conversation_name=stored)
+        return stored
 
     # -- background jobs ------------------------------------------------------
     def _poll_subagents(self) -> None:
