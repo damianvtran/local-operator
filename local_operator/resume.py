@@ -17,6 +17,7 @@ transcript-directory decision, so the rule has one definition.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -39,6 +40,31 @@ NAME_MAX_CHARS = 64
 #: pathological first line (a pasted file, a base64 image) must not turn
 #: opening the picker into reading megabytes off disk for every row.
 NAME_SCAN_CHARS = 64_000
+
+#: How far into a half-read first line the scan will look for the marker that
+#: says the fragment is a user message. The writer emits ``id``/``ts``/``type``
+#: before the payload, so the role sits ~110 characters in; a few hundred is
+#: slack for a longer id without letting the marker match something deep in a
+#: pasted body.
+_FRAGMENT_HEAD_CHARS = 400
+
+#: The marker that says a fragment is a user message, and the first COMPLETE
+#: JSON string value of a ``text`` key. Both tolerate whitespace around the
+#: colon: the session writer emits compact JSON, but a transcript written by
+#: anything else (a test fixture, a hand-edited file, a future exporter) is
+#: still the same document, and a scan that only matched the compact spelling
+#: silently returned no name for it.
+#:
+#: The closing quote is what makes the text value complete: a value still
+#: running when the read window ended cannot match, so a name is never a word
+#: cut in half. ``(?:[^"\\]|\\.)*`` steps over escaped quotes rather than
+#: stopping at the first one.
+_FRAGMENT_USER_RE = re.compile(r'"role"\s*:\s*"user"')
+_TEXT_VALUE_RE = re.compile(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+#: The image-payload key, whose position relative to the text decides whether a
+#: fragment is trustworthy. Same whitespace tolerance, same reason.
+_DATA_KEY_RE = re.compile(r'"data"\s*:')
 
 
 class ResumeNotFound(Exception):
@@ -185,16 +211,19 @@ def session_name(session_dir: Path, *, max_chars: int = NAME_MAX_CHARS) -> str:
             head = handle.read(NAME_SCAN_CHARS)
     except OSError:
         return ""
-    # A final line with no newline after it is dropped ONLY when the window was
-    # actually filled — i.e. the read stopped because of the cap, so that line
-    # is a half-READ one and parsing it would be parsing a fragment. When the
-    # whole file fitted, the same shape is a complete last line that simply has
-    # no trailing newline, and dropping it lost the name of any session whose
-    # transcript is a single entry.
+    # A final line with no newline after it is HELD BACK from the strict parse
+    # only when the window was actually filled — i.e. the read stopped because
+    # of the cap, so that line is a half-READ one and parsing it as JSON would
+    # be parsing a fragment. When the whole file fitted, the same shape is a
+    # complete last line that simply has no trailing newline, and dropping it
+    # lost the name of any session whose transcript is a single entry. Held
+    # rather than discarded because the fragment still carries the opener's
+    # text: see ``_text_from_fragment``.
     truncated = len(head) >= NAME_SCAN_CHARS
     lines = head.splitlines()
+    fragment = ""
     if truncated and lines and not head.endswith("\n"):
-        lines.pop()
+        fragment = lines.pop()
     for line in lines:
         line = line.strip()
         if not line:
@@ -218,7 +247,46 @@ def session_name(session_dir: Path, *, max_chars: int = NAME_MAX_CHARS) -> str:
         text = _first_text(payload.get("content"))
         if text:
             return _condense(text, max_chars)
-    return ""
+    # The window held no COMPLETE line, so the opener is a fragment. Dropping
+    # it (which is all this used to do) left every session that begins with a
+    # pasted screenshot permanently nameless: one base64 image puts the first
+    # line past the cap, and the picker then showed `(unnamed session)` for the
+    # rest of that conversation's life. Measured on two real sessions whose
+    # first lines were 115,289 and 733,034 chars.
+    return _condense(_text_from_fragment(fragment), max_chars) if fragment else ""
+
+
+def _text_from_fragment(fragment: str) -> str:
+    """The opening user message's text, recovered from a HALF-READ first line.
+
+    Deliberately a scan and not a parse: the fragment is an incomplete JSON
+    object, so there is nothing `json.loads` can do with it. What makes the scan
+    safe is the ORDER the writer emits: a user message with attachments
+    serializes its text block before the image data (``Message.user(text,
+    images)`` keeps that order), so on a line whose tail is megabytes of base64
+    the topic sits in the first few hundred characters — measured at offset 135,
+    with the image ``data`` key at 443.
+
+    Three guards, because a wrong name here is worse than none. The fragment
+    must identify itself as a user message, the text value must be COMPLETE (a
+    closing quote inside the window, never a mid-word cut), and it must appear
+    before any ``data`` key so a session can never be named after base64.
+    """
+    if _FRAGMENT_USER_RE.search(fragment[:_FRAGMENT_HEAD_CHARS]) is None:
+        return ""
+    match = _TEXT_VALUE_RE.search(fragment)
+    if match is None:
+        return ""
+    data = _DATA_KEY_RE.search(fragment)
+    if data is not None and data.start() < match.start():
+        return ""
+    try:
+        # Through the JSON decoder rather than a hand-rolled unescape: the
+        # captured span is a JSON string body, and a title showing a literal
+        # ``\u2014`` would be its own bug.
+        return json.loads(f'"{match.group(1)}"')
+    except ValueError:
+        return ""
 
 
 def _first_text(content: object) -> str:
