@@ -9,15 +9,13 @@ answer into the registry.
 Three properties are load-bearing, and each exists because the obvious version
 of this feature broke in exactly that way:
 
-- **The listing never subtracts.** Ids are UNIONed and every numeric field falls
-  back to the registry, because a listing is only as rich as the provider chose
-  to make it and several are far poorer than the bundled data. A lean
-  OpenAI-compatible gateway returns nothing but an id; replacing a registry row
-  with that is how a session ends up with ``context_window = -1`` and auto
-  compaction that never fires. Where a listing IS rich it wins outright, which is
-  the other half of the same rule: Anthropic's ``/v1/models`` reports
-  ``max_input_tokens``, and that is the only place a model released after this
-  package can state its real 1M window.
+- **List authority matches the endpoint.** ChatGPT's account-scoped Codex
+  catalogue is the user's actual selectable set, so it replaces OpenAI's stale
+  static ids when available. Generic compatibility endpoints are often partial
+  entitlement snapshots, so those ids are UNIONed instead. In both cases fields
+  fall back individually: a lean listing that returns only an id must not erase
+  the registry's context window and stop compaction from firing, while a rich
+  listing such as Anthropic's ``/v1/models`` supplies the real current limit.
 - **Failure and emptiness are different answers.** A transport error yields
   ``None`` ("keep what we had") and a successful listing with no models yields
   ``[]`` ("this provider really has nothing"). Collapsing them turns a flaky
@@ -34,6 +32,7 @@ disk speed and a listing outage is invisible for as long as the cache holds.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import math
 import time
@@ -59,6 +58,22 @@ logger = logging.getLogger("local_operator.model.discovery")
 #: timeout. ``_fetch_gemini`` spends it as a deadline across its pages rather than
 #: per request, because 25 pages x this value is not "seconds".
 DEFAULT_TIMEOUT_S = 10.0
+#: ChatGPT OAuth tokens are subscription credentials, not OpenAI API keys:
+#: ``api.openai.com/v1/models`` rejects them. The account-scoped Codex endpoint
+#: is the catalogue used by OpenAI's own client and reports the currently
+#: available slugs plus their display metadata and context windows.
+OPENAI_CHATGPT_MODELS_URL = "https://chatgpt.com/backend-api/codex/models"
+#: The endpoint requires a compatibility version and rejects a versionless
+#: request. This describes the catalogue schema parsed below, not this package's
+#: release number; using local-operator's current 0.x version would incorrectly
+#: hide models whose minimum Codex client version is numerically newer.
+OPENAI_MODELS_CLIENT_VERSION = "1.0.0"
+OPENAI_OAUTH_PROVIDERS = frozenset({"openai", "openai-device"})
+#: Visibility values this catalogue uses for rows that are internal helpers
+#: rather than models an operator may select. A DENYLIST rather than the
+#: inverse test: this listing may prune the registry, so an unrecognised or
+#: renamed value must not be read as "hide every row" and empty the picker.
+_OPENAI_CODEX_HIDDEN_VISIBILITY = frozenset({"hide", "hidden", "internal", "none"})
 
 #: Anthropic pins its wire format with a dated header and rejects requests that
 #: omit it. Duplicated from the wire client rather than imported, so listing a
@@ -184,6 +199,7 @@ class _FetchContext:
     base_url: str
     api_key: str | None
     is_oauth: bool
+    account_id: str | None
     client: httpx.Client
     timeout: float
 
@@ -421,8 +437,129 @@ def _row_from_openai_entry(entry: Mapping[str, object]) -> DiscoveredModel | Non
     )
 
 
+def _serves_account_scoped_catalogue(
+    provider_id: str,
+    *,
+    is_oauth: bool,
+    api_key: str | None,
+    account_id: str | None,
+) -> bool:
+    """Whether a listing for ``provider_id`` is ChatGPT's account-scoped one.
+
+    ONE predicate, read by all three places that need the answer: the
+    transport that chooses the endpoint, the cache key that isolates the
+    document, and the merge that decides whether the listing may prune
+    registry ids. They used to be spelled separately and disagreed — the
+    prune test omitted ``account_id`` and keyed off the credential-storage id
+    rather than the provider actually fetched, so the weakest of the three
+    was the only destructive one. An OAuth run with no account scope then
+    read the shared API-KEY cache document (``_cache_key`` degrades to the
+    unscoped name without an account id) and pruned the registry against a
+    listing written under a different credential, taking 11 shipped OpenAI
+    ids down to 1 with no request issued. A pre-change document parses
+    cleanly too, so an upgrade hit the same path.
+
+    Authority is therefore defined once, by the conditions under which the
+    account-scoped request is actually issuable, and every site derives from
+    it instead of restating it.
+    """
+    return bool(
+        is_oauth and provider_id in OPENAI_OAUTH_PROVIDERS and api_key and account_id,
+    )
+
+
+def _row_from_openai_codex_entry(entry: Mapping[str, object]) -> DiscoveredModel | None:
+    """One selectable model from ChatGPT's account-scoped Codex catalogue.
+
+    This is deliberately separate from the public OpenAI-compatible shape:
+    Codex addresses a model by ``slug`` and places modalities at the top level.
+
+    Both the id and the visibility test are deliberately permissive, because
+    this listing is now allowed to PRUNE the registry: a schema change at an
+    endpoint nobody here controls used to cost "no new models" and would
+    otherwise cost the whole OpenAI picker. So ``id`` is accepted as a
+    fallback spelling of ``slug`` (as in the public shape), and a row is
+    dropped only for a visibility value KNOWN to mean hidden. An unrecognised
+    value leaves the row listed: showing one internal helper model is a far
+    smaller harm than dropping every row and emptying the picker.
+    """
+    visibility = _first_str(entry.get("visibility")).casefold()
+    if visibility in _OPENAI_CODEX_HIDDEN_VISIBILITY:
+        return None
+    model_id = _first_str(entry.get("slug")) or _first_str(entry.get("id"))
+    if not model_id:
+        return None
+    return DiscoveredModel(
+        id=model_id,
+        name=_first_str(entry.get("display_name")),
+        context_window=_first_positive_int(
+            entry.get("context_window"),
+            entry.get("max_context_window"),
+        ),
+        max_tokens=_first_positive_int(
+            entry.get("max_tokens"),
+            entry.get("max_output_tokens"),
+        ),
+        supports_images=_has_image_input({"input_modalities": entry.get("input_modalities")}),
+    )
+
+
+def _fetch_openai_oauth(ctx: _FetchContext) -> list[DiscoveredModel] | None:
+    """The current ChatGPT/Codex models available to one logged-in account."""
+    if not ctx.api_key or not ctx.account_id:
+        # The account header is part of the authorization boundary. A token
+        # without it cannot safely ask which workspace's models are available.
+        return None
+    body = _get_json(
+        ctx,
+        OPENAI_CHATGPT_MODELS_URL,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {ctx.api_key}",
+            "ChatGPT-Account-ID": ctx.account_id,
+        },
+        params={"client_version": OPENAI_MODELS_CLIENT_VERSION},
+    )
+    if body is None:
+        return None
+    entries = _entry_list(body, "models")
+    if entries is None:
+        return None
+    rows = [row for row in (_row_from_openai_codex_entry(e) for e in entries) if row is not None]
+    if not rows:
+        # A 200 that yields nothing selectable is indistinguishable from "this
+        # account has no models" at the call site, and the two have very
+        # different remedies. The pinned client version is the likeliest cause
+        # of a filtered catalogue, so it is named here: without it, a listing
+        # filtered by a version this package pins is invisible in the logs.
+        logger.warning(
+            "openai model listing at %s returned %d entries but no selectable "
+            "models (client_version=%s); keeping the bundled catalogue",
+            OPENAI_CHATGPT_MODELS_URL,
+            len(entries),
+            OPENAI_MODELS_CLIENT_VERSION,
+        )
+    return rows
+
+
 def _fetch_openai_compat(ctx: _FetchContext) -> list[DiscoveredModel] | None:
-    """``GET {base_url}/models`` for every OpenAI-shaped gateway."""
+    """The provider's model catalogue, including ChatGPT's OAuth-only route."""
+    if _serves_account_scoped_catalogue(
+        ctx.provider_id,
+        is_oauth=ctx.is_oauth,
+        api_key=ctx.api_key,
+        account_id=ctx.account_id,
+    ):
+        return _fetch_openai_oauth(ctx)
+    if ctx.is_oauth and ctx.provider_id in OPENAI_OAUTH_PROVIDERS:
+        # An OAuth token for these providers cannot be spent on
+        # ``api.openai.com/v1/models`` (it rejects subscription credentials),
+        # and without an account scope the Codex catalogue is not askable
+        # either. Falling through to the generic wire would spend the token on
+        # a request that answers 401 and read as a listing outage; saying "no
+        # listing" keeps the bundled catalogue and issues no request.
+        return None
+
     headers = {"Accept": "application/json"}
     if ctx.api_key:
         # Bearer serves both API keys and OAuth access tokens on this wire, so
@@ -698,6 +835,7 @@ def fetch_models(
     *,
     api_key: str | None,
     is_oauth: bool = False,
+    account_id: str | None = None,
     base_url: str | None = None,
     client: httpx.Client | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
@@ -715,7 +853,10 @@ def fetch_models(
         provider_id: Registry provider id, or a legacy alias.
         api_key: API key or OAuth access token; ``None`` for keyless hosts.
         is_oauth: ``api_key`` is an OAuth access token, which changes the header
-            scheme on the Anthropic wire.
+            scheme on the Anthropic wire and selects ChatGPT's Codex catalogue
+            for OpenAI instead of ``api.openai.com/v1/models``.
+        account_id: ChatGPT account scope required by the Codex listing. Other
+            providers ignore it.
         base_url: Overrides the registry base (proxies, local gateways).
         client: Reused HTTP client. When omitted, one is created and closed here;
             a caller listing several providers should pass one so the connection
@@ -744,6 +885,7 @@ def fetch_models(
                 base_url=resolved_base,
                 api_key=api_key,
                 is_oauth=is_oauth,
+                account_id=account_id,
                 client=active,
                 timeout=timeout,
             )
@@ -765,12 +907,16 @@ def fetch_models(
 def merge_models(
     static_rows: Mapping[str, ModelInfo],
     live: list[DiscoveredModel] | None,
+    *,
+    include_static_only: bool = True,
 ) -> list[DiscoveredModel]:
-    """Fold a listing into the registry so the result is never the poorer of the two.
+    """Fold a listing into the registry without losing known per-model metadata.
 
-    Live rows come first because providers list newest-first, which puts a model
-    released this week where the user will actually see it -- the entire point of
-    discovery. Registry-only ids follow, in the registry's curated order.
+    Most provider listings are incomplete entitlement snapshots, so their static
+    ids remain reachable by default. A caller with an authoritative account-scoped
+    catalogue can set ``include_static_only=False``: listed ids still inherit
+    missing specs, but obsolete registry-only ids are not presented as available.
+    Live rows always come first because providers list newest-first.
     """
     merged: list[DiscoveredModel] = []
     seen: set[str] = set()
@@ -783,14 +929,14 @@ def merge_models(
         seen.add(row.id)
         merged.append(_merge_one(row, static_rows.get(row.id)))
 
-    for model_id, info in static_rows.items():
-        if model_id in seen:
-            continue
-        seen.add(model_id)
-        # Static ids are never pruned: a listing that omits an id we know works
-        # -- a gateway filtering by entitlement, a page we failed to fetch --
-        # would otherwise make a model the user is running today unreachable.
-        merged.append(_from_static(model_id, info))
+    if include_static_only:
+        for model_id, info in static_rows.items():
+            if model_id in seen:
+                continue
+            seen.add(model_id)
+            # Static ids are retained for non-authoritative listings: gateways
+            # filter by entitlement and may omit a model the user runs today.
+            merged.append(_from_static(model_id, info))
 
     return merged
 
@@ -894,18 +1040,32 @@ def _merge_name(live_name: str, static_name: str, model_id: str) -> str:
     return candidate
 
 
-def _cache_key(provider_id: str) -> str:
-    """Cache document name for a provider's listing.
+def _cache_key(
+    storage_id: str,
+    *,
+    account_scoped: bool = False,
+    account_id: str | None = None,
+) -> str:
+    """Cache document name, isolated by credential scope where required.
 
-    ``.listing`` rather than the bare provider id because an earlier release
-    cached a differently-shaped document -- the provider client's raw
-    ``list_models()`` payload -- under ``<provider>.models.json``. Reusing that
-    name would hand this reader a document it cannot interpret and, since the
-    payload is written before anything maps it, serve the failure as a fresh cache
-    hit for a full day. The old documents are unreachable by name and
-    ``catalogue.purge_legacy_documents`` deletes them.
+    ``.listing`` avoids the incompatible legacy ``<provider>.models.json``
+    layout. OpenAI's OAuth catalogue is account-scoped and has a different
+    schema from its API-key catalogue, so it gets a hashed account suffix: an
+    API-key cache or another workspace must never decide which models this
+    account can select. The raw account id is intentionally absent from disk.
+
+    ``storage_id`` is the credential-storage identity rather than the provider
+    id, so ``openai-device`` shares one document with ``openai`` — they are one
+    logged-in account and listing twice under two names would ask the same
+    endpoint for the same answer. ``account_scoped`` is passed in rather than
+    re-derived here: :func:`_serves_account_scoped_catalogue` is the single
+    place that decides it, and a second spelling of the same test is how the
+    scoping and the pruning came to disagree.
     """
-    return f"{provider_id}.listing"
+    if account_scoped and account_id:
+        account_scope = hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
+        return f"{storage_id}.oauth.{account_scope}.listing"
+    return f"{storage_id}.listing"
 
 
 def _rows_from_payload(
@@ -974,6 +1134,7 @@ def available_models(
     *,
     api_key: str | None,
     is_oauth: bool = False,
+    account_id: str | None = None,
     base_url: str | None = None,
     ttl_s: float = DEFAULT_TTL_S,
     cache_dir: Path | None = None,
@@ -982,11 +1143,10 @@ def available_models(
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
     """Every model a UI should offer for ``provider_id``, plus how it was obtained.
 
-    The result is always at least the registry, so a provider outage costs the
-    user discovery of new models and nothing else. This never raises and never
-    blocks longer than ``timeout``: it is called from the model picker and from
-    session start while the user waits, and a fresh cache skips the request
-    entirely.
+    A provider outage falls back to the registry, so failed discovery never
+    prevents selection. A successful authoritative catalogue may intentionally
+    replace registry-only ids. This never raises and never blocks longer than
+    ``timeout``; a fresh cache skips the request entirely.
 
     Returns:
         ``(models, status)``, where status is ``"ok"`` (fetched live just now),
@@ -1003,6 +1163,7 @@ def available_models(
             rows,
             api_key=api_key,
             is_oauth=is_oauth,
+            account_id=account_id,
             base_url=base_url,
             ttl_s=ttl_s,
             cache_dir=cache_dir,
@@ -1023,6 +1184,7 @@ def _available_models(
     *,
     api_key: str | None,
     is_oauth: bool,
+    account_id: str | None,
     base_url: str | None,
     ttl_s: float,
     cache_dir: Path | None,
@@ -1060,6 +1222,7 @@ def _available_models(
             definition.id,
             api_key=api_key,
             is_oauth=is_oauth,
+            account_id=account_id,
             base_url=resolved_base,
             client=client,
             timeout=timeout,
@@ -1072,8 +1235,17 @@ def _available_models(
             "models": [dataclasses.asdict(row) for row in live],
         }
 
-    capture = listing_capture_version(definition.id)
-    key = _cache_key(definition.id)
+    storage_id = definition.store_credentials_as or definition.id
+    # Derived ONCE and reused for both the document name and the pruning
+    # decision, so the two cannot disagree about whether this listing is the
+    # account's authoritative catalogue.
+    account_scoped = _serves_account_scoped_catalogue(
+        definition.id,
+        is_oauth=is_oauth,
+        api_key=api_key,
+        account_id=account_id,
+    )
+    key = _cache_key(storage_id, account_scoped=account_scoped, account_id=account_id)
     payload = cached_listing(key, fetch, ttl_s=ttl_s, cache_dir=cache_dir)
     live_rows = _rows_from_payload(payload, capture)
     if live_rows is None:
@@ -1100,7 +1272,20 @@ def _available_models(
             # Neither a listing nor a cache: the registry is all there is.
             return merge_models(rows, None), "static"
 
-    merged = merge_models(rows, live_rows)
+    # An authoritative listing may replace the bundled ids -- but only when it
+    # actually listed something. A 200 that parses to nothing (a renamed field,
+    # an unrecognised visibility value, a catalogue filtered by the pinned
+    # client version) would otherwise prune the registry to EMPTY and cache the
+    # emptiness for the 24h TTL, leaving the picker with no OpenAI models at
+    # all and no request issued to recover. Before this path existed the same
+    # answer still offered every bundled id, which is the behaviour to keep:
+    # upstream schema drift should cost "no new models", never "no models".
+    authoritative_live = account_scoped and bool(live_rows)
+    merged = merge_models(
+        rows,
+        live_rows,
+        include_static_only=not authoritative_live,
+    )
     if not fetched:
         return merged, "cached"
     return merged, ("empty" if not live_rows else "ok")

@@ -286,6 +286,16 @@ def test_a_placeholder_row_supplies_no_name() -> None:
     assert model_label("ollama", "qwen3:32b").full == "ollama/qwen3:32b"
 
 
+def test_the_unknown_placeholder_name_is_not_a_display_name() -> None:
+    """``Unknown`` is the shipped fallback's identity, not a model. Promoting it
+    is how a nameless xAI listing painted the status band ``Unknown`` for a
+    running Grok 4.6 session."""
+    info = ModelInfo(id="grok-4.6", name="Unknown", description="Unknown model")
+    assert build_model_spec("xai", "grok-4.6", info).display_name == ""
+    assert model_label("xai", "grok-4.6", "Unknown").full == "xai/grok-4.6"
+    assert model_label("xai", "grok-4.6", "Unknown").compact == "grok-4.6"
+
+
 def test_a_normalised_id_still_supplies_its_name() -> None:
     """The placeholder guard compares ids under ``_normalised_id``, not by
     equality, and this is why. ``_info_from_discovery`` matches rows on the
