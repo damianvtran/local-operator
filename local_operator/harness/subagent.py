@@ -782,13 +782,12 @@ async def _build_child_session(
         ),
     )
     # Undo ``Session.__init__``'s capability merge, DEPTH-AWARE. The set is
-    # DERIVED, not a copy of the ``enabled=("task", "wait", "jobs", "wake")``
-    # tuple in ``_merge_capability_tools``: nothing links a copy to that
-    # tuple, so a fifth session-gated tool would be handed to every child
-    # silently — the exact rot the module docstring says this prune exists to
-    # stop. The merge only appends new names or replaces same-named entries,
-    # so whatever the constructor ADDED to the list we passed in is precisely
-    # the set of tools gated on session capabilities.
+    # DERIVED, not a copy of ``session.SESSION_CAPABILITY_TOOLS``: nothing links
+    # a copy to that tuple, so the next session-gated tool added to it would be
+    # handed to every child silently — the exact rot the module docstring says
+    # this prune exists to stop. The merge only appends new names or replaces
+    # same-named entries, so whatever the constructor ADDED to the list we passed
+    # in is precisely the set of tools gated on session capabilities.
     #
     # A child of a TOP-LEVEL session keeps task/wait/jobs: one further level
     # of delegation (map-then-fan-out inside a child) is observable through

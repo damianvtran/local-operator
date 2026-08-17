@@ -18,8 +18,9 @@ Ported semantics:
 - Compaction is checked after each turn via a LAZY import of
   ``local_operator.compaction.api`` — a missing module degrades to
   no-compaction. Binding wiring: prune tool outputs BEFORE the trigger math,
-  trigger on ``compaction_context_tokens``, default threshold
-  ``min(int(window * 0.8), 600_000)`` when both knobs are unset, strategy
+  trigger on ``compaction_context_tokens`` against the single resolved
+  threshold ``min(threshold_percent * window, threshold_tokens)`` (defaults
+  80% and 600k, resolved only by ``compaction.thresholds``), strategy
   resolution with snapcompact preferred for vision models, and the recovery
   band gating auto-continuation.
 - ``agent_start``/``agent_end`` carry a per-session monotonic ``generation``
@@ -35,9 +36,16 @@ import inspect
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
 from local_operator.compaction.tokens import approx_text_tokens
 from local_operator.harness.approval import ApprovalGate
@@ -54,6 +62,7 @@ from local_operator.harness.types import (
     AgentTool,
     Aside,
     AsideResult,
+    AskUserFn,
     BrowserSurface,
     ChatRequest,
     CompactionEndEvent,
@@ -88,6 +97,11 @@ from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.transcript import Transcript
+from local_operator.tools.builtin import (
+    TODO_REMINDER_MESSAGE_TYPE,
+    open_todos,
+    todo_fingerprint,
+)
 
 if TYPE_CHECKING:
     # Type-only: the session must never pull the MCP stack in at import time.
@@ -107,6 +121,16 @@ _CONTINUATION_PROMPT = (
 #: MAX_PAUSED_TURN_CONTINUATIONS): a compaction pass that keeps clearing the
 #: recovery band must not re-prompt forever.
 _MAX_CONTINUATIONS = 8
+
+#: The builtin tools whose createIf gate reads a field only a SESSION can fill
+#: (``subagent_launcher``, ``jobs``, ``wake_scheduler``, ``subagent_comms``, the
+#: ask hook). Named here rather than inline in
+#: :meth:`Session._merge_capability_tools` because two other places have to
+#: agree with it: ``harness/subagent.py`` DERIVES a child's prune set from what
+#: the merge added, and ``set_ask_handler`` re-runs one entry of it. A tool
+#: added to the registry with a session-gated builder and not added here is
+#: advertised to nobody.
+SESSION_CAPABILITY_TOOLS: tuple[str, ...] = ("task", "wait", "jobs", "wake", "hub", "ask")
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,17 +183,18 @@ def _coerce_compaction_settings(settings: Any) -> Any:
 
 
 def _archive_to_json(archive: Any) -> dict[str, Any]:
-    """JSON-safe dump of a snapcompact ``Archive``: base64 frames + ISO
-    timestamp (``model_dump(mode='json')`` chokes on raw PNG bytes)."""
-    return {
-        "frames": [base64.b64encode(frame).decode("ascii") for frame in archive.frames],
-        "text": archive.text,
-        "text_head": archive.text_head,
-        "text_tail": archive.text_tail,
-        "shape_id": archive.shape_id,
-        "truncated_chars": archive.truncated_chars,
-        "created_at": archive.created_at.isoformat(),
-    }
+    """JSON-safe dump of a snapcompact ``Archive``.
+
+    Thin on purpose: ``Archive`` owns BOTH directions of the base64 contract
+    now (a ``frames`` validator that decodes, a json serializer that encodes).
+    This used to encode by hand here while revival went through pydantic's lax
+    ``str``->``bytes`` coercion, which UTF-8-encodes base64 text rather than
+    decoding it — the halves drifted and every post-compaction request shipped
+    doubly-encoded PNGs. Kept as the single named call site so the reason the
+    dump must be ``mode="json"`` (raw PNG bytes are not UTF-8) stays written
+    down where the callers can see it.
+    """
+    return archive.model_dump(mode="json")
 
 
 def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
@@ -179,12 +204,24 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     a snapcompact archive in ``preserve_data`` is rendered back into
     text_head → imaged middle → text_tail blocks (base64 ``ImageContent``
     between ``TextContent`` edges). ``wake_prompt`` deliveries become user
-    messages of their formatted text; other custom entries are dropped
-    (bookkeeping never enters LLM context). ``provider_payload`` rides along
-    untouched.
+    messages of their formatted text, and the newest ``todo_reminder`` (only
+    the newest) becomes one too; other custom entries are dropped (bookkeeping
+    never enters LLM context). ``provider_payload`` rides along untouched.
     """
     out: list[Message] = []
-    for message in messages:
+    # Only the NEWEST todo reminder survives the render. An earlier one asserts
+    # a todo list that has since changed, so replaying it would hand the model a
+    # stale — and by then actively false — claim about its own state, and
+    # re-argue a nudge it has already answered. The pruning belongs here because
+    # the renderer is a pure function of the whole list and reminders are never
+    # persisted, so nothing downstream could do it. Older ones simply fall
+    # through to the allow-list's drop.
+    newest_reminder = -1
+    for index in range(len(messages) - 1, -1, -1):
+        if _is_todo_reminder(messages[index]):
+            newest_reminder = index
+            break
+    for index, message in enumerate(messages):
         if isinstance(message, Message):
             out.append(message)
         elif message.custom_type == "compaction_summary":
@@ -222,7 +259,76 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
                     id=message.id,
                 )
             )
+        elif message.custom_type == TODO_REMINDER_MESSAGE_TYPE and index == newest_reminder:
+            # The continuation guardrail's nudge (``Session._todo_continuation``)
+            # reaches the model as a user turn or it does nothing at all: this
+            # allow-list is the trap a new aside type falls into, and a dropped
+            # reminder would make the loop re-enter with nothing to react to.
+            out.append(
+                Message(
+                    role="user",
+                    content=[TextContent(text=message.details.get("text", ""))],
+                    id=message.id,
+                )
+            )
     return out
+
+
+def _todo_reminder_text(pending: list[dict[str, str]]) -> str:
+    """The nudge the continuation guardrail injects (``_todo_continuation``).
+
+    Wrapped in ``<system-reminder>`` and labelled as harness-injected: the model
+    reads it as a user turn, and without the label it would answer the user
+    about a message the user never sent. Items are listed verbatim so the model
+    resolves the texts the tool will actually match, and the three honest exits
+    are named because "keep going" alone is what produces work marked done that
+    was never done. Compact on purpose — it is injected at every boundary.
+    """
+    items = "\n".join(f"- {item['text']}" for item in pending)
+    return (
+        "<system-reminder>\n"
+        "Injected by the harness at the turn boundary. Not from the user, and "
+        "not shown to them.\n"
+        f"These todo items are still open:\n{items}\n"
+        "Do not end the turn while items are open. Either keep working, or "
+        "resolve each one honestly: `todo done` when it is finished, "
+        "`todo block` with a reason when it needs a user decision or an "
+        "external service, `todo drop` when it is no longer needed. If the "
+        "decision is the user's to make, put it to them with the `ask` tool.\n"
+        "</system-reminder>"
+    )
+
+
+def _is_todo_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
+    """Is ``message`` a live continuation nudge (``_todo_continuation``)?
+
+    One predicate for the three places that have to agree about it — the
+    renderer's newest-only rule, the expiry scan
+    (:meth:`Session._live_todo_reminders`) and the compaction render
+    (:meth:`Session._render_for_compaction`). The ``isinstance`` half is
+    load-bearing rather than defensive: a RENDERED reminder is a plain
+    ``Message`` carrying the same text, and a predicate that matched that too
+    would read compaction's own output back as a fresh nudge.
+    """
+    return isinstance(message, CustomMessage) and message.custom_type == TODO_REMINDER_MESSAGE_TYPE
+
+
+def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    """The todo fingerprint a reminder was built from, normalized for compare.
+
+    Read back through an explicit tuple/str coercion rather than trusted as
+    stored: ``details`` is a plain dict, and any JSON round trip turns the
+    nested tuples into lists — a raw ``!=`` would then be True for an unchanged
+    list and expire every reminder on sight. A reminder with no stamp (or a
+    malformed one) compares equal to nothing and expires, which is the safe
+    direction: a nudge that may be lying is worth less than one turn without it.
+    """
+    stamped = details.get("fingerprint") or ()
+    return tuple(
+        (str(item[0]), str(item[1]))
+        for item in stamped
+        if isinstance(item, (list, tuple)) and len(item) == 2
+    )
 
 
 def _replayed_user_message(content: list[Content], entry_id: str | None) -> Message:
@@ -411,6 +517,12 @@ class Session:
         self._cwd = cwd or "."
         self._skill_resolver = skill_resolver
         self._request_approval = request_approval
+        # No constructor kwarg, unlike ``request_approval``: there is no
+        # default ask host to fall back to. Only a front end that owns the
+        # terminal can draw a picker, so the hook arrives from
+        # ``set_ask_handler`` after that front end has its session, and until
+        # it does the ``ask`` tool is simply not advertised.
+        self._ask_user: AskUserFn | None = None
 
         self._loop = AgentLoop()
         self._context = LoopContext(
@@ -452,6 +564,11 @@ class Session:
         self._seeded = False  # seed_history is once-only, pre-prompt
         self._logical_generation: int | None = None
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
+        # Todo-continuation latch: the full todo fingerprint captured at the
+        # last guardrail nudge in THIS user turn, so a model that yields twice
+        # with a byte-identical list is not nudged a second time. Reset per user
+        # turn in _run_turn_pipeline; see :meth:`_todo_continuation`.
+        self._todo_reminder_fingerprint: tuple[tuple[str, str], ...] | None = None
 
         self._disposed = False
         # Session-scoped task group (HC-11): wake deliveries and aside
@@ -495,14 +612,16 @@ class Session:
         # the agent could never close. dispose() closes whatever is still open.
         self._browser = BrowserSurface()
 
-        # Session-capability tools (task/wait/jobs) are createIf-gated on the
-        # ToolContext fields only a SESSION can provide (subagent_launcher,
-        # jobs, wake_scheduler). The factory that built this session constructs
-        # its inventory from a context WITHOUT those fields, so the three
+        # ``SESSION_CAPABILITY_TOOLS`` are createIf-gated on the ToolContext
+        # fields only a SESSION can provide (subagent_launcher, jobs,
+        # wake_scheduler, the ask hook). The factory that built this session
+        # constructs its inventory from a context WITHOUT those fields, so those
         # tools silently never advertise — the model cannot delegate even
         # though the engine fully supports it (reproduced live: 144 requests,
         # 4M input tokens, zero task calls). Merge them in now that the
-        # session's own context exists.
+        # session's own context exists. This pass cannot cover a capability that
+        # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
+        # hook is installed by the front end long after this returns.
         self._merge_capability_tools()
 
     def _render_history(self, messages: list[AgentMessage]) -> list[Message]:
@@ -514,9 +633,86 @@ class Session:
         for ALL of them. Compaction is the one that matters most: it has to
         send the history to summarise it, so a poisoned block makes even the
         escape hatch fail (anthropics/claude-code#50708).
+
+        Expired todo reminders are dropped here for the same reason: every path
+        that reaches a provider has to be free of them.
         """
-        rendered = self._convert_to_llm(messages)
+        rendered = self._convert_to_llm(self._live_todo_reminders(messages))
         return _without_images(rendered) if self._images_rejected else rendered
+
+    def _live_todo_reminders(self, messages: list[AgentMessage]) -> list[AgentMessage]:
+        """``messages`` without todo reminders the list has since outrun.
+
+        A reminder is a POINT-IN-TIME assertion — "these items are still open" —
+        so it expires the instant any item changes status. It lives on in
+        ``_context.messages`` (follow-ups are never removed from the live list),
+        and once the model has done the work, replaying it keeps insisting that
+        finished or blocked work is still open. That is a lie the model then has
+        to spend a turn arguing with, and it is the same staleness the renderer's
+        newest-only rule guards against for TWO reminders; this covers the one
+        reminder that simply went out of date.
+
+        It lives on the session rather than in :func:`_default_convert_to_llm`
+        because staleness needs the session id, and that function must stay a
+        pure function of its message list (``session_factory`` aliases it as the
+        default renderer for hosts that pass none).
+
+        Costs one scan and nothing else in the overwhelmingly common case: no
+        reminder in the list means the original list is handed straight back,
+        without even reading the store.
+        """
+        if not any(_is_todo_reminder(message) for message in messages):
+            return messages
+        current = todo_fingerprint(self._session_id)
+
+        def expired(message: AgentMessage) -> bool:
+            return (
+                _is_todo_reminder(message) and _stamped_todo_fingerprint(message.details) != current
+            )
+
+        return [message for message in messages if not expired(message)]
+
+    def _render_for_compaction(self) -> list[Message]:
+        """The rendered history a compaction pass plans and commits against.
+
+        :meth:`_render_history` minus the todo reminders, because a reminder is
+        the ONE injection nothing persists (``_todo_continuation`` hands it to
+        the loop as a follow-up, which emits no event and reaches no
+        transcript), and compaction is built on the rendered history being
+        persisted history. Rendered into it, one reminder broke the pass at both
+        ends:
+
+        - ``_plan_compaction``'s replayability guard matches ``kept[0].id``
+          against the transcript's entry ids, and a reminder's id is in no
+          transcript. A reminder AT the cut therefore refused the entire pass as
+          ``cut_not_replayable`` — measured at 30/30 refusals on a session with
+          one open todo against 25/30 committed with none — and it recurred
+          rather than self-healing, because the next turn puts a new reminder at
+          the same structural offset. The automatic gate has nobody to tell, so
+          the symptom was a session that silently stopped compacting.
+        - ``_run_compaction`` rebuilds the context from THIS history, so a
+          reminder inside the kept window came back as a plain
+          ``Message(role="user")``. Both guards that expire a nudge
+          (:meth:`_live_todo_reminders` and the newest-only rule in
+          :func:`_default_convert_to_llm`) match ``CustomMessage`` only, so the
+          baked copy was invisible to both and went on asserting "these todo
+          items are still open" for the rest of the session — after the items
+          were done, and beside a newer live reminder.
+
+        Excluded rather than rescued (advancing the cut past it, or re-attaching
+        it after the commit) because the reminder is EPHEMERAL by design, and
+        both rescues ask a transient message to be something it never was — a
+        replayable anchor, or a message that survives a rebuild it is not
+        persisted for. Nothing is lost by dropping it: no compaction pass can
+        run before the model has already read the nudge (``on_turn_end`` fires
+        only when the loop will CONTINUE, i.e. after the model answered it with
+        tool calls; the post-turn gate and ``/compact`` run later still), a
+        resume drops it anyway, and the guardrail re-arms on the next list
+        movement or user turn.
+        """
+        return self._render_history(
+            [message for message in self._context.messages if not _is_todo_reminder(message)]
+        )
 
     async def _degrade_if_image_rejected(self, error: BaseException | str) -> None:
         """Stop sending images if that is what the provider just refused.
@@ -548,7 +744,10 @@ class Session:
         if self._images_rejected or not is_image_rejection(error):
             return
         self._images_rejected = True
-        logger.warning("provider rejected an image; dropping images from this session's context")
+        logger.warning(
+            "provider rejected an image; dropping images from this session's context (%s)",
+            self._image_drop_diagnostic(),
+        )
         await self._emit(
             NoticeEvent(
                 text=(
@@ -560,7 +759,41 @@ class Session:
             )
         )
 
-    def _merge_capability_tools(self) -> None:
+    def _image_drop_diagnostic(self) -> str:
+        """Structure of the images this degrade is about to drop, for the log.
+
+        The backstop above is deliberately blind to WHY the provider refused,
+        which once turned a serialization defect of ours into a silent,
+        permanent loss of a whole compacted history — with a receipt still
+        claiming "82% smaller", because ``compaction/tokens.py`` charges a flat
+        estimate per image block without looking at ``data``. The first frame's
+        decoded magic separates the two causes on sight: ``89504e47`` is a real
+        PNG the provider refused, ``6956424f`` (ASCII ``iVBO``) is base64 we
+        encoded twice. Structure only — never message text, never the payload.
+
+        ``_convert_to_llm`` directly, not ``_render_history``: the flag is
+        already set by the time this runs, so the rendered history no longer
+        contains the blocks being reported on.
+        """
+        try:
+            images = [
+                block
+                for message in self._convert_to_llm(list(self._context.messages))
+                for block in message.content
+                if isinstance(block, ImageContent)
+            ]
+            if not images:
+                return "no image blocks in rendered history"
+            first = images[0]
+            magic = base64.b64decode(first.data, validate=True)[:4].hex()
+            return (
+                f"{len(images)} image block(s); first: mime={first.mime_type} "
+                f"b64_len={len(first.data)} magic={magic}"
+            )
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must never break the degrade
+            return f"diagnostic unavailable: {exc!r}"
+
+    def _merge_capability_tools(self, names: Sequence[str] = SESSION_CAPABILITY_TOOLS) -> None:
         """Add the tools gated on this session's own capabilities.
 
         ``create_tools`` is createIf-driven: a builder returns ``None`` unless
@@ -571,14 +804,18 @@ class Session:
         builders against ``self._build_tool_context()`` yields exactly those
         tools; merge them (replacing same-named placeholders) so the model's
         tool surface reflects what this session can actually do.
+
+        ``names`` exists because this merge is ALSO the rescue for a capability
+        that arrives after construction, and those must not rescue each other:
+        :meth:`set_ask_handler` merges ``("ask",)`` alone, so installing a
+        question surface cannot resurrect a ``wake`` or ``task`` tool that
+        ``_build_child_session`` deliberately pruned from a subagent's
+        inventory.
         """
         try:
             from local_operator.tools.registry import create_tools
 
-            capability = create_tools(
-                self._build_tool_context(),
-                enabled=("task", "wait", "jobs", "wake", "hub"),
-            )
+            capability = create_tools(self._build_tool_context(), enabled=names)
         except Exception:  # tooling must never break session construction
             return
         if not capability:
@@ -869,6 +1106,40 @@ class Session:
         """
         self._request_approval = handler
 
+    def set_ask_handler(self, handler: AskUserFn | None) -> None:
+        """Install the host's interactive-question surface (see SessionProtocol).
+
+        Read when the per-turn tool context is built, like the approval gate, so
+        a front end that resolves its session in a worker still governs every
+        call from the next one onward.
+
+        Installing this is also what makes ``ask`` EXIST: the tool's createIf
+        builder gates on the hook rather than on ``has_ui``, because a subagent
+        inherits ``has_ui`` from its parent and has no human at its keyboard —
+        a child session is built without this handler and so never advertises a
+        question it could only block on.
+
+        Which is why the inventory is REBUILT here and not only in ``__init__``.
+        The constructor's capability merge runs before any front end can install
+        this hook (the TUI resolves its session in a worker and installs it in
+        ``_adopt_session``), so the one-time merge always saw ``ask_user=None``
+        and ``build_ask_tool`` always returned ``None``: measured on a live TUI
+        session, the tools array reaching the provider ended
+        ``…, task, wait, jobs, wake, hub`` with no ``ask`` at all, while the
+        system prompt instructed the model to use it. The per-turn
+        ``_build_tool_context`` is not enough on its own — it decides what a
+        tool RUNS against, never whether the tool was advertised.
+
+        Uninstalling drops it again for the same reason it was gated in the
+        first place: a tool advertised with no hook behind it can only fail when
+        the model calls it.
+        """
+        self._ask_user = handler
+        if handler is not None:
+            self._merge_capability_tools(("ask",))
+        elif any(tool.name == "ask" for tool in self._tools):
+            self.refresh_tools([tool for tool in self._tools if tool.name != "ask"])
+
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end.
 
@@ -1023,6 +1294,12 @@ class Session:
         The generation stamp on the emitted end is the one from the start that
         opened the run, so the TUI's supersede guard still pairs them.
         """
+        # Re-arm the todo guardrail: a fresh user message may well be the answer
+        # a stalled list was waiting for, so the latch must not carry over. It is
+        # reset HERE and not in `_run_turn` on purpose — `_run_turn` also runs
+        # post-compaction continuations of this SAME user turn, and re-arming
+        # there would re-nudge an unchanged list the model already declined.
+        self._todo_reminder_fingerprint = None
         begin_message = getattr(self._stream_fn, "begin_message", None)
         if callable(begin_message):
             begin_message()
@@ -1081,6 +1358,7 @@ class Session:
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
                 get_aside_messages=self._drain_asides,
+                get_follow_up_messages=self._todo_continuation,
                 resolve_fallback_tool=self._fallback_tool_resolver,
                 interrupt_mode="immediate",
                 on_turn_end=self._on_turn_end,
@@ -1235,6 +1513,7 @@ class Session:
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=None if self._yolo else self._request_approval,
+            ask_user=self._ask_user,
             wake_scheduler=self._wake,
             browser=self._browser,
             subagent_launcher=self._launch_subagent,
@@ -1407,6 +1686,55 @@ class Session:
 
         self._aside_thunks.append(_wrapped)
 
+    async def _todo_continuation(self) -> list[AgentMessage]:
+        """The loop's follow-up hook: re-assert open todos at the yield boundary.
+
+        The loop ends a turn the instant the model returns no tool calls, even
+        with every item still open — a steering message answered in prose was
+        enough to end a turn reading ``Todos · 0/6``. A non-empty return here
+        sets ``has_more_tool_calls`` and re-enters the outer loop
+        (harness/loop.py, ``_collect_yield_injections``), so the model gets
+        another turn with its own list in front of it.
+
+        Fires only while the list is MOVING. A model that yields twice with a
+        byte-identical list is telling you it cannot proceed — usually it needs
+        a decision only the user can make — and nudging it again would burn the
+        loop's ``max_paused_turn_continuations`` budget (default 8), end the turn
+        with a continuation-limit warning notice, and delay the user's answer by
+        up to eight model calls. Any progress earns another nudge; a fresh user
+        turn re-arms the latch (see ``_run_turn_pipeline``).
+
+        The nudge it returns is a point-in-time assertion and stops being sent
+        the moment the list moves — see :meth:`_live_todo_reminders`, which
+        expires it against the fingerprint stamped in its details.
+
+        Invisible to the user by construction, which is exactly why the nudge is
+        a ``CustomMessage`` and not a ``Message.user(...)``: follow-ups are
+        appended by ``AgentLoop._drain_pending``, which emits no AgentEvent;
+        they never enter the run's ``new_messages``, so nothing persists them;
+        and the TUI's resume replay (``_render_resumed_history``) branches on
+        ``getattr(message, "role", None)``, which a CustomMessage does not have.
+        A plain user message would fail all three and would print in the
+        transcript as if the user had typed it.
+        """
+        pending = open_todos(self._session_id)
+        if not pending:
+            return []
+        fingerprint = todo_fingerprint(self._session_id)
+        if fingerprint == self._todo_reminder_fingerprint:
+            return []
+        self._todo_reminder_fingerprint = fingerprint
+        return [
+            CustomMessage(
+                custom_type=TODO_REMINDER_MESSAGE_TYPE,
+                attribution="system",
+                # The fingerprint rides ALONG with the text: it is what the
+                # render path compares to decide the assertion is still true
+                # (see :meth:`_live_todo_reminders`).
+                details={"text": _todo_reminder_text(pending), "fingerprint": fingerprint},
+            )
+        ]
+
     # -- compaction ------------------------------------------------------------
 
     async def _journal_prunes(
@@ -1480,31 +1808,22 @@ class Session:
         # Cheap pre-gate: when the provider just reported its context size and
         # that figure already fails the trigger, skip the full plan — the
         # plan renders the whole history to prove the same thing, and this
-        # hook fires at EVERY continuing tool-loop boundary. The threshold
-        # mirror below is 4 lines; _plan_compaction stays the authority for
-        # any context that passes this gate. No provider figure (usage not
-        # yet reported) falls through to the plan, whose own upper-bound
-        # proof is the cheap path there.
+        # hook fires at EVERY continuing tool-loop boundary.
+        # ``should_compact`` resolves the threshold itself (percent x window
+        # vs the absolute ceiling, ONE resolver), so this gate holds no
+        # threshold arithmetic of its own to drift from the plan's; a mirrored
+        # copy of that math here is what once let a session's gate and its
+        # receipt disagree about when a pass was due. No provider figure
+        # (usage not yet reported) falls through to the plan, whose own
+        # upper-bound proof is the cheap path there.
         provider_reported = (
             self._last_usage.context_tokens if self._last_usage is not None else None
         )
         if provider_reported is not None:
             from local_operator.compaction import api as compaction_api
 
-            gate_settings = settings
-            if (
-                getattr(settings, "threshold_tokens", -1) <= 0
-                and getattr(settings, "threshold_percent", -1) <= 0
-            ):
-                gate_settings = settings.model_copy(
-                    update={
-                        "threshold_tokens": compaction_api.resolve_threshold_tokens(
-                            self._model.context_window, settings
-                        )
-                    }
-                )
             if not compaction_api.should_compact(
-                provider_reported, self._model.context_window, gate_settings
+                provider_reported, self._model.context_window, settings
             ):
                 return None
         planned = await self._plan_compaction(respect_threshold=True)
@@ -1527,8 +1846,11 @@ class Session:
            superseded/useless tool outputs) BEFORE the trigger math.
         2. Trigger on ``compaction_context_tokens`` (max of provider-reported
            context size and the local estimate).
-        3. Default threshold when both knobs are unset:
-           ``min(int(context_window * 0.8), 600_000)``.
+        3. Threshold: whatever ``compaction.thresholds.resolve_threshold_tokens``
+           resolves for this window — ``min(threshold_percent * context_window,
+           threshold_tokens)``, defaults 80% and 600k. The gate never derives
+           it here; a mirrored formula in the session is how a 1M-context
+           session ended up compacting at ~235k.
         4. Strategy resolution: snapcompact for vision models (archive stored
            under ``preserve_data['snapcompact']``), context-full otherwise;
            any snapcompact failure falls back to LLM summarization.
@@ -1643,21 +1965,16 @@ class Session:
                 reason="disabled",
                 detail="compaction is switched off in config (values.compaction)",
             )
-        if settings.threshold_tokens <= 0 and settings.threshold_percent <= 0:
-            # Resolve through the API so the §C default, the 600k absolute cap
-            # AND the max_threshold_tokens defensive ceiling stay in ONE
-            # place (this path used to clone the formula and silently dropped
-            # the cap, so a session on a provider advertising a huge window
-            # never compacted until it stalled).
-            settings = settings.model_copy(
-                update={
-                    "threshold_tokens": compaction_api.resolve_threshold_tokens(
-                        self._model.context_window, settings
-                    )
-                }
-            )
+        # NOTE: the threshold is NOT derived here. ``should_compact`` below
+        # resolves ``min(threshold_percent * window, threshold_tokens)`` through
+        # the one resolver in compaction.thresholds, and ``_maybe_compact``'s
+        # recovery band asks the same resolver for the same number. This block
+        # used to pre-bake a threshold into ``settings.threshold_tokens``,
+        # which turned a second knob (a defensive ceiling) into a second
+        # definition of "when to compact" — and a 1M-context session firing at
+        # ~235k, 23% of its window, was the result.
 
-        llm_history = self._render_history(list(self._context.messages))
+        llm_history = self._render_for_compaction()
         if not llm_history:
             return CompactionOutcome(
                 ran=False,
@@ -1796,15 +2113,18 @@ class Session:
                 attribution="system",
                 details=marker_details,
             )
+            # The context becomes the RENDERED history, so a live todo reminder
+            # does not survive this — by design, and the reason the plan renders
+            # without them (see :meth:`_render_for_compaction`): a reminder
+            # baked in here as a plain user message is past both of the guards
+            # that expire it.
             self._context.messages = [marker, *kept]
             # Measured with the SAME ruler as ``plan.tokens_before`` (the local
             # estimate over the converted history), so the difference is a real
             # saving a receipt can quote and the recovery band below compares
             # like with like. The provider's own figure is not available until
             # the next request.
-            tokens_after = compaction_api.estimate_messages_tokens(
-                self._render_history(list(self._context.messages))
-            )
+            tokens_after = compaction_api.estimate_messages_tokens(self._render_for_compaction())
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,

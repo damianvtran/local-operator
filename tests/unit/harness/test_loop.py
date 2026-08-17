@@ -402,6 +402,66 @@ async def test_follow_up_reenters_outer_loop():
 
 
 @pytest.mark.asyncio
+async def test_todo_reminder_follow_up_reenters_and_stays_invisible():
+    """The todo continuation guardrail, at the loop's own boundary.
+
+    The session hands ``get_follow_up_messages`` a ``CustomMessage`` when todos
+    are still open (``Session._todo_continuation``); the loop must re-enter for
+    it — a turn that ended here is the bug the guardrail exists to fix — and it
+    must do so without emitting an event or reporting the reminder in the run's
+    messages, which is what keeps the nudge out of the transcript and off the
+    user's screen. The real session renderer is pinned in
+    ``tests/unit/session/test_todo_guardrail.py``; this stands in for it.
+    """
+    from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
+
+    reminder = CustomMessage(
+        custom_type=TODO_REMINDER_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "<system-reminder>still open: ship it</system-reminder>"},
+    )
+    follow_ups: list[list[Any]] = [[reminder], []]
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="answered in prose"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="back to work"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+
+    async def get_follow_ups():
+        return follow_ups.pop(0) if follow_ups else []
+
+    def convert(messages):
+        # Mirrors the session's allow-list: a custom reminder renders as a user
+        # turn. Without this the loop would re-enter with nothing to react to.
+        out = []
+        for message in messages:
+            if isinstance(message, Message):
+                out.append(message)
+            elif message.custom_type == TODO_REMINDER_MESSAGE_TYPE:
+                out.append(Message.user(message.details["text"]))
+        return out
+
+    context = LoopContext(tools=[])
+    config = make_config(stream, convert_to_llm=convert, get_follow_up_messages=get_follow_ups)
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    # Re-entered: a second provider request happened at all.
+    assert len(stream.requests) == 2
+    assert reminder in context.messages
+    assert any("still open: ship it" in m.text for m in stream.requests[1].messages)
+    # Invisible: no event carries it, and the run never reports it as a message
+    # the host should persist.
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert reminder not in end.messages
+    assert not any(getattr(event, "message", None) is reminder for event in events)
+
+
+@pytest.mark.asyncio
 async def test_aside_thunks_commit_and_none_dropped():
     """Aside thunks are invoked at injection; None results are dropped;
     on_commit fires when a custom payload reaches the model."""

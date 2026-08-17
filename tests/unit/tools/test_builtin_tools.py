@@ -40,6 +40,15 @@ def context(tmp_path: Path) -> ToolContext:
     return ToolContext(cwd=str(tmp_path), session_id="unit-test")
 
 
+@pytest.fixture(autouse=True)
+def _clean_todo_store():
+    """The todo store is MODULE state keyed by session id, so a list left behind
+    here is visible to every later test in the process — including a session
+    test whose turn the continuation guardrail would then refuse to end."""
+    yield
+    builtin.TODO_STORE.pop("unit-test", None)
+
+
 @pytest.fixture
 def tools(context: ToolContext) -> dict[str, AgentTool]:
     return {tool.name: tool for tool in create_tools(context)}
@@ -914,6 +923,137 @@ async def test_todo_view_empty_is_useless(tools, context) -> None:
     t = {x.name: x for x in create_tools(fresh)}
     result = await t["todo"].execute("c", {"op": "view"}, None, None, fresh)
     assert result.useless is True
+
+
+@pytest.mark.asyncio
+async def test_todo_done_marks_every_named_item(tools, context) -> None:
+    """Regression: ``done`` used to honour ``items[0]`` and silently ignore the
+    rest, so a model closing three items watched two of them stay open."""
+    await _call(tools, "todo", {"op": "init", "items": ["a", "b", "c"]}, context)
+
+    done = await _call(tools, "todo", {"op": "done", "items": ["a", "b", "c"]}, context)
+
+    assert done.is_error is False
+    assert "3/3" in done.text
+    view = await _call(tools, "todo", {"op": "view"}, context)
+    assert "[ ]" not in view.text
+    assert builtin.open_todos("unit-test") == []
+
+
+@pytest.mark.asyncio
+async def test_todo_done_partial_match_keeps_hits_and_names_misses(tools, context) -> None:
+    """The error has to be self-correcting: which text missed, and what is open."""
+    await _call(tools, "todo", {"op": "init", "items": ["a", "b"]}, context)
+
+    result = await _call(tools, "todo", {"op": "done", "items": ["a", "ghost"]}, context)
+
+    assert result.is_error is True
+    assert "'ghost'" in result.text
+    assert "- [ ] b" in result.text  # the open item, so no second `view` call
+    # The hit is NOT rolled back: real progress must survive a mistyped sibling.
+    assert [item["text"] for item in builtin.open_todos("unit-test")] == ["b"]
+
+
+@pytest.mark.asyncio
+async def test_todo_add_appends_and_skips_duplicates(tools, context) -> None:
+    """``add`` is the op the guardrail exists for: a requirement arriving
+    mid-turn is recordable without rewriting the list, and a retry is a no-op."""
+    await _call(tools, "todo", {"op": "init", "items": ["a"]}, context)
+
+    added = await _call(tools, "todo", {"op": "add", "items": ["b", "c"]}, context)
+    again = await _call(tools, "todo", {"op": "add", "items": ["b"]}, context)
+
+    assert added.is_error is False and "2 item(s)" in added.text
+    assert again.is_error is False and "nothing added" in again.text
+    assert [item["text"] for item in builtin.open_todos("unit-test")] == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_todo_add_without_items_is_error(tools, context) -> None:
+    result = await _call(tools, "todo", {"op": "add", "items": []}, context)
+    assert result.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_todo_block_requires_a_reason(tools, context) -> None:
+    """A blocked item with no reason is indistinguishable from abandoned work."""
+    await _call(tools, "todo", {"op": "init", "items": ["ship it"]}, context)
+
+    bare = await _call(tools, "todo", {"op": "block", "items": ["ship it"]}, context)
+    with_reason = await _call(
+        tools,
+        "todo",
+        {"op": "block", "items": ["ship it"], "reason": "needs the user's call on the domain"},
+        context,
+    )
+
+    assert bare.is_error is True and "reason" in bare.text
+    assert with_reason.is_error is False
+    # Blocked is NOT open for the guardrail — that is what makes it an honest
+    # stop rather than a way to end a turn on unfinished work.
+    assert builtin.open_todos("unit-test") == []
+    assert builtin.TODO_STORE["unit-test"][0]["reason"] == "needs the user's call on the domain"
+
+
+@pytest.mark.asyncio
+async def test_todo_drop_abandons_without_claiming_completion(tools, context) -> None:
+    await _call(tools, "todo", {"op": "init", "items": ["a", "b"]}, context)
+
+    dropped = await _call(tools, "todo", {"op": "drop", "items": ["b"]}, context)
+
+    assert dropped.is_error is False
+    assert builtin.TODO_STORE["unit-test"][1]["status"] == "dropped"
+    assert [item["text"] for item in builtin.open_todos("unit-test")] == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_todo_view_renders_all_four_statuses(tools, context) -> None:
+    """The panel renders the same four marks; a status the view cannot spell
+    would leave the model and the user reading different lists."""
+    await _call(tools, "todo", {"op": "init", "items": ["p", "d", "b", "x"]}, context)
+    await _call(tools, "todo", {"op": "done", "items": ["d"]}, context)
+    await _call(
+        tools, "todo", {"op": "block", "items": ["b"], "reason": "waiting on legal"}, context
+    )
+    await _call(tools, "todo", {"op": "drop", "items": ["x"]}, context)
+
+    view = await _call(tools, "todo", {"op": "view"}, context)
+
+    assert view.text.splitlines() == [
+        "- [ ] p",
+        "- [x] d",
+        "- [~] b — blocked: waiting on legal",
+        "- [-] x",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_open_todos_is_pending_only_and_copies(tools, context) -> None:
+    """The guardrail's single definition of "open", and it hands out copies:
+    the ops mutate item dicts in place."""
+    await _call(tools, "todo", {"op": "init", "items": ["a", "b"]}, context)
+    await _call(tools, "todo", {"op": "done", "items": ["a"]}, context)
+
+    snapshot = builtin.open_todos("unit-test")
+    snapshot[0]["text"] = "mutated"
+
+    assert builtin.open_todos("unit-test") == [{"text": "b", "status": "pending"}]
+    assert builtin.open_todos("no-such-session") == []
+
+
+@pytest.mark.asyncio
+async def test_todo_fingerprint_tracks_the_whole_list(tools, context) -> None:
+    """The latch compares the FULL list: a change among settled items is still
+    a change, and the pending subsequence alone cannot see it."""
+    await _call(tools, "todo", {"op": "init", "items": ["a", "b"]}, context)
+    await _call(tools, "todo", {"op": "done", "items": ["a"]}, context)
+    before = builtin.todo_fingerprint("unit-test")
+
+    await _call(tools, "todo", {"op": "drop", "items": ["a"]}, context)
+
+    assert before == (("a", "done"), ("b", "pending"))
+    assert builtin.todo_fingerprint("unit-test") == (("a", "dropped"), ("b", "pending"))
+    assert builtin.todo_fingerprint("no-such-session") == ()
 
 
 # ---------------------------------------------------------------------------

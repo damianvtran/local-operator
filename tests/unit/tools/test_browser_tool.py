@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -985,6 +987,85 @@ def test_unknown_action_lists_the_real_ones(monkeypatch) -> None:
     assert result.is_error
     for action in builtin.BROWSER_ACTIONS:
         assert action in result.text
+
+
+# --- what the model is told the tool IS --------------------------------------
+#
+# The failure these pin is not mechanical. In a real session the tool was
+# advertised and reachable, and the agent still answered a request for
+# before/after screenshots by writing a playwright script and running
+# `playwright install chromium` (23 s of download), then — told outright to use
+# the cmux browser instead — shelled the cmux CLI through `bash` rather than
+# calling this tool. A description that lists verbs gives the model nothing to
+# choose ON. The deciding property is that this is the user's own browser, so
+# its logins persist and they can sign in by hand, which no freshly downloaded
+# headless Chromium can offer.
+
+
+def test_description_states_the_persistence_that_makes_it_worth_choosing(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx())
+    assert tool is not None
+    text = tool.description.lower()
+    # It is the user's real browser, not a headless throwaway...
+    assert "real" in text
+    # ...which is worth choosing because the session survives.
+    assert "persist" in text
+    assert "cookies" in text and "logins" in text
+    # ...and the user can be asked to authenticate by hand.
+    assert "sign in" in text
+    # ...so there is never a reason to build a second browser stack.
+    assert "never install" in text
+
+
+def test_unavailable_error_refuses_the_substitution_too(monkeypatch) -> None:
+    """A host that forces the tool on reads this message instead of the
+    description, so the same rule has to be in both places."""
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    forced = builtin.AgentTool(
+        name="browser",
+        label="Browser",
+        description="d",
+        parameters={},
+        approval_tier="write",
+        concurrency="shared",
+        execute=builtin.execute_browser,
+    )
+    result = _run(forced, "t1", {"action": "screenshot", "path": "/tmp/x.png"}, _ctx())
+    assert result.is_error
+    assert "Do not install or script one instead" in result.text
+
+
+def _clear_cmux_env(monkeypatch) -> None:
+    """Drop every CMUX_* marker: this suite itself may run inside cmux."""
+    for name in [key for key in os.environ if key.startswith("CMUX_")]:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_detection_logs_when_a_cmux_looking_host_resolves_no_cli(monkeypatch, caplog) -> None:
+    """Absence is silent to the MODEL on purpose, which also made it silent to
+    whoever has to explain it. A session carrying cmux's markers yet resolving
+    no CLI is the one anomalous shape, and it should be diagnosable from a log
+    line rather than from the agent's behaviour afterwards."""
+    _clear_cmux_env(monkeypatch)
+    monkeypatch.setenv("CMUX_SURFACE_ID", "s123")
+    monkeypatch.setenv("CMUX_SOCKET_PATH", "/tmp/cmux.sock")
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+    with caplog.at_level(logging.WARNING, logger="local_operator.tools.builtin"):
+        assert builtin.cmux_browser_available() is False
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("CMUX_SURFACE_ID" in message for message in messages), messages
+    assert any("CMUX_BUNDLED_CLI_PATH" in message for message in messages), messages
+
+
+def test_detection_stays_quiet_on_a_host_that_is_not_cmux(monkeypatch, caplog) -> None:
+    """Detection runs on every session start. A warning on every non-cmux host
+    would be noise, and noise is how a real warning gets ignored."""
+    _clear_cmux_env(monkeypatch)
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+    with caplog.at_level(logging.WARNING, logger="local_operator.tools.builtin"):
+        assert builtin.cmux_browser_available() is False
+    assert caplog.records == []
 
 
 # --- the surface must outlive the per-turn ToolContext ------------------------

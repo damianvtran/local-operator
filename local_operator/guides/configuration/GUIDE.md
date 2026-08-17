@@ -145,7 +145,7 @@ remain in the credential store; never put tokens or keys in this mapping.
 
 - `hosting`, `model_name`: global model defaults
 - `auto_save_conversation`: legacy conversation persistence switch
-- `compaction`: `enabled`, `strategy`, `reserve_tokens`, `keep_recent_tokens`, `threshold_percent`, `threshold_tokens`, `max_threshold_tokens`, `auto_continue`, `mid_turn_enabled`
+- `compaction`: `enabled`, `strategy`, `reserve_tokens`, `keep_recent_tokens`, `threshold_percent`, `threshold_tokens`, `auto_continue`, `mid_turn_enabled`. A pass fires when the context passes `min(threshold_percent * context_window, threshold_tokens)` — the smaller of the two, defaults `0.80` (80% of the window; `80` is accepted and means the same) and `600000` tokens. On a 1M-token model that resolves to 600k; on a 200k model to 160k. Lower either knob to compact earlier; the legacy `max_threshold_tokens` key is read as `threshold_tokens` with a rename warning.
 - `retry`: `enabled`, `maxRetries`, `baseDelayMs`, `modelFallback`, `usageAwareFallback`, `usageReservePercent`, and `fallbackChains` (snake_case spellings are also accepted for retry fields)
 - `effort`: `auto` (default false) enables the zero-token local prompt-complexity classifier; `allowMax` lets high-complexity prompts select a model's maximum effort (default stops one rung below max)
 - `variables`: non-secret named values exposed through the variable tools; environment values remain lower precedence

@@ -1273,6 +1273,9 @@ unrecoverable at the time; it's since been fixed.
   session compacts before the provider's ~250k abort knee. Capped replay of
   the stuck session would now compact at exactly 250_000 instead of 600k.
 - Regression `test_thresholds.py::test_max_threshold_tokens_caps_the_section_c_default`.
+- Superseded 2026-08-17 — the cap became a second definition of "when to
+  compact" and resolved to 25% of a 1M window; see "Compaction fired at 23% of
+  a 1M window" below. The key now lives on as `threshold_tokens`.
 - Review: round 1 approved with **no blockers**, round 2 APPROVE (MCP-capability
   wipe bug found and fixed in the same PR — see below).
 
@@ -1711,3 +1714,239 @@ the transcript ground, picker overflow row, picker closed under a stationary
 pointer and a dismissed toast. A hover frame from the real `OperatorApp` is
 byte-identical before and after (the rule paints no pixels); the shape is the
 behavioural contract, which is what the tests hold.
+
+## Compaction fired at 23% of a 1M window (2026-08-17)
+
+A live session on `anthropic/claude-opus-5` (`context_window=1_000_000`,
+registry line 372-377) printed
+`context compacted · 234.8k → 33.2k tokens (86% smaller), via snapcompact`,
+and a second pass at 183.4k. 234.8k is 23% of the window: the session threw
+away three quarters of its usable context per pass, and every unnecessary pass
+was also an exposure to the snapcompact image-replay bug that destroyed that
+session's history.
+
+### Root cause: two knobs, two thresholds
+
+The shipped default was already `min(int(w * 0.8), 600_000)` = 600k for a 1M
+window. What resolved to 250k was a SECOND absolute knob:
+`values.compaction.max_threshold_tokens`, a defensive ceiling added for a
+radient-advertised 1.05M model whose requests aborted near 250k, which the
+user's `~/.local-operator/config.yml` sets to `250000`. Two independent
+notions of "when to compact" meant the resolved trigger was 25% of the window
+on a model that never had the abort problem.
+
+The receipt's 234.8k is a second, separate fact: the gate compares
+`compaction_context_tokens` = `max(provider-reported, local estimate)`, while
+the receipt quotes `_CompactionPlan.tokens_before`, the LOCAL estimate. The
+transcript entries for the passes on this machine record the gate's figure —
+261k, 269k, 332k, 402k, 475k — all above the 250k trigger the receipt appeared
+to undercut.
+
+### Fix: one resolver, `min(percent x window, absolute)`
+
+`compaction.thresholds.resolve_threshold_tokens` is the only place a trigger is
+derived; the session gate no longer pre-bakes a threshold into the settings it
+passes to `should_compact`. Two config knobs, defaults 80% and 600k:
+
+```yaml
+values:
+  compaction:
+    threshold_percent: 0.80   # 80 means the same thing
+    threshold_tokens: 600000
+```
+
+The SMALLER wins: the percentage keeps a small-context model compacting in
+proportion to what it can hold (80% of 200k = 160k, where a 600k absolute
+trigger could never fire), and the absolute ceiling stops a very large window
+from letting one session grow to a size that is slow and expensive on every
+request even though it fits. Resolved figures, shipped defaults:
+
+| window | trigger | % of window |
+|---|---|---|
+| 32,000 | 25,600 | 80.0% |
+| 128,000 | 102,400 | 80.0% |
+| 200,000 | 160,000 | 80.0% |
+| 750,000 | 600,000 | 80.0% |
+| 1,000,000 | 600,000 | 60.0% |
+| 2,000,000 | 600,000 | 30.0% |
+
+`max_threshold_tokens` is superseded (same meaning as `threshold_tokens` under
+`min`) and is read as it with a rename warning, so an existing config keeps its
+explicit ceiling instead of silently sailing past a proxy's real limit — a
+config still carrying `max_threshold_tokens: 250000` still resolves to 250k and
+must be edited to get the 600k default. Out-of-range values fall back to the
+default with a de-duplicated `logger.warning` (the trigger resolves at every
+tool-loop boundary). An explicit `reserve_tokens` now caps the trigger at
+`window - reserve` instead of bypassing the rule: it can only pull a pass
+earlier.
+
+Evidence: `tests/unit/compaction/test_thresholds.py` (17 tests: the min rule,
+the 235k regression, small-window inertness, the legacy key, validation
+fallbacks, warning de-duplication) and
+`tests/unit/session/test_compaction_trigger.py` (5 tests through the real gate
+with real `compaction.api`: no pass at 234.8k on a 1M window, a pass at
+600,001, a 200k model still firing at 160,001, the provider-vs-estimate ruler
+split, and both knobs moving the gate), plus
+`tests/unit/test_session_factory.py::test_trigger_knobs_are_settable_in_config_yml`
+and `::test_default_config_compacts_at_600k_on_a_1m_model` for the config.yml
+path.
+
+## A turn that ended with every todo still open (2026-08-17)
+
+Reported as an early yield: a requirement typed mid-turn, an acknowledgement in
+prose, and the turn over reading `Todos · 0/6`.
+
+Steering was not the cause — the loop injects a steered message and continues.
+The break is one hop later: the model treated its answer to the steering
+message as its final word, `has_more_tool_calls` went false, and `AgentLoop`
+reached `break` with the whole list outstanding. `harness/loop.py` already
+implemented "inject at the yield boundary and re-enter"; no host had ever wired
+`LoopConfig.get_follow_up_messages`, so nothing re-asserted the work.
+
+`Session._todo_continuation` now fills that hook, injecting a `todo_reminder`
+`CustomMessage` while the list is still MOVING. Two byte-identical yields mean
+the model cannot proceed — usually it wants a decision only the user can make —
+and nudging it again would spend the loop's continuation budget and delay the
+question. Invisible to the user by construction rather than by a flag:
+`_drain_pending` emits no event, follow-ups never enter `new_messages`, and the
+TUI's resume replay branches on a `role` a `CustomMessage` does not have.
+
+Live evidence (real model, `anthropic/claude-opus-5`, headless `exec`, prompt
+engineered to stop early): **2 provider requests before, 4 after**. The model
+tried to yield at request 2, the guardrail put it back, and it resolved the list
+with `todo drop` — the honest exit — rather than falsely marking work done.
+
+A false negative worth recording, because it cost an hour and recurred later in
+the same change: the first live runs showed no guardrail at all. The `.venv` in
+a worktree is a symlink whose editable install points at the MAIN checkout, so
+`.venv/bin/local-operator` imported `~/local-operator` while `pytest` (which
+puts the rootdir on `sys.path`) exercised the worktree. Testing a worktree
+through the console script needs `PYTHONPATH=$PWD`. The same trap later produced
+a false "these tests fail on origin/main" claim, where the failures were really
+a peer's uncommitted work in that checkout.
+
+Evidence: `tests/unit/session/test_todo_steering_e2e.py` (6 scenarios through
+the real `Session`, real `AgentLoop` and real `todo` tool, with a scripted
+provider that steers WHILE the first tool batch is in flight: a steered
+requirement does not end the turn, the reminder reaches neither the transcript
+nor a replayed history, a stuck model is nudged once then released, `block` ends
+the turn cleanly, progress earns another nudge, and a fresh user turn re-arms),
+`tests/unit/session/test_todo_guardrail.py` (11), and
+`tests/unit/harness/test_loop.py::test_todo_reminder_follow_up_reenters_and_stays_invisible`.
+
+The todo tool grew the ops the guardrail needs to be honest: `add` (a
+requirement arriving mid-turn was previously unrecordable, since `init`
+replaces the list), `block` with a mandatory reason, `drop`, and a fix to
+`done`, which honoured only `items[0]` and silently ignored the rest — so a
+model closing three items watched two stay open and would then be nagged about
+items it believed it had closed.
+
+## Two review rounds' findings, and what they cost to miss (2026-08-17)
+
+Both round-1 reviews requested changes on defects the 4177-test suite was green
+through, which is the entry worth keeping.
+
+The code round's blocker: the `ask` tool was **never advertised to any model**
+in any real host. Its builder is gated on a hook only a session can supply, the
+factory builds the inventory before that hook exists, and the mechanism that
+rescues exactly this class — `_merge_capability_tools` — both omitted `ask` and
+ran once in `__init__`, before the TUI installs the handler. A second link:
+`wire_mcp_into_session` snapshotted its non-MCP base at wiring time, so the
+first MCP activation undid any later merge. The tuple is now the named
+`SESSION_CAPABILITY_TOOLS`, `set_ask_handler` re-merges just `ask` (a full
+re-merge would resurrect the capabilities a subagent deliberately prunes), and
+the MCP base is read back per refresh. The guard against the next occurrence is
+DERIVED, not a second hardcoded list: a test asserts `{tools the session context
+can build} - {tools the factory context can build} == set(SESSION_CAPABILITY_TOOLS)`.
+
+The code round's majors, both from the reminder being the one injection nothing
+persists while still rendering into the planner's history with its own id: a
+reminder AT the compaction cut refused the whole pass as `cut_not_replayable`,
+and a reminder inside the kept window came back from `[marker, *kept]` as a
+plain user message that neither expiry guard could match, asserting items were
+open after they were closed. `Session._render_for_compaction` now renders the
+reminder-free view at both ends of a pass.
+
+The measurement below is a PARITY one: on one 30-turn run at
+`keep_recent_tokens=40`, an open todo gave 6 committed / 24 refused and no todos
+gave the same 6 / 24. The reviewer's pre-fix figures (30/30 refused with a todo
+against 25/30 committed without) came from a different run on a tree whose
+compaction TRIGGER this branch also changed, so the two are not two arms of one
+experiment and the absolute rates are not comparable across them.
+
+What the suite holds is stronger than the parity, and stated precisely:
+`test_an_open_todo_does_not_disable_compaction` asserts that an open todo does
+not change the commit rate, that the rate clears an absolute floor
+(`with_todos >= turns - 1` — only the opening turn has nothing to compact), and,
+in its `committed_passes` helper, that no refusal reads `cut_not_replayable` at
+all. The last of those is the real guard: it pins the FAILURE MODE rather than a
+rate, so it cannot be satisfied by a run that happens to compact often for some
+other reason.
+
+The design round's blocker: the ask card **clipped its own footer**, and at
+30x12 every option row — a question with no answers and no way out, on a turn
+parked waiting for one. Three causes, not one: a `max(1, budget - chrome)` floor
+that handed out rows the region did not have, a stylesheet `max-height: 80%`
+acting as a second unaware cap, and a `_screen_size` height floor of 8 rows that
+re-created the identical clip at 20x8. Rows are now paid for in a defended
+order (footer, one option, the windowing line, the question, title, remaining
+options, spacers, descriptions) from one frozen layout per paint.
+
+The residual took two more rounds and is worth recording as a lesson about
+evidence rather than about layout. Round 2 found, by fuzzing heights, that a
+1-2 row budget still drew three lines and lost the footer. My fix for it — a
+`MIN_BODY_ROWS` floor — was a **no-op**, and the test I added for it was
+**vacuous**: it asserted on the card's own generated `Text`, where the footer is
+appended unconditionally and the window always returns at least one row, so it
+held by construction whatever the screen did. Round 3 caught both by comparing
+the COMPOSITED screen across widths 20-100 x heights 1-7 and measuring zero
+changed observables, then located the real defect: the windowing row was drawn
+on a condition the allocator never paid for, and the footer was appended LAST
+while being bought FIRST, so the row most wanted was structurally the first
+clipped.
+
+Evidence: `tests/unit/session/test_late_capability_tools.py` (6),
+`tests/unit/session/test_todo_compaction.py` (the two compaction majors),
+`tests/unit/tui/test_ask_picker.py` (33; `size == virtual_size` over
+`SHORT_SIZES` x recommended-or-not, and separately the footer and at least one
+option drawn at each of those six sizes down to 20x8 — two tests, not one
+sweep), `tests/unit/tui/test_ask_settle.py`,
+`tests/unit/tools/test_ask_tool.py`, and `tests/unit/tui/test_band_panels.py`
+for the four-status band. One assertion is worth naming because its first
+version was wrong instructively: it measured the body's own region, and an
+overflowing child still reports the height it WANTED, so it agreed with the clip
+instead of catching it. It measures against the screen now, which is what let
+the 20x8 case be found.
+
+## Post-compaction images were double base64-encoded (2026-08-17)
+
+Every request after a compaction died with `400 ... does not represent a valid
+image`, on three providers in turn, after which the session silently dropped all
+images — and with them the compacted history the frames were standing in for.
+
+Two encodes, zero decodes: `_archive_to_json` encoded PNG bytes for JSON,
+`Archive.model_validate` then UTF-8-**encoded** those strings into `bytes`
+(pydantic's lax `str`→`bytes` coercion is not a base64 decode), and
+`history_blocks` encoded again. The provider decoded once and got ASCII
+`iVBORw0K…`. `Archive` now owns both halves of the contract, so bytes in ==
+bytes out.
+
+Verified on the real archive from the session that 400'd (28 persisted frames):
+`replayed frames: 6, distinct magics: {'89504e47'}` — before the fix every one
+was `6956424f`, the ASCII of the base64 text. Already-persisted transcripts
+store exactly what the validator decodes, so the fix repairs existing sessions
+on resume with no migration.
+
+Why CI was green through a shipped 400: every frame test built the `Archive`
+in-process with real `bytes`, and the one session-level test pinned
+`frames == []`. The new coverage exercises `_archive_to_json` →
+`model_validate` → `history_blocks`, and was falsified by restoring the old
+coercion — exactly the four new tests fail.
+
+The image-rejection backstop stays, since real provider flakes exist, but it now
+logs the first block's mime, base64 length and decoded magic: `89504e47` means a
+provider refused a real PNG, `6956424f` means we corrupted it ourselves.
+
+Evidence: `tests/unit/compaction/test_snapcompact.py` (persistence round trip)
+and `tests/unit/session/test_compact_now.py` (a non-empty archive replaying as
+valid PNGs through the live render path).

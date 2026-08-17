@@ -126,6 +126,11 @@ class FakeSession:
         # deadlocks under a full-screen app); fakes only need to accept it.
         self.approval_handler = handler
 
+    def set_ask_handler(self, handler: object | None) -> None:
+        # The TUI installs the `ask` tool's picker surface on boot, and that
+        # install is what makes the tool exist; fakes only need to accept it.
+        self.ask_handler = handler
+
     def abort(self, reason: str = "interrupted") -> None:
         self.aborts.append(reason)
 

@@ -412,6 +412,75 @@ class SubagentLauncher(Protocol):
     ) -> str: ...
 
 
+# Both models are NESTED in the ask tool's JSON schema, so their docstrings ride
+# in the tools array of every request. The reasoning therefore lives in comments
+# here and the docstrings stay one line — the same reason the other tool params
+# models in `tools/builtin.py` carry no prose.
+#
+# `description` exists because the labels a model writes are short by necessity:
+# a row reading `Escalate it` cannot say what escalating costs, and the prose
+# version of this surface (lettered options printed into the transcript) always
+# carried that second clause.
+class AskOption(BaseModel):
+    """One selectable answer on an ``ask`` question."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, description="The answer, as one short line.")
+    description: str = Field(
+        default="", description="One line under the label: what choosing it means."
+    )
+
+
+# Two options is the FLOOR, not a style preference: a one-option question is an
+# announcement, and rendering it as a picker asks the user to ratify a decision
+# that has already been made. A model with nothing to choose between should say
+# so in prose instead.
+#
+# `recommended` indexes `options` and is validated rather than clamped: a silent
+# clamp would preselect and visibly endorse a DIFFERENT option than the model
+# meant to.
+class AskQuestion(BaseModel):
+    """One question the ``ask`` tool puts to the user."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        min_length=1,
+        description="Short stable key for this question; the answer is reported under it.",
+    )
+    question: str = Field(min_length=1, description="The question, as one sentence.")
+    options: list[AskOption] = Field(min_length=2, description="At least two answers to pick from.")
+    multi: bool = Field(
+        default=False, description="True lets the user pick several options instead of one."
+    )
+    recommended: int | None = Field(
+        default=None,
+        description="0-based index of the option you recommend; it is preselected and marked.",
+    )
+
+    @model_validator(mode="after")
+    def _recommended_in_range(self) -> "AskQuestion":
+        if self.recommended is not None and not 0 <= self.recommended < len(self.options):
+            raise ValueError(
+                f"recommended must index options (0..{len(self.options) - 1}), "
+                f"got {self.recommended}"
+            )
+        return self
+
+
+#: The host's interactive-question hook: put these questions to the user and
+#: return ``question id -> the strings they chose``. ``None`` means the user
+#: answered NOTHING (escaped out), which is a legitimate outcome rather than a
+#: failure — the ask tool reports it as one so the model falls back to its own
+#: recommendation instead of retrying a question that will be refused again.
+#:
+#: A list of strings even for a single-select question, and a FREE string
+#: rather than an option index: the picker's "Other" row hands back text that
+#: was never in ``options``, which an index cannot express.
+AskUserFn = Callable[[list[AskQuestion]], Awaitable[dict[str, list[str]] | None]]
+
+
 class ToolContext(BaseModel):
     """Minimal host-provided context handed to tool execution.
 
@@ -496,6 +565,16 @@ class ToolContext(BaseModel):
     # advertise. ``None`` means no subagent engine, and the tool is then not
     # advertised at all (createIf).
     subagent_comms: Any | None = None
+    # The interactive-question hook behind the ``ask`` tool: mount a picker and
+    # hand back what the user chose. Installed only by a host that OWNS a
+    # terminal it can draw on (the TUI, via
+    # ``SessionProtocol.set_ask_handler``), which is what makes its absence the
+    # honest capability signal — a subagent inherits ``has_ui`` from its parent
+    # but is built without this hook, and a delegated child that advertised
+    # ``ask`` would block on a human who is watching the parent's screen and
+    # was never shown the question. ``None`` means the tool is not advertised
+    # at all (createIf), for the same reason ``wake_scheduler`` is.
+    ask_user: AskUserFn | None = None
 
 
 ToolExecuteFn = Callable[

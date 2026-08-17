@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from local_operator.harness.types import ImageContent, Message, ModelSpec, TextContent
 
@@ -441,6 +441,55 @@ class Archive(BaseModel):
     shape_id: str = ""
     truncated_chars: int = 0
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # ``frames`` is raw PNG bytes in memory and base64 text on disk, and the
+    # two directions MUST live together on the model that owns the field.
+    # They did not: the session dumped base64 by hand while revival went
+    # through pydantic's lax str->bytes coercion, which UTF-8-ENCODES the
+    # base64 text instead of base64-DECODING it. The frame silently became the
+    # ASCII bytes OF its own base64, history_blocks encoded that a second time,
+    # and every request after a compaction shipped base64(base64(png)) as
+    # image/png — provider 400 "does not represent a valid image", which the
+    # session's image-rejection backstop then answered by dropping the entire
+    # compacted history. The same coercion also made _base64_size and
+    # estimate_archive_tokens over-report a revived archive by 4/3, since they
+    # measure the inflated frame.
+    @field_validator("frames", mode="before")
+    @classmethod
+    def _decode_frames(cls, value: Any) -> Any:
+        """Base64-decode persisted (``str``) frames; pass live ``bytes`` through.
+
+        The type IS the discriminator: JSON revival yields ``str``, in-process
+        construction by :func:`compact_to_archive` yields real PNG ``bytes``.
+        ``validate=True`` makes garbage a ``binascii.Error`` (a ``ValueError``,
+        so pydantic reports a validation error) rather than a frame that is
+        wrong but plausible.
+        """
+        if not isinstance(value, list):
+            return value
+        return [
+            base64.b64decode(item, validate=True) if isinstance(item, str) else item
+            for item in value
+        ]
+
+    @field_serializer("frames", when_used="json")
+    def _encode_frames(self, frames: list[bytes]) -> list[str]:
+        """The one canonical persisted form: ``model_dump(mode="json")``.
+
+        Scoped to json mode so ``model_dump()`` still hands callers the real
+        bytes; without it pydantic tries to UTF-8-decode PNG bytes.
+        """
+        return [base64.b64encode(frame).decode("ascii") for frame in frames]
+
+    @field_serializer("created_at", when_used="json")
+    def _encode_created_at(self, created_at: datetime) -> str:
+        """``isoformat()`` (``+00:00``), not pydantic's ``Z`` shorthand.
+
+        Archives already persisted carry the offset form, and this dump is what
+        overwrites them on the next compaction; both parse, but one spelling per
+        file keeps transcript diffs and any external reader honest.
+        """
+        return created_at.isoformat()
 
 
 def _paginate(text: str, shape: Shape) -> list[str]:

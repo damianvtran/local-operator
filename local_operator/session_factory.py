@@ -1197,12 +1197,21 @@ async def wire_mcp_into_session(
         tool_count=len(mcp_tools),
     )
 
-    # Snapshot the NON-MCP base before any lazy activation. Session capability
-    # tools (task/wait/jobs/wake) live here even though ``builtin_tools``
-    # predates them, so the session inventory remains the authoritative base.
+    # The NON-MCP base is READ BACK from the session on every refresh, not
+    # snapshotted once. Session capability tools live in that inventory even
+    # though ``builtin_tools`` predates them, and some of them are merged in
+    # AFTER this wiring runs: the TUI installs its ask handler in
+    # ``_adopt_session``, long after the factory returned, and a frozen base
+    # would silently un-advertise ``ask`` again the first time the model
+    # activated any MCP tool. What is subtracted is the set this function last
+    # installed itself, so classification never depends on ``get_tool_meta``
+    # still answering for a server that has since dropped away. The snapshot
+    # below survives only as the fallback for a host that exposes no inventory
+    # to read back.
     base_inventory = list(
         getattr(session, "_tools", None) or getattr(session, "tools", None) or builtin_tools
     )
+    installed_mcp: set[str] = set()
     enabled_origins: set[tuple[str, str]] = set()
 
     def selected_tools(source: list[AgentTool]) -> list[AgentTool]:
@@ -1215,7 +1224,12 @@ async def wire_mcp_into_session(
         return selected
 
     def refresh_selected(source: list[AgentTool]) -> None:
-        session.refresh_tools(list(base_inventory) + selected_tools(source))
+        live = list(getattr(session, "_tools", None) or getattr(session, "tools", None) or ())
+        base = [tool for tool in live if tool.name not in installed_mcp] or base_inventory
+        selected = selected_tools(source)
+        installed_mcp.clear()
+        installed_mcp.update(tool.name for tool in selected)
+        session.refresh_tools(base + selected)
 
     def activate(server_name: str, raw_tool_name: str) -> None:
         enabled_origins.add((server_name, raw_tool_name))

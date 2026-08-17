@@ -65,6 +65,11 @@ class _FakeCommsForBlocks:
         return False
 
 
+async def _fake_ask_for_blocks(questions: list[Any]) -> dict[str, list[str]] | None:
+    """Minimal ask hook so create_tools includes ask for ordering checks."""
+    return None
+
+
 # ---------------------------------------------------------------------------
 # render_string / render_template engine
 # ---------------------------------------------------------------------------
@@ -250,12 +255,51 @@ def test_inventory_block_matches_default_tool_order() -> None:
             subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
             jobs=_FakeJobsForBlocks(),
             subagent_comms=_FakeCommsForBlocks(),
+            # `ask` is createIf-gated on a UI that can draw its picker AND on the
+            # hook that answers it, so the fully-capable context this test needs
+            # has to carry both or the tool drops out of the inventory.
+            has_ui=True,
+            ask_user=_fake_ask_for_blocks,
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)
     lines = [line for line in blocks[1].splitlines() if line.startswith("- ")]
     expected = list(DEFAULT_TOOL_NAMES)  # scheduler attached -> wake included
     assert [line.split(":")[0][2:] for line in lines] == expected
+
+
+def test_inventory_explains_a_missing_browser_instead_of_leaving_a_hole() -> None:
+    """The browser builder is createIf-gated on a reachable cmux, so on a host
+    without one the model can only see an ABSENCE — and an absence reads as
+    "arrange your own". A real session answered a screenshot request by writing
+    a playwright script and downloading a Chromium that could not carry the
+    user's logins. The inventory says the capability is missing and why."""
+    blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
+
+    inventory = blocks[1]
+    assert "NO browser tool" in inventory
+    assert "playwright" in inventory
+    assert "never install or script a browser engine" in inventory.lower()
+    # The note is a capability statement, not a fake inventory entry: the
+    # ordering test reads every "- " line as a tool name.
+    assert not any(line.startswith("- ") and "browser" in line for line in inventory.splitlines())
+
+
+def test_inventory_note_is_absent_when_a_browser_tool_exists() -> None:
+    """Never tell the model a browser is unavailable while one would answer."""
+    tools = [*TOOLS, _tool("browser", "Drive the user's real browser.")]
+
+    inventory = build_system_blocks(tools, SKILLS, ENV, DATE)[1]
+    assert "NO browser tool" not in inventory
+    assert "playwright" not in inventory
+
+
+def test_inventory_note_follows_membership_not_visibility() -> None:
+    """A hidden tool is still callable; claiming it does not exist is worse
+    than saying nothing."""
+    tools = [*TOOLS, _tool("browser", "Drive the user's real browser.", hidden=True)]
+
+    assert "NO browser tool" not in build_system_blocks(tools, SKILLS, ENV, DATE)[1]
 
 
 def test_env_block_handles_empty_env_details() -> None:
