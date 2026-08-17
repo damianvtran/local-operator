@@ -1197,6 +1197,46 @@ async def test_concurrent_edits_share_one_file_transaction(
 
 
 @pytest.mark.asyncio
+async def test_hardlink_aliases_share_one_file_transaction(
+    tools,
+    context,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct path spellings of one inode cannot lose a concurrent edit."""
+    path = tmp_path / "shared.txt"
+    alias = tmp_path / "alias.txt"
+    path.write_text("alpha\nbeta\n")
+    os.link(path, alias)
+
+    real_match = builtin._match_windows
+
+    def delayed_match(content: str, old_text: str):
+        time.sleep(0.05)
+        return real_match(content, old_text)
+
+    monkeypatch.setattr(builtin, "_match_windows", delayed_match)
+    first, second = await asyncio.gather(
+        _call(
+            tools,
+            "edit",
+            {"path": "shared.txt", "old_text": "alpha", "new_text": "ALPHA"},
+            context,
+        ),
+        _call(
+            tools,
+            "edit",
+            {"path": "alias.txt", "old_text": "beta", "new_text": "BETA"},
+            context,
+        ),
+    )
+
+    assert not first.is_error and not second.is_error
+    assert path.read_text() == "ALPHA\nBETA\n"
+    assert alias.read_text() == "ALPHA\nBETA\n"
+
+
+@pytest.mark.asyncio
 async def test_edit_whitespace_tolerant_match_reindents(tools, context, tmp_path) -> None:
     """old_text written at the wrong indentation still matches, and the
     replacement is re-indented to the FILE's level — the edit written from a

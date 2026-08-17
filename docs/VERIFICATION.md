@@ -1594,12 +1594,12 @@ and glob already used):
 Off-loop did NOT mean transaction-free. Review round 1 caught two concurrency
 edges the event loop had serialized accidentally:
 
-- `read`/`edit`/`write` share 64 fixed process-wide path stripes. Parent and
-  child AgentLoops can run concurrently, but two spellings of one resolved
-  path share a lock across the whole transaction. Read's `stat` + content
-  sniff + cap decision + bytes are one snapshot under that stripe; edit/write
-  hold it across read/decide/write/diff. Fixed stripes bound memory, and a
-  hash collision only serializes unrelated files.
+- `read`/`edit`/`write` share 64 fixed process-wide filesystem stripes.
+  Existing files key by `(device, inode)`, coalescing symlinks, hardlinks and
+  case aliases; not-yet-created files fall back to a resolved, case-folded
+  path. Read's `stat` + content sniff + cap decision + bytes are one snapshot
+  under that stripe; edit/write hold it across read/decide/write/diff. Fixed
+  stripes bound memory, and a hash collision only serializes unrelated files.
 - Spill content and metadata now stage through unique same-directory temp
   files and atomic replace. Identical content has an identical digest, so the
   old deterministic `<digest>.txt.tmp` let concurrent writers rename one
@@ -1620,12 +1620,16 @@ Round-3's read-snapshot repro swaps `before` to `after` between content sniff
 and byte read: `68cd87b` returns `1| after` under checks made against the old
 snapshot; the striped snapshot returns `before` and the writer commits only
 afterward.
+Round-4's hardlink repro addresses one inode through `shared.txt` and
+`alias.txt`: `cafa34c` returns success for both edits but settles as
+`alpha\nBETA\n` (lost `ALPHA`); inode-keyed stripes settle both aliases as
+`ALPHA\nBETA\n`.
 
 Evidence: `tests/unit/tools/test_loop_liveness.py` — a 20 ms heartbeat
 running while the tools work. On the fix: max gap under 120 ms. At `d424441`
 (the PR base): **0.649 s** for three concurrent image reads. The refusal
 strings and byte-level framing of `edit`'s ambiguity contract are asserted
-unchanged by the current tools suite (365 tests).
+unchanged by the current tools suite (369 tests).
 
 ## The name that never landed (and the early provider failures)
 

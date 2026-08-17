@@ -954,14 +954,23 @@ _FILE_TRANSACTION_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 
 def _file_transaction_lock(path: Path) -> threading.Lock:
-    """The process-wide transaction stripe for ``path``.
+    """The process-wide transaction stripe for one filesystem object.
 
-    ``resolve(strict=False)`` canonicalizes existing symlinks, so two spellings
-    of one file land on one stripe. Python's randomized hash is fine: only
-    stability inside this process matters.
+    Existing files key by device+inode, which coalesces symlinks, hardlinks
+    and case aliases on case-insensitive filesystems. A path that does not
+    exist yet falls back to a resolved, case-folded spelling; case-folding can
+    conservatively serialize two distinct names on a case-sensitive volume,
+    but that is a safe false collision and closes the create-time alias race.
+    Python's randomized hash is fine: only stability inside this process
+    matters.
     """
-    canonical = os.path.normcase(str(path.resolve(strict=False)))
-    return _FILE_TRANSACTION_LOCKS[hash(canonical) % len(_FILE_TRANSACTION_LOCKS)]
+    try:
+        stat = path.stat()
+    except OSError:
+        key: object = ("path", str(path.resolve(strict=False)).casefold())
+    else:
+        key = ("inode", stat.st_dev, stat.st_ino)
+    return _FILE_TRANSACTION_LOCKS[hash(key) % len(_FILE_TRANSACTION_LOCKS)]
 
 
 def _guard(tool_name: str) -> Callable[[ToolExecutor], ToolExecutor]:
