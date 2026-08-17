@@ -1867,15 +1867,21 @@ plain user message that neither expiry guard could match, asserting items were
 open after they were closed. `Session._render_for_compaction` now renders the
 reminder-free view at both ends of a pass.
 
-The measurement is a PARITY one, and only parity: on one 30-turn run at
+The measurement below is a PARITY one: on one 30-turn run at
 `keep_recent_tokens=40`, an open todo gave 6 committed / 24 refused and no todos
 gave the same 6 / 24. The reviewer's pre-fix figures (30/30 refused with a todo
 against 25/30 committed without) came from a different run on a tree whose
 compaction TRIGGER this branch also changed, so the two are not two arms of one
-experiment and the absolute rates are not comparable across them. What is held
-is that an open todo no longer changes the rate —
-`test_an_open_todo_does_not_disable_compaction` asserts exactly that and nothing
-more.
+experiment and the absolute rates are not comparable across them.
+
+What the suite holds is stronger than the parity, and stated precisely:
+`test_an_open_todo_does_not_disable_compaction` asserts that an open todo does
+not change the commit rate, that the rate clears an absolute floor
+(`with_todos >= turns - 1` — only the opening turn has nothing to compact), and,
+in its `committed_passes` helper, that no refusal reads `cut_not_replayable` at
+all. The last of those is the real guard: it pins the FAILURE MODE rather than a
+rate, so it cannot be satisfied by a run that happens to compact often for some
+other reason.
 
 The design round's blocker: the ask card **clipped its own footer**, and at
 30x12 every option row — a question with no answers and no way out, on a turn

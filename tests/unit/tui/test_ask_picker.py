@@ -574,11 +574,22 @@ async def test_the_footer_is_the_last_line_the_card_gives_up() -> None:
                 # lines than the screen can draw.
                 assert len(painted) <= room, (size, painted, room)
                 assert len(screen.render_lines_for_test()) <= room, (size, room)
-                if room <= 2:
-                    # The whole card, because nothing else fits beside the exit.
+                if room == 1:
+                    # One line is a line for the exit, and ONLY the exit: with
+                    # no option row on screen, `enter` would commit a selection
+                    # the user cannot see and the digits would jump within a
+                    # list that is not there. Measured before the fix: at a
+                    # 5-row terminal `down down down enter` committed an option
+                    # nobody had been shown (round 4, R14).
                     assert len(painted) == 1, (size, painted)
-                    assert f"of {screen.row_count}" not in painted[0], (size, painted)
+                    assert painted[0].strip() == "esc skip", (size, painted)
                     assert screen.visible_rows == [], (size, screen.visible_rows)
+                elif room == 2:
+                    # Two lines buy the selected row beside the footer, which is
+                    # what makes the free-text row echo what is being typed into
+                    # it (round 4, R15). The count is still not affordable.
+                    assert len(screen.visible_rows) == 1, (size, screen.visible_rows)
+                    assert f"of {screen.row_count}" not in "".join(painted), (size, painted)
                 else:
                     assert len(screen.visible_rows) >= 1, size
 

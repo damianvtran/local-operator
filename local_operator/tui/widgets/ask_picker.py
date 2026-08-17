@@ -692,6 +692,14 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         """
         if budget < MIN_BODY_ROWS:
             # Nothing about the question fits. See :data:`MIN_BODY_ROWS`.
+            #
+            # Two rows buy the selected row as well as the footer, and that row
+            # is worth having even with no question above it and no count
+            # beside it: on the free-text row it is the ONLY echo of what the
+            # user is typing, and a card that accepts a typed answer without
+            # showing it is worse than one showing a bare option. One row buys
+            # the exit alone; none is a card that cannot be drawn, and drawing
+            # it anyway is the clip itself (round 4, R15).
             return _CardLayout(
                 width=width,
                 question=(),
@@ -699,10 +707,8 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
                 space_above=False,
                 space_below=False,
                 show_descriptions=False,
-                page=0,
+                page=1 if budget >= 2 else 0,
                 show_position=False,
-                # One line left is a line for the exit. None is a card that
-                # cannot be drawn, and drawing it anyway is the clip itself.
                 show_footer=budget >= 1,
             )
         remaining = budget - 2  # the footer, and one option row
@@ -879,7 +885,7 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
             out.append_text(self._position_row(width, window, muted, dim))
         if layout.show_footer:
             newline(None)
-            out.append_text(self._footer_row(width, muted, dim))
+            out.append_text(self._footer_row(width, muted, dim, drawn=bool(window)))
         self._line_rows = lines
         return out
 
@@ -905,18 +911,28 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         row.append(total, style=muted)
         return _cut_row(row, width)
 
-    def _footer_row(self, width: int, muted: Style, dim: Style) -> Text:
+    def _footer_row(self, width: int, muted: Style, dim: Style, *, drawn: bool = True) -> Text:
         """The key hints — or what the last refused Enter has to say instead.
 
         One row either way, so a refusal never moves the card under the cursor,
         and the keys come back the moment the state can answer.
+
+        ``drawn`` is False on the collapsed card, where the footer is the only
+        line and no option row is on screen. Then the exit is the ONLY honest
+        hint: `enter` would commit a selection the user cannot see, and the
+        digits would jump within a list that is not there. Measured on the
+        previous revision at a 5-row terminal: `down down down enter` committed
+        an option nobody had been shown (round 4, R14). This file already
+        refuses to advertise the digits on the free-text row for the same
+        reason — a key offered where it does not do what it says is a lie.
         """
         row = Text(no_wrap=True, overflow="ellipsis")
         rejection = self._rejection()
         if rejection:
             row.append(rejection, style=muted)
             return _cut_row(row, width)
-        for position, (key, what) in enumerate(self._footer_hints(width)):
+        hints = self._footer_hints(width) if drawn else [("esc", "skip")]
+        for position, (key, what) in enumerate(hints):
             if position:
                 row.append(" · ", style=dim)
             # Keys at `muted` (6.51:1) and their grammar at `dim` (3.43:1), each
