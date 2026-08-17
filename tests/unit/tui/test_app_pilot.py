@@ -3841,3 +3841,32 @@ async def test_unmount_restores_the_terminals_own_title(
     push_index = writes.index("\x1b[22;0t")
     pop_index = writes.index("\x1b[23;0t")
     assert push_index < pop_index
+
+
+@pytest.mark.asyncio
+async def test_context_command_renders_wire_schema_breakdown() -> None:
+    """`/context` is the visible answer to MCP/tool-schema context cost: all
+    wire categories, total/window percent, and cache-read row when present."""
+    session = FakeSession()
+    session.context_breakdown = lambda: {
+        "instructions": 1200,
+        "tool_inventory": 400,
+        "tool_schemas": 6600,
+        "environment": 50,
+        "knowledge_mcp_goal": 900,
+        "messages": 10950,
+        "total": 20100,
+        "context_window": 200000,
+        "cache_read": 12800,
+    }
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        block = app._context_block()
+        assert block is not None
+        listing = _renderable_plain(block.renderable)
+        assert "Context" in listing
+        assert "Tool schemas" in listing and "6.6k" in listing
+        assert "Messages" in listing and "10.9k" in listing
+        assert "Total" in listing and "10.1%" in listing
+        assert "Last cache read" in listing and "12.8k" in listing

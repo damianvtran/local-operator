@@ -69,3 +69,34 @@ the SDK's state validation passes. Supplying a `client_id` in config pins the
 client: the registration is pre-seeded and dynamic registration is skipped —
 required for providers whose redirect URI was registered against a fixed
 loopback port.
+
+## Per-tool filters
+
+A server can expose hundreds of tools while a session needs only a handful.
+Filter server-owned tool names in that server's entry:
+
+```json
+{
+  "mcpServers": {
+    "crm": {
+      "type": "http",
+      "url": "https://example.test/mcp",
+      "enabledTools": ["contacts_*", "get_company"],
+      "disabledTools": ["contacts_delete"]
+    }
+  }
+}
+```
+
+`enabledTools` is an allowlist when non-empty; `disabledTools` always wins.
+Both accept exact names or glob patterns. Filtering happens before cached
+(deferred) and live tool schemas are mounted, so a reconnect or
+`tools/list_changed` cannot restore a denied tool. Run `/context` in the TUI
+to see the current token cost of system blocks, wire tool schemas and
+messages — this is the fastest way to spot an unexpectedly heavy MCP server.
+
+A hosted server can challenge OAuth again during `tools/call`, after the
+initial connection succeeded. HTTP 401 / `WWW-Authenticate` /
+`mcp/www_authenticate` errors enter the same bounded policy as a stale
+connection: one reconnect (which refreshes OAuth through the SDK provider),
+one replay of the tool call, never a loop.

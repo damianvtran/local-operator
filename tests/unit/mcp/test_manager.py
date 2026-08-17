@@ -951,3 +951,19 @@ class TestChildOutputContainment:
         stderr_log.feed("x" * 1000)
         assert len(stderr_log.quoted_tail()) <= STDERR_QUOTED_CHARS + 1
         assert stderr_log.quoted_tail().endswith("…")
+
+
+def test_per_tool_filter_allow_deny_and_deny_wins(project: Path) -> None:
+    from local_operator.mcp.config import MCPStdioServerConfig
+
+    manager = McpManager(str(project))
+    manager._configs["srv"] = MCPStdioServerConfig(
+        command="x",
+        enabledTools=["search_*", "get_one"],
+        disabledTools=["search_private", "get_one"],
+    )
+    assert manager._tool_is_enabled("srv", "search_public") is True
+    assert manager._tool_is_enabled("srv", "search_private") is False
+    assert manager._tool_is_enabled("srv", "get_one") is False  # deny wins
+    assert manager._tool_is_enabled("srv", "unlisted") is False
+    assert manager._tool_is_enabled("missing", "anything") is True

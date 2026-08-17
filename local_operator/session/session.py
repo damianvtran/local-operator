@@ -664,6 +664,62 @@ class Session:
         """
         return list(self._context.messages)
 
+    def context_breakdown(self) -> dict[str, int]:
+        """On-demand token breakdown for the context the next request sends.
+
+        This is the user-visible counterpart to the 30k start-context budget:
+        it tokenizes the actual system blocks + wire tool schemas + rendered
+        messages, so a 126-tool MCP server's cost is a fact the user can SEE
+        instead of an invisible latency/cost regression. The four fixed blocks
+        retain their cache-layout names; schemas are counted separately
+        because providers serialize them beside the prompt, not in block 1.
+        """
+        import json
+
+        from local_operator.compaction.tokens import (
+            approx_text_tokens,
+            estimate_messages_tokens,
+        )
+
+        blocks = list(self._context.system_blocks)
+        while len(blocks) < 4:
+            blocks.append("")
+        result = {
+            "instructions": approx_text_tokens(blocks[0]),
+            "tool_inventory": approx_text_tokens(blocks[1]),
+            "environment": approx_text_tokens(blocks[2]),
+            "knowledge_mcp_goal": approx_text_tokens(blocks[3]),
+            "tool_schemas": sum(
+                approx_text_tokens(
+                    tool.name
+                    + "\n"
+                    + (tool.description or "")
+                    + "\n"
+                    + json.dumps(tool.parameters, sort_keys=True, separators=(",", ":"))
+                )
+                for tool in self._tools
+            ),
+            "messages": estimate_messages_tokens(
+                self._render_history(list(self._context.messages))
+            ),
+            "context_window": int(self._model.context_window),
+            "cache_read": int(
+                self._last_usage.cache_read_tokens if self._last_usage is not None else 0
+            ),
+        }
+        result["total"] = sum(
+            result[key]
+            for key in (
+                "instructions",
+                "tool_inventory",
+                "environment",
+                "knowledge_mcp_goal",
+                "tool_schemas",
+                "messages",
+            )
+        )
+        return result
+
     def set_model(self, model: ModelSpec) -> None:
         """Swap the model spec mid-session.
 

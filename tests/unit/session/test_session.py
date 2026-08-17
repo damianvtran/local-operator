@@ -30,6 +30,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     TextContent,
     ToolResult,
+    Usage,
 )
 from local_operator.providers.failover import ProviderError
 from local_operator.session.session import IMAGE_DROPPED_NOTICE, Session
@@ -1480,3 +1481,31 @@ async def test_consumed_and_foreign_jobs_do_not_auto_deliver(tmp_path):
     await asyncio.sleep(0.05)
     assert len(session._context.messages) == before  # nothing delivered
     await session.dispose()
+
+
+def test_context_breakdown_counts_wire_schemas_and_messages(tmp_path):
+    """The `/context` source measures what the provider actually receives:
+    four system blocks, wire tool schemas (not just names), rendered messages,
+    window and the last cache-read bucket."""
+    tool = echo_tool([])
+    session = make_session(tmp_path, ScriptedStream([]), tools=[tool])
+    session._context.system_blocks = ["instructions", "inventory", "env", "skills"]
+    session._context.messages = [Message.user("hello"), Message.assistant("world")]
+    session._last_usage = Usage(input_tokens=10, cache_read_tokens=7, context_tokens=17)
+    data = session.context_breakdown()
+    assert data["instructions"] > 0
+    assert data["tool_schemas"] > 0
+    assert data["messages"] > 0
+    assert data["context_window"] == MODEL.context_window
+    assert data["cache_read"] == 7
+    assert data["total"] == sum(
+        data[key]
+        for key in (
+            "instructions",
+            "tool_inventory",
+            "environment",
+            "knowledge_mcp_goal",
+            "tool_schemas",
+            "messages",
+        )
+    )

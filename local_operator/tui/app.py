@@ -239,6 +239,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("accounts", "List stored credentials"),
     # The panel is the receipt — the row the owner reported as noise.
     SlashCommand("usage", "Show provider usage quota"),
+    SlashCommand("context", "Show prompt, tool-schema and message token usage"),
     # THE exception. `/goal <text>` is the one command whose argument reaches
     # the model: the goal rides the system prompt's volatile tail on every later
     # turn (`Session.set_goal`). Words the model is given are the transcript's
@@ -3423,6 +3424,12 @@ class OperatorApp(App[None]):
             self._cmd_accounts(notice)
         elif command == "/usage":
             self._cmd_usage(arg, notice)
+        elif command == "/context":
+            block = self._context_block()
+            if block is not None:
+                self._append_block(block)
+            else:
+                notice("context breakdown unavailable.")
         elif command == "/goal":
             self._cmd_goal(arg, notice)
         elif command == "/loop":
@@ -5504,6 +5511,39 @@ class OperatorApp(App[None]):
                     [(skill.name, skill.description) for skill in visible], "loaded skills"
                 )
             )
+        except Exception:
+            return None
+
+    def _context_block(self) -> RichBlock | None:
+        """The exact categories behind the next provider request.
+
+        ``/usage`` answers account quota; this answers context economics —
+        especially MCP/tool-schema cost. A transcript block rather than a
+        modal panel: the numbers are a point-in-time diagnostic the user may
+        want to keep next to the task that prompted it, and the whole answer
+        fits in seven rows.
+        """
+        try:
+            data = self._session.context_breakdown()
+            total = data["total"]
+            window = max(data["context_window"], 1)
+            pct = total / window * 100
+            items = [
+                ("Instructions", format_context_tokens(data["instructions"])),
+                ("Tool inventory", format_context_tokens(data["tool_inventory"])),
+                ("Tool schemas", format_context_tokens(data["tool_schemas"])),
+                ("Environment", format_context_tokens(data["environment"])),
+                ("Skills / MCP / goal", format_context_tokens(data["knowledge_mcp_goal"])),
+                ("Messages", format_context_tokens(data["messages"])),
+                (
+                    "Total",
+                    f"{format_context_tokens(total)} / "
+                    f"{format_context_tokens(window)} ({pct:.1f}%)",
+                ),
+            ]
+            if data["cache_read"]:
+                items.append(("Last cache read", format_context_tokens(data["cache_read"])))
+            return RichBlock(_tree_listing(items, "Context"))
         except Exception:
             return None
 
