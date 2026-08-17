@@ -302,7 +302,7 @@ async def test_jobs_says_wait_for_a_job_that_has_not_been_admitted(tmp_path):
         await gate.wait()
         return "ok"
 
-    manager.register("task", "alpha", blocked)
+    running_id = manager.register("task", "alpha", blocked)
     parked_id = manager.register("task", "parked", blocked, queued=True)
     await asyncio.sleep(0)
     parked = manager.get(parked_id)
@@ -311,10 +311,15 @@ async def test_jobs_says_wait_for_a_job_that_has_not_been_admitted(tmp_path):
 
     context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
     result = await _call(_tools(context), "jobs", {}, context)
-    row = next(line for line in result.text.splitlines() if line.startswith(parked_id))
+    rows = {line.split()[0]: line for line in result.text.splitlines()}
+    row = rows[parked_id]
 
     assert "215.0s" in row, row
     assert row.split()[3] == "wait", row
+    # ``wait`` is four cells where every other sense is at most three. The
+    # field must budget for the widest vocabulary entry or the one parked row
+    # shears its label one cell right of the entire table.
+    assert row.index("parked") == rows[running_id].index("alpha"), rows
 
     gate.set()
     await manager.dispose()

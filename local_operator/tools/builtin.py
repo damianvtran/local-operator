@@ -4165,7 +4165,7 @@ async def execute_jobs(
         # was fixed to stop printing. Both branches are nine cells, so the
         # grid holds either way.
         age = f"{max(now - reference, 0.0):8.1f}s" if reference else f"{'unknown':>9}"
-        lines.append(f"{job.id}  {job.status:<9}  {age} {sense:<3}  {job.label}")
+        lines.append(f"{job.id}  {job.status:<9}  {age} {sense:<4}  {job.label}")
     return _text(
         tool_call_id,
         "jobs",

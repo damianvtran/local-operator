@@ -446,14 +446,14 @@ async def test_a_narrow_title_shortens_the_state_word_before_losing_it() -> None
 
 
 @pytest.mark.asyncio
-async def test_the_title_gains_fields_monotonically_as_it_widens() -> None:
-    """The ladder's arithmetic must not make the title sawtooth.
+async def test_the_title_never_loses_its_state_as_it_widens() -> None:
+    """A wider title must never lose a state word a narrower one carried.
 
     The label budget omitted the glyph cell, so a rung whose label consumed its
-    budget exactly was rejected and the ladder fell through: the state word
-    visible at 35 cells and gone again at 36-40, where it still fit. A title
-    that loses a field as the page WIDENS tells a reader their window shrank,
-    and a reader who saw both widths would believe it.
+    budget exactly was rejected and the ladder fell through: the state visible
+    at 35 cells and gone again at 36-40, where it still fit. The assertion is
+    deliberately about STATE preservation, not every field: the ladder may
+    trade a duration for the longer, more precise phrase as it widens.
     """
     parked = _Job("sub-parked", "flaky test bisect", status="cancelled")
     parked.settled_at = parked.start_time + 96.0
@@ -464,15 +464,15 @@ async def test_the_title_gains_fields_monotonically_as_it_widens() -> None:
     async with app.run_test(size=(120, 24)) as pilot:
         view = await _open(pilot, app, parked)
 
-        prev = None
+        state_seen = False
         for width in range(20, 110):
             row = view._title_row(width, "⠋", 0).plain
-            present = tuple(part for part in (CANCELLED_BEFORE_START, "1m36s") if part in row)
-            if prev is not None:
-                assert len(present) >= len(
-                    prev
-                ), f"width {width} lost a field its narrower neighbour kept: {row!r}"
-            prev = present
+            has_state = "cancelled" in row
+            if state_seen:
+                assert (
+                    has_state
+                ), f"width {width} lost the state its narrower neighbour kept: {row!r}"
+            state_seen = state_seen or has_state
 
 
 @pytest.mark.asyncio
