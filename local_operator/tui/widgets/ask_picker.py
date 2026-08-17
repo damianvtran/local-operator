@@ -81,10 +81,17 @@ CARD_PADDING_ROWS = 2
 #: 100x24 — so the margin yields by the row, and never in a step.
 CARD_FLOAT_MARGIN_SHARE = 5
 
-#: The smallest body :meth:`AskPickerScreen._allocate` can actually express —
-#: one question line, one option row, and the footer. A budget under this is not
-#: a smaller card but a clipped one, and what it clips is the footer (the row
-#: the allocator buys first, being the only statement of how to leave).
+#: The smallest body :meth:`AskPickerScreen._allocate` can say anything about
+#: the QUESTION in: one option row, the windowing line that admits the rest of
+#: the list is hidden, and the footer. Under it the plan collapses to the footer
+#: alone, because one option row with no question above it and no count beside
+#: it is an answer to nothing, while the keys are still how the user leaves.
+#:
+#: It is a THRESHOLD in the allocator, not a floor on the budget. As a floor it
+#: changed no observable at all: the card went on laying out these three lines
+#: into a body with room for one or two, and Textual clips the tail — so what a
+#: five- or six-row terminal painted was an option row and no footer (round 3,
+#: R9-R11, measured on the composited screen rather than the card's own text).
 MIN_BODY_ROWS = 3
 
 #: The cursor glyph, matching the ``/resume`` and command pickers. A caret plus
@@ -173,7 +180,15 @@ class _CardLayout:
     space_below: bool
     show_descriptions: bool
     #: Option ROWS the window may draw, whatever each of them costs in lines.
+    #: Zero when the body is too short to say anything about the question.
     page: int
+    #: Whether the windowing line was BOUGHT. The renderer reads this instead of
+    #: re-deriving "the window is short of the list", which is how a row nobody
+    #: had paid for got drawn and took the footer off the tail (round 3, R11).
+    show_position: bool
+    #: False only when the body has no drawable line at all. Everywhere else the
+    #: footer is the first row bought, so it is the last thing that can go.
+    show_footer: bool
 
 
 class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
@@ -293,7 +308,8 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
 
         Named for what it is — the DRAWN window, not the whole list — because on
         a short terminal those differ, and a test that asserted the full list
-        would agree with a card that clipped half of it.
+        would agree with a card that clipped half of it. Empty on a body with no
+        room for a row at all, where the card is the footer or nothing.
         """
         window = self._window()
         return [self._row_label(index) for index in window]
@@ -589,21 +605,27 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         A CAP and not a fill: the body is ``height: auto``, so a card with
         little to say still draws short and still floats.
 
-        Floored at ``MIN_BODY_ROWS`` because :meth:`_allocate` cannot honour a
-        budget below it: the smallest plan it can express is a question line, an
-        option row and the footer, and handed 1 or 2 rows it returns a plan the
-        renderer still draws as three lines — clipping the footer, which is the
-        one row the allocator buys first precisely because it is the only
-        statement of how to leave. Below three rows a card is not drawable at
-        all, so it overflows by design rather than silently losing its exit
-        (found in round 2 by fuzzing heights 1-45; the case is bounded to
-        terminals four rows tall and under, and independent of width).
+        The result is what the card can DRAW, with no floor under it: two rows
+        go to ``Screen { padding: 1 }`` before this is measured
+        (:meth:`_screen_size`) and two more to the card's own padding, so a
+        terminal five rows tall leaves the body exactly one line and one four
+        rows tall leaves it none. Zero is the honest answer there, and a plan of
+        no lines is the honest card: there is nowhere to paint.
+
+        Returning more than this is not a bigger card but a clipped one, and
+        Textual clips the TAIL — the footer, the row :meth:`_allocate` buys
+        first precisely because it is the only statement of how to leave. That
+        is what a floor here bought: at heights 5 and 6 the card laid out three
+        lines into one or two and painted an option row with no keys under it
+        (round 3, R9-R11). :meth:`_allocate` spends this budget line by line and
+        never overdraws it, so nothing is clipped rather than the wrong thing
+        being.
         """
         _, height = self._screen_size()
-        room = max(1, height - CARD_PADDING_ROWS)
+        room = max(0, height - CARD_PADDING_ROWS)
         wanted = 2 + question_lines + self.row_count + 1
         margin = min(height // CARD_FLOAT_MARGIN_SHARE, max(0, room - wanted))
-        return max(MIN_BODY_ROWS, room - margin)
+        return room - margin
 
     def _layout(self) -> _CardLayout:
         """Divide the body's rows BEFORE anything is drawn into them.
@@ -630,15 +652,23 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         6. the rest of the option rows;
         7. the blank spacers, which are rhythm and nothing else;
         8. the descriptions, all of them or none.
+
+        A budget under :data:`MIN_BODY_ROWS` cannot buy even the first three, so
+        the plan collapses to the footer alone — and at a budget of zero, which
+        is every terminal four rows tall and under, to nothing at all. Laying
+        out a card the screen cannot paint is how the keys went missing in the
+        first place.
         """
         width = self._card_width()
         question = self._question_lines(width)
         budget = self._body_rows(len(question))
         plan = self._allocate(width, question, budget, position=False)
-        if plan.page < self.row_count:
+        if 0 < plan.page < self.row_count:
             # The list windows after all, so the line saying how much is hidden
             # has to be bought. Taking a row back can only shrink the page, so
-            # this settles in one step rather than looping.
+            # this settles in one step rather than looping — and this branch is
+            # the only place the row can be bought, which is the only place the
+            # renderer will draw it from.
             plan = self._allocate(width, question, budget, position=True)
         return plan
 
@@ -650,11 +680,35 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         *,
         position: bool,
     ) -> _CardLayout:
-        """One trial division of ``budget`` body rows, in the order above."""
+        """One trial division of ``budget`` body rows, in the order above.
+
+        Past the collapse below, every line the returned plan implies is bought
+        from ``remaining`` and nothing is bought that ``remaining`` cannot pay
+        for, so the plan is exactly ``budget`` less whatever is left of it —
+        never more than the budget, whichever branches are taken. It could be
+        more before: handed 1 or 2 rows this ran ``remaining`` negative, still
+        returned ``page=1``, and the renderer drew three lines into a body with
+        room for one (round 3, R11).
+        """
+        if budget < MIN_BODY_ROWS:
+            # Nothing about the question fits. See :data:`MIN_BODY_ROWS`.
+            return _CardLayout(
+                width=width,
+                question=(),
+                show_title=False,
+                space_above=False,
+                space_below=False,
+                show_descriptions=False,
+                page=0,
+                show_position=False,
+                # One line left is a line for the exit. None is a card that
+                # cannot be drawn, and drawing it anyway is the clip itself.
+                show_footer=budget >= 1,
+            )
         remaining = budget - 2  # the footer, and one option row
         if position:
             remaining -= 1
-        kept = list(question[: max(0, remaining)])
+        kept = list(question[:remaining])
         if len(kept) < len(question) and kept:
             # Say that the question continues. A silently halved question is
             # the one clip on this card the reader cannot detect: every other
@@ -687,7 +741,9 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
             space_above=space_above,
             space_below=space_below,
             show_descriptions=descriptions,
-            page=max(1, self.row_count if descriptions else rows),
+            page=self.row_count if descriptions else rows,
+            show_position=position,
+            show_footer=True,
         )
 
     def _window(self, page: int | None = None) -> list[int]:
@@ -704,11 +760,14 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         # Any movement is a new state, so a refused Enter stops describing it.
         self._rejected = False
         # Scroll only far enough to keep the cursor drawn, so the list is stable
-        # while moving through the middle of it.
+        # while moving through the middle of it. A page of zero draws no rows at
+        # all (a body under :data:`MIN_BODY_ROWS`), and there is no keeping a
+        # cursor drawn on a list that is not: scrolling it would only leave an
+        # offset behind for the terminal to grow back into.
         page = self._layout().page
         if self.state.selected < self._offset:
             self._offset = self.state.selected
-        elif self.state.selected >= self._offset + page:
+        elif page and self.state.selected >= self._offset + page:
             self._offset = self.state.selected - page + 1
         self._repaint()
 
@@ -730,11 +789,30 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         body = getattr(self, "_body", None)
         if body is None or not body.is_mounted:
             return
-        body.update(self._card_text())
+        text = self._card_text()
+        body.update(text)
+        card = body.parent
+        if card is not None:
+            # A card with no drawable line is not a smaller card: its own
+            # ``padding: 1 2`` is two rows the screen has not got, so at three
+            # terminal rows and under the container pushed the screen's virtual
+            # height past its size — a scrollable screen, which AGENTS.md calls
+            # always a bug here, over a card painting nothing. Nothing to draw,
+            # nothing laid out; the next resize brings it back.
+            card.display = bool(text.plain)
 
     def render_lines_for_test(self) -> list[str]:
-        """The card as plain strings — what a user reads."""
-        return [line.plain for line in self._card_text().split("\n")]
+        """The card as plain strings — what a user reads.
+
+        Empty when the body has no drawable line at all, because ``Text``
+        splits an empty card into ONE empty line and a caller counting that
+        against the room the screen has would be told the card overflows a
+        terminal it is painting nothing into.
+        """
+        text = self._card_text()
+        if not text.plain:
+            return []
+        return [line.plain for line in text.split("\n")]
 
     def _row_label(self, index: int) -> str:
         """One row's label text, free-text row included, without styling."""
@@ -791,15 +869,17 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         if layout.space_below:
             newline(None)
 
-        # The position line is EMITTED only when the list windows, and its row
-        # is bought in exactly that case, so the two can no longer disagree: the
-        # card used to reserve the row unconditionally and then be clipped out
-        # of drawing it, which is how a window of one in four went unannounced.
-        if len(window) < self.row_count:
+        # Both rows are drawn only where the plan BOUGHT them. The position line
+        # used to be emitted on `len(window) < self.row_count` alone, with no
+        # reference to the budget: at 1 or 2 rows the allocator never paid for
+        # it, the renderer drew it regardless, and the footer went off the tail
+        # (round 3, R11). The allocator decides; this only reads the decision.
+        if layout.show_position:
             newline(None)
             out.append_text(self._position_row(width, window, muted, dim))
-        newline(None)
-        out.append_text(self._footer_row(width, muted, dim))
+        if layout.show_footer:
+            newline(None)
+            out.append_text(self._footer_row(width, muted, dim))
         self._line_rows = lines
         return out
 

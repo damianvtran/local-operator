@@ -9,7 +9,10 @@ The card's own arithmetic (widths, page size) is asserted through
 ``render_lines_for_test``; the layout it produces under the real stylesheet is
 checked against ``OperatorApp`` at the bottom of the file, because the lightweight
 host below declares no ``CSS_PATH`` and therefore cannot show a clip or a
-scrollbar at all.
+scrollbar at all. Where a clip is the thing under test the assertion goes one
+step further and reads the COMPOSITED SCREEN (``_painted_rows``): a card that
+lays out more lines than its region has still reports the height it wanted, so
+its own text agrees with the clip instead of catching it.
 """
 
 from __future__ import annotations
@@ -488,6 +491,19 @@ async def _real_app_card(size: tuple[int, int], questions: list[AskQuestion]):
     return OperatorApp(lambda: factory()), AskPickerScreen(questions)
 
 
+def _painted_rows(app) -> list[str]:  # type: ignore[no-untyped-def]
+    """The rows the SCREEN is showing, blank ones dropped.
+
+    The compositor rather than the card's own ``Text``, because the clip that
+    loses the footer is only observable here: an overflowing child still reports
+    the height it WANTED, and ``_card_text`` used to append the footer
+    unconditionally, so a card whose keys never reached the terminal could still
+    satisfy an assertion on its generated lines.
+    """
+    strips = app.screen._compositor.render_strips()
+    return [text for text in (strip.text.strip() for strip in strips) if text]
+
+
 @pytest.mark.asyncio
 async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() -> None:
     """The blocker this layout exists for: at 100x14 the card drew a question,
@@ -519,14 +535,57 @@ async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() 
 
 
 @pytest.mark.asyncio
-async def test_the_exit_survives_a_terminal_too_small_to_draw_the_card() -> None:
-    """Below three body rows there is no drawable card, so the question is what
-    it gives up. Round 2 found that a 1-2 row budget still rendered as three
-    lines, and the line lost was the footer — the one row ``_allocate`` buys
-    first, because it is the only statement of how to leave a card the turn is
-    parked on. ``MIN_BODY_ROWS`` makes the card overflow a terminal this size
-    instead, which is visible and recoverable by resizing; a silently amputated
-    exit is neither."""
+async def test_the_footer_is_the_last_line_the_card_gives_up() -> None:
+    """A terminal too short to draw the list still has to say how to leave it.
+
+    Asserted on the COMPOSITED SCREEN. Round 2's version of this test read the
+    card's own ``render_lines_for_test`` instead, where ``_card_text`` appended
+    the footer unconditionally and ``_window`` returned at least one row — so it
+    held by construction whatever the terminal painted, and round 3 ran it with
+    the fix reverted and watched it pass (R10).
+
+    What is pinned is what round 3 measured. Five and six terminal rows leave
+    the body one line and two (two rows to the screen's padding, two to the
+    card's), and the card spends them on the footer ALONE: an option row with no
+    question above it and no count beside it is an answer to nothing, and those
+    two heights used to paint exactly that with no keys under it. Seven rows and
+    up draw the list again, keys still on the last painted line. Four rows and
+    under leave the body nothing, so the card is not drawn at all rather than
+    drawn and clipped — and nothing overflows the screen either way.
+    """
+    for width in (20, 30, 40, 100):
+        for height in (5, 6, 7, 8, 12):
+            size = (width, height)
+            app, screen = await _real_app_card(size, [_long_question()])
+            async with app.run_test(size=size) as pilot:
+                await pilot.pause()
+                app.push_screen(screen)
+                await pilot.pause()
+                await pilot.pause()
+                painted = _painted_rows(app)
+                room = screen.size.height - CARD_PADDING_ROWS
+                # The keys reached the TERMINAL, and reached it last: the footer
+                # is bought first and drawn last, so a clipped tail would take it
+                # and nothing else. Asserted before the counts because this is
+                # the assertion round 2's version could not make.
+                assert painted, (size, "nothing painted")
+                assert "esc" in painted[-1] or "enter" in painted[-1], (size, painted)
+                # And nothing was clipped to get there: the card lays out no more
+                # lines than the screen can draw.
+                assert len(painted) <= room, (size, painted, room)
+                assert len(screen.render_lines_for_test()) <= room, (size, room)
+                if room <= 2:
+                    # The whole card, because nothing else fits beside the exit.
+                    assert len(painted) == 1, (size, painted)
+                    assert f"of {screen.row_count}" not in painted[0], (size, painted)
+                    assert screen.visible_rows == [], (size, screen.visible_rows)
+                else:
+                    assert len(screen.visible_rows) >= 1, size
+
+    # Four rows and under: the body has no drawable line, and a card drawn into
+    # none of them is the clip itself. Its own padding is two rows the screen
+    # has not got, so laying it out also made the screen scrollable — which
+    # AGENTS.md calls always a bug on this app.
     for size in ((40, 4), (40, 3), (30, 2), (20, 1)):
         app, screen = await _real_app_card(size, [_long_question()])
         async with app.run_test(size=size) as pilot:
@@ -534,9 +593,13 @@ async def test_the_exit_survives_a_terminal_too_small_to_draw_the_card() -> None
             app.push_screen(screen)
             await pilot.pause()
             await pilot.pause()
-            lines = screen.render_lines_for_test()
-            assert "esc" in lines[-1] or "enter" in lines[-1], (size, lines)
-            assert len(screen.visible_rows) >= 1, size
+            assert screen.render_lines_for_test() == [], size
+            assert _painted_rows(app) == [], (size, _painted_rows(app))
+            assert tuple(app.screen.size) == tuple(app.screen.virtual_size), (
+                size,
+                tuple(app.screen.size),
+                tuple(app.screen.virtual_size),
+            )
 
 
 @pytest.mark.asyncio

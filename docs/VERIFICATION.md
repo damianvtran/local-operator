@@ -1861,13 +1861,21 @@ can build} - {tools the factory context can build} == set(SESSION_CAPABILITY_TOO
 
 The code round's majors, both from the reminder being the one injection nothing
 persists while still rendering into the planner's history with its own id: a
-reminder AT the compaction cut refused the whole pass as `cut_not_replayable`
-(**30/30 refusals with one open todo against 25/30 committed with none**), and a
-reminder inside the kept window came back from `[marker, *kept]` as a plain user
-message that neither expiry guard could match, asserting items were open after
-they were closed. `Session._render_for_compaction` now renders the
-reminder-free view at both ends of a pass. Measured after: 6 committed / 24
-refused with an open todo, identical to 6 / 24 with none.
+reminder AT the compaction cut refused the whole pass as `cut_not_replayable`,
+and a reminder inside the kept window came back from `[marker, *kept]` as a
+plain user message that neither expiry guard could match, asserting items were
+open after they were closed. `Session._render_for_compaction` now renders the
+reminder-free view at both ends of a pass.
+
+The measurement is a PARITY one, and only parity: on one 30-turn run at
+`keep_recent_tokens=40`, an open todo gave 6 committed / 24 refused and no todos
+gave the same 6 / 24. The reviewer's pre-fix figures (30/30 refused with a todo
+against 25/30 committed without) came from a different run on a tree whose
+compaction TRIGGER this branch also changed, so the two are not two arms of one
+experiment and the absolute rates are not comparable across them. What is held
+is that an open todo no longer changes the rate —
+`test_an_open_todo_does_not_disable_compaction` asserts exactly that and nothing
+more.
 
 The design round's blocker: the ask card **clipped its own footer**, and at
 30x12 every option row — a question with no answers and no way out, on a turn
@@ -1876,14 +1884,27 @@ that handed out rows the region did not have, a stylesheet `max-height: 80%`
 acting as a second unaware cap, and a `_screen_size` height floor of 8 rows that
 re-created the identical clip at 20x8. Rows are now paid for in a defended
 order (footer, one option, the windowing line, the question, title, remaining
-options, spacers, descriptions) from one frozen layout per paint. Round 2 found
-the residual by fuzzing heights 1-45 and it is floored at `MIN_BODY_ROWS`.
+options, spacers, descriptions) from one frozen layout per paint.
+
+The residual took two more rounds and is worth recording as a lesson about
+evidence rather than about layout. Round 2 found, by fuzzing heights, that a
+1-2 row budget still drew three lines and lost the footer. My fix for it — a
+`MIN_BODY_ROWS` floor — was a **no-op**, and the test I added for it was
+**vacuous**: it asserted on the card's own generated `Text`, where the footer is
+appended unconditionally and the window always returns at least one row, so it
+held by construction whatever the screen did. Round 3 caught both by comparing
+the COMPOSITED screen across widths 20-100 x heights 1-7 and measuring zero
+changed observables, then located the real defect: the windowing row was drawn
+on a condition the allocator never paid for, and the footer was appended LAST
+while being bought FIRST, so the row most wanted was structurally the first
+clipped.
 
 Evidence: `tests/unit/session/test_late_capability_tools.py` (6),
 `tests/unit/session/test_todo_compaction.py` (the two compaction majors),
-`tests/unit/tui/test_ask_picker.py` (32, including a 90-combination geometry
-sweep asserting `size == virtual_size` with the footer and at least one option
-drawn at every size down to 20x8), `tests/unit/tui/test_ask_settle.py`,
+`tests/unit/tui/test_ask_picker.py` (33; `size == virtual_size` over
+`SHORT_SIZES` x recommended-or-not, and separately the footer and at least one
+option drawn at each of those six sizes down to 20x8 — two tests, not one
+sweep), `tests/unit/tui/test_ask_settle.py`,
 `tests/unit/tools/test_ask_tool.py`, and `tests/unit/tui/test_band_panels.py`
 for the four-status band. One assertion is worth naming because its first
 version was wrong instructively: it measured the body's own region, and an
