@@ -8,6 +8,7 @@ import asyncio
 import pytest
 
 from local_operator.harness.jobs import (
+    CANCELLED_BEFORE_START,
     DEFAULT_MAX_RUNNING_JOBS,
     AsyncJob,
     AsyncJobManager,
@@ -133,10 +134,52 @@ async def test_cancelling_a_parked_job_clears_its_queued_flag_and_runner():
     assert job.queued is False, "a cancelled job is not waiting for a slot"
     # The runner is gone, so nothing can promote it and nothing pins its closure.
     assert parked not in manager._queued_runners
-    assert manager.queued_ids() == []
+    # The surviving running job still holds the manager's only slot: clearing
+    # a cancelled row's ``queued`` must not free or double-count one.
+    # (``queued_ids() == []`` was asserted here and could not fail — it filters
+    # on ``status == "running"``, which a cancelled row never is.)
+    assert manager.at_capacity() is True
 
     gate.set()
     await wait_for(lambda: require_job(manager, running).status == "completed")
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_parked_job_records_that_it_never_ran():
+    """Clearing ``queued`` erases the only record that the job never started,
+    and every surface then presents its PARKED time as work time.
+
+    Both the panel row and the full-page view measure ``settled_at -
+    start_time``, which for a job cancelled at the gate is how long it waited
+    — printed in the column where every other row's number is time a child
+    spent working. A child that ran 0 s and spent $0 rendered ``⊘ 1m36s`` with
+    no word beside it, which reads as a run somebody killed a minute and a
+    half in. So the fact moves to the carrier the settled paths already read.
+    """
+    manager = AsyncJobManager(max_running=1)
+    gate = asyncio.Event()
+
+    async def blocked(job_id, signal, report_progress):
+        await gate.wait()
+        return "ok"
+
+    running = manager.register("task", "running", blocked)
+    parked = manager.register("task", "parked", blocked, queued=manager.at_capacity())
+    # `register` only SCHEDULES the runner, so the yield is what makes
+    # `running` a job that genuinely started — and what stops its coroutine
+    # being abandoned un-awaited when `cancel` kills the task.
+    await asyncio.sleep(0)
+
+    assert await manager.cancel(parked) is True
+    assert require_job(manager, parked).result_text == CANCELLED_BEFORE_START
+
+    # A job cancelled while genuinely RUNNING owns this field — the runner may
+    # be mid-flight in it — so only the parked case is stamped.
+    assert await manager.cancel(running) is True
+    assert require_job(manager, running).result_text is None
+
+    gate.set()
     await manager.dispose()
 
 

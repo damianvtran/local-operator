@@ -36,6 +36,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RUNNING_JOBS = 15
 DEFAULT_RETENTION_MS = 5 * 60_000
 
+#: ``result_text`` stamped by :meth:`AsyncJobManager.cancel` on a job that was
+#: cancelled while still PARKED, so the one fact the cancellation destroys —
+#: that the job never ran — survives on the row every settled surface already
+#: reads. Named rather than inlined because two renderers match on it: the
+#: panel row prints it as the outcome, and the full-page view's title spends it
+#: instead of the bare word ``cancelled`` beside a duration that is parked time.
+CANCELLED_BEFORE_START = "cancelled before it started"
+
 JobStatus = Literal["running", "completed", "failed", "cancelled"]
 JobType = Literal["bash", "task"]
 
@@ -267,6 +275,18 @@ class AsyncJobManager:
         # is dropped for the same reason: ``start_queued`` refuses a non-running
         # job, so the entry could never run again and only kept the closure
         # (prompt, parent session, model spec) alive for the life of the manager.
+        #
+        # Clearing the flag also erases the ONLY record that the job never ran,
+        # and every surface then presents its PARKED time as work time: the
+        # panel row and the page title both measure ``settled_at - start_time``,
+        # which for a parked job is how long it waited, printed in the column
+        # where every other row's number is time a child spent working. So the
+        # fact moves to the carrier the settled-row paths already read, before
+        # the flag that carried it is dropped. Only a parked job can be stamped
+        # (a running one may be mid-``_run_job`` and owns this field), and only
+        # when nothing else claimed it.
+        if job.queued and job.result_text is None:
+            job.result_text = CANCELLED_BEFORE_START
         job.queued = False
         self._queued_runners.pop(job_id, None)
         signal = self._signals.get(job_id)

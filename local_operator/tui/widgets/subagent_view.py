@@ -61,6 +61,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.harness.jobs import CANCELLED_BEFORE_START
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import tool_card
 from local_operator.tui.widgets.assistant import AssistantBlock
@@ -778,6 +779,11 @@ class SubagentView(Vertical):
         self._status = "running"
         self._queued = False
         self._elapsed = "0s"
+        #: The job's settled ``result_text``, verbatim. Read for ONE fact the
+        #: page cannot otherwise know: a job cancelled while still parked never
+        #: ran, so its duration is parked time and the bare word ``cancelled``
+        #: beside it reads as a run that burned that long.
+        self._outcome = ""
 
     @property
     def job_id(self) -> str:
@@ -833,6 +839,7 @@ class SubagentView(Vertical):
         status: str,
         queued: bool,
         elapsed: str,
+        outcome: str = "",
         events: Sequence[Any],
         prompt: str = "",
         progress: str = "",
@@ -860,6 +867,7 @@ class SubagentView(Vertical):
         self._status = status
         self._queued = queued
         self._elapsed = elapsed
+        self._outcome = strip_control_sequences(outcome or "").strip()
         self._running = status == "running" and not queued
         gone = status == "gone"
 
@@ -1078,6 +1086,16 @@ class SubagentView(Vertical):
             return row
 
         glyph, word, token = status_glyph(self._status, queued=self._queued, spinner_glyph=spinner)
+        if self._status == "cancelled" and self._outcome == CANCELLED_BEFORE_START:
+            # `⊘ cancelled · 1m36s` beside rows reading `⣷ running · 7m53s`
+            # presents a PARKED wait as a run: an operator concludes the child
+            # burned a minute and a half of tokens before they killed it, when
+            # it burned none. The duration is right — it is the age of the job
+            # — so what the title owes is the sense of it, and the manager
+            # stamps exactly that phrase on the row for both surfaces to spend
+            # (`harness/jobs.py`). Matched rather than sniffed: `cancel` is the
+            # only writer of `result_text` on a cancelled job.
+            word = CANCELLED_BEFORE_START
         glyph_style = Style(color=theme_mod.semantic_color(token))
         # Most disposable first. The glyph is never dropped: it is the one
         # field that survives a colourless frame and the only one that still

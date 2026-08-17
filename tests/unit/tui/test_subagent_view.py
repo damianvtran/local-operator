@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from rich.cells import cell_len
 
+from local_operator.harness.jobs import CANCELLED_BEFORE_START
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
@@ -379,6 +380,40 @@ async def test_a_swept_job_says_so_instead_of_claiming_to_be_running() -> None:
         assert rows[0] == "Subagent · sub-gone  no longer on the ledger"
         assert GLYPH_DONE not in rows[0]
         assert LEDGER_GONE_NOTE in " ".join(rows)
+
+
+@pytest.mark.asyncio
+async def test_the_title_says_a_cancelled_child_never_ran() -> None:
+    """``⊘ cancelled · 1m36s`` presents parked time as work time.
+
+    A job cancelled at the capacity gate ran for zero seconds and spent
+    nothing; its duration is how long it WAITED. Beside a page whose sibling
+    rows read ``⣷ running · 7m53s``, the bare word paired with that number
+    says an operator killed a child a minute and a half into its work. The
+    manager records the distinction on the row (``CANCELLED_BEFORE_START``)
+    and the title spends it.
+    """
+    parked = _Job("sub-parked", "flaky test bisect", status="cancelled")
+    parked.settled_at = parked.start_time + 96.0
+    parked.result_text = CANCELLED_BEFORE_START
+    mid_run = _Job("sub-midrun", "docs sweep agent", status="cancelled")
+    mid_run.settled_at = mid_run.start_time + 96.0
+    session = FakeSession()
+    session.jobs = _fake_jobs(parked, mid_run)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await _open(pilot, app, parked)
+        title = view.rendered_rows()[0]
+        assert CANCELLED_BEFORE_START in title, title
+        assert "1m36s" in title  # the number stays; what it MEANS is now said
+
+        # A child cancelled while genuinely running keeps the bare word: it
+        # did work, and that duration is work time.
+        app._open_subagent_view("sub-midrun")
+        await pilot.pause()
+        title = view.rendered_rows()[0]
+        assert "cancelled" in title
+        assert CANCELLED_BEFORE_START not in title, title
 
 
 @pytest.mark.asyncio

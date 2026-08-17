@@ -3121,6 +3121,12 @@ class OperatorApp(App[None]):
             status=str(getattr(job, "status", "") or "gone") if job is not None else "gone",
             queued=bool(getattr(job, "queued", False)),
             elapsed=job_elapsed(job) if job is not None else "0s",
+            # The settled outcome, for the one fact the page's own fields
+            # cannot carry: a job cancelled while still PARKED never ran, so
+            # its `elapsed` is parked time, and the title says so instead of
+            # pairing the bare word `cancelled` with a duration that reads as
+            # a run (`harness/jobs.CANCELLED_BEFORE_START`).
+            outcome=str(getattr(job, "result_text", "") or ""),
             # The instruction the parent delegated. Recorded on the job at
             # REGISTRATION (`AsyncJob.prompt`), which is the only place it
             # survives: `Session.prompt` feeds the user message straight into

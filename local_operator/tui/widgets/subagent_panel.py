@@ -317,6 +317,15 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
         activity = " ".join(
             strip_control_sequences(str(getattr(job, "result_text", "") or "")).split()
         )
+        if not activity and status == "cancelled":
+            # ``cancelled`` was the only state that painted no word: a job
+            # cancelled mid-run records no ``result_text``, so the row's whole
+            # state rested on a 1-cell ``⊘`` while the page it opens prints
+            # ``⊘ cancelled`` and the sibling ``queued`` branch already spells
+            # itself. Cancelled-while-PARKED does not reach here empty — the
+            # manager stamps ``CANCELLED_BEFORE_START`` on it, which is the
+            # more specific sentence and wins on its own.
+            activity = status_glyph(status)[1]
     if current and not running:
         # The page IS this row's detail, three rows above it. Repeating a
         # SETTLED outcome here printed a failed child's error string twice in
@@ -412,26 +421,34 @@ def _row_rung(facts: RowFacts, stats: JobStats, width: int, column: int, clock: 
 
 #: Everything on a row that is not the label, the glyph, the numbers or the
 #: activity: ``• `` + the two spaces after the label + the space after the
-#: glyph. The elapsed reading and the GLYPH are added by the caller, being the
-#: two chrome fields whose width varies — ``⏳`` is two cells where every other
-#: state mark is one, so a constant here measured a queued row one cell
-#: narrower than it drew and ``compose_row``'s own truncate then ate the last
-#: cell of a dollar figure. A money value clipped mid-digit is a worse answer
-#: than the ``$0.0000`` this module refuses to print.
+#: glyph. The elapsed reading and the GLYPH COLUMN are added by the caller,
+#: being the two chrome fields whose width varies with the row.
 _CHROME_CELLS = 2 + 2 + 1
+
+#: Cells the state mark is padded out to, so the clock, the numbers and the
+#: activity start in the same column on every row. ``⏳`` (U+23F3) is
+#: ``East_Asian_Width=W`` and draws two cells where every other mark draws
+#: one, so an unpadded queued row pushed everything after it one cell right —
+#: its clock alone out of the column the other rows right-align into.
+_GLYPH_COL = 2
 
 
 def _glyph_cells(facts: RowFacts) -> int:
-    """Cells the state mark occupies — measured, never assumed.
+    """Cells the state mark's COLUMN occupies — measured, never assumed.
 
     A running row's spinner frame and ``✓``/``✗``/``⊘`` are one cell each and
     ``⏳`` is two, and the set is shared with the full-page view's title, so
     this widget does not get to pick. Any frame will do for the measurement:
     the spinner glyphs are the same width as each other by construction (the
     band's arithmetic already depends on that).
+
+    The answer is the padded column rather than the raw glyph, because that is
+    what :func:`compose_row` spends — a budget measured one cell short of what
+    the row draws is what lets ``compose_row``'s own truncate eat the last
+    cell of a dollar figure.
     """
     glyph, _word, _token = status_glyph(facts.status, queued=facts.queued)
-    return cell_len(glyph)
+    return max(_GLYPH_COL, cell_len(glyph))
 
 
 def _lay_out(
@@ -590,6 +607,12 @@ def compose_row(
     # different states on two surfaces. A running row's glyph advances on the
     # panel's timer, so a stopped timer means a frozen row — visible at once.
     row.append(glyph, style=Style(color=theme_mod.semantic_color(token)))
+    # Padded to one shared column so what follows starts in the same cell on
+    # every row. Without it a `⏳` row — two cells where every other mark is
+    # one — carried its clock, numbers and activity one cell right of the
+    # column the rest of the list right-aligns into, which is visible as a
+    # single stepped row in a list whose whole job is comparison.
+    row.append(" " * max(0, _GLYPH_COL - cell_len(glyph)), style=dim)
     # RIGHT-aligned into the panel's clock column, which is the one field D2's
     # label column did not settle: `22s` is two cells narrower than `7m49s`,
     # and that row's context and cost then sat two cells left of everybody

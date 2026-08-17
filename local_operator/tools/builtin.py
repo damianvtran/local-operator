@@ -4120,16 +4120,33 @@ async def execute_jobs(
         # job, whatever its real age — the one number this tool exists to
         # report, and the reading a caller uses to decide whether a subagent is
         # progressing or wedged. A six-minute child and one launched a second
-        # ago were indistinguishable. ``start_time`` is the age's only source;
-        # it is guarded because a replayed or embedder-supplied row may carry
-        # none, and a missing clock is worth 0.0s rather than a traceback.
-        reference = (
-            job.settled_at
-            if job.status != "running" and job.settled_at
-            else getattr(job, "start_time", None)
-        )
-        elapsed = max(now - reference, 0.0) if reference else 0.0
-        lines.append(f"{job.id}  {job.status:<9}  {elapsed:6.1f}s  {job.label}")
+        # ago were indistinguishable.
+        #
+        # Two quantities in one column, so each row says WHICH with a sense
+        # word: ``up`` is "has been running this long", ``ago`` is "settled
+        # this long ago". Without it the two readings are identical in shape
+        # and a reader comparing a settled row against the subagent panel
+        # (which reports the job's own duration) gets two numbers and no way
+        # to reconcile them.
+        #
+        # Eight cells, not six: a running bash job in a long session reaches
+        # 2h46m40s, at which point ``6.1f`` overflows its field and shears the
+        # label column one cell for that row alone. Eight covers 11.5 days.
+        # ``start_time`` is guarded because ``JobManagerProtocol.list()`` is
+        # typed ``list[Any]``, so a third-party embedder may hand this loop a
+        # duck-typed row without one. The guard covers ONLY that attribute:
+        # ``id``/``status``/``settled_at``/``label`` are read unguarded on the
+        # same row, so a row missing any of those still raises.
+        if job.status != "running" and job.settled_at:
+            reference, sense = job.settled_at, "ago"
+        else:
+            reference, sense = getattr(job, "start_time", None), "up"
+        # A row with no clock says so. Printing 0.0s made it byte-identical to
+        # a job launched this instant — the exact unreadable number this tool
+        # was fixed to stop printing. Both branches are nine cells, so the
+        # grid holds either way.
+        age = f"{max(now - reference, 0.0):8.1f}s" if reference else f"{'unknown':>9}"
+        lines.append(f"{job.id}  {job.status:<9}  {age} {sense:<3}  {job.label}")
     return _text(
         tool_call_id,
         "jobs",
@@ -4146,7 +4163,8 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
         label="List jobs",
         description=(
             "List running and recently-settled background jobs (task/bash) "
-            "with their id, status and elapsed time."
+            "with their id, status and age — 'up' is how long a running job "
+            "has been going, 'ago' is how long since a settled one finished."
         ),
         parameters=JobsParams.model_json_schema(),
         approval_tier="read",

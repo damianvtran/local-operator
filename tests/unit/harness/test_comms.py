@@ -248,13 +248,19 @@ async def test_a_starting_child_is_not_reported_as_parked_behind_the_gate():
     """Two states reach the no-live-child branch and an operator acts on them
     differently.
 
-    A PARKED job is waiting for a slot and may not start for minutes. A job
-    that is running but has not reached ``attach`` yet is mid-construction —
-    its session is being built — and takes the message moments later. Both
-    used to report the capacity gate, which is a false statement about an
-    admitted job: it says "nothing is happening" about a child that is
-    already spending tokens, so a healthy run reads as stuck and gets
-    cancelled instead of waited out.
+    A PARKED job is waiting for a slot and may not start for minutes. An
+    ADMITTED job is waiting only on this event loop — ``register`` schedules
+    the runner without entering it, so one yield starts it. Both used to
+    report the capacity gate, which is a false statement about an admitted
+    job: it says "nothing is happening" about a child that is already
+    spending tokens, so a healthy run reads as stuck and gets cancelled
+    instead of waited out.
+
+    Neither string may claim a session is being BUILT (in the state this
+    branch was written for the runner has not been entered at all), neither
+    may stutter the label the render site already prints, and both owe the
+    caller a next step — the parked one most of all, because that is the
+    state where a caller most needs to be told to stop waiting.
     """
     jobs = FakeJobs()
     comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
@@ -267,11 +273,19 @@ async def test_a_starting_child_is_not_reported_as_parked_behind_the_gate():
     comms.record_launch("job-parked", "designer")
     parked = await comms.ask("job-parked", "status?", timeout_ms=50)
 
-    assert "still starting up" in (starting.error or "")
+    assert "scheduled" in (starting.error or "")
     assert "capacity gate" not in (starting.error or "")
-    # The genuinely parked job keeps the message that names its real cause.
+    assert "being built" not in (starting.error or "")
+    # The genuinely parked job keeps the message that names its real cause,
+    # and now carries the advice its sibling always had.
     assert "capacity gate" in (parked.error or "")
+    assert "do not wait on it" in (parked.error or "")
     assert starting.error != parked.error
+    # The only render site prefixes `{label} ({job_id}): `, and the card
+    # truncates the reason as content — a stuttered label spends the cells
+    # that would otherwise have carried the state word.
+    assert "reviewer" not in (starting.error or "")
+    assert "designer" not in (parked.error or "")
 
 
 def test_send_to_an_unknown_job_fails_without_raising():

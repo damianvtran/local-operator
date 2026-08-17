@@ -469,23 +469,39 @@ class SubagentComms:
 
         Two states reach here and the caller acts on them differently. A job
         the manager PARKED is waiting for a slot and may not start for
-        minutes, so the honest advice is to stop waiting on it. A job that is
-        running but has not reached ``attach`` yet is mid-construction (the
-        child session is being built: config, tools, MCP wiring) and will take
-        the message the moment it is up.
+        minutes, so the honest advice is to stop waiting on it. An ADMITTED
+        job is only waiting on this event loop: ``register`` calls
+        ``ensure_future``, which schedules the runner without entering it, so
+        a parent that registers a child and then does non-yielding work leaves
+        it scheduled-but-unstarted for the whole stretch. One loop yield — the
+        caller's next await, including its next tool call — is enough to start
+        it, so the honest advice there is to retry.
+
+        Neither string promises a session is being BUILT. In the state this
+        branch was written for, the runner coroutine has not been entered at
+        all, so nothing is under construction yet; "scheduled" covers that and
+        the build that follows it, and both resolve on the same advice.
 
         Both used to report the capacity gate. That is a false statement about
         an admitted job, and it is the one an operator acts on: it says
         "nothing is happening" about a child that is already spending tokens,
         so a stuck-looking run gets cancelled instead of waited out.
+
+        Neither string names ``record.label``: the only render site
+        (``builtin.py``'s hub result) already prefixes ``{label} ({job_id}): ``,
+        and the card truncates the reason as content — so a stuttered label
+        spends the exact cells that would otherwise have carried the state.
         """
         jobs = self._jobs()
         job = jobs.get(record.job_id) if jobs is not None else None
         if job is not None and getattr(job, "queued", False):
-            return "subagent has not started yet (parked behind the job capacity gate)"
+            return (
+                "subagent has not started yet (parked behind the job capacity gate); "
+                "it starts when a slot frees, so do not wait on it"
+            )
         return (
-            f"subagent {record.label} is still starting up (its session is being built); "
-            "retry in a moment"
+            "subagent has not started yet (it is scheduled, and starts when this "
+            "session next yields); retry in a moment"
         )
 
     def _gone_reason(self, record: _ChildRecord) -> str:
