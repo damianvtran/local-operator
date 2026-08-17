@@ -1449,6 +1449,10 @@ class SessionStreamFn:
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
         self._route_state = FailoverRouteState(on_change=self._on_route_change)
         self._message_boundary_pending = True
+        # Frozen for one user-message tool loop: choosing a new effort between
+        # tool calls would bust the provider cache and make one task reason at
+        # several depths.
+        self._message_effort: str | None = None
         self._primary_selector: str | None = None
         self._usage_checked_selector: str | None = None
         self._usage_checked_at = 0.0
@@ -1471,6 +1475,7 @@ class SessionStreamFn:
     def begin_message(self) -> None:
         """Mark the next model call as a user-message boundary."""
         self._message_boundary_pending = True
+        self._message_effort = None
 
     async def _notice(self, text: str, kind: str = "warning") -> None:
         if self._notice_handler is None:
@@ -1696,6 +1701,37 @@ class SessionStreamFn:
         self, request: ChatRequest, signal: AbortSignal | None
     ) -> AsyncIterator[StreamEvent]:
         from local_operator.providers.failover import stream_with_failover
+
+        # Classify only at the user-message boundary, then freeze the chosen
+        # effort for every tool-loop request under it. The tiny local linear
+        # model is sub-millisecond / zero tokens — an extra "small LLM" call
+        # would erase the saving on the short prompts most likely to go low.
+        if self._message_boundary_pending:
+            from local_operator.model.effort_classifier import auto_effort_for
+
+            last_user = next(
+                (message.text for message in reversed(request.messages) if message.role == "user"),
+                "",
+            )
+            self._message_effort, classification = auto_effort_for(
+                last_user,
+                request.model.reasoning_efforts,
+                self._settings,
+            )
+            if classification is not None and self._message_effort is not None:
+                await self._notice(
+                    f"auto effort: {self._message_effort} ({classification.tier}, "
+                    f"score {classification.score:.1f})",
+                    "info",
+                )
+        if self._message_effort is not None:
+            request = request.model_copy(
+                update={
+                    "model": request.model.model_copy(
+                        update={"reasoning_effort": self._message_effort}
+                    )
+                }
+            )
 
         if self._session_id and request.prompt_cache_key is None:
             # The transcript directory name is stable for the session and

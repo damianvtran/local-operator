@@ -145,6 +145,7 @@ remain in the credential store; never put tokens or keys in this mapping.
 - `auto_save_conversation`: legacy conversation persistence switch
 - `compaction`: `enabled`, `strategy`, `reserve_tokens`, `keep_recent_tokens`, `threshold_percent`, `threshold_tokens`, `max_threshold_tokens`, `auto_continue`, `mid_turn_enabled`
 - `retry`: `enabled`, `maxRetries`, `baseDelayMs`, `modelFallback`, `usageAwareFallback`, `usageReservePercent`, and `fallbackChains` (snake_case spellings are also accepted for retry fields)
+- `effort`: `auto` (default false) enables the zero-token local prompt-complexity classifier; `allowMax` lets high-complexity prompts select a model's maximum effort (default stops one rung below max)
 - `variables`: non-secret named values exposed through the variable tools; environment values remain lower precedence
 - `tui`: terminal UI settings such as `theme`
 - `session_retention_max_sessions`, `session_retention_max_bytes`, `session_retention_max_age_days`: independent ephemeral-session ceilings; `0` disables that ceiling
