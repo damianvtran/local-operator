@@ -685,8 +685,17 @@ async def test_long_rate_limit_retry_after_rotates_without_sleep(monkeypatch) ->
     assert [key for _provider, key in auth.rotations] == ["k1", "k2"]
 
 
-async def test_short_rate_limit_retries_once_per_credential(monkeypatch) -> None:
-    """Brief throttles get one chance, not the generic ten-retry budget."""
+async def test_short_rate_limit_retries_twice_per_credential(monkeypatch) -> None:
+    """Brief throttles get two chances, not the generic ten-retry budget.
+
+    Two because the throttles that advertise a short delay are burst and
+    concurrency limits, which clear in seconds: the first retry often lands
+    inside the same collision that produced the 429, and giving up after it
+    turned a recoverable blip into a credential rotation plus a provider
+    fallback — the early "provider failure" churn a live session reads as
+    flakiness. Still not the full budget: each attempt sleeps the ADVERTISED
+    delay, so the cap bounds how long one credential can hold the screen.
+    """
     attempts: list[str | None] = []
     sleeps: list[int] = []
 
@@ -714,8 +723,8 @@ async def test_short_rate_limit_retries_once_per_credential(monkeypatch) -> None
         ):
             pass
 
-    assert attempts == ["k1", "k1", "k2", "k2"]
-    assert len(sleeps) == 2
+    assert attempts == ["k1", "k1", "k1", "k2", "k2", "k2"]
+    assert len(sleeps) == 4
 
 
 async def test_403_rotates_once_per_credential_no_double_rotation() -> None:

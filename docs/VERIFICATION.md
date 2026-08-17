@@ -1569,3 +1569,145 @@ Reviewed by `Round11Reviewer` over the two commits: approve, no blocker, no
 major, two nits. S1 above; S2 was that a suite count taken in the shared
 worktree measures eleven agents' uncommitted work as well as this change, so the
 reproducible figure is the one from a detached worktree at the commit.
+
+## The frozen render loop: synchronous stretches inside tool coroutines
+
+Reported as "the TUI intermittently freezes on multiple concurrent tool
+calls". The tool coroutines ride the SAME asyncio loop that renders the TUI,
+so every synchronous stretch inside one is a stretch the frame does not
+animate — and a batch of calls finishing together put several hundred
+milliseconds back-to-back. The measured offender: three concurrent image
+reads blocked the loop for **649 ms** (one ~216 ms decode+re-encode each, on
+the loop), which is a freeze by any user's word for it.
+
+The stretches, and where they moved (`asyncio.to_thread`, the pattern grep
+and glob already used):
+
+| Site | What blocked |
+|---|---|
+| `execute_read` | `read_bytes` (2 MB text / 16 MB image), PIL decode+re-encode, text decode+`splitlines`, wide-`iterdir` listings |
+| `execute_write` | prior-content `read_text`, `write_text`, `difflib.unified_diff` (pure Python, O(N·M)) |
+| `execute_edit` | same read/replace/write/diff block |
+| `execute_bash` | multi-MB chunk joins+decodes, the oversized-output tail (spill disk write, elide slicing) |
+| `execute_grep`/`execute_glob` | match-list joins, spill write |
+
+Off-loop did NOT mean transaction-free. Review round 1 caught two concurrency
+edges the event loop had serialized accidentally:
+
+- `read`/`edit`/`write` share 64 fixed process-wide filesystem stripes. Every
+  transaction holds a resolved, case-folded path stripe, keeping the key
+  stable as a file is created. Existing files additionally hold their
+  `(device, inode)` stripe, coalescing hardlinks. All stripes are acquired in
+  numeric order, so overlapping alias sets cannot deadlock. Read's `stat` +
+  content sniff + cap + bytes are one snapshot; edit/write hold the set across
+  read/decide/write/diff. Fixed stripes bound memory, and hash collisions only
+  serialize unrelated files.
+- Spill content and metadata now stage through unique same-directory temp
+  files and atomic replace. Identical content has an identical digest, so the
+  old deterministic `<digest>.txt.tmp` let concurrent writers rename one
+  another's temp away. The temp path is recorded before the first byte, so a
+  full-disk write removes its partial `delete=False` file. One store lock
+  covers content + sidecar installation and the eviction sweep; `prune_all`
+  takes the same lock, so no writer can delete another's half-installed or
+  just-installed digest near the byte ceiling.
+
+Deterministic review repros at reviewed head `676ba26`: two delayed concurrent
+edits to `alpha\nbeta\n` both returned success but settled as `ALPHA\nbeta\n`
+(lost update); eight identical spill writers returned at least one `None`.
+Those F1/F3 tests fail there and pass with the process lock / unique atomic
+temps. Round-2 tests additionally hold the store transaction at one active
+entry installer and force a write failure after temp creation, asserting the
+partial temp is removed.
+Round-3's read-snapshot repro swaps `before` to `after` between content sniff
+and byte read: `68cd87b` returns `1| after` under checks made against the old
+snapshot; the striped snapshot returns `before` and the writer commits only
+afterward.
+Round-4's hardlink repro addresses one inode through `shared.txt` and
+`alias.txt`: `cafa34c` returns success for both edits but settles as
+`alpha\nBETA\n` (lost `ALPHA`); inode-keyed stripes settle both aliases as
+`ALPHA\nBETA\n`.
+Round-5's creation-transition repro holds the first writer after it creates
+`new.txt`: `ef687c2` lets the second writer enter on the new inode stripe
+(`peak == 2`); the stable path + optional inode set keeps peak concurrency at
+one until the creator commits.
+
+Evidence: `tests/unit/tools/test_loop_liveness.py` — a 20 ms heartbeat
+running while the tools work. On the fix: max gap under 120 ms. At `d424441`
+(the PR base): **0.649 s** for three concurrent image reads. The refusal
+strings and byte-level framing of `edit`'s ambiguity contract are asserted
+unchanged by the current tools suite (370 tests).
+
+## The name that never landed (and the early provider failures)
+
+A 10:08 session held three user messages and zero replies: the provider path
+was failing from minute zero while a heavy sibling session ran, and the
+session's terminal title stayed `lo › tmp` forever. Two causes, one fix each:
+
+1. **The naming errand raced the opening turn.** Auto-naming launched
+   concurrently with the first turn's own provider call — two simultaneous
+   requests on one OAuth account at its busiest moment, and OAuth concurrency
+   ceilings 429 BOTH: the turn surfaced early "provider failure" notices and
+   the naming call died. The errand now waits on `_turn_settled` with NO
+   timeout before calling the provider. A title is decoration: a turn that
+   never settles may cost its name but must never be made worse by a courtesy
+   call. The turn worker's `finally` and reload path release every normal end,
+   and the worker re-checks session identity/user naming after the wait.
+2. **A follow-up could race the title call itself.** After the first turn
+   settled, `complete_once` could run for up to 20 seconds with no lock; a
+   prompt submitted in that window entered `session.prompt` concurrently.
+   Turn and naming share one app-level provider lock. Turn start invalidates
+   the naming generation and cancels it BEFORE waiting on the lock, so the
+   user request begins only after the courtesy call has unwound. The
+   generation owns the latch: the follow-up schedules its replacement naming
+   worker immediately, and the canceled attempt cannot clear/store into it.
+3. **Reload could carry the old lane into the replacement.** Session swap now
+   invalidates/cancels naming before disposal, then drains the provider lock
+   after disposing the old turn and before constructing/adopting the new
+   session. A stale title call cannot hold the replacement's first prompt.
+4. **A failed attempt was spent forever.** `_name_requested` latched on
+   schedule, not on success, so the minute-zero failure cost the session its
+   name permanently. The latch now releases when an attempt produces no title
+   and the conversation is still unnamed; the next substantive message
+   retries without displacing an existing/user-set title.
+
+Short-throttle 429s also get **two** same-credential retries (was one), each
+sleeping the ADVERTISED delay: burst and concurrency limits clear in
+seconds, and the first retry usually lands inside the collision that created
+the 429. Long quota windows still rotate immediately — the 30 s
+`MAX_USAGE_RETRY_AFTER_MS` cap is what keeps an interactive session out of a
+provider's reset window.
+
+Evidence: `tests/unit/tui/test_conversation_naming.py` (5 tests — opening-turn
+deferral, follow-up preemption+latch transfer, reload drain, unlatch-and-retry,
+store-and-stay-spent). At reviewed head `68cd87b`, the follow-up schedules no
+replacement naming worker and reload leaves the old call uncancelled; both
+regressions fail there and pass after generation ownership + drain.
+`tests/unit/providers/test_failover.py::test_short_rate_limit_retries_twice_per_credential`
+asserts `k1,k1,k1,k2,k2,k2` with 4 advertised-delay sleeps.
+
+## The pointer that never changed
+
+"The cursor doesn't update to the pointer when hovering clickable elements;
+typable regions work." Textual 8.2.8 has the whole mechanism — the `pointer`
+CSS rule, `Screen.update_pointer_shape()` walking the hovered widget on every
+mouse move, `App._set_pointer_shape` emitting OSC 22 (ghostty implements it;
+a terminal that does not ignores it harmlessly) — and the app set it on
+exactly two subagent surfaces. Tool cards, toasts and every picker row kept
+the default arrow.
+
+`ToolCard` and `Toast` now carry a static `pointer: pointer` (their whole
+surface is the click target); the command/model/session pickers set the
+inline rule from the row index under the move, so their non-row rows (the
+overflow count, padding) give the arrow back. Picker close/dismiss paths and
+toast dismissal reset the inline rule BEFORE the surface disappears, so a
+stationary pointer cannot leave the terminal's hand cursor latched; a reused
+toast re-arms the click affordance when it shows. `set_rule` gates on change,
+so per-move assignments are no-ops when the shape did not move.
+
+Evidence: `tests/unit/tui/test_pointer_shapes.py` — `pilot.hover` through the
+real mouse-move path, asserting `Screen._pointer_shape` (the exact value
+OSC 22 carries): `pointer` over a card, picker row and toast; `default` over
+the transcript ground, picker overflow row, picker closed under a stationary
+pointer and a dismissed toast. A hover frame from the real `OperatorApp` is
+byte-identical before and after (the rule paints no pixels); the shape is the
+behavioural contract, which is what the tests hold.

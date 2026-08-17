@@ -14,6 +14,8 @@ import io
 import os
 import random
 import struct
+import threading
+import time
 import zlib
 from pathlib import Path
 from typing import Any
@@ -1105,6 +1107,177 @@ async def test_edit_multi_hunk_applies_all_in_one_call(tools, context, tmp_path)
     assert result.is_error is False
     assert (tmp_path / "m.py").read_text() == "ALPHA\nmiddle\nBETA\nmiddle\nGAMMA\n"
     assert "3 hunk(s)" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_classification_and_bytes_share_the_write_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A writer cannot swap the file between read sniffing and its byte snapshot."""
+    path = tmp_path / "snapshot.txt"
+    path.write_text("before")
+    sniff_entered = threading.Event()
+    release_sniff = threading.Event()
+    real_sniff = builtin.sniff_image_file
+
+    def blocked_sniff(target: str):
+        # Capture classification, then give the writer a deterministic window.
+        # Without one shared transaction it commits `after` during the sleep,
+        # so the read's earlier checks describe different returned bytes.
+        info = real_sniff(target)
+        sniff_entered.set()
+        assert release_sniff.wait(timeout=2)
+        time.sleep(0.05)
+        return info
+
+    def writer() -> None:
+        assert sniff_entered.wait(timeout=2)
+        release_sniff.set()
+        builtin._write_file_result(path, "after")
+
+    monkeypatch.setattr(builtin, "sniff_image_file", blocked_sniff)
+    writer_thread = threading.Thread(target=writer)
+    writer_thread.start()
+    context = ToolContext(cwd=str(tmp_path))
+    result = await builtin.execute_read(
+        "read-snapshot",
+        {"path": "snapshot.txt", "raw": True},
+        None,
+        None,
+        context,
+    )
+    await asyncio.to_thread(writer_thread.join, 2)
+
+    assert not writer_thread.is_alive()
+    assert not result.is_error
+    assert "before" in result.text
+    assert "after" not in result.text
+    assert path.read_text() == "after"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_edits_share_one_file_transaction(
+    tools,
+    context,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Separate AgentLoops cannot both read the same original and lose one edit."""
+    path = tmp_path / "shared.txt"
+    path.write_text("alpha\nbeta\n")
+
+    real_match = builtin._match_windows
+
+    def delayed_match(content: str, old_text: str):
+        # Both unlocked transactions read the original before this sleep and
+        # then overwrite one another. The process-wide path stripe makes the
+        # second transaction enter only after the first has committed.
+        time.sleep(0.05)
+        return real_match(content, old_text)
+
+    monkeypatch.setattr(builtin, "_match_windows", delayed_match)
+    first, second = await asyncio.gather(
+        _call(
+            tools,
+            "edit",
+            {"path": "shared.txt", "old_text": "alpha", "new_text": "ALPHA"},
+            context,
+        ),
+        _call(
+            tools,
+            "edit",
+            {"path": "shared.txt", "old_text": "beta", "new_text": "BETA"},
+            context,
+        ),
+    )
+
+    assert not first.is_error and not second.is_error
+    assert path.read_text() == "ALPHA\nBETA\n"
+
+
+@pytest.mark.asyncio
+async def test_hardlink_aliases_share_one_file_transaction(
+    tools,
+    context,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct path spellings of one inode cannot lose a concurrent edit."""
+    path = tmp_path / "shared.txt"
+    alias = tmp_path / "alias.txt"
+    path.write_text("alpha\nbeta\n")
+    os.link(path, alias)
+
+    real_match = builtin._match_windows
+
+    def delayed_match(content: str, old_text: str):
+        time.sleep(0.05)
+        return real_match(content, old_text)
+
+    monkeypatch.setattr(builtin, "_match_windows", delayed_match)
+    first, second = await asyncio.gather(
+        _call(
+            tools,
+            "edit",
+            {"path": "shared.txt", "old_text": "alpha", "new_text": "ALPHA"},
+            context,
+        ),
+        _call(
+            tools,
+            "edit",
+            {"path": "alias.txt", "old_text": "beta", "new_text": "BETA"},
+            context,
+        ),
+    )
+
+    assert not first.is_error and not second.is_error
+    assert path.read_text() == "ALPHA\nBETA\n"
+    assert alias.read_text() == "ALPHA\nBETA\n"
+
+
+@pytest.mark.asyncio
+async def test_create_transition_keeps_the_path_transaction_stripe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second writer cannot bypass the creator after the inode appears."""
+    path = tmp_path / "new.txt"
+    created = threading.Event()
+    release_first = threading.Event()
+    state_lock = threading.Lock()
+    active = 0
+    peak = 0
+    real_locked = builtin._write_file_result_locked
+
+    def observed_locked(target: Path, content: str):
+        nonlocal active, peak
+        with state_lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            result = real_locked(target, content)
+            if content == "first":
+                created.set()
+                assert release_first.wait(timeout=2)
+            return result
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(builtin, "_write_file_result_locked", observed_locked)
+    first = asyncio.create_task(asyncio.to_thread(builtin._write_file_result, path, "first"))
+    assert await asyncio.to_thread(created.wait, 1)
+    second = asyncio.create_task(asyncio.to_thread(builtin._write_file_result, path, "second"))
+    try:
+        await asyncio.sleep(0.05)
+        assert peak == 1
+        assert not second.done(), "existing-inode stripe bypassed the creator"
+    finally:
+        release_first.set()
+    await asyncio.gather(first, second)
+
+    assert path.read_text() == "second"
 
 
 @pytest.mark.asyncio

@@ -212,6 +212,12 @@ Screen > .screen--selection {
 ToolCard {
     height: 1;
     background: $lo-surface;
+    /* The hand pointer, not just the hover tint: the whole row is the click
+     * target for expand/collapse (see ToolCard.on_click), so the cursor is
+     * the affordance that says so BEFORE the click. Textual walks this rule
+     * on every mouse event and emits OSC 22, which ghostty implements and a
+     * terminal that does not simply ignores. */
+    pointer: pointer;
 }
 
 /* Expanded is the ONE case that is content-sized: the summary row plus one
@@ -460,6 +466,9 @@ Toast {
     padding: 0 1;
     background: $lo-overlay;
     color: $lo-fg;
+    /* A click dismisses the card early (Toast.on_click) — the hand pointer
+     * says so, the same affordance the tool rows and subagent rows carry. */
+    pointer: pointer;
 }
 
 /* ---- usage panel (the `/usage` popup) --------------------------------- *

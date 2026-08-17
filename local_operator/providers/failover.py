@@ -726,10 +726,15 @@ BACKOFF_JITTER_FRACTION = 0.25
 # Interactive sessions must never disappear into a provider's quota-reset
 # window. A 429 can carry Retry-After values of many minutes or hours; sleeping
 # that duration before credential rotation makes the TUI look hung and prevents
-# configured fallback models from running. Short throttles get one same-key
-# retry, while long waits rotate or surface immediately.
+# configured fallback models from running. Short throttles get two same-key
+# retries — burst limits and OAuth concurrency limits ("another request is
+# already being processed") clear in seconds, and one attempt only ever saw
+# the collision that created it — while long waits rotate or surface
+# immediately. Two, not the full ``max_retries`` budget: each attempt sleeps
+# the ADVERTISED delay, so this cap is also the longest a screen sits waiting
+# on one credential before a sibling or fallback is tried.
 MAX_USAGE_RETRY_AFTER_MS = 30_000
-MAX_SAME_CREDENTIAL_USAGE_RETRIES = 1
+MAX_SAME_CREDENTIAL_USAGE_RETRIES = 2
 
 
 def backoff_delay_ms(base_delay_ms: int, attempt: int, *, rng: random.Random | None = None) -> int:

@@ -13,7 +13,10 @@ break:
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +115,106 @@ def test_write_is_content_addressed_and_idempotent() -> None:
     assert first.handle == second.handle
     # Identical output written twice must cost ONE entry, not two.
     assert store.entry_count() == 1
+
+
+def test_concurrent_atomic_replaces_use_distinct_temps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent replaces of one digest cannot rename another writer's temp."""
+    workers = 8
+    barrier = threading.Barrier(workers)
+    real_replace = spill.os.replace
+
+    def synchronized_replace(source, destination) -> None:  # noqa: ANN001
+        # Hold every writer after staging but before the rename. A
+        # deterministic temp gives all eight the same source; unique temps let
+        # every atomic replace complete.
+        barrier.wait(timeout=5)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(spill.os, "replace", synchronized_replace)
+    target = tmp_path / "same.txt"
+    payload = b"identical" * 10_000
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(spill._atomic_write_bytes, target, payload) for _ in range(workers)
+        ]
+        for future in futures:
+            future.result(timeout=10)
+
+    assert target.read_bytes() == payload
+
+
+def test_store_serializes_install_and_evict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Entry installation and its eviction sweep are one store transaction."""
+    store = spill.get_store()
+    workers = 8
+    state_lock = threading.Lock()
+    active = 0
+    peak = 0
+    real_write_entry = spill.SpillStore._write_entry
+
+    def delayed_write_entry(self, digest, data, meta) -> None:  # noqa: ANN001
+        nonlocal active, peak
+        with state_lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.02)
+            real_write_entry(self, digest, data, meta)
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(spill.SpillStore, "_write_entry", delayed_write_entry)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                store.write,
+                f"entry {index}\n" + ("x" * 10_000),
+                tool_name="bash",
+                session_id=f"session-{index}",
+            )
+            for index in range(workers)
+        ]
+        metas = [future.result(timeout=10) for future in futures]
+
+    assert all(meta is not None for meta in metas)
+    assert peak == 1
+
+
+def test_atomic_write_cleans_partial_temp_when_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disk-write failure cannot leak an untracked delete=False temp."""
+    temp_path = tmp_path / ".forced.tmp"
+
+    class FailingTemp:
+        name = str(temp_path)
+
+        def __enter__(self):
+            temp_path.write_bytes(b"partial")
+            return self
+
+        def __exit__(self, *_args) -> bool:
+            return False
+
+        def write(self, _data: bytes) -> None:
+            raise OSError("disk full")
+
+    monkeypatch.setattr(
+        spill.tempfile,
+        "NamedTemporaryFile",
+        lambda **_kwargs: FailingTemp(),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        spill._atomic_write_bytes(tmp_path / "target.txt", b"complete")
+    assert not temp_path.exists()
 
 
 def test_stat_returns_metadata_without_content() -> None:
