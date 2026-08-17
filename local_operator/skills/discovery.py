@@ -149,9 +149,7 @@ def _parse_globs(raw: object) -> tuple[str, ...]:
         items = raw
     else:
         return ()
-    return tuple(
-        item.strip() for item in items if isinstance(item, str) and item.strip()
-    )
+    return tuple(item.strip() for item in items if isinstance(item, str) and item.strip())
 
 
 def scan_skills_dir(

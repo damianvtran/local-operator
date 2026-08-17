@@ -376,6 +376,28 @@ def _latest_user_query(transcript: Transcript) -> str:
     return "\n".join(part for part in (user_text, summary) if part)
 
 
+def _latest_compaction_id(transcript: Transcript) -> str | None:
+    """Entry id of the newest compaction marker, or ``None`` without one.
+
+    This is the freeze key for the knowledge block: selection normally
+    freezes after the first query so the prompt-cache prefix stays warm, but
+    a compaction rewrites the transcript head anyway — the cache is already
+    invalidated — so a NEW id here licenses one re-selection (see
+    :func:`_select_knowledge_block`). Same contract as
+    :func:`_latest_user_query`: any transcript deviation degrades to
+    ``None`` (treated as "no compaction yet"), never breaks the turn.
+    """
+    try:
+        entries = transcript.entries()
+    except Exception:  # noqa: BLE001 — degradation is the contract
+        return None
+    for entry in reversed(entries):
+        if getattr(entry, "type", None) == "compaction":
+            entry_id = getattr(entry, "id", None)
+            return str(entry_id) if entry_id else None
+    return None
+
+
 def _env_details(cwd: str | None = None) -> str:
     """Volatile environment facts for the env block (date rides there too,
     added by ``build_system_blocks``). Kept tiny and byte-stable within a
@@ -459,6 +481,11 @@ class _KnowledgeHooks:
     skills_by_name: dict[str, Skill] = field(default_factory=dict)
     guides_by_name: dict[str, Skill] = field(default_factory=dict)
     frozen_block: str | None = None
+    #: Compaction entry id observed when ``frozen_block`` was computed. A
+    #: change here (a new compaction marker) re-opens selection once — the
+    #: transcript head is being rewritten anyway, so the prompt cache the
+    #: freeze protects is already gone.
+    frozen_compaction_id: str | None = None
     mcp_resolver: Callable[[str], str | None] | None = None
     mcp_catalogue: Callable[[], str] | None = None
 
@@ -598,15 +625,38 @@ async def _setup_knowledge(
     return hooks
 
 
-async def _select_knowledge_block(hooks: _KnowledgeHooks, query: str) -> str:
-    """Freeze selected knowledge plus the bounded MCP catalogue for the session."""
-    if hooks.frozen_block is not None:
+async def _select_knowledge_block(
+    hooks: _KnowledgeHooks,
+    query: str,
+    *,
+    compaction_id: str | None = None,
+    cwd: str | None = None,
+) -> str:
+    """Freeze selected knowledge plus the bounded MCP catalogue for the session.
+
+    The freeze exists purely for prompt-cache warmth: once the block is
+    rendered, later turns reuse it byte-for-byte rather than re-embedding and
+    possibly reordering the tail. The ONE thing that re-opens it is a new
+    compaction marker (``compaction_id`` differs from the id recorded at
+    freeze time): compaction rewrites the transcript head the block rides
+    behind, invalidating that cache anyway, so selection is re-run against
+    the latest user query + compaction summary (the query the provider
+    extracts) and re-frozen under the new id. ``cwd`` feeds gitignore-style
+    ``globs`` matching in the index (see
+    :meth:`local_operator.skills.index.SkillIndex.select`).
+    """
+    if hooks.frozen_block is not None and hooks.frozen_compaction_id == compaction_id:
         return hooks.frozen_block
 
     picked: list[Skill] = []
     query = query.strip()
     if query:
-        picked = await hooks.index.select(query) if hooks.index is not None else []
+        # cwd rides as a keyword ONLY when set: test doubles and alternate
+        # index shapes in the wild implement ``select(query, ...)`` with the
+        # historical signature, and there is no globs matching to do without
+        # a cwd anyway.
+        select_kwargs: dict[str, Path] = {"cwd": Path(cwd)} if cwd else {}
+        picked = await hooks.index.select(query, **select_kwargs) if hooks.index is not None else []
         if hooks.agent_hint_index is not None:
             matching_agents = await hooks.agent_hint_index.select(query, k=1)
             agents_guide = hooks.guides_by_name.get("agents")
@@ -629,6 +679,7 @@ async def _select_knowledge_block(hooks: _KnowledgeHooks, query: str) -> str:
         if catalogue:
             sections.append(catalogue)
     hooks.frozen_block = "\n\n".join(sections)
+    hooks.frozen_compaction_id = compaction_id
     return hooks.frozen_block
 
 
@@ -686,7 +737,8 @@ def _make_system_blocks_provider(
     so semantic knowledge selection can live inside. Block layout comes from
     ``prompts_api.build_system_blocks``: stable head (instructions, inventory,
     env) then the session-frozen guide/skill block last, so the cache prefix
-    stays warm.
+    stays warm — re-selected only when a new compaction marker invalidates
+    that prefix anyway (see :func:`_select_knowledge_block`).
 
     ``goal_state`` is the SAME holder the session facade exposes through
     ``set_goal``, which is how a ``/goal`` edit reaches the next turn's
@@ -695,8 +747,8 @@ def _make_system_blocks_provider(
     ``user_instructions`` is captured once by the caller and closed over
     rather than re-read here: it lands in the byte-stable head block, so
     re-reading the file per turn would let a mid-session edit silently
-    invalidate the whole cached prefix. Editing the file takes effect on the
-    next session, which is also what makes a session's prompt reproducible.
+    invalidate the whole cached prefix. Editing the file takes effect on
+    the next session, which is also what makes a session's prompt reproducible.
     """
 
     async def provider() -> list[str]:
@@ -704,7 +756,12 @@ def _make_system_blocks_provider(
 
         query = _latest_user_query(transcript)
         try:
-            knowledge_block = await _select_knowledge_block(hooks, query)
+            knowledge_block = await _select_knowledge_block(
+                hooks,
+                query,
+                compaction_id=_latest_compaction_id(transcript),
+                cwd=cwd,
+            )
         except Exception:  # noqa: BLE001 — never break the turn
             knowledge_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -1089,6 +1146,9 @@ def attach_mcp_dispose(session: Session, manager: McpManager) -> None:
     """
     session.add_dispose_hook(manager.disconnect_all)
     session.mcp_manager = manager
+    # Breaker incidents become session incidents: the model learns a server's
+    # tools are gone instead of hammering them (MCP-07's observable half).
+    manager.on_incident = session._on_mcp_incident
 
 
 def attach_auth_dispose(session: Session, auth_store: AuthStore | None) -> None:
