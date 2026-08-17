@@ -1426,3 +1426,45 @@ async def test_bash_real_abort_still_kills(tmp_path) -> None:
         await task
     await asyncio.sleep(0.1)
     assert manager.list() == []  # nothing was backgrounded
+
+
+@pytest.mark.asyncio
+async def test_cancel_backgrounded_bash_kills_process_group(tmp_path) -> None:
+    """Manager cancel immediately cancels the detached runner; cleanup must
+    still kill/reap the start-new-session process before it can create a marker."""
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg-cancel", jobs=manager)
+    tools = {t.name: t for t in create_tools(context)}
+    task = asyncio.create_task(
+        _call(
+            tools,
+            "bash",
+            {"command": "sleep 1; touch should-not-exist"},
+            context,
+        )
+    )
+    await asyncio.sleep(0.15)
+    task.cancel()
+    result = await task
+    assert result.details is not None
+    job_id = result.details["job_id"]
+    assert await manager.cancel(job_id) is True
+    await asyncio.sleep(1.2)
+    assert not (tmp_path / "should-not-exist").exists()
+    job = manager.get(job_id)
+    assert job is not None and job.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_glob_respects_nested_gitignore(tools, context, tmp_path) -> None:
+    nested = tmp_path / "packages" / "a"
+    nested.mkdir(parents=True)
+    (nested / ".gitignore").write_text("generated/\n")
+    (nested / "generated").mkdir()
+    (nested / "generated" / "hidden.py").write_text("x")
+    (nested / "visible.py").write_text("x")
+    result = await _call(tools, "glob", {"pattern": "**/*.py"}, context)
+    assert "packages/a/visible.py" in result.text
+    assert "packages/a/generated/hidden.py" not in result.text

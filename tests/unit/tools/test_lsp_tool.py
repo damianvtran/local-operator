@@ -319,3 +319,47 @@ def test_jedi_internal_failure_becomes_an_error_result(tool, tree, monkeypatch) 
     assert result.is_error
     assert "failed unexpectedly" in result.text
     assert "jedi exploded" in result.text
+
+
+@pytest.mark.asyncio
+async def test_outside_initial_path_requires_approval(tool, tree, tmp_path) -> None:
+    outside = tmp_path.parent / "outside-lsp.py"
+    outside.write_text("def secret():\n    return 1\n")
+    requests: list[str] = []
+
+    async def deny(tool_name: str, description: str) -> bool:
+        requests.append(description)
+        return False
+
+    context = ToolContext(cwd=str(tree), request_approval=deny)
+    result = await tool.execute(
+        "c", {"action": "symbols", "path": str(outside)}, None, None, context
+    )
+    assert result.is_error is True
+    assert "declined" in result.text.lower()
+    assert requests and str(outside) in requests[0]
+
+
+@pytest.mark.asyncio
+async def test_outside_initial_path_works_only_after_approval(tool, tree, tmp_path) -> None:
+    outside = tmp_path.parent / "approved-lsp.py"
+    outside.write_text("def allowed():\n    return 1\n")
+
+    async def approve(*_args: Any) -> bool:
+        return True
+
+    context = ToolContext(cwd=str(tree), request_approval=approve)
+    result = await tool.execute(
+        "c", {"action": "symbols", "path": str(outside)}, None, None, context
+    )
+    assert result.is_error is False
+    assert "allowed" in result.text
+
+
+def test_result_path_filter_allows_initial_or_cwd_only(tree, tmp_path) -> None:
+    from local_operator.tools.lsp import _allowed_source
+
+    initial = tree / "pkg" / "main.py"
+    assert _allowed_source(initial, tree, initial) is True
+    assert _allowed_source(tree / "pkg" / "lib.py", tree, initial) is True
+    assert _allowed_source(tmp_path.parent / "secret.py", tree, initial) is False

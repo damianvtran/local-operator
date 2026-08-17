@@ -103,3 +103,17 @@ def test_empty_when_no_files(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     assert discover_context_files(repo) == []
     assert load_repo_guidance(repo) == ""
+
+
+def test_cap_keeps_nearest_most_specific_files(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    current = repo
+    for index in range(7):
+        current = current / f"d{index}"
+        current.mkdir()
+        (current / "AGENTS.md").write_text(f"guidance {index}\n")
+    files = discover_context_files(current)
+    assert len(files) == 5
+    bodies = [file.read_text() for file in files]
+    # Prompt order is farthest->nearest, but the retained SET is the nearest 5.
+    assert bodies == [f"guidance {i}\n" for i in range(2, 7)]

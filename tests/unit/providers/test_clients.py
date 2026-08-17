@@ -1568,3 +1568,127 @@ async def test_google_parallel_same_tool_calls_get_unique_ids() -> None:
     assert calls[0].id != calls[1].id
     assert {calls[0].index, calls[1].index} == {0, 1}
     assert all(call.name == "read" for call in calls)
+
+
+async def test_responses_failed_and_top_level_error_raise_provider_errors() -> None:
+    for payload in (
+        {
+            "type": "response.failed",
+            "response": {"error": {"code": "rate_limit_exceeded", "message": "quota gone"}},
+        },
+        {
+            "type": "error",
+            "error": {"code": "invalid_api_key", "message": "bad key"},
+        },
+    ):
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=_sse([payload]), headers={"content-type": "text/event-stream"}
+            )
+
+        client = OpenAICompatClient(
+            "https://api.openai.com/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            openai_api="responses",
+        )
+        with pytest.raises(ProviderError) as error:
+            await _collect(
+                client.stream(
+                    ChatRequest(
+                        model=_spec("openai", "gpt-5.4").model_copy(
+                            update={"supports_responses_api": True}
+                        ),
+                        messages=[Message.user("hi")],
+                    ),
+                    "sk-test",
+                )
+            )
+        assert error.value.message
+
+
+async def test_responses_incomplete_max_output_maps_to_length() -> None:
+    payloads = [
+        {
+            "type": "response.output_item.added",
+            "item": {"type": "function_call", "id": "fc1", "call_id": "c1", "name": "read"},
+        },
+        {
+            "type": "response.incomplete",
+            "response": {
+                "id": "r1",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 10, "output_tokens": 3},
+            },
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=_sse(payloads), headers={"content-type": "text/event-stream"}
+        )
+
+    client = OpenAICompatClient(
+        "https://api.openai.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        openai_api="responses",
+    )
+    events = await _collect(
+        client.stream(
+            ChatRequest(
+                model=_spec("openai", "gpt-5.4").model_copy(
+                    update={"supports_responses_api": True}
+                ),
+                messages=[Message.user("hi")],
+            ),
+            "sk-test",
+        )
+    )
+    end = next(e for e in events if isinstance(e, StreamEndEvent))
+    assert end.stop_reason == "length"  # loop will never execute the partial call
+
+
+async def test_responses_stream_without_terminal_is_provider_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse([{"type": "response.output_text.delta", "delta": "partial"}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatClient(
+        "https://api.openai.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        openai_api="responses",
+    )
+    with pytest.raises(ProviderError, match="without a terminal event"):
+        await _collect(
+            client.stream(
+                ChatRequest(
+                    model=_spec("openai", "gpt-5.4").model_copy(
+                        update={"supports_responses_api": True}
+                    ),
+                    messages=[Message.user("hi")],
+                ),
+                "sk-test",
+            )
+        )
+
+
+def test_responses_tool_image_output_stays_native_image_content() -> None:
+    from local_operator.providers.clients import _messages_to_openai_responses
+
+    message = Message(
+        role="tool",
+        tool_call_id="c1",
+        tool_name="read",
+        content=[
+            TextContent(text="screenshot"),
+            ImageContent(data="aGVsbG8=", mime_type="image/png"),
+        ],
+    )
+    output = _messages_to_openai_responses([message])[0]["output"]
+    assert output == [
+        {"type": "input_text", "text": "screenshot"},
+        {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+    ]

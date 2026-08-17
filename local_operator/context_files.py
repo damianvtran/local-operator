@@ -95,8 +95,9 @@ def discover_context_files(cwd: str | Path) -> list[Path]:
             break
     # Nearest-last above; the prompt wants farthest-first so the nearest file
     # (most specific) is the LAST thing in the block.
+    found = found[:MAX_CONTEXT_FILES]  # keep nearest before reversing for prompt order
     found.reverse()
-    return found[:MAX_CONTEXT_FILES]
+    return found
 
 
 def render_context_files(files: list[Path], cwd: str | Path) -> str:

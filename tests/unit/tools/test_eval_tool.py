@@ -322,3 +322,35 @@ def test_tool_shape() -> None:
 def test_describe_approval_shows_code_first_line() -> None:
     sentence = eval_tool._describe_eval_approval({"code": "x = 1\ny = 2"}, "/ws")
     assert sentence.startswith("eval: ")
+
+
+def test_worker_caps_stdout_stderr_display_and_repr_before_json() -> None:
+    """Containment is worker-side: huge output never reaches the parent or
+    json.dumps unbounded, even before the eval tool's 8KiB spill layer."""
+    from local_operator.tools.eval_worker import (
+        DISPLAY_CHAR_LIMIT,
+        STREAM_CHAR_LIMIT,
+        _handle,
+    )
+
+    payload = _handle(
+        {},
+        {
+            "id": "cap",
+            "code": (
+                "print('x' * 10_000_000)\n"
+                "import sys\n"
+                "print('e' * 10_000_000, file=sys.stderr)\n"
+                "display('d' * 10_000_000)\n"
+                "'r' * 10_000_000"
+            ),
+        },
+    )
+    assert len(payload["stdout"]) <= STREAM_CHAR_LIMIT + 100
+    assert len(payload["stderr"]) <= STREAM_CHAR_LIMIT + 100
+    assert sum(len(item) for item in payload["display"]) <= DISPLAY_CHAR_LIMIT + 100
+    assert len(payload["result"]) < 10_000
+    assert "truncated" in payload["stdout"]
+    # reprlib truncates one huge value before it reaches the display-channel
+    # aggregate cap; either path is bounded without building a giant payload.
+    assert "..." in payload["display"][0]

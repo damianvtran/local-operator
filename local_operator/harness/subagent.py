@@ -266,7 +266,7 @@ def _make_runner(
             )
             bridge = asyncio.create_task(_abort_bridge(signal, child))
             try:
-                await child.prompt(prompt)
+                await child.prompt(effective_prompt)
             finally:
                 bridge.cancel()
                 with contextlib.suppress(BaseException):

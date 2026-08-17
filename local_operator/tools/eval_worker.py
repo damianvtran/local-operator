@@ -42,10 +42,81 @@ import ast
 import contextlib
 import io
 import json
+import reprlib
 import sys
 import traceback
 from collections.abc import Callable
 from typing import Any
+
+#: Worker-side protocol caps. Parent-side spill_truncate is intentionally
+#: later; these caps prevent a giant print/display/repr from allocating and
+#: JSON-encoding gigabytes BEFORE the parent gets a chance to spill it.
+STREAM_CHAR_LIMIT = 1_000_000
+DISPLAY_CHAR_LIMIT = 256_000
+TRUNCATED_MARKER = "\n[…worker output truncated before protocol serialization]"
+
+_REPR = reprlib.Repr()
+_REPR.maxstring = 4096
+_REPR.maxother = 4096
+_REPR.maxlist = 100
+_REPR.maxtuple = 100
+_REPR.maxdict = 100
+
+
+class _CappedTextIO(io.TextIOBase):
+    """Text sink retaining at most ``limit`` chars while reporting all writes
+    successful, so user code cannot distinguish it from StringIO."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self._parts: list[str] = []
+        self._used = 0
+        self.truncated = False
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, value: str) -> int:
+        text = str(value)
+        remaining = self.limit - self._used
+        if remaining > 0:
+            kept = text[:remaining]
+            self._parts.append(kept)
+            self._used += len(kept)
+        if len(text) > max(remaining, 0):
+            self.truncated = True
+        return len(text)
+
+    def getvalue(self) -> str:
+        body = "".join(self._parts)
+        return body + (TRUNCATED_MARKER if self.truncated else "")
+
+
+class _DisplaySink:
+    """Bounded list-shaped display channel (the wire contract stays list[str])."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.items: list[str] = []
+        self.used = 0
+        self.truncated = False
+
+    def add(self, value: str) -> None:
+        remaining = self.limit - self.used
+        if remaining <= 0:
+            self.truncated = True
+            return
+        kept = value[:remaining]
+        self.items.append(kept)
+        self.used += len(kept)
+        if len(value) > remaining:
+            self.truncated = True
+
+    def finish(self) -> list[str]:
+        if self.truncated:
+            self.items.append("[…display output truncated before protocol serialization]")
+        return self.items
+
 
 #: Filename stamped into compiled code so tracebacks name the tool's cell
 #: instead of a real path the model never wrote (or worse, one it did).
@@ -72,12 +143,12 @@ def _safe_repr(value: Any) -> str:
     in-band instead.
     """
     try:
-        return repr(value)
+        return _REPR.repr(value)
     except BaseException as exc:  # noqa: BLE001 — user code, any failure is data
         return f"<unrepresentable result: {type(exc).__name__}: {exc}>"
 
 
-def _make_display(sink: list[str]) -> Callable[..., None]:
+def _make_display(sink: _DisplaySink) -> Callable[..., None]:
     """The per-request ``display`` builtin, appending formatted values to
     ``sink``.
 
@@ -87,9 +158,9 @@ def _make_display(sink: list[str]) -> Callable[..., None]:
     """
 
     def display(value: Any, *more: Any) -> None:
-        sink.append(_safe_repr(value))
+        sink.add(_safe_repr(value))
         for extra in more:
-            sink.append(_safe_repr(extra))
+            sink.add(_safe_repr(extra))
 
     return display
 
@@ -145,11 +216,12 @@ def _execute(namespace: dict[str, Any], code: str) -> str | None:
 
 def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
     """Execute one request and build its response mapping."""
-    display_sink: list[str] = []
+    display_sink = _DisplaySink(DISPLAY_CHAR_LIMIT)
     # Rebound per request (see _make_display).
     namespace["display"] = _make_display(display_sink)
 
-    stdout, stderr = io.StringIO(), io.StringIO()
+    stdout = _CappedTextIO(STREAM_CHAR_LIMIT)
+    stderr = _CappedTextIO(STREAM_CHAR_LIMIT)
     ok = True
     error: str | None = None
     result: str | None = None
@@ -169,7 +241,7 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
         "stderr": stderr.getvalue(),
         "error": error,
         "result": result,
-        "display": display_sink,
+        "display": display_sink.finish(),
     }
 
 

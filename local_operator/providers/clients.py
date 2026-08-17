@@ -453,6 +453,31 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
     return {"role": role, "content": parts}
 
 
+def _tool_output_to_openai_responses(
+    output: str | list[dict[str, Any]],
+) -> str | list[dict[str, Any]]:
+    """Chat-completions tool content -> Responses function output content.
+
+    Responses accepts a string OR native input content blocks. JSON-encoding
+    chat's image_url parts turns base64 into megabytes of plain text and makes
+    the screenshot invisible to the model; translate to input_text/input_image
+    instead.
+    """
+    if isinstance(output, str):
+        return output
+    blocks: list[dict[str, Any]] = []
+    for part in output:
+        if part.get("type") == "text":
+            blocks.append({"type": "input_text", "text": part.get("text", "")})
+            continue
+        if part.get("type") == "image_url":
+            image = part.get("image_url") or {}
+            url = image.get("url") if isinstance(image, Mapping) else ""
+            if url:
+                blocks.append({"type": "input_image", "image_url": url})
+    return blocks
+
+
 def _messages_to_openai_responses(messages: Sequence[Message]) -> list[dict[str, Any]]:
     """Render harness history as Responses input items, including tool turns."""
     items: list[dict[str, Any]] = []
@@ -480,7 +505,7 @@ def _messages_to_openai_responses(messages: Sequence[Message]) -> list[dict[str,
                 {
                     "type": "function_call_output",
                     "call_id": message.tool_call_id or "",
-                    "output": output if isinstance(output, str) else json.dumps(output),
+                    "output": _tool_output_to_openai_responses(output),
                 }
             )
             continue
@@ -597,6 +622,35 @@ def _stream_timeout(total: float) -> httpx.Timeout:
     which is the only place that knows a stream has started.
     """
     return httpx.Timeout(total, connect=30.0, read=total, write=120.0)
+
+
+_OPENAI_RESPONSE_ERROR_STATUS = {
+    "invalid_api_key": 401,
+    "authentication_error": 401,
+    "permission_denied": 403,
+    "rate_limit_exceeded": 429,
+    "server_error": 500,
+    "context_length_exceeded": 400,
+}
+
+
+def _openai_response_error(payload: Mapping[str, Any]) -> ProviderError:
+    """Failed/top-level Responses terminal event -> shared ProviderError."""
+    response_obj = payload.get("response") or {}
+    error = payload.get("error") or (
+        response_obj.get("error") if isinstance(response_obj, Mapping) else None
+    )
+    if not isinstance(error, Mapping):
+        error = {"message": str(error or payload)}
+    code = str(error.get("code") or error.get("type") or "")
+    message = _first_text(error.get("message")) or code or "OpenAI Responses request failed"
+    status = _OPENAI_RESPONSE_ERROR_STATUS.get(code)
+    return ProviderError(
+        status,
+        f"{code}: {message}" if code and code not in message else message,
+        retryable=status is None or status == 429 or status >= 500,
+        auth_error=status in (401, 403),
+    )
 
 
 class OpenAICompatClient:
@@ -916,6 +970,7 @@ class OpenAICompatClient:
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
         tool_call_count = 0
+        terminal_stop: str | None = None
         # Output item/call ids -> normalized tool-call index.
         call_indexes: dict[str, int] = {}
 
@@ -961,7 +1016,7 @@ class OpenAICompatClient:
                     delta = payload.get("delta")
                     if delta:
                         yield StreamTextDelta(delta=delta)
-                elif event_type == "response.completed":
+                elif event_type in ("response.completed", "response.incomplete"):
                     response_obj = payload.get("response") or {}
                     if response_obj.get("id"):
                         provider_payload = {"id": response_obj["id"]}
@@ -979,9 +1034,36 @@ class OpenAICompatClient:
                             context_tokens=int(raw.get("input_tokens", 0)) or None,
                         )
                         yield StreamUsageEvent(usage=usage)
+                    if event_type == "response.completed":
+                        terminal_stop = "toolUse" if tool_call_count else "stop"
+                    else:
+                        incomplete = response_obj.get("incomplete_details") or {}
+                        reason = str(
+                            incomplete.get("reason")
+                            if isinstance(incomplete, Mapping)
+                            else incomplete
+                        )
+                        if reason in ("max_output_tokens", "max_output_chars"):
+                            # Length means the loop pairs placeholders and NEVER
+                            # executes a partial function call.
+                            terminal_stop = "length"
+                        else:
+                            raise ProviderError(
+                                400,
+                                f"OpenAI Responses incomplete: {reason or 'unknown reason'}",
+                                retryable=False,
+                            )
+                elif event_type in ("response.failed", "error"):
+                    raise _openai_response_error(payload)
 
+        if terminal_stop is None:
+            raise ProviderError(
+                None,
+                "OpenAI Responses stream ended without a terminal event",
+                retryable=True,
+            )
         yield StreamEndEvent(
-            stop_reason="toolUse" if tool_call_count else "stop",
+            stop_reason=terminal_stop,
             usage=usage,
             provider_payload=provider_payload,
         )

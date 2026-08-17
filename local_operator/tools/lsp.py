@@ -42,7 +42,9 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.tools.builtin import (
+    _approval_description,
     _capped_list_body,
+    _check_approval,
     _error,
     _guard,
     _resolve_workspace_path,
@@ -262,6 +264,15 @@ def _no_symbol_at_position_error(tool_call_id: str, params: LspParams, display: 
     )
 
 
+def _allowed_source(path: Path, root: Path, initial: Path) -> bool:
+    """Initial path (explicitly approved if outside) or anything inside cwd."""
+    try:
+        resolved = path.expanduser().resolve()
+        return resolved == initial.resolve() or resolved.is_relative_to(root.resolve())
+    except (OSError, RuntimeError):
+        return False
+
+
 def _definitions_result(
     tool_call_id: str,
     script: Any,
@@ -285,6 +296,7 @@ def _definitions_result(
         return _no_symbol_at_position_error(tool_call_id, params, display)
 
     rows: list[str] = []
+    omitted_outside = 0
     seen: set[tuple[str, int | None, str]] = set()
     label = params.name or (targets[0].name if targets else "")
     for target in targets:
@@ -297,15 +309,21 @@ def _definitions_result(
             # ``def print`` name carries module_path=None).
             rows.append(f"builtins: {target.name} ({target.type})")
             continue
-        target_lines = _source_lines(Path(target.module_path), cache)
+        target_path = Path(target.module_path)
+        if not _allowed_source(target_path, root, path):
+            omitted_outside += 1
+            continue
+        target_lines = _source_lines(target_path, cache)
         snippet = (
             target_lines[target.line - 1].strip() if 0 < target.line <= len(target_lines) else ""
         )
-        rows.append(f"{_display_path(Path(target.module_path), root)}:{target.line}: {snippet}")
+        rows.append(f"{_display_path(target_path, root)}:{target.line}: {snippet}")
     elided = len(rows) - LSP_DEFINITION_LIMIT
     if elided > 0:
         rows = rows[:LSP_DEFINITION_LIMIT]
         rows.append(f"… and {elided} more")
+    if omitted_outside:
+        rows.append(f"({omitted_outside} outside-workspace definition(s) omitted)")
     where = f" at {display}:{used[0]}:{used[1]}" if used else ""
     return _text(
         tool_call_id,
@@ -338,13 +356,18 @@ def _references_result(
     label = params.name or refs[0].name
     rows: list[str] = []
     positionless = 0
+    omitted_outside = 0
     for ref in refs:
         if ref.module_path is None or ref.line is None:
             positionless += 1
             continue
-        ref_lines = _source_lines(Path(ref.module_path), cache)
+        ref_path = Path(ref.module_path)
+        if not _allowed_source(ref_path, root, path):
+            omitted_outside += 1
+            continue
+        ref_lines = _source_lines(ref_path, cache)
         text = ref_lines[ref.line - 1].rstrip() if 0 < ref.line <= len(ref_lines) else ""
-        rows.append(f"{_display_path(Path(ref.module_path), root)}:{ref.line}: {text}")
+        rows.append(f"{_display_path(ref_path, root)}:{ref.line}: {text}")
     if not rows:
         return _text(
             tool_call_id,
@@ -357,6 +380,8 @@ def _references_result(
     body, details = _capped_list_body("\n".join(rows), shown, "lsp", context)
     if positionless:
         body += f"\n({positionless} reference(s) without source positions omitted)"
+    if omitted_outside:
+        body += f"\n({omitted_outside} outside-workspace reference(s) omitted)"
     return _text(
         tool_call_id,
         "lsp",
@@ -427,6 +452,17 @@ def _rename_preview_result(
         except RefactoringError as exc:
             last_error = exc
             continue
+        changed = [Path(p) for p in refactoring.get_changed_files() if p is not None]
+        renamed = [Path(p) for pair in refactoring.get_renames() for p in pair]
+        outside = [p for p in (*changed, *renamed) if not _allowed_source(p, root, path)]
+        if outside:
+            shown = ", ".join(str(p) for p in outside[:3])
+            return _error(
+                tool_call_id,
+                "lsp",
+                "rename preview crosses outside the approved workspace; refusing to expose "
+                f"or propose changes to: {shown}",
+            )
         diff = refactoring.get_diff()
         # jedi renders the refactoring as a unified diff itself (the same
         # ``--- / +++`` shape difflib.unified_diff emits); re-diffing the
@@ -504,7 +540,11 @@ async def execute_lsp(
         root = Path(cwd).expanduser().resolve()
     except RuntimeError:
         root = Path(cwd).resolve()
-    path, _inside, _resolvable = _resolve_workspace_path(params.path, cwd)
+    path, inside, resolvable = _resolve_workspace_path(params.path, cwd)
+    if not inside:
+        description = _approval_description(path, inside, "lsp", resolvable)
+        if not await _check_approval(context, "read", description):
+            return _error(tool_call_id, "lsp", "User declined to inspect this path.")
     if not path.exists():
         return _error(tool_call_id, "lsp", f"Path does not exist: {path}")
     if not path.is_file():

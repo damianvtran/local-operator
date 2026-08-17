@@ -713,3 +713,22 @@ async def test_the_launch_prompt_is_recorded_on_the_job(tmp_path, monkeypatch):
     settled = parent.jobs.get(job_id)
     assert settled is not None and settled.prompt == instruction, "must survive settlement"
     await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_scout_preamble_reaches_the_provider_turn(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    stream = OneShotStream()
+    parent = make_session(tmp_path, stream)
+    job_id = parent._launch_subagent(label="research", prompt="Map the repo.", agent="scout")
+
+    def settled() -> bool:
+        job = parent.jobs.get(job_id)
+        return job is not None and job.status != "running"
+
+    await wait_for(settled)
+    assert stream.requests
+    first_user = next(message for message in stream.requests[0].messages if message.role == "user")
+    assert "[scout mode:" in first_user.text
+    assert "Map the repo." in first_user.text
+    await parent.dispose()

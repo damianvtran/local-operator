@@ -1236,38 +1236,77 @@ async def execute_bash(
             # budget, keeps the readers alive to drain the pipes, and reports
             # the exit status + bounded output as the job result.
             del job_id, report_progress
-            # Local from the start: assigning it in the timeout branch without
-            # this line would make it a local read-before-assign (the closure
-            # never runs — the outer assignment happens in a scope the runner
-            # never re-enters after registration).
             timed_out_bg = False
+            cancelled_bg = False
             bg_deadline = asyncio.get_running_loop().time() + remaining_timeout
-            while process.returncode is None:
-                if job_signal is not None and job_signal.aborted:
+            bg_wait = asyncio.create_task(process.wait())
+
+            async def cleanup(*, kill: bool) -> None:
+                """Kill/reap the whole process group and close EVERY owner.
+
+                AsyncJobManager.cancel both aborts the job signal and cancels
+                this runner immediately. Without a cancellation handler, that
+                cancellation can land inside the wait below and settle the job
+                while the start-new-session child + pipe readers keep running
+                untracked. Cleanup is bounded but exhaustive: process group,
+                waiter, both readers, transport.
+                """
+                if kill and process.returncode is None:
                     _kill()
-                    break
-                if asyncio.get_running_loop().time() > bg_deadline:
-                    timed_out_bg = True
+                if not bg_wait.done():
+                    with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                        await asyncio.wait_for(asyncio.shield(bg_wait), timeout=1.0)
+                if process.returncode is None:
                     _kill()
-                    break
-                try:
-                    await asyncio.wait_for(asyncio.shield(process.wait()), timeout=0.25)
-                except (TimeoutError, asyncio.TimeoutError):
-                    continue
-            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                    with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                        await asyncio.wait_for(process.wait(), timeout=1.0)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
+                        timeout=0.5,
+                    )
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                if readers:
+                    await asyncio.gather(*readers, return_exceptions=True)
+                if not bg_wait.done():
+                    bg_wait.cancel()
+                    await asyncio.gather(bg_wait, return_exceptions=True)
+                transport = getattr(process, "_transport", None)
+                if transport is not None:
+                    transport.close()
+
+            try:
+                while not bg_wait.done():
+                    if job_signal is not None and job_signal.aborted:
+                        cancelled_bg = True
+                        break
+                    if asyncio.get_running_loop().time() > bg_deadline:
+                        timed_out_bg = True
+                        break
+                    await asyncio.wait({bg_wait}, timeout=0.25)
+                await cleanup(kill=cancelled_bg or timed_out_bg)
+            except asyncio.CancelledError:
+                # Manager cancellation is deliberately immediate. Convert it
+                # into process cleanup first, then preserve cancellation so the
+                # job row settles as cancelled rather than completed/failed.
+                await cleanup(kill=True)
+                raise
+
             out = b"".join(stdout_chunks).decode("utf-8", errors="replace")
             err = b"".join(stderr_chunks).decode("utf-8", errors="replace")
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
-            summary, spill = _capped_list_body(
-                _bash_output_summary(out, err),
-                _bash_output_summary(out, err)[:TOOL_OUTPUT_LIMIT_CHARS],
+            if cancelled_bg:
+                head = "CANCELLED (process killed)"
+            combined = _bash_output_summary(out, err)
+            summary, _spill_details = _capped_list_body(
+                combined,
+                combined[:TOOL_OUTPUT_LIMIT_CHARS],
                 "bash",
                 context,
             )
-            transport = getattr(process, "_transport", None)
-            if transport is not None:
-                transport.close()
             return "\n".join(part for part in (head, f"exit code: {code}", summary) if part)
 
         try:
@@ -2717,6 +2756,35 @@ def _literal_prefix(pattern: str) -> str:
     return "".join(out).rstrip("/")
 
 
+def _path_is_ignored(root: Path, path: Path) -> bool:
+    """Evaluate root + nested ignore files for one glob candidate.
+
+    Unlike grep's walker, pathlib.glob materializes candidates without walking
+    through our rule stack. Rebuild the ancestor stack here so a
+    packages/a/.gitignore has the same authority over `**/*.py` as it does in
+    grep. The caller still bypasses this for an explicitly named literal
+    prefix ("dist/*.js" means the ignored dist on purpose).
+    """
+    try:
+        rel_parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    rules: list[tuple[str, list[_IgnoreRule]]] = []
+    current = root
+    rel_dir = ""
+    for index, part in enumerate(rel_parts):
+        found = _load_ignore_rules(current, rel_dir)
+        if found:
+            rules.append((rel_dir, found))
+        rel = "/".join(rel_parts[: index + 1])
+        candidate = current / part
+        if _ignored(rel, candidate.is_dir(), rules):
+            return True
+        current = candidate
+        rel_dir = rel
+    return False
+
+
 def _glob_walk(root: Path, pattern: str) -> list[str]:
     """The walk half of execute_glob, run in a worker thread.
 
@@ -2725,15 +2793,12 @@ def _glob_walk(root: Path, pattern: str) -> list[str]:
     the pattern's literal prefix names them, because an author who writes
     'dist/index.html' into a repo that ignores dist/ means that file."""
     prefix = _literal_prefix(pattern)
-    rules: list[tuple[str, list[_IgnoreRule]]] = []
-    if root.joinpath(".gitignore").is_file() or root.joinpath(".ignore").is_file():
-        rules = [("", _load_ignore_rules(root, ""))]
     out = []
     for p in root.glob(pattern):
         rel = p.relative_to(root).as_posix()
-        if rules and not rel.startswith(prefix + "/") and rel != prefix:
-            if _ignored(rel, p.is_dir(), rules):
-                continue
+        explicitly_named = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
+        if not explicitly_named and _path_is_ignored(root, p):
+            continue
         out.append(rel + ("/" if p.is_dir() else ""))
     return sorted(out)
 
