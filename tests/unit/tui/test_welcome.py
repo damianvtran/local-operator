@@ -28,8 +28,8 @@ from rich.style import Style
 from rich.text import Text
 from textual.color import Color
 
-from local_operator.session.naming import ConversationName
 from local_operator.harness.types import AgentMessage, ImageContent
+from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import SLASH_COMMANDS, OperatorApp

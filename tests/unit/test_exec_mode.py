@@ -39,8 +39,8 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.headless_print import PrintRenderer, printable_event, run_print_mode
-from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.naming import ConversationName
+from local_operator.session.protocol import CompactionOutcome
 
 # --- Fakes ---------------------------------------------------------------------
 

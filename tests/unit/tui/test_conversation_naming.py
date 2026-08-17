@@ -441,7 +441,7 @@ async def test_a_human_rename_is_never_overwritten_by_a_retitle() -> None:
 
 @pytest.mark.asyncio
 async def test_a_chatty_follow_up_makes_no_call_at_all() -> None:
-    """"thanks" cannot have moved a subject, and the filter is free."""
+    """ "thanks" cannot have moved a subject, and the filter is free."""
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()

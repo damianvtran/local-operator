@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 
-from local_operator.session.naming import ConversationName
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentStartEvent,
@@ -25,6 +24,7 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
     ToolResult,
 )
+from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome, SessionProtocol
 from local_operator.tui.events import (
     AssistantDelta,

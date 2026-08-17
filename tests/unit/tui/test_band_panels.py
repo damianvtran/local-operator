@@ -19,12 +19,12 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 
 from local_operator.harness.types import ImageContent
+from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.todo_panel import MAX_TODO_ROWS, TodoPanel
-from local_operator.session.naming import ConversationName
 
 
 class FakeSession:
