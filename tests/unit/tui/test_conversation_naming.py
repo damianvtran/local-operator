@@ -276,7 +276,7 @@ async def test_a_dead_naming_call_leaves_the_opener_on_the_band() -> None:
 
 @pytest.mark.asyncio
 async def test_a_low_signal_opener_names_nothing_at_all() -> None:
-    """"hi" is not a title in either half of the module.
+    """ "hi" is not a title in either half of the module.
 
     The deterministic filter gates the stand-in as well as the provider call, so
     a greeting leaves the band on its directory fallback rather than putting the
