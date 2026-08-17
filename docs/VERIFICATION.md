@@ -1569,3 +1569,88 @@ Reviewed by `Round11Reviewer` over the two commits: approve, no blocker, no
 major, two nits. S1 above; S2 was that a suite count taken in the shared
 worktree measures eleven agents' uncommitted work as well as this change, so the
 reproducible figure is the one from a detached worktree at the commit.
+
+## The frozen render loop: synchronous stretches inside tool coroutines
+
+Reported as "the TUI intermittently freezes on multiple concurrent tool
+calls". The tool coroutines ride the SAME asyncio loop that renders the TUI,
+so every synchronous stretch inside one is a stretch the frame does not
+animate — and a batch of calls finishing together put several hundred
+milliseconds back-to-back. The measured offender: three concurrent image
+reads blocked the loop for **645 ms** (one 214 ms decode+re-encode each, on
+the loop), which is a freeze by any user's word for it.
+
+The stretches, and where they moved (`asyncio.to_thread`, the pattern grep
+and glob already used):
+
+| Site | What blocked |
+|---|---|
+| `execute_read` | `read_bytes` (2 MB text / 16 MB image), PIL decode+re-encode, text decode+`splitlines`, wide-`iterdir` listings |
+| `execute_write` | prior-content `read_text`, `write_text`, `difflib.unified_diff` (pure Python, O(N·M)) |
+| `execute_edit` | same read/replace/write/diff block |
+| `execute_bash` | multi-MB chunk joins+decodes, the oversized-output tail (spill disk write, elide slicing) |
+| `execute_grep`/`execute_glob` | match-list joins, spill write |
+
+Evidence: `tests/unit/tools/test_loop_liveness.py` — a 20 ms heartbeat
+running while the tools work. On the fix: max gap under 120 ms. At `d424441`
+(the PR base): **0.649 s** for three concurrent image reads. The refusal
+strings and byte-level framing of `edit`'s ambiguity contract are asserted
+unchanged by the current tools suite (363 tests).
+
+## The name that never landed (and the early provider failures)
+
+A 10:08 session held three user messages and zero replies: the provider path
+was failing from minute zero while a heavy sibling session ran, and the
+session's terminal title stayed `lo › tmp` forever. Two causes, one fix each:
+
+1. **The naming errand raced the opening turn.** Auto-naming launched
+   concurrently with the first turn's own provider call — two simultaneous
+   requests on one OAuth account at its busiest moment, and OAuth concurrency
+   ceilings 429 BOTH: the turn surfaced early "provider failure" notices and
+   the naming call died. The errand now waits on `_turn_settled` (bounded at
+   twice the title call's own timeout, so a wedged turn cannot wedge the
+   name) before calling the provider.
+2. **A failed attempt was spent forever.** `_name_requested` latched on
+   schedule, not on success, so the minute-zero failure cost the session its
+   name permanently. The latch now releases when an attempt produces no title
+   and the conversation is still unnamed; the next substantive message
+   retries. Bounded by the user's own sends, and it can never displace an
+   existing (or user-set) title — the `conversation_name` guard in
+   `_maybe_name_conversation` still owns that.
+
+Short-throttle 429s also get **two** same-credential retries (was one), each
+sleeping the ADVERTISED delay: burst and concurrency limits clear in
+seconds, and the first retry usually lands inside the collision that created
+the 429. Long quota windows still rotate immediately — the 30 s
+`MAX_USAGE_RETRY_AFTER_MS` cap is what keeps an interactive session out of a
+provider's reset window.
+
+Evidence: `tests/unit/tui/test_conversation_naming.py` (3 tests — deferral,
+unlatch-and-retry, store-and-stay-spent; the first two FAIL at the PR base,
+`d424441`),
+`tests/unit/providers/test_failover.py::test_short_rate_limit_retries_twice_per_credential`
+(asserts `k1,k1,k1,k2,k2,k2` with 4 advertised-delay sleeps; the one-retry
+contract it replaces is the test it edited).
+
+## The pointer that never changed
+
+"The cursor doesn't update to the pointer when hovering clickable elements;
+typable regions work." Textual 8.2.8 has the whole mechanism — the `pointer`
+CSS rule, `Screen.update_pointer_shape()` walking the hovered widget on every
+mouse move, `App._set_pointer_shape` emitting OSC 22 (ghostty implements it;
+a terminal that does not ignores it harmlessly) — and the app set it on
+exactly two subagent surfaces. Tool cards, toasts and every picker row kept
+the default arrow.
+
+`ToolCard` and `Toast` now carry a static `pointer: pointer` (their whole
+surface is the click target); the command/model/session pickers set the
+inline rule from the row index under the move, so their non-row rows (the
+overflow count, padding) give the arrow back. `set_rule` gates on change, so
+the per-move assignment is a no-op when the shape did not move.
+
+Evidence: `tests/unit/tui/test_pointer_shapes.py` — `pilot.hover` through the
+real mouse-move path, asserting `Screen._pointer_shape` (the exact value
+OSC 22 carries): `pointer` over a card and a picker row, `default` over the
+transcript ground and the picker's overflow row. A hover frame from the real
+`OperatorApp` is byte-identical before and after (the rule paints no pixels);
+the shape is the behavioural contract, which is what the tests hold.

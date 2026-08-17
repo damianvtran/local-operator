@@ -621,11 +621,19 @@ class CommandPicker(Static):
         if index != self._hovered:
             self._hovered = index
             self._repaint()
+        # The hand pointer only over a ROW: the picker's padding and notice
+        # rows are not click targets, and a static `pointer` rule on the
+        # widget would promise the click the empty rows cannot keep. Setting
+        # the inline rule is what makes the shape follow the hover — the
+        # property's own observer re-runs `Screen.update_pointer_shape()`,
+        # and no-ops when the value did not change.
+        self.styles.pointer = "pointer" if index is not None else "default"
 
     def on_leave(self, event: events.Leave) -> None:
         if self._hovered is not None:
             self._hovered = None
             self._repaint()
+        self.styles.pointer = "default"
 
     def on_resize(self, event: events.Resize) -> None:
         """Re-truncate every row against the new width."""

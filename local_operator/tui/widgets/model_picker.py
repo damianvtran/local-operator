@@ -700,11 +700,17 @@ class ModelPicker(Static):
         if index != self._hovered:
             self._hovered = index
             self._repaint()
+        # Hand pointer over a row only (a click chooses it); the widget's
+        # non-row rows keep the default shape. The inline-rule assignment
+        # drives `Screen.update_pointer_shape()` through the property's own
+        # observer and no-ops when the shape did not change.
+        self.styles.pointer = "pointer" if index is not None else "default"
 
     def on_leave(self) -> None:
         if self._hovered is not None:
             self._hovered = None
             self._repaint()
+        self.styles.pointer = "default"
 
     def on_click(self, event) -> None:  # noqa: ANN001 - Textual event type
         index = self._index_at(event.y)

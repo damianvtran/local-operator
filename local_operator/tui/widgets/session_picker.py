@@ -365,11 +365,17 @@ class SessionPickerScreen(ModalScreen[str | None]):
         if index != self._hovered:
             self._hovered = index
             self._repaint()
+        # Hand pointer over a row only (a click resumes it); the card's
+        # padding and headers keep the default shape. The inline-rule
+        # assignment drives `Screen.update_pointer_shape()` through the
+        # property's own observer and no-ops when the shape did not change.
+        self.styles.pointer = "pointer" if index is not None else "default"
 
     def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
         if self._hovered is not None:
             self._hovered = None
             self._repaint()
+        self.styles.pointer = "default"
 
     def _index_at(self, event) -> int | None:  # type: ignore[no-untyped-def]
         """List index under a mouse event, or ``None`` anywhere else.
