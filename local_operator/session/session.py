@@ -2117,10 +2117,10 @@ class Session:
         # the parent session, every subagent and the TUI repaint, that made one
         # agent's threshold check a global stall: a stall trace of eight
         # concurrent subagents put 116 of 121 blocking samples inside the
-        # encoder reached from here (worst single stall 860 ms). The ``_async``
-        # forms hand large histories to a worker thread, where tiktoken's GIL
-        # release lets them run genuinely in parallel; small ones still run
-        # inline so a short session pays no thread-hop tax.
+        # encoder reached from here (worst single stall 860 ms).
+        # ``_offloaded`` hands large histories to a worker thread, where
+        # tiktoken's GIL release lets them run genuinely in parallel; small
+        # ones still run inline so a short session pays no thread-hop tax.
         local_estimate = await self._offloaded(
             compaction_api, "estimate_messages_tokens", llm_history
         )

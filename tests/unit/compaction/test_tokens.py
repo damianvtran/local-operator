@@ -488,8 +488,18 @@ class TestThreadSafetyForOffloadedEstimation:
 
         assert stale == 0, f"{stale}/25 invalidations were lost, leaving a stale estimate"
 
-    def test_generation_bookkeeping_cannot_grow_without_bound(self):
-        """The race fix must not become the leak the cache bound exists to stop."""
+    def test_race_bookkeeping_cannot_grow_without_bound(self):
+        """The race fix must not become the leak the cache bound exists to stop.
+
+        Both paths, because the INSERT path alone hides the leak that matters.
+        An earlier per-message-id counter was pruned only on eviction, and
+        eviction only happens on an insert — so the once-per-turn path that
+        invalidates without ever estimating (a prune below the compaction
+        threshold, where the cheap upper bound returns early and the exact
+        estimator never runs) grew one permanent entry per turn, on a
+        module-global dict shared by every session. Measured 20,000 entries
+        after 20,000 such turns with the cache still empty.
+        """
         from local_operator.compaction import tokens as mod
 
         clear_estimate_cache()
@@ -498,4 +508,57 @@ class TestThreadSafetyForOffloadedEstimation:
                 [Message.user(f"b{batch} m{i} hello world") for i in range(400)]
             )
         assert len(mod._ESTIMATE_CACHE) <= mod._ESTIMATE_CACHE_MAX
-        assert len(mod._ESTIMATE_GENERATION) <= mod._ESTIMATE_CACHE_MAX
+
+        # The path that leaked: invalidate, never estimate.
+        for turn in range(5_000):
+            invalidate_message_cache(Message.user(f"turn {turn} tool output"))
+        assert not mod._INFLIGHT_ESTIMATES, (
+            f"{len(mod._INFLIGHT_ESTIMATES)} entries survived invalidations that "
+            "never ran an estimate; the race bookkeeping is leaking"
+        )
+
+    def test_a_stalled_computation_cannot_be_revived_by_cache_turnover(self):
+        """Race state is keyed by a unique ticket, never by message id.
+
+        With a per-id counter, evicting the id dropped its counter, so a later
+        read returned 0 — the same value a stalled computation had recorded
+        before it started encoding. That resurrects the exact lost-invalidation
+        bug the counter was added to fix, just behind a narrower window.
+        """
+        import threading
+
+        from local_operator.compaction import tokens as mod
+
+        real_compute = mod._compute_tokens
+        try:
+            clear_estimate_cache()
+            message = Message.user("lorem ipsum " * 400)
+            computing = threading.Event()
+
+            def slow_compute(msg, _real=real_compute):
+                value = _real(msg)
+                computing.set()
+                time.sleep(0.15)
+                return value
+
+            mod._compute_tokens = slow_compute
+            worker = threading.Thread(target=lambda: estimate_tokens(message))
+            worker.start()
+            computing.wait(timeout=5)
+
+            message.content = [TextContent(text="blanked")]
+            invalidate_message_cache(message)
+
+            # Churn the cache past its bound so any per-id state would recycle.
+            mod._compute_tokens = real_compute
+            for i in range(mod._ESTIMATE_CACHE_MAX + 500):
+                estimate_tokens(Message.user(f"churn {i}"))
+            worker.join(timeout=5)
+
+            cached = mod._ESTIMATE_CACHE.get(message.id)
+            assert cached is None or cached == real_compute(message), (
+                "a stalled computation's pre-mutation count was cached after "
+                "cache turnover recycled its race state"
+            )
+        finally:
+            mod._compute_tokens = real_compute

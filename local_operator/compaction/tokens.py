@@ -65,10 +65,12 @@ closed by :data:`_ESTIMATE_GENERATION` rather than by widening the lock.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import threading
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
 from local_operator.harness.types import Message, TextContent
@@ -83,7 +85,7 @@ _CACHE_LOCK = threading.Lock()
 
 #: Below this many characters of history, estimating inline is cheaper than a
 #: thread hop (~50-100 us round trip). Above it the encode dominates and the
-#: hop pays for itself many times over. Applied by the ``_async`` helpers so
+#: hop pays for itself many times over. Applied by ``Session._offloaded`` so
 #: callers do not each re-derive the trade-off.
 OFFLOAD_MIN_CHARS = 20_000
 
@@ -298,20 +300,47 @@ _ESTIMATE_CACHE_MAX = 4096
 #: and unsubscribe is O(1).
 _INVALIDATORS: dict[int, Callable[[Message], None]] = {}
 
-#: Monotonic counter bumped by every :func:`invalidate_message_cache`, per
-#: message id. It closes a lost-invalidation race that only exists because
-#: ``_compute_tokens`` deliberately runs OUTSIDE :data:`_CACHE_LOCK`:
+
+@dataclass
+class _Inflight:
+    """One token computation that is running right now.
+
+    ``message_id`` is what an invalidation matches on; ``invalidated`` is the
+    flag it sets. A tiny mutable record rather than a tuple because the flag
+    is written by a different thread than the one that created it.
+    """
+
+    message_id: str
+    invalidated: bool = False
+
+
+#: In-flight computations, keyed by a unique ticket. Closes a
+#: lost-invalidation race that exists only because ``_compute_tokens``
+#: deliberately runs OUTSIDE :data:`_CACHE_LOCK`:
 #:
 #:   thread A reads the cache (miss) -> starts encoding
 #:   the loop mutates the message and invalidates it (``pop`` finds nothing)
 #:   thread A inserts the count it computed from the PRE-mutation message
 #:
 #: The stale value then survives forever, because the invalidation that should
-#: have removed it already ran. Recording the generation A observed BEFORE it
-#: computed, and refusing the insert if it changed meanwhile, makes the
-#: invalidation win without pulling the encode under the lock. Entries are
-#: dropped alongside their cache entry, so this cannot outgrow the cache.
-_ESTIMATE_GENERATION: dict[str, int] = {}
+#: have removed it already ran. A computation registers a ticket before it
+#: encodes; an invalidation flags every ticket for that message id; the
+#: computation declines to cache a result whose ticket was flagged. The
+#: invalidation therefore wins without pulling the encode under the lock.
+#:
+#: Keyed by TICKET, not by message id, which is what makes the state bounded
+#: and ABA-free. Bounded: an entry exists only while a computation is
+#: running, so the dict is sized by concurrency (a handful), not by the
+#: number of messages ever seen — an earlier per-id counter leaked one entry
+#: per invalidation on the once-per-turn prune path, which never inserts and
+#: so never evicted (20k turns -> 20k entries, cache still empty). ABA-free:
+#: tickets are unique and never reused, so a stalled computation cannot
+#: observe a recycled value and mistake it for its own.
+_INFLIGHT_ESTIMATES: dict[int, "_Inflight"] = {}
+
+#: Source of ticket ids. Guarded by :data:`_CACHE_LOCK`; monotonic so a
+#: ticket is never reused within a process.
+_TICKET_SEQUENCE = itertools.count()
 
 
 def estimate_tokens(message: Message) -> int:
@@ -340,23 +369,30 @@ def estimate_tokens(message: Message) -> int:
         if cached is not None:
             _ESTIMATE_CACHE.move_to_end(message.id)
             return cached
-        # The generation this computation is about to be based on. If an
-        # invalidation bumps it while the encode runs, the result below
-        # describes a message that no longer exists and must not be cached.
-        generation = _ESTIMATE_GENERATION.get(message.id, 0)
+        # Register this computation BEFORE releasing the lock, so any
+        # invalidation that lands while it encodes can find and flag it.
+        ticket = next(_TICKET_SEQUENCE)
+        _INFLIGHT_ESTIMATES[ticket] = _Inflight(message_id=message.id)
 
-    tokens = _compute_tokens(message)
+    try:
+        tokens = _compute_tokens(message)
+    except BaseException:
+        # The ticket must not outlive its computation, or the bound above
+        # ceases to hold the moment an encode raises.
+        with _CACHE_LOCK:
+            _INFLIGHT_ESTIMATES.pop(ticket, None)
+        raise
 
     with _CACHE_LOCK:
-        if _ESTIMATE_GENERATION.get(message.id, 0) != generation:
+        inflight = _INFLIGHT_ESTIMATES.pop(ticket, None)
+        if inflight is None or inflight.invalidated:
             # Invalidated mid-flight: return the value to THIS caller (it is
             # the honest answer for the message as it was read) but leave the
             # cache empty so the next reader recomputes from the current one.
             return tokens
         _ESTIMATE_CACHE[message.id] = tokens
         while len(_ESTIMATE_CACHE) > _ESTIMATE_CACHE_MAX:
-            evicted, _ = _ESTIMATE_CACHE.popitem(last=False)
-            _ESTIMATE_GENERATION.pop(evicted, None)
+            _ESTIMATE_CACHE.popitem(last=False)
     return tokens
 
 
@@ -517,11 +553,14 @@ def invalidate_message_cache(message: Message) -> None:
     """
     with _CACHE_LOCK:
         _ESTIMATE_CACHE.pop(message.id, None)
-        # Bump even when nothing was cached: the entry this invalidation is
-        # racing may not have been INSERTED yet (see _ESTIMATE_GENERATION).
+        # Flag even when nothing was cached: the entry this invalidation is
+        # racing may not have been INSERTED yet (see _INFLIGHT_ESTIMATES).
         # Popping a miss and returning is exactly how the stale value used to
-        # survive.
-        _ESTIMATE_GENERATION[message.id] = _ESTIMATE_GENERATION.get(message.id, 0) + 1
+        # survive. Costs one pass over the in-flight computations, which are
+        # bounded by concurrency rather than by history size.
+        for inflight in _INFLIGHT_ESTIMATES.values():
+            if inflight.message_id == message.id:
+                inflight.invalidated = True
     for invalidator in list(_INVALIDATORS.values()):
         try:
             invalidator(message)
@@ -548,12 +587,9 @@ def clear_estimate_cache() -> None:
     """Wipe the whole estimate cache (tests, memory pressure)."""
     with _CACHE_LOCK:
         _ESTIMATE_CACHE.clear()
-        # Deliberately NOT cleared: an in-flight computation still holds a
-        # generation read before this call, and resetting the counters to 0
-        # would let its result look current and land in the fresh cache.
-        # Entries are evicted with their cache entry; a clear only leaves
-        # counters for ids that may still be mid-flight, which the next
-        # insert prunes.
-        for key in list(_ESTIMATE_GENERATION):
-            if key not in _ESTIMATE_CACHE:
-                _ESTIMATE_GENERATION[key] = _ESTIMATE_GENERATION[key] + 1
+        # In-flight computations are flagged rather than dropped: a caller
+        # that wipes the cache must not have a computation started before the
+        # wipe land in the fresh one. Their tickets are still removed by the
+        # computations themselves, so this leaks nothing.
+        for inflight in _INFLIGHT_ESTIMATES.values():
+            inflight.invalidated = True
