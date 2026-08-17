@@ -4148,7 +4148,18 @@ async def execute_jobs(
         reference = (
             job.settled_at if not running and job.settled_at else getattr(job, "start_time", None)
         )
-        sense = "up" if running else ("ago" if job.settled_at else "old")
+        # A PARKED job is ``running`` with ``queued=True`` and a runner that
+        # has never been entered, so ``up`` would present its wait as uptime —
+        # the same misreport this PR was filed to stop, on the third surface.
+        # ``waiting`` names what the number is: time spent at the gate. The
+        # check is guarded like ``start_time`` because this row may be
+        # duck-typed by an embedder.
+        if running and getattr(job, "queued", False):
+            sense = "wait"
+        elif running:
+            sense = "up"
+        else:
+            sense = "ago" if job.settled_at else "old"
         # A row with no clock says so. Printing 0.0s made it byte-identical to
         # a job launched this instant — the exact unreadable number this tool
         # was fixed to stop printing. Both branches are nine cells, so the
@@ -4172,7 +4183,9 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
         description=(
             "List running and recently-settled background jobs (task/bash) "
             "with their id, status and age — 'up' is how long a running job "
-            "has been going, 'ago' is how long since a settled one finished."
+            "has been going, 'wait' is how long a parked one has been waiting "
+            "for a slot, 'ago' is how long since a settled one finished, and "
+            "'old' is a settled job whose finish time was not recorded."
         ),
         parameters=JobsParams.model_json_schema(),
         approval_tier="read",

@@ -1128,8 +1128,13 @@ class SubagentView(Vertical):
                     fields = tail[dropped:]
                     # The label gets whatever the fields do not want, floored
                     # at eight cells so it never vanishes entirely — it is the
-                    # page's subject.
-                    spend = sum(cell_len(text) for text, _ in fields) + 13
+                    # page's subject. The fixed chrome is the breadcrumb AND
+                    # the glyph: counting only the 13 breadcrumb cells left
+                    # the budget one short, so a rung whose label consumed it
+                    # exactly was rejected and the ladder fell through —
+                    # non-monotone in width, with the state word visible at
+                    # 35 cells and gone again at 36-40 where it still fit.
+                    spend = sum(cell_len(text) for text, _ in fields) + 13 + cell_len(glyph)
                     label = truncate_cells(self._label, max(8, width - spend))
                     row = Text(no_wrap=True, overflow="ellipsis")
                     row.append("Subagent", style=dim)

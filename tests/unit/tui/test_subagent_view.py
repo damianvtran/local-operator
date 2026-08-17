@@ -399,6 +399,10 @@ async def test_the_title_says_a_cancelled_child_never_ran() -> None:
     parked.result_text = CANCELLED_BEFORE_START
     mid_run = _Job("sub-midrun", "docs sweep agent", status="cancelled")
     mid_run.settled_at = mid_run.start_time + 96.0
+    # Representational, not load-bearing: the view reads ``result_text``, but
+    # this row's premise is "its runner began", and ``started_at`` is the fact
+    # that says so on a real job — left unset, the row encodes the OPPOSITE.
+    mid_run.started_at = mid_run.start_time
     session = FakeSession()
     session.jobs = _fake_jobs(parked, mid_run)
     app = OperatorApp(_async_factory(session))
@@ -406,12 +410,10 @@ async def test_the_title_says_a_cancelled_child_never_ran() -> None:
         view = await _open(pilot, app, parked)
         title = view.rendered_rows()[0]
         assert CANCELLED_BEFORE_START in title, title
-        assert "1m36s" in title  # the number stays; what it MEANS is now said
-
         # A child whose runner DID begin keeps the bare word: it worked, and
-        # that duration is work time. ``started_at`` is what separates the two,
-        # and it is set on this fixture to say so — ``queued`` would not, since
-        # an admitted-but-never-entered job is not parked either.
+        # that duration is work time. ``started_at`` (set above) is what
+        # separates it from the parked row — ``queued`` would not, since an
+        # admitted-but-never-entered job is not parked either.
         app._open_subagent_view("sub-midrun")
         await pilot.pause()
         title = view.rendered_rows()[0]
@@ -441,6 +443,36 @@ async def test_a_narrow_title_shortens_the_state_word_before_losing_it() -> None
 
     assert "cancelled" in title, title
     assert CANCELLED_BEFORE_START not in title, "premise: too narrow for the phrase"
+
+
+@pytest.mark.asyncio
+async def test_the_title_gains_fields_monotonically_as_it_widens() -> None:
+    """The ladder's arithmetic must not make the title sawtooth.
+
+    The label budget omitted the glyph cell, so a rung whose label consumed its
+    budget exactly was rejected and the ladder fell through: the state word
+    visible at 35 cells and gone again at 36-40, where it still fit. A title
+    that loses a field as the page WIDENS tells a reader their window shrank,
+    and a reader who saw both widths would believe it.
+    """
+    parked = _Job("sub-parked", "flaky test bisect", status="cancelled")
+    parked.settled_at = parked.start_time + 96.0
+    parked.result_text = CANCELLED_BEFORE_START
+    session = FakeSession()
+    session.jobs = _fake_jobs(parked)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(120, 24)) as pilot:
+        view = await _open(pilot, app, parked)
+
+        prev = None
+        for width in range(20, 110):
+            row = view._title_row(width, "⠋", 0).plain
+            present = tuple(part for part in (CANCELLED_BEFORE_START, "1m36s") if part in row)
+            if prev is not None:
+                assert len(present) >= len(
+                    prev
+                ), f"width {width} lost a field its narrower neighbour kept: {row!r}"
+            prev = present
 
 
 @pytest.mark.asyncio

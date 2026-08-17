@@ -291,6 +291,36 @@ async def test_jobs_never_says_up_beside_a_settled_status(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_jobs_says_wait_for_a_job_that_has_not_been_admitted(tmp_path):
+    """A parked job is ``running`` with ``queued=True`` and a runner that has
+    never been entered, so ``up`` presented its wait as uptime — the same
+    misreport this PR was filed to stop, on the third surface."""
+    manager = AsyncJobManager(max_running=1)
+    gate = asyncio.Event()
+
+    async def blocked(job_id, signal, report_progress):
+        await gate.wait()
+        return "ok"
+
+    manager.register("task", "alpha", blocked)
+    parked_id = manager.register("task", "parked", blocked, queued=True)
+    await asyncio.sleep(0)
+    parked = manager.get(parked_id)
+    assert parked is not None and parked.queued and parked.started_at is None
+    parked.start_time -= 215.0
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    result = await _call(_tools(context), "jobs", {}, context)
+    row = next(line for line in result.text.splitlines() if line.startswith(parked_id))
+
+    assert "215.0s" in row, row
+    assert row.split()[3] == "wait", row
+
+    gate.set()
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
 async def test_jobs_keeps_its_columns_aligned_at_any_age(tmp_path):
     """A day-old running job must not shear the grid.
 
