@@ -226,10 +226,34 @@ class Transcript:
         )
         async with self._lock:
             self._entries.append(entry)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(entry.to_json() + "\n")
-                handle.flush()
+            # Serialize + open + write + flush in a worker thread. One event
+            # loop serves the parent session, every subagent and the TUI
+            # repaint, and this runs per message: with several children
+            # persisting turns at once, the flushes queued up on the loop and
+            # became the largest remaining stall once the tokenizer moved off
+            # it (measured at ~94 ms worst case with six children).
+            #
+            # Correctness is unchanged because the append stays INSIDE the
+            # lock: entries reach the file in the same order they reach
+            # ``_entries``, and a second append waits for this one's flush.
+            # ``to_json`` runs in the worker too — it is the CPU half of the
+            # cost on a message carrying a large tool result.
+            await asyncio.to_thread(self._write_entry, entry)
         return entry
+
+    def _write_entry(self, entry: TranscriptEntry) -> None:
+        """Append one serialized entry to the file (worker-thread half of
+        :meth:`_append`).
+
+        Synchronous by design — ``asyncio.to_thread`` is the only caller, and
+        the ``_lock`` held across that call is what keeps concurrent appends
+        ordered. ``flush`` stays here rather than being dropped: a crashed
+        session must not lose the turn it had already recorded, which is the
+        whole basis of transcript replay and ``--resume``.
+        """
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(entry.to_json() + "\n")
+            handle.flush()
 
     # -- replay -------------------------------------------------------------
 
@@ -378,15 +402,41 @@ class Transcript:
                 if entry.type == ENTRY_MESSAGE and entry.id in prunes:
                     entry = _pruned_entry(entry, prunes[entry.id])
                 folded.append(entry)
-            payload = "".join(entry.to_json() + "\n" for entry in folded)
-            reclaimed = before - len(payload.encode("utf-8"))
+            # Re-serializing and rewriting the WHOLE transcript is proportional
+            # to session length (hundreds of ms on a long one), and it runs on
+            # the loop every session shares. Off to a worker: the ``_lock`` held
+            # across the await keeps it exclusive against appends, and the
+            # ``os.replace`` is still atomic, so an interrupted rewrite leaves
+            # the original intact exactly as before.
+            payload, reclaimed = await asyncio.to_thread(self._render_folded, folded, before)
             if reclaimed < min_reclaim_bytes:
                 return 0
-            tmp = self.path.with_suffix(self.path.suffix + ".compact")
-            tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, self.path)
+            await asyncio.to_thread(self._replace_file, payload)
             self._entries = folded
             return reclaimed
+
+    @staticmethod
+    def _render_folded(folded: list[TranscriptEntry], before: int) -> tuple[str, int]:
+        """Serialize the folded entries and price the rewrite.
+
+        Worker-thread half of :meth:`compact_file`: this is the O(session)
+        string building, kept out of the loop. Returns the payload alongside
+        the bytes it reclaims so the caller can decide whether the rewrite is
+        worth doing without re-measuring.
+        """
+        payload = "".join(entry.to_json() + "\n" for entry in folded)
+        return payload, before - len(payload.encode("utf-8"))
+
+    def _replace_file(self, payload: str) -> None:
+        """Write the compacted transcript beside the old one and move it over.
+
+        Worker-thread half of :meth:`compact_file`. Crash safety is the whole
+        point of the temp-file dance: ``os.replace`` is atomic, so an
+        interrupted compaction leaves the original transcript readable.
+        """
+        tmp = self.path.with_suffix(self.path.suffix + ".compact")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, self.path)
 
     def flush(self) -> None:
         """Writes are flushed per append; provided for dispose() symmetry."""

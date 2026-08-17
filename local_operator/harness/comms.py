@@ -151,6 +151,13 @@ class _ChildRecord:
     #: record whose child never started, which is why those evict FIRST — a
     #: record with no transcript is the one worth least.
     settled_at: float | None = None
+    #: Set by :meth:`SubagentComms.attach` the moment ``child`` becomes live.
+    #: Exists so :meth:`SubagentComms.ask` can WAIT for a child that has been
+    #: registered but whose runner the loop has not entered yet, instead of
+    #: refusing the question outright — see :meth:`SubagentComms._await_child`.
+    #: Created lazily on first use because it must be bound to the running
+    #: loop, and ``record_launch`` can be reached from a synchronous caller.
+    attached: "asyncio.Event | None" = None
 
 
 class SubagentComms:
@@ -190,6 +197,11 @@ class SubagentComms:
         for message in record.pending:
             child.queue_aside(self._thunk(record, message))
         record.pending.clear()
+        # Last: everything a waiter in ``_await_child`` needs must be in place
+        # before it is allowed to proceed, or it would queue its question onto
+        # a record whose buffered notes had not been flushed yet.
+        if record.attached is not None:
+            record.attached.set()
 
     def detach(self, job_id: str) -> None:
         """Release the live child. An unanswered question fails here rather
@@ -202,6 +214,12 @@ class SubagentComms:
         record.settled_at = time.time()
         record.child = None
         record.armed = False
+        # Wake anyone parked in ``_await_child``: the child is gone, so the
+        # attach they are waiting for is never coming. They re-check
+        # ``record.child`` after the wait and report the settled reason, so
+        # setting the event here fails them fast instead of at their timeout.
+        if record.attached is not None:
+            record.attached.set()
         if record.unsubscribe is not None:
             try:
                 record.unsubscribe()
@@ -295,18 +313,73 @@ class SubagentComms:
         record.child.steer(self._format_to_child(text, expects_reply=False, steer=True))
         return Delivery(job_id, record.label, "injected")
 
+    async def _await_child(self, record: _ChildRecord, timeout_s: float) -> bool:
+        """Wait (briefly) for a registered child's session to become live.
+
+        WHY: ``run_subagent`` registers the job and ``AsyncJobManager.register``
+        calls ``ensure_future``, which SCHEDULES the runner without entering
+        it. A parent that launches a child and asks it something in its very
+        next tool call therefore finds ``record.child is None`` — not because
+        anything is wrong, but because the loop has not reached the runner yet.
+        The old behaviour reported "subagent has not started yet … retry in a
+        moment" and returned immediately, which is a refusal the model has no
+        good answer to: it cannot yield the loop except by making another call,
+        so it either polls in a loop or gives up on checking in at all. Both
+        were observed live.
+
+        Awaiting the attach event yields the loop, which is exactly what lets
+        the runner start — so the wait is self-fulfilling rather than a
+        gamble. A PARKED job is deliberately excluded by the caller: it may sit
+        behind the capacity gate for minutes, and burning the asker's whole
+        timeout on it would be worse than saying so.
+
+        Returns True when the child is live, False on timeout (the caller then
+        reports the honest not-started reason).
+        """
+        if record.child is not None:
+            return True
+        if record.attached is None:
+            record.attached = asyncio.Event()
+        try:
+            await asyncio.wait_for(record.attached.wait(), timeout_s)
+        except asyncio.TimeoutError:
+            return False
+        return record.child is not None
+
+    #: How much of an ``ask`` timeout may be spent waiting for a
+    #: scheduled-but-not-yet-entered child to come up, before the question is
+    #: refused. A fraction rather than a constant so a caller that asked for a
+    #: short timeout still gets a timely answer, and a patient caller stays
+    #: patient. Capped by :data:`ATTACH_WAIT_MAX_S` because a child that needs
+    #: longer than that is not merely "scheduled" — something is wrong, and
+    #: saying so beats consuming the caller's whole budget in silence.
+    ATTACH_WAIT_FRACTION = 0.5
+    ATTACH_WAIT_MAX_S = 30.0
+
     async def ask(self, job_id: str, text: str, timeout_ms: int) -> Reply:
-        """Put a question to a running child and wait for its answer."""
+        """Put a question to a running child and wait for its answer.
+
+        A child that is registered but not yet entered by the loop is WAITED
+        for (see :meth:`_await_child`) rather than refused: "it starts when
+        this session next yields" is not an actionable answer for the one
+        caller who cannot yield without making another call.
+        """
         record = self._records.get(job_id)
         if record is None:
             return Reply(job_id, job_id, error=f"unknown subagent {job_id!r}")
         if record.child is None:
-            reason = (
-                self._gone_reason(record)
-                if record.settled or not self._is_running(record)
-                else self._not_started_reason(record)
-            )
-            return Reply(job_id, record.label, error=reason)
+            if record.settled or not self._is_running(record):
+                return Reply(job_id, record.label, error=self._gone_reason(record))
+            jobs = self._jobs()
+            job = jobs.get(job_id) if jobs is not None else None
+            parked = bool(job is not None and getattr(job, "queued", False))
+            # Parked behind the capacity gate: no amount of yielding starts it,
+            # so report rather than burn the caller's timeout.
+            grace = min(self.ATTACH_WAIT_MAX_S, (timeout_ms / 1000.0) * self.ATTACH_WAIT_FRACTION)
+            if parked or not await self._await_child(record, grace):
+                return Reply(job_id, record.label, error=self._not_started_reason(record))
+        if record.child is None:  # pragma: no cover - narrowing for the checker
+            return Reply(job_id, record.label, error=self._not_started_reason(record))
         if record.ask is not None and not record.ask.done():
             return Reply(
                 job_id, record.label, error="a question is already pending for this subagent"

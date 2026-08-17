@@ -49,10 +49,12 @@ from .thresholds import (
 )
 from .tokens import (
     IMAGE_TOKEN_ESTIMATE,
+    OFFLOAD_MIN_CHARS,
     _encode_len,
     clear_estimate_cache,
     estimate_messages_tokens,
     estimate_tokens,
+    history_chars,
     invalidate_message_cache,
     messages_tokens_upper_bound,
     register_invalidator,
@@ -81,6 +83,8 @@ __all__ = [
     "estimate_tokens",
     "extract_file_ops_from_messages",
     "find_cut_point",
+    "history_chars",
+    "OFFLOAD_MIN_CHARS",
     "format_file_operations",
     "invalidate_message_cache",
     "messages_tokens_upper_bound",
