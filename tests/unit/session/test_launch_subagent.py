@@ -106,10 +106,16 @@ async def test_launch_subagent_runs_child_and_emits_lifecycle(tmp_path, monkeypa
     assert "child did the work" in (ends[0].result_text or "")
 
     # The child actually ran its own provider turn through the shared stream.
-    assert len(stream.requests) == 1
+    assert stream.requests
     assert stream.requests[0].messages
     assert isinstance(stream.requests[0].messages[0], Message)
     assert stream.requests[0].messages[0].text == "go do a thing"
+
+    # Item 12: once the task settles, the idle TOP-LEVEL parent re-wakes with
+    # the result instead of polling `jobs`; the shared provider sees a second
+    # request carrying that job-result custom message.
+    await wait_for(lambda: len(stream.requests) >= 2)
+    assert any("background job 'sub' completed" in m.text for m in stream.requests[1].messages)
 
     await parent.dispose()
 
@@ -278,7 +284,7 @@ class FakeMcpManager:
         return self._meta.get(tool_name)
 
 
-async def build_child(parent, model_spec=None, job_id="job-1"):
+async def build_child(parent, model_spec=None, job_id="job-1", agent="task"):
     from local_operator.harness import subagent as subagent_mod
 
     return await subagent_mod._build_child_session(
@@ -287,6 +293,7 @@ async def build_child(parent, model_spec=None, job_id="job-1"):
         parent_session=parent,
         model_spec=model_spec,
         job_id=job_id,
+        agent=agent,
     )
 
 
@@ -459,24 +466,66 @@ async def test_child_inherits_a_mid_session_model_override(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_child_never_advertises_session_capability_tools(tmp_path, monkeypatch):
-    """Children are one level deep. ``Session.__init__`` merges task/wait/jobs/
-    wake in from the session's OWN ToolContext, which handed every child a
-    ``task`` tool: a grandchild would register on the child's job manager, which
-    no panel renders and which ``_dispose_child`` tears down the moment the
-    child's single prompt ends. Same for ``wake``, whose scheduler stops
-    existing seconds after it accepts a schedule."""
+async def test_child_of_top_level_session_keeps_delegation_but_not_wake(tmp_path, monkeypatch):
+    """Depth is two: a child of a TOP-LEVEL session keeps task/wait/jobs (its
+    own job manager is observable through its own tools and is disposed with
+    it, so grandchildren cannot outlive their lineage), while ``wake`` never
+    crosses any boundary — a child session ends after one prompt, so a wake
+    armed there would be silently lost."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, OneShotStream())
 
     child = await build_child(parent)
 
     names = {tool.name for tool in child._tools}
-    assert names.isdisjoint({"task", "wait", "jobs", "wake"})
+    assert {"task", "wait", "jobs"} <= names
+    assert "wake" not in names
     # The prune must not take the ordinary inventory with it.
     assert {"bash", "read", "edit", "write"} <= names
     # ...and the loop sees the same list the session does.
     assert [t.name for t in child._context.tools] == [t.name for t in child._tools]
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_grandchild_never_advertises_session_capability_tools(tmp_path, monkeypatch):
+    """One level deeper the whole set goes: a grandchild's children would
+    register on a job manager nothing observes and that dies mid-turn."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    # A parent that is itself a child is recognisable by its _job_id.
+    parent._job_id = "job-parent"
+
+    child = await build_child(parent)
+
+    names = {tool.name for tool in child._tools}
+    assert names.isdisjoint({"task", "wait", "jobs", "wake"})
+    assert {"bash", "read", "edit", "write"} <= names
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_scout_child_is_read_only_and_cannot_delegate(tmp_path, monkeypatch):
+    """The scout tier: tool inventory filtered to lookups (allowlist, not
+    tier — no bash, no eval-style execution, no MCP calls, no delegation),
+    its prompt stamped with the scout preamble, and the capability tools
+    pruned entirely: a read-only agent that delegates autonomous work is not
+    read-only."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+
+    child = await build_child(parent, agent="scout")
+
+    names = {tool.name for tool in child._tools}
+    assert names <= {"read", "glob", "grep", "list_variables", "read_variable"}
+    assert {"bash", "edit", "write", "task", "wait", "jobs", "wake"}.isdisjoint(names)
+    assert (
+        "scout mode" in getattr(child._context.messages[0], "text", "")
+        if child._context.messages
+        else True
+    )
     await child.dispose()
     await parent.dispose()
 
@@ -663,4 +712,23 @@ async def test_the_launch_prompt_is_recorded_on_the_job(tmp_path, monkeypatch):
     )
     settled = parent.jobs.get(job_id)
     assert settled is not None and settled.prompt == instruction, "must survive settlement"
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_scout_preamble_reaches_the_provider_turn(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    stream = OneShotStream()
+    parent = make_session(tmp_path, stream)
+    job_id = parent._launch_subagent(label="research", prompt="Map the repo.", agent="scout")
+
+    def settled() -> bool:
+        job = parent.jobs.get(job_id)
+        return job is not None and job.status != "running"
+
+    await wait_for(settled)
+    assert stream.requests
+    first_user = next(message for message in stream.requests[0].messages if message.role == "user")
+    assert "[scout mode:" in first_user.text
+    assert "Map the repo." in first_user.text
     await parent.dispose()

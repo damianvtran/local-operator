@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from local_operator.harness.types import (
+    AgentTool,
     ChatRequest,
     ImageContent,
     Message,
@@ -20,12 +21,14 @@ from local_operator.harness.types import (
     StreamUsageEvent,
     TextContent,
     ToolCall,
+    ToolResult,
 )
 from local_operator.providers.clients import (
     AnthropicClient,
     MockClient,
     OpenAICompatClient,
     _anthropic_stream_error,
+    client_for_spec,
     raise_for_status,
 )
 from local_operator.providers.failover import ProviderError
@@ -493,6 +496,163 @@ def _responses_sse() -> bytes:
         },
     ]
     return _sse(events)
+
+
+def _public_responses_sse() -> bytes:
+    return _sse(
+        [
+            {
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_weather",
+                    "name": "get_weather",
+                },
+            },
+            {"type": "response.output_text.delta", "delta": "Checking"},
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "output_index": 1,
+                "delta": '{"city":',
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "output_index": 1,
+                "delta": '"Paris"}',
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_public_1",
+                    "usage": {
+                        "input_tokens": 80,
+                        "output_tokens": 9,
+                        "input_tokens_details": {"cached_tokens": 48},
+                    },
+                },
+            },
+        ]
+    )
+
+
+async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            content=_public_responses_sse(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def unused_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
+        raise AssertionError("wire serialization must not execute tools")
+
+    spec = ModelSpec(
+        provider="openai",
+        model_id="gpt-5.4",
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+        reasoning=True,
+        reasoning_effort="high",
+        reasoning_efforts=("low", "medium", "high"),
+        supports_sampling_params=False,
+    )
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    events = await _collect(
+        client.stream(
+            ChatRequest(
+                model=spec,
+                system_blocks=["Be concise."],
+                messages=[Message.user("weather in Paris?")],
+                tools=[
+                    AgentTool(
+                        name="get_weather",
+                        description="Get weather",
+                        parameters={
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                        execute=unused_execute,
+                    )
+                ],
+                prompt_cache_key="session-123",
+            ),
+            "sk-public",
+        )
+    )
+
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert captured["headers"]["authorization"] == "Bearer sk-public"
+    for private_header in ("chatgpt-account-id", "openai-beta", "originator"):
+        assert private_header not in captured["headers"]
+    body = captured["body"]
+    assert body["input"] == [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "weather in Paris?"}],
+        }
+    ]
+    assert body["tools"] == [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        }
+    ]
+    assert body["reasoning"] == {"effort": "high"}
+    assert body["prompt_cache_key"] == "session-123"
+    assert body["prompt_cache_retention"] == "24h"
+
+    assert [event.delta for event in events if isinstance(event, StreamTextDelta)] == ["Checking"]
+    tool_events = [event for event in events if isinstance(event, StreamToolCallDelta)]
+    assert tool_events[0].id == "call_weather" and tool_events[0].name == "get_weather"
+    assert json.loads("".join(event.argument_delta for event in tool_events)) == {"city": "Paris"}
+    usage = [event.usage for event in events if isinstance(event, StreamUsageEvent)][0]
+    assert (usage.input_tokens, usage.output_tokens, usage.cache_read_tokens) == (80, 9, 48)
+    assert events[-1].stop_reason == "toolUse"
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "deepseek"])
+async def test_compat_providers_stay_on_chat_completions_for_responses_model(
+    provider: str,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            content=_sse([{"choices": [{"delta": {}, "finish_reason": "stop"}]}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    spec = ModelSpec(
+        provider=provider,
+        model_id="openai/gpt-5.4",
+        supports_responses_api=True,
+    )
+    client = client_for_spec(spec, http_client=http, openai_api="responses")
+    await _collect(client.stream(ChatRequest(model=spec, messages=[Message.user("hi")]), "key"))
+    assert captured["url"].endswith("/chat/completions")
+    await http.aclose()
 
 
 async def test_openai_oauth_routes_to_codex_responses_with_required_headers() -> None:
@@ -1355,3 +1515,180 @@ def test_google_sends_no_effort_key() -> None:
     # edit would put the key there.
     assert "thinkingConfig" not in body["generationConfig"]
     assert not any("effort" in key.lower() for key in body["generationConfig"])
+
+
+def _google_sse_parallel_calls() -> bytes:
+    """One Gemini response carrying TWO same-name functionCalls — the exact
+    shape that used to mint identical ids (``fc_read`` twice)."""
+    return _sse(
+        [
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"functionCall": {"name": "read", "args": {"path": "a.py"}}},
+                                {"functionCall": {"name": "read", "args": {"path": "b.py"}}},
+                            ]
+                        },
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
+            }
+        ]
+    )
+
+
+async def test_google_parallel_same_tool_calls_get_unique_ids() -> None:
+    """Two same-tool functionCalls in one Gemini response must survive as two
+    tool calls. The loop dedups tool calls by id (first-wins), so ids minted
+    from the tool name alone silently dropped every call after the first —
+    the model believed two reads ran when only one did. The per-response
+    index is minted alongside the id because it is the stream slot the loop
+    assembles argument deltas into; two calls sharing slot 0 would overwrite
+    each other even with distinct ids."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_google_sse_parallel_calls(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = GoogleClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    events = await _collect(
+        client.stream(
+            ChatRequest(model=_spec("google", "gemini-2.5-pro"), messages=[Message.user("hi")]),
+            "g-key",
+        )
+    )
+    calls = [e for e in events if isinstance(e, StreamToolCallDelta)]
+    assert len(calls) == 2
+    assert calls[0].id != calls[1].id
+    assert {calls[0].index, calls[1].index} == {0, 1}
+    assert all(call.name == "read" for call in calls)
+
+
+async def test_responses_failed_and_top_level_error_raise_provider_errors() -> None:
+    for payload in (
+        {
+            "type": "response.failed",
+            "response": {"error": {"code": "rate_limit_exceeded", "message": "quota gone"}},
+        },
+        {
+            "type": "error",
+            "error": {"code": "invalid_api_key", "message": "bad key"},
+        },
+    ):
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=_sse([payload]), headers={"content-type": "text/event-stream"}
+            )
+
+        client = OpenAICompatClient(
+            "https://api.openai.com/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            openai_api="responses",
+        )
+        with pytest.raises(ProviderError) as error:
+            await _collect(
+                client.stream(
+                    ChatRequest(
+                        model=_spec("openai", "gpt-5.4").model_copy(
+                            update={"supports_responses_api": True}
+                        ),
+                        messages=[Message.user("hi")],
+                    ),
+                    "sk-test",
+                )
+            )
+        assert error.value.message
+
+
+async def test_responses_incomplete_max_output_maps_to_length() -> None:
+    payloads = [
+        {
+            "type": "response.output_item.added",
+            "item": {"type": "function_call", "id": "fc1", "call_id": "c1", "name": "read"},
+        },
+        {
+            "type": "response.incomplete",
+            "response": {
+                "id": "r1",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 10, "output_tokens": 3},
+            },
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=_sse(payloads), headers={"content-type": "text/event-stream"}
+        )
+
+    client = OpenAICompatClient(
+        "https://api.openai.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        openai_api="responses",
+    )
+    events = await _collect(
+        client.stream(
+            ChatRequest(
+                model=_spec("openai", "gpt-5.4").model_copy(
+                    update={"supports_responses_api": True}
+                ),
+                messages=[Message.user("hi")],
+            ),
+            "sk-test",
+        )
+    )
+    end = next(e for e in events if isinstance(e, StreamEndEvent))
+    assert end.stop_reason == "length"  # loop will never execute the partial call
+
+
+async def test_responses_stream_without_terminal_is_provider_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse([{"type": "response.output_text.delta", "delta": "partial"}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatClient(
+        "https://api.openai.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        openai_api="responses",
+    )
+    with pytest.raises(ProviderError, match="without a terminal event"):
+        await _collect(
+            client.stream(
+                ChatRequest(
+                    model=_spec("openai", "gpt-5.4").model_copy(
+                        update={"supports_responses_api": True}
+                    ),
+                    messages=[Message.user("hi")],
+                ),
+                "sk-test",
+            )
+        )
+
+
+def test_responses_tool_image_output_stays_native_image_content() -> None:
+    from local_operator.providers.clients import _messages_to_openai_responses
+
+    message = Message(
+        role="tool",
+        tool_call_id="c1",
+        tool_name="read",
+        content=[
+            TextContent(text="screenshot"),
+            ImageContent(data="aGVsbG8=", mime_type="image/png"),
+        ],
+    )
+    output = _messages_to_openai_responses([message])[0]["output"]
+    assert output == [
+        {"type": "input_text", "text": "screenshot"},
+        {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+    ]

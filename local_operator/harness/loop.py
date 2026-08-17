@@ -304,13 +304,36 @@ class AgentLoop:
                         self._append_results(context, tool_results, new_messages)
 
                     yield TurnEndEvent(message=assistant, tool_results=tool_results)
-                    turn_end = config.on_turn_end
-                    if turn_end is not None:
+                    has_more_tool_calls = bool(assistant.tool_calls)
+                    if has_more_tool_calls and config.on_turn_end is not None:
+                        # The boundary hook fires only when the loop will
+                        # CONTINUE — a terminal boundary is the post-turn
+                        # pass's job (the host's own after-run gate), and
+                        # firing there too would run every host hook twice
+                        # for the price of one decision.
+                        turn_end = config.on_turn_end
                         outcome = turn_end(list(context.messages))
                         if inspect.isawaitable(outcome):
-                            await outcome
+                            outcome = await outcome
+                        if isinstance(outcome, list):
+                            # Mid-run context replacement (automatic mid-turn
+                            # compaction). The replacement is authoritative
+                            # for the context; the run accumulator keeps only
+                            # what this run produced that SURVIVED it — ids
+                            # the replacement dropped were summarized away and
+                            # must never reach post-run persistence, where
+                            # they would resurrect after the compaction entry
+                            # that superseded them. Matching is by id because
+                            # the renderer passes plain Messages through as
+                            # the same objects but customs as fresh ones.
+                            survivors = {
+                                getattr(m, "id", None) for m in outcome if getattr(m, "id", None)
+                            }
+                            context.messages[:] = outcome
+                            new_messages = [
+                                m for m in new_messages if getattr(m, "id", None) in survivors
+                            ]
 
-                    has_more_tool_calls = bool(assistant.tool_calls)
                     pending = await self._collect_inflight_injections(config)
 
                 # ---- outer loop tail: yield boundary ----------------------

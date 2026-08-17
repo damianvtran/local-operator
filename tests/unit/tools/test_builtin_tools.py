@@ -1074,3 +1074,445 @@ async def test_tool_result_invariants(tmp_path, tool_name, args) -> None:
     if result.useless:
         assert isinstance(result.details, dict)
         assert result.details.get("useless") is True
+
+
+# ---------------------------------------------------------------------------
+# edit: multi-hunk, whitespace tolerance, anchor_line
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_edit_multi_hunk_applies_all_in_one_call(tools, context, tmp_path) -> None:
+    await _call(
+        tools,
+        "write",
+        {"path": "m.py", "content": "alpha\nmiddle\nbeta\nmiddle\ngamma\n"},
+        context,
+    )
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "m.py",
+            "edits": [
+                {"old_text": "alpha", "new_text": "ALPHA"},
+                {"old_text": "beta", "new_text": "BETA"},
+                {"old_text": "gamma", "new_text": "GAMMA"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is False
+    assert (tmp_path / "m.py").read_text() == "ALPHA\nmiddle\nBETA\nmiddle\nGAMMA\n"
+    assert "3 hunk(s)" in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_whitespace_tolerant_match_reindents(tools, context, tmp_path) -> None:
+    """old_text written at the wrong indentation still matches, and the
+    replacement is re-indented to the FILE's level — the edit written from a
+    structural summary or memory works instead of erroring."""
+    await _call(
+        tools,
+        "write",
+        {"path": "t.py", "content": "class A:\n    def foo(self):\n        return 1\n"},
+        context,
+    )
+    # The model wrote the body at 2 spaces while the file uses 8.
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "t.py",
+            "edits": [
+                {"old_text": "def foo(self):\n  return 1", "new_text": "def foo(self):\n  return 2"}
+            ],
+        },
+        context,
+    )
+    assert result.is_error is False
+    assert (tmp_path / "t.py").read_text() == ("class A:\n    def foo(self):\n        return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_edit_anchor_line_disambiguates(tools, context, tmp_path) -> None:
+    await _call(tools, "write", {"path": "d.txt", "content": "foo\nfoo\nfoo\n"}, context)
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "d.txt", "old_text": "foo", "new_text": "WON", "anchor_line": 3},
+        context,
+    )
+    assert result.is_error is False
+    assert (tmp_path / "d.txt").read_text() == "foo\nfoo\nWON\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_rejects_both_forms_at_once(tools, context, tmp_path) -> None:
+    await _call(tools, "write", {"path": "x.txt", "content": "abc\n"}, context)
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "x.txt",
+            "old_text": "abc",
+            "new_text": "zzz",
+            "edits": [{"old_text": "abc", "new_text": "zzz"}],
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert (tmp_path / "x.txt").read_text() == "abc\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_tolerant_ambiguity_still_errors(tools, context, tmp_path) -> None:
+    """Tolerance widens matching, so its ambiguity discipline matters more:
+    two strip-equal candidates with no anchor and no replace_all refuse."""
+    await _call(tools, "write", {"path": "amb.txt", "content": "  foo\nbar\n  foo\n"}, context)
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "amb.txt", "old_text": "foo", "new_text": "X"},
+        context,
+    )
+    # Exact match fails (file lines are indented); tolerant matches twice.
+    assert result.is_error is True
+    assert "2 places" in result.text
+
+
+# ---------------------------------------------------------------------------
+# read: Python structural summaries
+# ---------------------------------------------------------------------------
+
+
+def _summary_py() -> str:
+    body = "\n".join(f"    # filler {i}" for i in range(120))
+    return (
+        '"""Module doc."""\n'
+        "import os\n"
+        "from pathlib import Path\n"
+        "\n"
+        "def helper(one, two=2) -> int:\n"
+        '    """Helper doc."""\n'
+        f"{body}\n"
+        "    return one + two\n"
+        "\n"
+        "class Widget(Base):\n"
+        '    """Widget doc."""\n'
+        "\n"
+        "    def render(self) -> str:\n"
+        "        return 'w'\n"
+        "\n"
+        "    async def load(self):\n"
+        "        pass\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_python_structural_summary_default(tools, context, tmp_path) -> None:
+    (tmp_path / "big.py").write_text(_summary_py())
+    result = await _call(tools, "read", {"path": "big.py"}, context)
+    assert result.is_error is False
+    assert "structural summary" in result.text
+    assert "def helper(one, two=2) -> int" in result.text
+    assert "class Widget(Base):" in result.text
+    assert "async def load(self)" in result.text
+    assert '"Widget doc.' in result.text
+    assert "[imports: 2 (elided)]" in result.text
+    # Line ranges ride every symbol so the footer's range advice is actionable.
+    assert "L5-" in result.text
+    # Bodies are elided — the filler is the proof it is not the raw body.
+    assert "filler 50" not in result.text
+    assert "bodies elided" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_raw_and_range_bypass_summary(tools, context, tmp_path) -> None:
+    (tmp_path / "big.py").write_text(_summary_py())
+    raw = await _call(tools, "read", {"path": "big.py", "raw": True}, context)
+    assert "filler 50" in raw.text
+    ranged = await _call(tools, "read", {"path": "big.py", "range": "1-3"}, context)
+    assert "Module doc" in ranged.text
+    assert "def helper" not in ranged.text
+
+
+@pytest.mark.asyncio
+async def test_read_summary_falls_back_on_syntax_error(tools, context, tmp_path) -> None:
+    broken = "def broken(:\n" + "\n".join(f"# pad {i}" for i in range(100)) + "\n"
+    (tmp_path / "broken.py").write_text(broken)
+    result = await _call(tools, "read", {"path": "broken.py"}, context)
+    assert "structural summary" not in result.text
+    assert "def broken(:" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_short_python_file_stays_raw(tools, context, tmp_path) -> None:
+    (tmp_path / "small.py").write_text("def a():\n    return 1\n")
+    result = await _call(tools, "read", {"path": "small.py"}, context)
+    assert "structural summary" not in result.text
+    assert "def a():" in result.text
+
+
+# ---------------------------------------------------------------------------
+# grep/glob: context lines, skip, gitignore
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def python_engine(monkeypatch):
+    """Pin the pure-Python scan so filesystem assertions are deterministic
+    regardless of whether the host running the tests has ripgrep."""
+    monkeypatch.setenv("LOCAL_OPERATOR_GREP_ENGINE", "python")
+
+
+@pytest.mark.usefixtures("python_engine")
+@pytest.mark.asyncio
+async def test_grep_context_lines_render_groups(tools, context, tmp_path) -> None:
+    # Matches at lines 2 and 7 with -C1 leave a real gap (lines 4-5 unsent),
+    # which is what a `--` group separator is FOR; adjacent context blocks
+    # render contiguously by design, like sed output.
+    (tmp_path / "c.txt").write_text("one\ntwo MATCH\nthree\nfour\nfive\nsix\nseven MATCH\neight\n")
+    result = await _call(tools, "grep", {"pattern": "MATCH", "context_lines": 1}, context)
+    assert result.is_error is False
+    assert "c.txt:2:two MATCH" in result.text
+    assert "c.txt:1-one" in result.text  # context: dash separator
+    assert "c.txt:3-three" in result.text
+    assert "--" in result.text  # groups 1-3 and 6-8 are disjoint
+    assert "c.txt:7:seven MATCH" in result.text
+
+
+@pytest.mark.usefixtures("python_engine")
+@pytest.mark.asyncio
+async def test_grep_skip_paginates_matches(tools, context, tmp_path) -> None:
+    (tmp_path / "p.txt").write_text("".join(f"hit {i}\n" for i in range(10)))
+    page1 = await _call(tools, "grep", {"pattern": "hit"}, context)
+    assert "p.txt:1:hit 0" in page1.text
+    page2 = await _call(tools, "grep", {"pattern": "hit", "skip": 3}, context)
+    assert "p.txt:1:hit 0" not in page2.text
+    assert "p.txt:4:hit 3" in page2.text
+    assert "skipped 3" in page2.text
+
+
+@pytest.mark.usefixtures("python_engine")
+@pytest.mark.asyncio
+async def test_grep_respects_gitignore(tools, context, tmp_path) -> None:
+    (tmp_path / ".gitignore").write_text("gen/\n*.log\n")
+    (tmp_path / "src.txt").write_text("needle here\n")
+    (tmp_path / "gen" / "out.txt").parent.mkdir()
+    (tmp_path / "gen" / "out.txt").write_text("needle ignored\n")
+    (tmp_path / "app.log").write_text("needle ignored\n")
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+    assert "src.txt:1" in result.text
+    assert "gen/out.txt" not in result.text
+    assert "app.log" not in result.text
+
+
+@pytest.mark.usefixtures("python_engine")
+@pytest.mark.asyncio
+async def test_grep_gitignore_negation_un_ignores(tools, context, tmp_path) -> None:
+    (tmp_path / ".gitignore").write_text("gen/\n!gen/keep.txt\n")
+    (tmp_path / "gen").mkdir()
+    (tmp_path / "gen" / "keep.txt").write_text("needle\n")
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+    # git semantics: an ignored DIRECTORY cannot be re-included by a child
+    # negation — keep.txt stays out, matching git's own behaviour.
+    assert "keep.txt" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_grep_ripgrep_engine_matches_python_contract(tools, context, tmp_path) -> None:
+    """With ripgrep present, the native engine must satisfy the same shape
+    contract as the Python one: rel paths without './', path:line:text, and
+    the 1MB-skip footer recovered from the walked list."""
+    import shutil
+
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep not installed")
+    (tmp_path / "small.py").write_text("needle\n")
+    big = tmp_path / "big.py"
+    big.write_text("needle\n" + "x" * (1024 * 1024 + 10))
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+    assert "small.py:1:needle" in result.text
+    assert "./small.py" not in result.text
+    assert "1 file(s) skipped over the 1MB cap" in result.text
+
+
+@pytest.mark.asyncio
+async def test_glob_respects_gitignore_unless_pattern_names_it(tools, context, tmp_path) -> None:
+    (tmp_path / ".gitignore").write_text("dist/\n")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "out.js").write_text("built")
+    (tmp_path / "src.js").write_text("src")
+    broad = await _call(tools, "glob", {"pattern": "**/*.js"}, context)
+    assert "src.js" in broad.text
+    assert "dist/out.js" not in broad.text
+    named = await _call(tools, "glob", {"pattern": "dist/*.js"}, context)
+    assert "dist/out.js" in named.text
+
+
+# ---------------------------------------------------------------------------
+# bash: steering detach vs real abort
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bash_steering_cancellation_backgrounds_the_command(tmp_path) -> None:
+    """A steering cancel (task cancelled, signal NOT aborted) detaches the
+    command into a tracked background job instead of killing it: the tool
+    returns a result naming the job, and the job later reports the exit code
+    and output of the process that was allowed to finish."""
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg", jobs=manager)
+    tools = {t.name: t for t in create_tools(context)}
+
+    task = asyncio.create_task(
+        _call(
+            tools,
+            "bash",
+            {"command": "sleep 0.6 && echo finished-marker"},
+            context,
+        )
+    )
+    await asyncio.sleep(0.2)  # let the command start
+    task.cancel()
+    result = await task  # the tool swallows the steering cancel and answers
+
+    assert result.is_error is False
+    assert "continues in the background" in result.text
+    assert result.details is not None
+    job_id = result.details["job_id"]
+    job = manager.get(job_id)
+    assert job is not None and job.type == "bash"
+
+    async def settle():
+        while job.status == "running":
+            await asyncio.sleep(0.05)
+
+    await settle()
+    assert job.status == "completed"
+    assert "exit code: 0" in (job.result_text or "")
+    assert "finished-marker" in (job.result_text or "")
+
+
+@pytest.mark.asyncio
+async def test_bash_real_abort_still_kills(tmp_path) -> None:
+    """A genuine abort (Ctrl+C / jobs cancel: signal.aborted) kills the
+    process group; the cancellation propagates as before."""
+    from local_operator.harness.jobs import AsyncJobManager
+    from local_operator.harness.types import AbortSignal
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg2", jobs=manager)
+    tools = {t.name: t for t in create_tools(context)}
+    sig = AbortSignal()
+
+    async def run_bash() -> ToolResult:
+        return await tools["bash"].execute(
+            "c",
+            {"command": "sleep 5 && echo should-not-run"},
+            sig,
+            None,
+            context,
+        )
+
+    task = asyncio.create_task(run_bash())
+    await asyncio.sleep(0.2)
+    sig.abort("interrupted")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.1)
+    assert manager.list() == []  # nothing was backgrounded
+
+
+@pytest.mark.asyncio
+async def test_cancel_backgrounded_bash_kills_process_group(tmp_path) -> None:
+    """Manager cancel immediately cancels the detached runner; cleanup must
+    still kill/reap the start-new-session process before it can create a marker."""
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg-cancel", jobs=manager)
+    tools = {t.name: t for t in create_tools(context)}
+    task = asyncio.create_task(
+        _call(
+            tools,
+            "bash",
+            {"command": "sleep 1; touch should-not-exist"},
+            context,
+        )
+    )
+    await asyncio.sleep(0.15)
+    task.cancel()
+    result = await task
+    assert result.details is not None
+    job_id = result.details["job_id"]
+    assert await manager.cancel(job_id) is True
+    await asyncio.sleep(1.2)
+    assert not (tmp_path / "should-not-exist").exists()
+    job = manager.get(job_id)
+    assert job is not None and job.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_glob_respects_nested_gitignore(tools, context, tmp_path) -> None:
+    nested = tmp_path / "packages" / "a"
+    nested.mkdir(parents=True)
+    (nested / ".gitignore").write_text("generated/\n")
+    (nested / "generated").mkdir()
+    (nested / "generated" / "hidden.py").write_text("x")
+    (nested / "visible.py").write_text("x")
+    result = await _call(tools, "glob", {"pattern": "**/*.py"}, context)
+    assert "packages/a/visible.py" in result.text
+    assert "packages/a/generated/hidden.py" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_exact_match_preserves_tabs_verbatim(tools, context, tmp_path) -> None:
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("target:\n\told\nnext:\n", newline="")
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "Makefile", "old_text": "\told\n", "new_text": "\tnew\n"},
+        context,
+    )
+    assert result.is_error is False
+    assert makefile.read_bytes() == b"target:\n\tnew\nnext:\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_exact_match_preserves_requested_trailing_newline(
+    tools, context, tmp_path
+) -> None:
+    path = tmp_path / "exact.txt"
+    path.write_text("needle-after", newline="")
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "exact.txt", "old_text": "needle", "new_text": "replacement\n"},
+        context,
+    )
+    assert result.is_error is False
+    assert path.read_bytes() == b"replacement\n-after"
+
+
+@pytest.mark.asyncio
+async def test_edit_tolerant_match_keeps_crlf_line_endings(tools, context, tmp_path) -> None:
+    path = tmp_path / "crlf.txt"
+    path.write_bytes(b"if ok:\r\n\told()\r\nnext()\r\n")
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "crlf.txt",
+            "old_text": "    old()\n",
+            "new_text": "    new()\n    added()\n",
+        },
+        context,
+    )
+    assert result.is_error is False
+    assert path.read_bytes() == b"if ok:\r\n\tnew()\r\n\tadded()\r\nnext()\r\n"

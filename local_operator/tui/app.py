@@ -120,6 +120,7 @@ from local_operator.tui.widgets.status_line import (
     SubagentBand,
     format_context_tokens,
     format_cost,
+    format_window,
 )
 from local_operator.tui.widgets.subagent_panel import (
     JobStats,
@@ -239,6 +240,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand("accounts", "List stored credentials"),
     # The panel is the receipt — the row the owner reported as noise.
     SlashCommand("usage", "Show provider usage quota"),
+    SlashCommand("context", "Show prompt, tool-schema and message token usage"),
     # THE exception. `/goal <text>` is the one command whose argument reaches
     # the model: the goal rides the system prompt's volatile tail on every later
     # turn (`Session.set_goal`). Words the model is given are the transcript's
@@ -3429,6 +3431,12 @@ class OperatorApp(App[None]):
             self._cmd_accounts(notice)
         elif command == "/usage":
             self._cmd_usage(arg, notice)
+        elif command == "/context":
+            block = self._context_block()
+            if block is not None:
+                self._append_block(block)
+            else:
+                notice("context breakdown unavailable.")
         elif command == "/goal":
             self._cmd_goal(arg, notice)
         elif command == "/loop":
@@ -5577,6 +5585,53 @@ class OperatorApp(App[None]):
         except Exception:
             return None
 
+    def _context_block(self) -> RichBlock | None:
+        """The exact categories behind the next provider request.
+
+        ``/usage`` answers account quota; this answers context economics —
+        especially MCP/tool-schema cost. A transcript block rather than a
+        modal panel: the numbers are a point-in-time diagnostic the user may
+        want to keep next to the task that prompted it, and the whole answer
+        fits in seven rows.
+        """
+        try:
+            session = self._session
+            if session is None:
+                return None
+            breakdown = getattr(session, "context_breakdown", None)
+            if not callable(breakdown):
+                return None
+            data = cast(dict[str, int], breakdown())
+            total = data["total"]
+            window = max(data["context_window"], 1)
+            pct = total / window * 100
+
+            def estimated(value: int) -> str:
+                return f"~{format_context_tokens(value)}"
+
+            items = [
+                ("Instructions", estimated(data["instructions"])),
+                ("Tool inventory", estimated(data["tool_inventory"])),
+                ("Tool schemas", estimated(data["tool_schemas"])),
+                ("Environment", estimated(data["environment"])),
+                ("Skills / MCP / goal", estimated(data["knowledge_mcp_goal"])),
+                ("Messages", estimated(data["messages"])),
+                (
+                    "Total",
+                    f"{estimated(total)} / {format_window(window)} ({pct:.1f}%)",
+                ),
+            ]
+            if data["cache_read"]:
+                items.append(
+                    (
+                        "Last cache read (exact)",
+                        format_context_tokens(data["cache_read"]),
+                    )
+                )
+            return RichBlock(_tree_listing(items, "Estimated next request", detail_token="muted"))
+        except Exception:
+            return None
+
     def _mcp_block(self) -> RichBlock | None:
         """Per-server MCP state: connection status plus the error when it failed.
 
@@ -6323,7 +6378,9 @@ def _partial_text(partial_result) -> str:
     return ""
 
 
-def _tree_listing(items: list[tuple[str, str]], caption: str) -> Group:
+def _tree_listing(
+    items: list[tuple[str, str]], caption: str, *, detail_token: str = "dim"
+) -> Group:
     """Tree-glyph section: ├─ / └─, name in the string tint, detail dim (D4).
 
     ``caption`` names WHAT the tree lists, on a dim row above it. It exists
@@ -6348,6 +6405,7 @@ def _tree_listing(items: list[tuple[str, str]], caption: str) -> Group:
         return Group()
     name_style = Style(color=theme_mod.semantic_color("string"))
     dim = Style(color=theme_mod.semantic_color("dim"))
+    detail_style = Style(color=theme_mod.semantic_color(detail_token))
     lines: list[Text] = [Text(caption, style=dim)]
     last_index = len(items) - 1
     for index, (name, detail) in enumerate(items):
@@ -6356,7 +6414,7 @@ def _tree_listing(items: list[tuple[str, str]], caption: str) -> Group:
         line.append(branch, style=dim)
         line.append(name, style=name_style)
         if detail:
-            line.append("  " + detail, style=dim)
+            line.append("  " + detail, style=detail_style)
         lines.append(line)
     return Group(*lines)
 

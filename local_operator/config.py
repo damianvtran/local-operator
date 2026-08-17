@@ -150,6 +150,10 @@ DEFAULT_CONFIG = Config(
             # ``local-operator exec`` running in CI, where nobody is watching the
             # tools it approves.
             "tool_approval_mode": "ask",
+            # Direct OpenAI GPT-5 calls use the public Responses API by default.
+            # Set `providers.openai.api` to `chat_completions` for an explicit
+            # compatibility opt-out; other OpenAI-shaped providers never read it.
+            "providers": {"openai": {"api": "responses"}},
             # One ordered cascade for every text-model call. Entries may be
             # "provider/model" strings or {provider, model, effort} mappings;
             # usage-aware switching is opt-in because it spends one lightweight

@@ -2,10 +2,12 @@
 
 On-disk format is identical to the wider Agent Skills ecosystem:
 a skill is a directory containing a ``SKILL.md`` whose YAML frontmatter
-carries ``name``, ``description``, ``enabled``, ``hide`` and the Agent
-Skills-standard ``disable-model-invocation``. The body is never read here —
-it is fetched on demand through the ``skill://`` protocol, so discovery stays
-cheap regardless of skill size.
+carries ``name``, ``description``, ``enabled``, ``hide``, the Agent
+Skills-standard ``disable-model-invocation``, and the optional
+gitignore-style ``globs`` (path-based force-include, see
+:meth:`local_operator.skills.index.SkillIndex.select`). The body is never
+read here — it is fetched on demand through the ``skill://`` protocol, so
+discovery stays cheap regardless of skill size.
 
 Deliberate divergences from that ecosystem (see docs/REWRITE.md §C):
 
@@ -52,6 +54,12 @@ class Skill(BaseModel):
     base_dir: Path
     source: str
     hide: bool = False
+    #: Gitignore-style path patterns from the ``globs`` frontmatter key
+    #: (CSV string or YAML list). A pattern matching the session cwd or a
+    #: file-path-like token of the selection query force-includes the skill
+    #: regardless of the cosine threshold — the skill author saying "this
+    #: one is about these paths" outranks an embedder's guess.
+    globs: tuple[str, ...] = ()
     resource_type: Literal["skill", "guide", "agent_hint"] = "skill"
 
 
@@ -121,7 +129,27 @@ def _skill_from_file(skill_md: Path, base_dir: Path, source: str) -> Skill | Non
         base_dir=base_dir,
         source=source,
         hide=hide,
+        globs=_parse_globs(meta.get("globs")),
     )
+
+
+def _parse_globs(raw: object) -> tuple[str, ...]:
+    """Normalize the ``globs`` frontmatter key to a tuple of patterns.
+
+    The ecosystem writes either a CSV string (``"*.py,src/**/*.ts"``) or a
+    YAML list; both are accepted. Non-string list entries and empty items
+    are dropped rather than rejected — a stray ``globs: [true]`` must not
+    cost the user an otherwise-good skill, and an empty pattern can never
+    match anything usefully. Any other shape (a bare int, a mapping) is
+    ignored entirely.
+    """
+    if isinstance(raw, str):
+        items: Sequence[object] = raw.split(",")
+    elif isinstance(raw, (list, tuple)):
+        items = raw
+    else:
+        return ()
+    return tuple(item.strip() for item in items if isinstance(item, str) and item.strip())
 
 
 def scan_skills_dir(

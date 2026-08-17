@@ -30,6 +30,7 @@ EXTRAS: dict[str, str] = {
     "mcp": "Model Context Protocol client support",
     "images": "HEIC/HEIF image attachment decoding",
     "tokenizer": "exact BPE token counting for context management",
+    "lsp": "Python symbol-aware navigation and rename previews (jedi)",
     "all": "every optional feature",
 }
 

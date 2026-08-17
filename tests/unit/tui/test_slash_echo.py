@@ -56,6 +56,7 @@ ECHO_POLICY = {
     # ledger; a user row would be the one it left. See `SLASH_COMMANDS`.
     "btw": False,
     "compact": False,
+    "context": False,
     "approvals": False,
     "skills": False,
     "mcp": False,
