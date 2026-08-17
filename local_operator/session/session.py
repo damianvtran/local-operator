@@ -47,7 +47,10 @@ from collections.abc import (
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
-from local_operator.compaction.tokens import approx_text_tokens
+from local_operator.compaction.tokens import (
+    approx_text_tokens,
+    estimate_messages_tokens,
+)
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
 from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJobManager
@@ -76,6 +79,7 @@ from local_operator.harness.types import (
     ModelSpec,
     NoticeEvent,
     StaleAside,
+    SteeringDeliveredEvent,
     StreamEvent,
     StreamTextDelta,
     StreamUsageEvent,
@@ -396,6 +400,25 @@ def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
     }
 
 
+def _last_reported_usage(messages: Sequence[AgentMessage]) -> Usage | None:
+    """The newest provider-reported :class:`Usage` in ``messages``, or ``None``.
+
+    Scans BACKWARDS and stops at the first hit: the newest reading is the only
+    one that describes the context as it now stands, and a resumed conversation
+    can hold hundreds of messages to walk past.
+
+    ``None`` means "no turn in this history ever reported usage", which is a
+    real state and distinct from zero — a brand-new session, a conversation
+    whose only entries are user messages, or a transcript from a provider that
+    reports no usage at all. Callers must not collapse the two: a confident 0 on
+    a resumed session is the empty-context lie this exists to prevent.
+    """
+    for message in reversed(messages):
+        if isinstance(message, Message) and message.usage is not None:
+            return message.usage
+    return None
+
+
 def _render_compaction_marker(marker: CustomMessage, entry_id: str | None = None) -> Message:
     """Render one compaction marker into an LLM-visible message. ``entry_id``
     (the marker's transcript entry id) rides onto the rendered message.
@@ -547,7 +570,16 @@ class Session:
         self.mcp_startup: McpStartupOutcome | None = None
         self._aside_thunks: list[Aside] = []
         self._continuation_queue: list[AgentMessage] = []
-        self._last_usage: Usage | None = None  # latest provider-reported usage
+        # Latest provider-reported usage. SEEDED from the replayed transcript
+        # rather than starting at None, because on a resumed session the last
+        # turn's usage is a fact that already happened and the transcript is
+        # where it was persisted. Two things read it and both were wrong without
+        # this: the compaction trigger fell back to a local estimate for the
+        # first turn after every resume (the estimate runs 7-17% off, and the
+        # gate it feeds decides whether to rewrite the user's history), and
+        # ``restored_usage`` below reports the conversation's real size to a
+        # front end that would otherwise open on an empty-looking context.
+        self._last_usage: Usage | None = _last_reported_usage(self._context.messages)
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
         # Boundary-event suppression across a post-compaction continuation:
@@ -1179,6 +1211,29 @@ class Session:
 
     # -- context accounting ---------------------------------------------------
 
+    def restored_usage(self) -> Usage | None:
+        """The provider's own last reading for THIS conversation, or ``None``.
+
+        What a resumed front end needs and could not previously get. The status
+        band's context segment and its cost segment are both fed by turns that
+        end while the app is running, so a resumed session had no source for
+        either until the user spent a whole turn — the band opened reporting an
+        empty context and no spend for a conversation that might be 40% of the
+        way through its window with dollars already on it.
+
+        This is the EXACT figure the provider reported, not an estimate, so a
+        host may mark it as such: it is the same number the band would be
+        showing had the process never stopped. ``None`` means the transcript
+        holds no usage at all (a new session, or a provider that reports none),
+        which is why this returns the object rather than a bare int — a caller
+        must be able to tell "nothing reported" from "reported zero" and only
+        the first justifies falling back to a local estimate.
+
+        Read-only and synchronous: it serves an already-parsed field off the
+        replayed history, so a front end may call it on the paint path.
+        """
+        return self._last_usage
+
     async def measure_preloaded_context(self) -> int:
         """Tokens the NEXT request carries before the user has typed anything.
 
@@ -1192,8 +1247,27 @@ class Session:
         from 0% to 15% because of a short question.
 
         What is counted is exactly what :class:`~local_operator.harness.loop`
-        puts in a ``ChatRequest`` with an empty transcript: the system blocks
-        and the serialized tool schemas.
+        puts in a ``ChatRequest``: the system blocks, the serialized tool
+        schemas, AND the conversation already in context.
+
+        That last term is not an embellishment, it is the difference between a
+        correct reading and a wrong one on every RESUMED session. The name says
+        "preloaded", and on a NEW session the history is empty so the two
+        readings coincide — which is exactly why the omission survived. A
+        ``--resume`` (or ``/resume``, or any reload that keeps the conversation)
+        rebuilds ``_context.messages`` from the transcript before this runs, so
+        a sum over blocks and schemas alone reports the size of an EMPTY
+        conversation for one that may hold hundreds of messages: measured on a
+        resumed session whose last provider reading was 402k, the band opened at
+        1.7k (0.2%/1M) and stayed there until the next turn happened to end.
+        Under-reporting is the dangerous direction — it is the reading a user
+        checks to decide whether there is room to keep going, and it claimed a
+        whole free window while 40% of it was already spent.
+
+        The history is measured through the SAME renderer a request is built
+        from (:meth:`_render_history`), so what is counted is what would
+        actually be sent — expired todo reminders dropped, images stripped when
+        a provider has refused them — rather than the raw transcript.
 
         Two costs are deliberately refused, because a status readout must not
         be the most expensive thing a session does before the user speaks:
@@ -1222,6 +1296,13 @@ class Session:
         # ``self._tools`` rather than mutating it, so this reference stays a
         # coherent snapshot even if an MCP refresh swaps the list mid-count.
         tools = self._tools
+        # Rendered on the LOOP for the same reason the schemas are serialized in
+        # the thread is right: rendering touches session state (the todo-reminder
+        # expiry reads the store, the image degrade reads a flag), and handing
+        # mutable session state to a worker thread is how a snapshot tears. The
+        # render is a list walk over messages already in memory; the tokenizing
+        # of its text is the part that scales, and that still crosses.
+        rendered = self._render_history(list(self._context.messages))
 
         def count() -> int:
             total = sum(approx_text_tokens(text) for text in resolved)
@@ -1234,6 +1315,20 @@ class Session:
                 total += approx_text_tokens(tool.description)
                 if tool.parameters:
                     total += approx_text_tokens(json.dumps(tool.parameters, separators=(",", ":")))
+            # ``estimate_messages_tokens`` rather than a hand-rolled walk: it is
+            # the ruler compaction plans against, and a second implementation of
+            # "how big is this history" is how the band and the compaction gate
+            # end up disagreeing about the same conversation. It also counts
+            # images and tool-call arguments, which a naive text sum drops — on a
+            # resumed vision session those are the largest terms there are.
+            #
+            # It prefers cl100k_base when the ``tokenizer`` extra is installed,
+            # which is a sharper ruler than this method's own chars/4 rule but
+            # NOT a new cost: the estimates are memoized per message id, so a
+            # resumed session pays once for history the compaction gate would
+            # have tokenized on its first turn regardless. Without the extra it
+            # degrades to the same chars/4 heuristic as the blocks above.
+            total += estimate_messages_tokens(rendered)
             return total
 
         return await asyncio.to_thread(count)
@@ -1656,12 +1751,27 @@ class Session:
     async def _drain_steering(self) -> list[AgentMessage]:
         """Consume the steering queue. Steering messages are real injected
         turns, so they are persisted here — the loop never returns them in its
-        ``new_messages``."""
+        ``new_messages``.
+
+        Emits :class:`SteeringDeliveredEvent` when it actually takes something.
+        This is the one place that knows a queued message stopped being queued:
+        the loop calls it at the boundary where the messages join the context,
+        so a front end showing "queued — sends when this step finishes" can
+        settle that row to a delivered one instead of leaving the promise up for
+        the rest of the session. Silent when the queue is empty, which is the
+        overwhelmingly common case — this is called at EVERY tool and message
+        boundary, and an event per boundary would be noise with no receiver.
+        """
         messages: list[AgentMessage] = []
         while not self._steering_queue.empty():
             message = self._steering_queue.get_nowait()
             await self._transcript.append_message(message)
             messages.append(message)
+        if messages:
+            # After persistence, not before: the receipt says the message is in
+            # the conversation, and it is only in the conversation once it is on
+            # disk and in the list being handed back to the loop.
+            await self._emit(SteeringDeliveredEvent(count=len(messages)))
         return messages
 
     async def _drain_asides(self) -> list[Aside]:

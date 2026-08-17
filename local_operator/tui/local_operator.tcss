@@ -898,6 +898,41 @@ ApprovalBlock:focus {
     background: $lo-surface;
 }
 
+/* One surface row ABOVE the band's first slot, so a docked panel is inset the
+ * same on both sides of its slab.
+ *
+ * The asymmetry this fixes, measured at 100x24 with three todos: the panel's
+ * caption sat directly on the transcript's ground row while TWO surface rows
+ * (the last slot's own padding, then `#input-shell`'s) separated its last row
+ * from the composer. One row above against two below, on a slab whose whole job
+ * is to read as part of the dock — reported from the field as "it looks a bit
+ * tight" above the todo and subagent lists.
+ *
+ * On the BAND, not on `.band-slot`: the slot's padding repeats per slot, and
+ * with both panels docked a per-slot top row would open a second gap between
+ * the subagent list and the todo list — where the existing single row is
+ * already the right rhythm. This is the join between the CONVERSATION and the
+ * dock, which happens once no matter how many slots the band holds.
+ *
+ * Why this does not re-create the trench the padding flip removed: that row was
+ * transparent, so it painted the Screen's `$lo-bg` between two lighter slabs.
+ * This one is inside `#band` and therefore `$lo-surface` — the same fill as the
+ * rows below the slab, so the panel reads as inset within the dock rather than
+ * as having come loose from it. The transcript's own ground row still sits
+ * above it and still separates the conversation from the dock, which is the
+ * rule that row belongs to.
+ *
+ * Carried by a CLASS the band toggles rather than declared unconditionally,
+ * because padding on a container applies even when every child is hidden: an
+ * idle session and the boot splash have both panels `display: none`, and an
+ * unconditional row would put a bare surface strip into a composition that is
+ * measured to the row (`test_an_empty_band_paints_nothing_on_the_splash`). The
+ * class is applied only while a slot is actually visible — see
+ * `OperatorApp._refresh_band`. */
+#band.has-slot {
+    padding: 1 0 0 0;
+}
+
 /* One blank row UNDER each slot, not over it, and the direction is the whole
  * point: the transcript ends in a row of its own ground (`TranscriptView`'s
  * bottom padding), so a top padding row here stacked with it — measured at

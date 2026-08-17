@@ -82,6 +82,7 @@ from local_operator.tui.events import (
     RetryEnded,
     RetryStarted,
     StartFlushTimer,
+    SteeringDelivered,
     SubagentEnded,
     SubagentProgress,
     SubagentStarted,
@@ -177,6 +178,33 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: this for new sessions" names the consequence, fits the same slot, and includes
 #: the article the clipped phrase lacked.
 PERSIST_HINT = "/model default saves this for new sessions"
+
+#: The two states of a mid-turn message, as one pair so they cannot drift apart.
+#:
+#: The queued line is a promise about the future in the future tense, and the
+#: sent line is the same fact in the past tense — the row is UPDATED IN PLACE
+#: from one to the other (`NoticeBlock.restate`) when the engine actually takes
+#: the message, so the transcript ends up holding one statement that came true
+#: rather than a stale promise with a correction underneath it.
+#:
+#: The settled line deliberately reads as a receipt, not an alarm: `sent` is the
+#: word the user is waiting for, and `✓` at `success` weight is the app's
+#: existing mark for a completed action. The queued line stays `note` — mid
+#: weight, readable at a glance, not shouting — because it answers a question
+#: the user is actively asking ("did my text just get thrown away?").
+QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
+SENT_STEER_NOTICE = "sent — delivered to the agent mid-turn"
+
+#: Shortest SCREEN (not terminal — two rows go to the app's own outer padding)
+#: that can afford the dock band's top inset row, ``#band.has-slot``.
+#:
+#: At 10 rows the dock already exceeds the terminal without it: ``#input-shell``
+#: is five rows and the transcript's padding two more, and ``TodoPanel`` is
+#: clamped at its ``_MIN_BODY_ROWS`` floor with nothing left to give back. The
+#: inset is one row of rhythm; a clipped todo header is a lost statement, so
+#: below this the band keeps its previous flush join. See
+#: :meth:`OperatorApp._sync_band_inset`.
+MIN_BAND_INSET_SCREEN_ROWS = 10
 
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
@@ -696,6 +724,20 @@ class OperatorApp(App[None]):
         #: retention window and a spend counter that goes DOWN when a finished
         #: child is evicted is worse than no counter at all.
         self._subagent_costs: dict[str, float] = {}
+        #: Queued-steer rows still promising a delivery that has not happened.
+        #: Appended when a mid-turn submit is steered, drained when the engine
+        #: reports it took them (`on_steering_delivered`). A list because several
+        #: messages can be queued against one boundary and the engine delivers
+        #: them together; cleared on a session swap, where the rows belong to a
+        #: conversation that is no longer on screen.
+        self._queued_steer_notices: list[NoticeBlock] = []
+        #: What the CURRENT turn has already been billed for, per model call, by
+        #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
+        #: whole and is the authoritative figure, so it adds only the difference
+        #: and this resets to 0.0 at every turn boundary. Without it the two
+        #: writers would each bill the same tokens and the band would report
+        #: roughly double what a turn actually cost.
+        self._turn_accrued_cost: float = 0.0
         # Auto-naming fires while the conversation is STILL unnamed, at most
         # one attempt in flight. Latched here rather than on the session
         # holder because the app is what schedules the call, and a second
@@ -1052,6 +1094,14 @@ class OperatorApp(App[None]):
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
         self._render_resumed_history(session)
+        # BEFORE the measurement, and the order is load-bearing: this installs
+        # the provider's own exact reading for a resumed conversation, and
+        # `_measure_preloaded_context` refuses to spend an estimate once an
+        # exact figure is standing. Run the other way round, the estimate would
+        # land first and the exact restore would then be the thing overwriting
+        # it — same end state on a quiet boot, but the estimate is resolved in a
+        # worker, so which one won would depend on scheduling.
+        self._restore_reported_usage(session)
         self._measure_preloaded_context(session)
 
     async def _preflight_usage(self, session: Any) -> None:
@@ -1084,6 +1134,68 @@ class OperatorApp(App[None]):
             return
         self._adopt_session(session)
         await self._preflight_usage(session)
+
+    def _restore_reported_usage(self, session: Any) -> None:
+        """Put a RESUMED conversation's own token and cost figures on the band.
+
+        A resumed session opens on a conversation that already happened, and the
+        band is fed entirely by turns that end while this process is running —
+        so before this, `--resume` painted an empty-looking context and no spend
+        for a conversation that might be 40% through its window with real money
+        on it. Measured on a resumed session whose last provider reading was
+        402k of a 1M window: the band opened at `0.2%/1M` with no cost segment,
+        and stayed there until the next turn happened to end.
+
+        Two figures, from the same restored ``Usage`` and with deliberately
+        different standing:
+
+        - **Context** is the provider's own ``context_tokens`` for the last call
+          of the last turn, so it is installed EXACT (``context_is_estimate``
+          False). It is not a guess about the conversation; it is the number the
+          band would still be showing had the process never stopped. Being exact
+          is also what makes it suppress the local estimate below.
+        - **Cost** is the restored turn's price, and it is a FLOOR rather than
+          the session's true lifetime total: only the last reported turn's usage
+          survives in a form this can price, so a ten-turn conversation restores
+          the last turn's dollars and accrues from there. It is seeded anyway
+          because the alternative on screen is an empty segment, and empty reads
+          as "this session has cost nothing" — the one reading that is certainly
+          false. Undercounting a known-partial total beats asserting zero.
+
+        Degrades silently and completely. Reduced hosts (the pilot fakes, the
+        embedders) have no ``restored_usage``, an unpriceable model yields no
+        cost, and a transcript with no usage in it yields nothing at all — in
+        every one of those cases the band keeps exactly the behaviour it had.
+        """
+        restore = getattr(session, "restored_usage", None)
+        if not callable(restore) or self._status is None:
+            return
+        try:
+            usage = restore()
+        except Exception:  # a status readout must never take the app down
+            logger.debug("restored usage unavailable", exc_info=True)
+            return
+        if usage is None:
+            return  # nothing was ever reported: leave the estimate its job
+
+        context_tokens = getattr(usage, "context_tokens", None) or 0
+        if context_tokens > 0:
+            self._status.update(
+                context_tokens=int(context_tokens),
+                context_is_estimate=False,
+                context_window=_context_window(session),
+            )
+
+        # Priced through the same `_cost_for` every live turn uses, so a
+        # restored figure and an accrued one cannot disagree about what the same
+        # usage was worth. `_total_cost` is ASSIGNED rather than added to: this
+        # runs on adopt, where the ledger has just been zeroed for the swap, and
+        # `+=` would double the figure on a `/reload` that lands back on the
+        # same conversation (whose spend `_reconcile_reload` restores).
+        cost = self._cost_for(usage)
+        if cost:
+            self._total_cost = cost
+            self._status.update(cost=format_cost(self._spend_total()))
 
     def _measure_preloaded_context(self, session: Any) -> None:
         """Fill the context segment before the first turn, off the boot path.
@@ -1511,6 +1623,16 @@ class OperatorApp(App[None]):
         carried_spend = (self._total_cost, dict(self._subagent_costs))
         self._total_cost = 0.0
         self._subagent_costs.clear()
+        # The held queued-steer rows were just removed with the rest of the
+        # ledger, so the references are to widgets no longer on screen. Left in
+        # the list, the replacement session's first delivery would "settle"
+        # rows the user cannot see and the rows it CAN see would keep promising.
+        self._queued_steer_notices.clear()
+        # The per-call accrual belongs to a turn on the session being replaced.
+        # Left standing, the NEXT session's first `agent_end` would subtract the
+        # dead conversation's already-billed calls from its own turn total and
+        # under-report that turn by exactly that much.
+        self._turn_accrued_cost = 0.0
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -2844,6 +2966,13 @@ class OperatorApp(App[None]):
 
     def _clear_transcript(self) -> None:
         self._transcript_view().clear_blocks()  # fires the on_clear hook
+        # Same reason as the session swap: the rows those references point at
+        # have just been removed, and a delivery landing afterwards must not
+        # try to settle widgets that are no longer in the transcript. The
+        # messages themselves are unaffected — `/clear` empties the screen, not
+        # the engine's queue — so the delivery still happens, it just has no row
+        # left to report it on.
+        self._queued_steer_notices.clear()
         # ``ends_empty_state=False``: the receipt reports on the CLEAR, so the
         # session has not started talking and the splash the clear just restored
         # must survive it. Going through ``_append_block`` rather than straight to
@@ -3025,7 +3154,20 @@ class OperatorApp(App[None]):
             # the user is waiting for, and below `warning`, which is an alarm this
             # is not. Three warning-tinted rows on one frame for routine receipts
             # is how the loudest ink in the palette stops meaning anything.
-            self._append_block(NoticeBlock("queued — sends when this step finishes", "note"))
+            # Held, not just appended: this row is a promise about the future
+            # ("sends when this step finishes") and the reference is what lets
+            # `on_steering_delivered` settle it into a statement of fact once
+            # the engine actually takes the message. Without that, the row went
+            # on saying `queued` for the rest of the session and the agent's
+            # eventual reply was the only evidence it had ever been delivered.
+            #
+            # A LIST because a user can queue several messages while one tool
+            # runs, and the engine delivers whatever has accumulated at the next
+            # boundary — all of them, together. Settling only the newest would
+            # leave the earlier rows lying.
+            queued = NoticeBlock(QUEUED_STEER_NOTICE, "note")
+            self._append_block(queued)
+            self._queued_steer_notices.append(queued)
             # Still worth a title: the steering message can be the first thing
             # in the conversation that actually says what the task is.
             self._maybe_name_conversation(text)
@@ -3224,6 +3366,40 @@ class OperatorApp(App[None]):
         # down (see the panels' own docstrings).
         self._refresh_band()
 
+    def _sync_band_inset(self) -> None:
+        """Give the band its top inset only while it actually holds a slot.
+
+        See ``#band.has-slot`` in the stylesheet for what the row is for. The
+        toggle is here because visibility is a runtime fact: both panels hide
+        themselves when their store is empty, and CSS cannot express "pad only
+        if a child is displayed". Padding a container whose children are all
+        hidden still reserves the row, which on the boot splash is a bare
+        surface strip in a composition measured to the row.
+
+        Never raises: the band is chrome, and a status surface must not be able
+        to take the app down (the same posture as the panels' own ``sync``).
+        """
+        try:
+            band = self.query_one("#band")
+            screen_height = self.screen.size.height
+        except Exception:  # not composed yet (early boot), or no band on this host
+            return
+        docked = any(
+            panel is not None and panel.display
+            for panel in (self._subagent_panel, self._todo_panel)
+        )
+        # The inset is breathing room, and the shortest terminals have none to
+        # spend. `TodoPanel` clamps itself at `_MIN_BODY_ROWS` (header + one
+        # item) and below a 10-row screen the dock already exceeds the terminal
+        # on its own, so there is no row left for the panel to pay this out of —
+        # taken anyway, it pushes the band past the screen and
+        # `Screen { overflow: hidden }` reports that by clipping the panel's own
+        # header off the TOP, which is the exact failure the row budget exists
+        # to prevent. Measured at 100x12: virtual height 11 against a 10-row
+        # screen. One row of rhythm is not worth a clipped list, so below the
+        # threshold the band goes back to its previous flush join.
+        band.set_class(docked and screen_height > MIN_BAND_INSET_SCREEN_ROWS, "has-slot")
+
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
 
@@ -3233,10 +3409,28 @@ class OperatorApp(App[None]):
         treat a missing manager as empty).
         """
         session = self._session
-        if self._subagent_panel is not None:
-            self._subagent_panel.sync(session)
-        if self._todo_panel is not None:
-            self._todo_panel.sync(session)
+        # Three steps, and the order is load-bearing rather than tidy.
+        #
+        # A panel's own `sync` is what decides whether it is displayed at all
+        # (its store went from empty to non-empty), and the band's inset exists
+        # only while something is docked — so visibility has to be settled
+        # before the inset can be. But the inset also SPENDS one of the rows
+        # `TodoPanel` sizes its list against, so the budget has to be settled
+        # before the list is painted. Those two orderings conflict, and doing
+        # only one of them is what produced a visible reflow: the list appeared
+        # at its pre-inset height and lost a row on the following tick.
+        #
+        # Resolved by paying for a second `sync`: settle visibility, settle the
+        # inset from it, then repaint against the budget that results. The
+        # second pass is nearly free — both panels hold an equality guard over
+        # (contents, budget) and return immediately when neither moved, which is
+        # every tick where this changed nothing.
+        for _ in range(2):
+            if self._subagent_panel is not None:
+                self._subagent_panel.sync(session)
+            if self._todo_panel is not None:
+                self._todo_panel.sync(session)
+            self._sync_band_inset()
         # The open subagent page rides the SAME tick, for the same reason: a
         # child's elapsed time and its last tool both move with no event, and
         # a page that only advanced on relayed events sat frozen through every
@@ -5973,7 +6167,19 @@ class OperatorApp(App[None]):
         cost_text: str | None = None
         cost = self._cost_for(message.usage)
         if cost is not None:
-            self._total_cost += cost
+            # Only the REMAINDER. `on_context_usage_reported` has been billing
+            # this turn's calls as they landed so the segment moves while the
+            # agent works; this figure prices the whole turn and supersedes the
+            # running one, so adding it whole would count every already-billed
+            # call twice. Floored at zero: the turn total is a sum over the same
+            # calls and cannot legitimately come back smaller, and a negative
+            # correction would walk the session's lifetime spend backwards.
+            self._total_cost += max(0.0, cost - self._turn_accrued_cost)
+        # The turn is over either way, so the per-call ledger closes here rather
+        # than only on the path that priced something: a turn whose cost came
+        # back unpriceable must not leave its accrual standing to be subtracted
+        # from the NEXT turn's total.
+        self._turn_accrued_cost = 0.0
         # Fold in whatever the children have spent BEFORE reading the total: a
         # turn that delegated has almost certainly moved their figures, and the
         # 1 Hz poll would otherwise be what first showed it.
@@ -6282,20 +6488,40 @@ class OperatorApp(App[None]):
         self._refresh_working_activity()
 
     def on_context_usage_reported(self, message: ContextUsageReported) -> None:
-        """Move the context reading DURING a turn, not only when it ends.
+        """Move the context reading AND the cost DURING a turn, not only at its end.
 
         An agentic turn is many model calls over many minutes, and each one
         reports the context it ran against. Waiting for ``agent_end`` meant the
         band showed the pre-turn size for the whole time the agent was working
         — the exact stretch a user watches it for. Reported as exact, because
         it is the provider's own number.
+
+        Money moves on the same signal and for the same reason. Cost used to
+        appear only when the whole turn settled, so a brand-new session's FIRST
+        turn showed no cost at all while it ran — reported from the field as
+        "the cost doesn't start tracking until after the second message". A turn
+        that spends ten minutes in tools is at its most expensive precisely
+        while the segment is empty, and an empty segment reads as free.
+
+        ``_turn_accrued_cost`` is what keeps the two writers honest. This one
+        pays per call as the calls happen; ``on_turn_ended`` prices the turn as
+        a whole and is authoritative (it sums every call, including any this
+        never saw). Recording what was already taken lets the end add only the
+        REMAINDER instead of billing the turn twice.
         """
         assert self._status is not None
-        self._status.update(
-            context_tokens=message.context_tokens,
-            context_is_estimate=False,
-            context_window=_context_window(self._session),
-        )
+        if message.context_tokens > 0:
+            self._status.update(
+                context_tokens=message.context_tokens,
+                context_is_estimate=False,
+                context_window=_context_window(self._session),
+            )
+        cost = self._cost_for(message.usage)
+        if not cost:
+            return
+        self._total_cost += cost
+        self._turn_accrued_cost += cost
+        self._status.update(cost=format_cost(self._spend_total()))
 
     def on_tool_composing(self, message: ToolComposing) -> None:
         """Show the call the model is still dictating (TUI-026).
@@ -6397,6 +6623,29 @@ class OperatorApp(App[None]):
 
     def on_notice_posted(self, message: NoticePosted) -> None:
         self._append_block(NoticeBlock(message.text, message.kind))
+
+    def on_steering_delivered(self, message: SteeringDelivered) -> None:
+        """Settle every queued-steer row into a delivered one.
+
+        The engine has taken the messages into context, so the promise those
+        rows were making has come true and they say so — in place, in the past
+        tense. Appending a second notice instead would leave the stale `queued`
+        claim on screen above its own correction, and spend a row doing it.
+
+        ALL held rows settle on one delivery, because that is what actually
+        happened: the queue is drained whole at a single boundary, so three
+        messages typed during one tool call are three promises kept at once.
+        ``count`` is not used to settle a subset for that reason — it would have
+        to guess WHICH rows, and the queue's own answer is "all of them".
+        """
+        if not self._queued_steer_notices:
+            return  # a delivery for rows this app is no longer holding
+        for block in self._queued_steer_notices:
+            try:
+                block.restate(SENT_STEER_NOTICE, "success")
+            except Exception:  # a receipt must never take the app down
+                logger.debug("queued-steer notice could not be settled", exc_info=True)
+        self._queued_steer_notices.clear()
 
     def on_compaction_started(self, message: CompactionStarted) -> None:
         self._append_block(NoticeBlock("compacting context…", "info"))

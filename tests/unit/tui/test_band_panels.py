@@ -453,12 +453,17 @@ async def test_todo_row_cap_follows_the_screen_and_the_marker_counts_the_hidden(
         lines = str(panel._body.content).split("\n")
 
         assert app.screen.size.height == 12
-        # 12 rows of screen, 8 of them the dock's, leaving header + 2 + marker.
-        assert panel._body_rows() == 4
-        assert len(lines) == 4
+        # 12 rows of screen, 8 of them the dock's and one the band's own top
+        # inset (`#band.has-slot`), leaving header + 1 item + marker. The inset
+        # buys the panel the same one-row breathing space above its slab that it
+        # already had below it; at this height it is paid for out of the item
+        # rows, and the marker's count grows to match rather than anything being
+        # clipped — which the region/virtual-size assertions below pin.
+        assert panel._body_rows() == 3
+        assert len(lines) == 3
         assert lines[0] == "Todos · 0/12 resolved"
-        assert lines[1:3] == ["- [ ] step 1 of the plan", "- [ ] step 2 of the plan"]
-        assert lines[-1] == "… 10 more todos"
+        assert lines[1:2] == ["- [ ] step 1 of the plan"]
+        assert lines[-1] == "… 11 more todos"
         # Nothing clipped upward, and the band fits the screen it is drawn in.
         assert app.screen.query_one("#todo-body").region.y >= 0
         assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
