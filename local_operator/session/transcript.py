@@ -226,34 +226,27 @@ class Transcript:
         )
         async with self._lock:
             self._entries.append(entry)
-            # Serialize + open + write + flush in a worker thread. One event
-            # loop serves the parent session, every subagent and the TUI
-            # repaint, and this runs per message: with several children
-            # persisting turns at once, the flushes queued up on the loop and
-            # became the largest remaining stall once the tokenizer moved off
-            # it (measured at ~94 ms worst case with six children).
+            # DELIBERATELY SYNCHRONOUS, and not an oversight — do not "fix"
+            # this into a to_thread the way :meth:`compact_file` legitimately
+            # is. This append has callers that never await it:
+            # ``Session.queue_aside`` persists a materialized aside through
+            # ``_spawn_background``, i.e. fire-and-forget. Every await inside
+            # this method widens the window between "the message reached the
+            # model" and "the message is on disk", and a reader that opens the
+            # transcript in that window sees a child's context missing a
+            # message it has already acted on.
             #
-            # Correctness is unchanged because the append stays INSIDE the
-            # lock: entries reach the file in the same order they reach
-            # ``_entries``, and a second append waits for this one's flush.
-            # ``to_json`` runs in the worker too — it is the CPU half of the
-            # cost on a message carrying a large tool result.
-            await asyncio.to_thread(self._write_entry, entry)
+            # Measured, because the tradeoff was real: offloading this cut the
+            # worst loop stall at one workload (56 ms -> 22 ms) and made it
+            # WORSE at a larger one (298 ms -> 655 ms), while CI caught the
+            # visibility regression it introduced. The tokenizer offload in
+            # ``Session._offloaded`` is where the loop-responsiveness win
+            # actually comes from (1360 ms -> 56 ms); this write is a few
+            # hundred microseconds and is not worth a correctness hazard.
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(entry.to_json() + "\n")
+                handle.flush()
         return entry
-
-    def _write_entry(self, entry: TranscriptEntry) -> None:
-        """Append one serialized entry to the file (worker-thread half of
-        :meth:`_append`).
-
-        Synchronous by design — ``asyncio.to_thread`` is the only caller, and
-        the ``_lock`` held across that call is what keeps concurrent appends
-        ordered. ``flush`` stays here rather than being dropped: a crashed
-        session must not lose the turn it had already recorded, which is the
-        whole basis of transcript replay and ``--resume``.
-        """
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(entry.to_json() + "\n")
-            handle.flush()
 
     # -- replay -------------------------------------------------------------
 
