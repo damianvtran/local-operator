@@ -35,6 +35,7 @@ from local_operator.tui.widgets.subagent_panel import (
     JobStats,
     SubagentPanel,
     SubagentRow,
+    _glyph_cells,
     compose_row,
     job_elapsed,
     job_stats,
@@ -411,6 +412,25 @@ def test_the_clock_column_starts_in_the_same_cell_on_every_row() -> None:
         elapsed = job_elapsed(job)
         ends.add(cell_len(row[: row.index(elapsed) + len(elapsed)]))
     assert len(ends) == 1, f"the clock column sheared: {rows!r}"
+
+
+def test_the_glyph_budget_is_the_column_the_row_actually_draws() -> None:
+    """The pad and the BUDGET are two halves of one fix, and each can regress
+    alone.
+
+    ``compose_row`` spends ``_glyph_cells`` when it decides what to truncate. A
+    budget measured at the raw glyph width while the row draws a padded column
+    is short by one cell, which is what let the truncate eat the last cell of a
+    dollar figure — and a money value clipped mid-digit is a worse answer than
+    the ``$0.0000`` this module refuses to print. So the budget must report the
+    padded column for a one-cell mark, not the mark.
+    """
+    facts = {"fallback_id": "j0", "current": False}
+    one_cell = row_facts(Job("j1", "docs sweep", progress="auditing merged MRs"), **facts)
+    two_cell = row_facts(Job("j2", "queued crawler", queued=True), **facts)
+
+    assert _glyph_cells(one_cell) == 2, "a one-cell mark still occupies the shared column"
+    assert _glyph_cells(two_cell) == 2, "and a two-cell mark is already that wide"
 
 
 def test_the_whole_column_sheds_together_so_a_blank_cell_means_one_thing() -> None:

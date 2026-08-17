@@ -384,14 +384,15 @@ async def test_a_swept_job_says_so_instead_of_claiming_to_be_running() -> None:
 
 @pytest.mark.asyncio
 async def test_the_title_says_a_cancelled_child_never_ran() -> None:
-    """``⊘ cancelled · 1m36s`` presents parked time as work time.
+    """``⊘ cancelled · 1m36s`` presents waiting time as work time.
 
-    A job cancelled at the capacity gate ran for zero seconds and spent
-    nothing; its duration is how long it WAITED. Beside a page whose sibling
-    rows read ``⣷ running · 7m53s``, the bare word paired with that number
-    says an operator killed a child a minute and a half into its work. The
-    manager records the distinction on the row (``CANCELLED_BEFORE_START``)
-    and the title spends it.
+    A job cancelled before its runner was entered ran for zero seconds and
+    spent nothing; its duration is how long it WAITED. Beside a page whose
+    sibling rows read ``⣷ running · 7m53s``, the bare word paired with that
+    number says an operator killed a child a minute and a half into its work.
+    The manager records the distinction on the row
+    (``CANCELLED_BEFORE_START``, keyed on ``started_at``) and the title spends
+    it.
     """
     parked = _Job("sub-parked", "flaky test bisect", status="cancelled")
     parked.settled_at = parked.start_time + 96.0
@@ -407,8 +408,10 @@ async def test_the_title_says_a_cancelled_child_never_ran() -> None:
         assert CANCELLED_BEFORE_START in title, title
         assert "1m36s" in title  # the number stays; what it MEANS is now said
 
-        # A child cancelled while genuinely running keeps the bare word: it
-        # did work, and that duration is work time.
+        # A child whose runner DID begin keeps the bare word: it worked, and
+        # that duration is work time. ``started_at`` is what separates the two,
+        # and it is set on this fixture to say so — ``queued`` would not, since
+        # an admitted-but-never-entered job is not parked either.
         app._open_subagent_view("sub-midrun")
         await pilot.pause()
         title = view.rendered_rows()[0]
