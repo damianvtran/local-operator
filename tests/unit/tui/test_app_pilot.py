@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -2138,6 +2139,89 @@ async def test_the_model_list_offers_what_the_user_can_actually_run() -> None:
         offered = {row.selector for row in picker.rows()}
     # openrouter has a credential; ollama needs none by definition; anthropic has
     # neither and is the one the user cannot act on.
+    assert offered == {"openrouter/deepseek/deepseek-chat", "ollama/qwen3:8b"}, offered
+
+
+class _PruningController(_AccessController):
+    """A catalogue that withdrew the model the session is running.
+
+    This is what an authoritative account-scoped listing does: the account's own
+    catalogue replaces the bundled ids, so a session started on a bundled id has
+    no entry in the list at all. The registry still describes it and ``/model``
+    still accepts it, which is exactly the disagreement the rescue exists to
+    close.
+    """
+
+    def static_catalogue(self):
+        from local_operator.providers.controller import CatalogueEntry
+
+        return [
+            CatalogueEntry(
+                provider="openrouter",
+                model_id="deepseek/deepseek-chat",
+                label="DeepSeek Chat",
+                context_window=64_000,
+                input_price=0.14,
+                output_price=0.28,
+                connected=True,
+                aggregated=True,
+            )
+        ]
+
+    def entry_for(self, provider, model_id):
+        from local_operator.providers.controller import CatalogueEntry
+
+        if (provider, model_id) != ("test", "model"):
+            return None
+        return CatalogueEntry(
+            provider=provider,
+            model_id=model_id,
+            label="Test Model",
+            context_window=128_000,
+            input_price=1.0,
+            output_price=2.0,
+            connected=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_running_model_is_offered_even_when_the_listing_withdrew_it() -> None:
+    """The band names the model; the list must not deny it.
+
+    An authoritative listing may prune bundled ids, and exempting the current row
+    from the credential filter does not help when no entry arrives to exempt. The
+    session read `test/model` on the band while the picker showed no current row
+    and typing the id answered "no matching models" — the list disagreeing with
+    the set `/model` accepts, with the list being the discovery surface.
+    """
+    ctrl = _PruningController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.selector for row in picker.rows()}
+        chrome = picker.render_text(90).plain
+
+    assert "test/model" in offered, offered
+    # The `●` is the whole point: it is what answers "what am I on", and a row
+    # without it would leave the band and the list contradicting each other.
+    assert "test/model" in chrome and "●" in chrome, chrome
+    # And the count stays honest: the rescued row is not one of the catalogue's
+    # entries, so a naive subtraction reports a NEGATIVE number of hidden rows.
+    assert not re.search(r"-\d+\s+hidden", chrome), chrome
+
+
+@pytest.mark.asyncio
+async def test_a_host_facade_without_the_rescue_still_paints_the_list() -> None:
+    """The provider facade is duck-typed, so an embedding host need not implement
+    ``entry_for``. A missing courtesy must never cost the picker."""
+    ctrl = _AccessController()  # no entry_for at all
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        picker = await _open_model_picker(app, pilot)
+        offered = {row.selector for row in picker.rows()}
+
     assert offered == {"openrouter/deepseek/deepseek-chat", "ollama/qwen3:8b"}, offered
 
 

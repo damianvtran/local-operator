@@ -373,6 +373,26 @@ def test_the_static_catalogue_needs_no_network_and_carries_real_models(controlle
     assert all(entry.provider and entry.model_id for entry in entries)
 
 
+def test_one_entry_can_be_rebuilt_for_the_model_a_session_is_running(controller) -> None:
+    """A picker must offer the running model even when the catalogue withdrew it.
+
+    An authoritative account-scoped listing is allowed to prune bundled ids, so
+    the session's own model can be absent from the catalogue entirely. This is
+    how the picker gets it back, with the same normalization every other entry
+    goes through rather than a caller reaching into the registry itself.
+    """
+    entry = controller.entry_for("anthropic", "claude-opus-4-20250514")
+
+    assert entry is not None
+    assert entry.selector == "anthropic/claude-opus-4-20250514"
+    assert entry.context_window > 0
+    assert entry.input_price > 0
+    # An id the registry does not describe is a real answer, not an error: an
+    # operator may have configured a model by hand.
+    assert controller.entry_for("anthropic", "claude-not-a-model") is None
+    assert controller.entry_for("not-a-provider", "whatever") is None
+
+
 def test_an_unknown_price_is_not_reported_as_free(controller, monkeypatch) -> None:
     """The picker renders a genuine pair of zeroes as `free`, so an unknown price
     passed through as zero would advertise a paid model as costing nothing.

@@ -4095,6 +4095,14 @@ class OperatorApp(App[None]):
         broken configuration invisible rather than obvious. And when the credential
         store cannot be read at all, EVERY row stays: an empty picker claims the
         user owns no models, which is precisely what the app failed to find out.
+
+        Exempting the current row from the filter is not enough on its own: an
+        authoritative live listing may PRUNE bundled ids, so a session running one
+        of them gets no entry to exempt. The band went on naming the model while
+        the list showed no `●` and typing the id answered "no matching models" —
+        the list and the set `/model` accepts disagreeing, with the list being the
+        discovery surface. So a missing current row is rebuilt from the registry
+        rather than merely spared.
         """
         usable = self._usable_providers()
         current = self._current_selector()
@@ -4112,10 +4120,57 @@ class OperatorApp(App[None]):
             for entry in entries
             if usable is None or entry.provider in usable or entry.selector == current
         ]
+        rows = self._with_current_row(rows, current)
         if usable is None:
             return rows, "credential check unavailable — showing every model"
-        hidden = len(entries) - len(rows)
+        # ``max(0, …)``: a rebuilt current row is not in ``entries``, so a
+        # catalogue that pruned the running model would otherwise report a
+        # NEGATIVE hidden count.
+        hidden = max(0, len(entries) - len(rows))
         return rows, (f"{hidden} hidden — /login <provider>" if hidden else "")
+
+    def _with_current_row(self, rows: list[ModelRow], current: str | None) -> list[ModelRow]:
+        """``rows`` guaranteed to contain the session's own model.
+
+        A no-op in the ordinary case, which is every case where the catalogue
+        listed the running model. It earns its place when an authoritative live
+        listing withdrew a bundled id the session is running: the registry still
+        describes that model, the session is still on it, and ``/model`` still
+        accepts it, so the one surface that must not deny it is the list.
+
+        Appended rather than inserted at the head: the picker owns its own
+        ranking and marks the current row itself.
+        """
+        if not current or any(row.selector == current for row in rows):
+            return rows
+        providers = self._providers
+        if providers is None:
+            return rows
+        provider, _, model_id = current.partition("/")
+        if not provider or not model_id:
+            return rows
+        try:
+            entry = providers.entry_for(provider, model_id)
+        # ``AttributeError`` included deliberately: this facade is duck-typed
+        # (``provider_controller: Any``) and an embedding host may not implement
+        # ``entry_for`` at all. A rescue row is a courtesy; never the reason a
+        # picker fails to paint.
+        except Exception:  # noqa: BLE001 — a rescue row never costs the list
+            return rows
+        if entry is None:
+            return rows
+        return rows + [
+            ModelRow(
+                provider=entry.provider,
+                model_id=entry.model_id,
+                label=entry.label,
+                context_window=entry.context_window,
+                input_price=entry.input_price,
+                output_price=entry.output_price,
+                connected=entry.connected,
+                aggregated=entry.aggregated,
+            )
+        ]
 
     def _usable_providers(self) -> set[str] | None:
         """Providers a turn could run on, or ``None`` when that cannot be read.

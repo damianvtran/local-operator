@@ -400,6 +400,41 @@ class ProviderController:
                 )
         return entries
 
+    def entry_for(self, provider: str, model_id: str) -> CatalogueEntry | None:
+        """One entry for ``provider``/``model_id``, or ``None`` if unknown here.
+
+        Exists for the model a session is ALREADY RUNNING. A picker must offer
+        it whatever the catalogue says, and after an authoritative listing it may
+        not be in the catalogue at all: the account's live list is allowed to
+        prune bundled ids, so a session started on one of those ids had its own
+        model disappear from the list while the status band still named it, and
+        typing the id answered "no matching models".
+
+        Built here rather than in the caller because the normalization is this
+        module's job (see :class:`CatalogueEntry`): a caller reaching into the
+        registry itself would have to know that a context window of ``-1`` and
+        ``0`` both mean unknown, and would spell the price rules a second time.
+        ``None`` means the registry does not describe this pair, which is a real
+        answer for a model the operator configured by hand.
+        """
+        definition = get_provider_definition(provider)
+        if definition is None:
+            return None
+        info = static_models(definition.id).get(model_id)
+        if info is None:
+            return None
+        usable = self.usable_providers()
+        return CatalogueEntry(
+            provider=definition.id,
+            model_id=model_id,
+            label=model_label(definition.id, model_id, info.name or "").full,
+            context_window=max(0, info.context_window or 0),
+            input_price=_price(info.input_price, definition),
+            output_price=_price(info.output_price, definition),
+            connected=usable is None or definition.id in usable,
+            aggregated=definition.id in AGGREGATOR_PROVIDERS,
+        )
+
     async def live_catalogue(
         self, *, ttl_s: float | None = None
     ) -> tuple[list[CatalogueEntry], dict[str, str]]:
