@@ -21,6 +21,7 @@ from typing import Callable, Protocol, runtime_checkable
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.types import (
     AgentMessage,
+    AskUserFn,
     EventHandler,
     ImageContent,
     Message,
@@ -235,6 +236,19 @@ class SessionProtocol(Protocol):
         anyone. The handler is read when the per-turn tool context is built, so
         installing one mid-session applies from the next tool call. ``None``
         restores auto-approval (what ``--yolo`` already does).
+        """
+        ...
+
+    def set_ask_handler(self, handler: AskUserFn | None) -> None:
+        """Install the surface that puts the ``ask`` tool's questions to the user.
+
+        Declared beside the approval gate because it is the same kind of hook —
+        a front end that owns the terminal is the only thing that can draw a
+        picker — and because installing it is what makes the ``ask`` tool exist
+        at all: its createIf builder gates on the hook, so a host that never
+        calls this (a server, exec mode, or any subagent) advertises no question
+        it could only block on. Read when the per-turn tool context is built, so
+        installing one mid-session applies from the next tool call.
         """
         ...
 

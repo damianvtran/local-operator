@@ -2,10 +2,13 @@
 
 import base64
 import io
+import json
 from datetime import datetime, timezone
 from typing import cast
 
+import pytest
 from PIL import Image
+from pydantic import ValidationError
 
 from local_operator.compaction.api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from local_operator.compaction.snapcompact import (
@@ -29,6 +32,10 @@ from local_operator.harness.types import (
     TextContent,
     ToolCall,
 )
+
+# The session's dump helper, exercised HERE because it is the other half of
+# Archive's base64 contract: neither direction is testable alone.
+from local_operator.session.session import _archive_to_json
 
 # ---------------------------------------------------------------------------
 # Shapes
@@ -331,6 +338,62 @@ def test_history_blocks_text_only_archive():
     blocks = history_blocks(archive)
     assert [b["kind"] for b in blocks] == ["text"]
     assert blocks[0]["text"] == archive.text_head
+
+
+# ---------------------------------------------------------------------------
+# Persistence round trip (the base64 contract)
+# ---------------------------------------------------------------------------
+
+
+def test_persisted_archive_replays_real_pngs():
+    """The FULL production path, with frames: the live archive is dumped to
+    JSON, revived, and replayed.
+
+    This is the path every request after a compaction takes (the marker carries
+    the dump, in-process as well as on resume), and it was broken while every
+    frame test above stayed green: the dump encoded base64 and revival ran
+    pydantic's lax ``str``->``bytes`` coercion, which UTF-8-ENCODED that text
+    instead of decoding it, so ``history_blocks`` encoded a second time and the
+    provider was handed ``base64(base64(png))`` labelled ``image/png``.
+    ``6956424f`` (ASCII ``iVBO``) is the corrupt magic to watch for.
+    """
+    archive = _large_archive()
+    assert archive.frames
+
+    revived = Archive.model_validate(_archive_to_json(archive))
+
+    assert revived.frames == archive.frames  # byte-for-byte, not merely decodable
+    frames = [b for b in history_blocks(revived) if b["kind"] == "images"][0]["frames"]
+    assert base64.b64decode(frames[0]).startswith(b"\x89PNG\r\n\x1a\n")
+    with Image.open(io.BytesIO(base64.b64decode(frames[0]))) as img:
+        assert img.format == "PNG"
+
+
+def test_archive_json_dump_keeps_its_persisted_shape():
+    """``_archive_to_json`` delegates to the model now; already-persisted
+    transcripts only keep loading if the emitted dict is unchanged."""
+    archive = _large_archive()
+    payload = _archive_to_json(archive)
+    assert set(payload) == {
+        "frames",
+        "text",
+        "text_head",
+        "text_tail",
+        "shape_id",
+        "truncated_chars",
+        "created_at",
+    }
+    assert payload["frames"] == [base64.b64encode(f).decode("ascii") for f in archive.frames]
+    assert payload["created_at"] == archive.created_at.isoformat()
+    assert json.loads(json.dumps(payload)) == payload
+
+
+def test_malformed_persisted_frame_is_a_validation_error():
+    """Garbage in the frames list must FAIL loudly. Silent coercion is what
+    turned a defect into a 400 the session answered by dropping the history."""
+    payload = _archive_to_json(_large_archive())
+    with pytest.raises(ValidationError):
+        Archive.model_validate({**payload, "frames": ["not base64 at all!!"]})
 
 
 # ---------------------------------------------------------------------------

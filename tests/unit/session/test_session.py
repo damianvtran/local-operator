@@ -368,16 +368,16 @@ async def test_wake_delivery_goes_through_prompt_path(tmp_path):
 async def test_compaction_runs_when_due(tmp_path, monkeypatch):
     """Post-turn compaction: prune -> trigger (compaction_context_tokens) ->
     summarize -> transcript entry -> context rebuilt to marker + kept messages.
-    Default threshold min(window*0.8, 600_000) applies at the call site."""
+    The gate holds NO threshold arithmetic of its own: it hands the settings to
+    ``should_compact``, which resolves min(percent * window, absolute)."""
     from pydantic import BaseModel, Field
 
     class CompactionSettings(BaseModel):
         enabled: bool = True
         reserve_tokens: int = 16384
         keep_recent_tokens: int = 20000
-        threshold_percent: float = -1.0
-        threshold_tokens: int = Field(default=-1)
-        max_threshold_tokens: int = 600_000
+        threshold_percent: float = 0.80
+        threshold_tokens: int = Field(default=600_000)
         auto_continue: bool = True
 
     prune_calls: list[tuple[int, int]] = []
@@ -400,10 +400,8 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
     setattr(
         fake_api,
         "resolve_threshold_tokens",
-        lambda window, settings: (
-            settings.threshold_tokens
-            if settings.threshold_tokens > 0
-            else min(int(window * 0.8), getattr(settings, "max_threshold_tokens", 600_000))
+        lambda window, settings: min(
+            int(window * settings.threshold_percent), settings.threshold_tokens
         ),
     )
     setattr(fake_api, "RECOVERY_BAND", 0.8)
@@ -411,8 +409,9 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
     seen_threshold: list[int] = []
 
     def should_compact(ctx_tokens, window, settings):
-        seen_threshold.append(settings.threshold_tokens)
-        return ctx_tokens > settings.threshold_tokens
+        threshold = fake_api.resolve_threshold_tokens(window, settings)
+        seen_threshold.append(threshold)
+        return ctx_tokens > threshold
 
     setattr(fake_api, "should_compact", should_compact)
 
@@ -449,9 +448,10 @@ async def test_compaction_runs_when_due(tmp_path, monkeypatch):
     session.subscribe(events.append)
     await session.prompt("do work")
 
-    # Default threshold applied at the call site: min(100_000 * 0.8, 600_000).
-    # Twice, because the trigger is two-stage: the cheap upper bound is tested
-    # first and only a bound that clears the threshold buys the exact estimate.
+    # The threshold the gate acted on came from the resolver, not from the
+    # session: min(100_000 * 0.80, 600_000). Twice, because the trigger is
+    # two-stage — the cheap upper bound is tested first and only a bound that
+    # clears the threshold buys the exact estimate.
     assert seen_threshold == [80_000, 80_000]
     # Prune ran BEFORE the trigger with millisecond timestamps.
     assert prune_calls and prune_calls[0][0] > 10**12
@@ -498,9 +498,8 @@ async def test_compaction_below_bound_never_pays_for_the_exact_estimate(tmp_path
         enabled: bool = True
         reserve_tokens: int = 16384
         keep_recent_tokens: int = 20000
-        threshold_percent: float = -1.0
-        threshold_tokens: int = Field(default=-1)
-        max_threshold_tokens: int = 600_000
+        threshold_percent: float = 0.80
+        threshold_tokens: int = Field(default=600_000)
         auto_continue: bool = True
 
     exact_calls: list[int] = []
@@ -521,14 +520,14 @@ async def test_compaction_below_bound_never_pays_for_the_exact_estimate(tmp_path
     setattr(
         fake_api,
         "resolve_threshold_tokens",
-        lambda window, settings: (
-            settings.threshold_tokens
-            if settings.threshold_tokens > 0
-            else min(int(window * 0.8), getattr(settings, "max_threshold_tokens", 600_000))
+        lambda window, settings: min(
+            int(window * settings.threshold_percent), settings.threshold_tokens
         ),
     )
     setattr(
-        fake_api, "should_compact", lambda ctx, window, settings: ctx > settings.threshold_tokens
+        fake_api,
+        "should_compact",
+        lambda ctx, window, settings: ctx > fake_api.resolve_threshold_tokens(window, settings),
     )
     setattr(fake_api, "RECOVERY_BAND", 0.8)
 
@@ -1118,9 +1117,8 @@ async def test_mid_turn_compaction_at_continuing_boundary(tmp_path, monkeypatch)
         enabled: bool = True
         reserve_tokens: int = 16384
         keep_recent_tokens: int = 20000
-        threshold_percent: float = -1.0
-        threshold_tokens: int = Field(default=-1)
-        max_threshold_tokens: int = 600_000
+        threshold_percent: float = 0.80
+        threshold_tokens: int = Field(default=600_000)
         auto_continue: bool = False
         mid_turn_enabled: bool = True
 
@@ -1156,7 +1154,8 @@ async def test_mid_turn_compaction_at_continuing_boundary(tmp_path, monkeypatch)
     setattr(
         fake_api,
         "should_compact",
-        lambda ctx_tokens, window, settings: ctx_tokens > settings.threshold_tokens,
+        lambda ctx_tokens, window, settings: ctx_tokens
+        > fake_api.resolve_threshold_tokens(window, settings),
     )
 
     async def summarize(
@@ -1259,9 +1258,8 @@ async def test_mid_turn_compaction_disabled_by_setting(tmp_path, monkeypatch):
         enabled: bool = True
         reserve_tokens: int = 16384
         keep_recent_tokens: int = 20000
-        threshold_percent: float = -1.0
-        threshold_tokens: int = Field(default=-1)
-        max_threshold_tokens: int = 600_000
+        threshold_percent: float = 0.80
+        threshold_tokens: int = Field(default=600_000)
         auto_continue: bool = False
         mid_turn_enabled: bool = False
 
@@ -1286,7 +1284,8 @@ async def test_mid_turn_compaction_disabled_by_setting(tmp_path, monkeypatch):
     setattr(
         fake_api,
         "should_compact",
-        lambda ctx_tokens, window, settings: ctx_tokens > settings.threshold_tokens,
+        lambda ctx_tokens, window, settings: ctx_tokens
+        > fake_api.resolve_threshold_tokens(window, settings),
     )
 
     async def summarize(

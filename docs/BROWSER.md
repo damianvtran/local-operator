@@ -62,10 +62,18 @@ Signals measured inside a real cmux session on this host (2026-08-06):
 | `CMUX_BUNDLED_CLI_PATH` | path into the app bundle | **Yes** — an executable path, checked as the PATH fallback. |
 | `which cmux` | `/opt/homebrew/bin/cmux` | **Yes** — the primary signal. |
 
-Degrading is silent. No cmux means `build_browser_tool()` returns `None` and the
-tool is never advertised (the *createIf* convention, same as `wake`). Nothing
-raises, and session start is unaffected. If a host forces the tool on anyway,
-every action returns one clear error.
+Degrading is silent to the MODEL. No cmux means `build_browser_tool()` returns
+`None` and the tool is never advertised (the *createIf* convention, same as
+`wake`). Nothing raises, and session start is unaffected. If a host forces the
+tool on anyway, every action returns one clear error.
+
+It is not silent to the LOG. A session carrying cmux's `CMUX_*` markers — so
+plainly running inside cmux — that still resolves no CLI is the one anomalous
+shape, and `cmux_browser_available()` logs a warning naming the markers it saw
+and the `CMUX_BUNDLED_CLI_PATH` it rejected. A `PATH` rebuilt by a login shell
+or a `sudo -i` is exactly how that happens. An ordinary non-cmux host logs
+nothing: absence there is normal, and a warning per session start is noise that
+trains everyone to ignore the real one.
 
 **There is no headless fallback, deliberately.** This repo ships no browser
 engine: `playwright` belongs to the pre-rewrite codebase, appears in no
@@ -74,6 +82,41 @@ one would put ~10 packages and a ~150 MB browser download into a default
 install that is kept small on purpose. A host without cmux therefore has no
 browser tool at all — which is honest — and the agent still reaches static
 pages with `bash` and `curl`.
+
+## The substitution gap, and the three places it is closed
+
+Detection being right is not enough. Measured in a real session (transcript
+`d85fe6050bc0`, 2026-08-17), with `cmux_browser_available()` true and `browser`
+in the inventory: asked for before/after screenshots of a local dev server, the
+agent wrote a `capture-my-work-evidence.mjs` playwright script and ran
+`pnpm exec playwright install chromium` — 23 s of browser download. Told
+outright to *"use the cmux browser instead"*, it read its cmux guidance and then
+shelled `cmux --json new-surface` through `bash`, still never calling the tool.
+The tool was reachable the whole time; nothing told the model what it was for.
+
+A downloaded headless Chromium is not a smaller version of the real thing. It
+carries none of the user's cookies, the user cannot log into it, and it renders
+where nobody can look — so for anything behind a login it is a dead end that
+looks like progress. That property, not the verb list, is the reason to pick
+this tool, so it is now stated in all three places the model can read:
+
+1. **The tool description** says it drives the user's REAL browser, that
+   cookies and logins persist across calls and sessions, that the user can be
+   asked to sign in by hand, and that a browser engine must never be installed
+   instead.
+2. **The system prompt** (`prompts_md/system.md`) carries the general rule: no
+   `playwright install`, no puppeteer, no downloaded Chromium — and, when no
+   browser tool is listed, say screenshots are unavailable and why rather than
+   building a parallel browser stack.
+3. **The tool inventory** (`prompts_api._NO_BROWSER_NOTE`) names the absence
+   when there is no `browser` tool, because an unexplained hole reads as
+   "arrange your own". It is keyed on membership rather than visibility: a
+   hidden tool still answers, and claiming otherwise would be worse than
+   silence. The `createIf` contract is untouched — a tool that cannot work is
+   still never advertised.
+
+Personal cmux workflow rules (which surface to reuse, focus habits, layout)
+belong in the operator's own `system_prompt.md`, not in this package.
 
 ## cmux conventions, and why they are not negotiable
 
