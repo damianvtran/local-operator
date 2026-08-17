@@ -400,20 +400,34 @@ def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
     }
 
 
-def _last_reported_usage(messages: Sequence[AgentMessage]) -> Usage | None:
-    """The newest provider-reported :class:`Usage` in ``messages``, or ``None``.
+def _parsed_usage(payload: dict[str, Any]) -> Usage | None:
+    """One persisted ``usage`` payload as a :class:`Usage`, or ``None``.
+
+    A transcript row is data from a previous process and may predate a field, so
+    a payload that no longer validates is dropped rather than raised: a status
+    readout must not be able to stop a session from opening. ``None`` simply
+    falls through to the next-newest reading, and then to the local estimate.
+    """
+    try:
+        return Usage.model_validate(payload)
+    except Exception:
+        logger.debug("dropping unparseable persisted usage payload", exc_info=True)
+        return None
+
+
+def _last_reported_usage(usages: Sequence[Usage | None]) -> Usage | None:
+    """The newest provider-reported :class:`Usage` in ``usages``, or ``None``.
 
     Scans BACKWARDS and stops at the first hit: the newest reading is the only
     one that describes the context as it now stands, and a resumed conversation
-    can hold hundreds of messages to walk past.
+    can hold hundreds of entries to walk past.
 
-    **Reports nothing at all for a COMPACTED history**, and that exception is
-    the whole reason this is a function rather than a one-line scan. A compacted
-    transcript replays as a summary marker followed by the KEPT WINDOW, and the
-    kept messages still carry the ``usage`` they were given BEFORE the pass —
-    figures describing a context that no longer exists. Nothing ever supersedes
-    them: only a completed turn rewrites this, and a session that compacted and
-    then exited never ran one.
+    **Refuses any reading recorded before the newest compaction**, and that
+    exception is the whole reason this is a function rather than a one-line
+    scan. A compacted transcript replays as a summary marker followed by the
+    KEPT WINDOW, and those kept messages still carry the ``usage`` they were
+    given BEFORE the pass — figures describing a context that no longer exists,
+    which nothing supersedes when the session compacted and then exited.
 
     Seeding from one is not a small error. Measured on a transcript that
     compacted at 900k of a 1M window, the reading came back 900_000 against a
@@ -424,27 +438,29 @@ def _last_reported_usage(messages: Sequence[AgentMessage]) -> Usage | None:
     pointing the other way, and the compaction consequence makes it the more
     expensive of the two.
 
-    Note the marker sits at the HEAD of the replayed list, not between the stale
-    readings and the live ones — the kept window follows it — so a backwards
-    scan meets the stale message first and a "stop at the boundary" rule reads
-    exactly backwards. The presence of the marker anywhere is what disqualifies
-    the whole history, because every reading in it predates the pass.
+    The rule cannot be expressed on the replayed list alone. The marker sits at
+    the HEAD of it and the kept window FOLLOWS it, so "stop scanning backwards
+    at the marker" reads exactly backwards — the stale messages come first — and
+    "any marker disqualifies everything" throws away the legitimate case: a
+    session that compacted and then ran ten more turns has a perfectly good
+    newest reading, and refusing it would send every such resume back to the
+    local estimate for no reason.
+
+    So the boundary is taken from the TRANSCRIPT, whose entries are in append
+    order and therefore say which readings were recorded after the pass.
+    ``entries_after_compaction`` returns exactly those; a history with no
+    compaction returns all of them, which is the ordinary path.
 
     ``None`` means "no usable reading here", a real state and distinct from
     zero: a brand-new session, a conversation of nothing but user messages, a
-    provider that reports no usage, or the compacted case above. Callers must
-    not collapse the two — a confident 0 on a resumed session is the
-    empty-context lie this exists to prevent — and falling through to the local
-    estimate is the right answer for every one of them.
+    provider that reports no usage, or a compacted history with no completed
+    turn since the pass. Callers must not collapse the two — a confident 0 on a
+    resumed session is the empty-context lie this exists to prevent — and
+    falling through to the local estimate is the right answer for all of them.
     """
-    if any(
-        isinstance(message, CustomMessage) and message.custom_type == "compaction_summary"
-        for message in messages
-    ):
-        return None
-    for message in reversed(messages):
-        if isinstance(message, Message) and message.usage is not None:
-            return message.usage
+    for usage in reversed(usages):
+        if usage is not None:
+            return usage
     return None
 
 
@@ -608,7 +624,13 @@ class Session:
         # gate it feeds decides whether to rewrite the user's history), and
         # ``restored_usage`` below reports the conversation's real size to a
         # front end that would otherwise open on an empty-looking context.
-        self._last_usage: Usage | None = _last_reported_usage(self._context.messages)
+        # From the TRANSCRIPT, not from the replayed context: only append order
+        # distinguishes a reading taken after the newest compaction from one the
+        # pass invalidated, and the replayed list deliberately loses that (see
+        # ``Transcript.usages_since_compaction`` and ``_last_reported_usage``).
+        self._last_usage: Usage | None = _last_reported_usage(
+            [_parsed_usage(payload) for payload in transcript.usages_since_compaction()]
+        )
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
         # Boundary-event suppression across a post-compaction continuation:

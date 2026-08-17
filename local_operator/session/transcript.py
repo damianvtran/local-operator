@@ -245,6 +245,40 @@ class Transcript:
                 return dict(entry.payload.get("details", {}))
         return None
 
+    def usages_since_compaction(self) -> list[dict[str, Any]]:
+        """Every message entry's ``usage`` payload recorded AFTER the newest
+        compaction, oldest first (all of them when nothing compacted).
+
+        Append order is the only place the "after" in that sentence exists.
+        :meth:`build_llm_history` cannot answer it: it puts the compaction
+        marker at the HEAD of what it returns and the kept window after it, so
+        the replayed list carries pre-pass readings ahead of post-pass ones with
+        nothing to tell them apart. The entries know, because they are in the
+        order they happened.
+
+        Why the distinction is worth an accessor: a kept message still carries
+        the ``usage`` it had before the pass shrank the context, and a host that
+        seeds a status readout from one reports a context that no longer exists
+        (measured at 900k against a real 1.7k). But a session that compacted and
+        then ran ten more turns has a perfectly good newest reading, and
+        refusing that would be the opposite error. Entries after the marker are
+        exactly the readings that survived the pass.
+
+        Returns the raw payload dicts rather than ``Usage`` objects: this module
+        is the persistence layer and does not own the harness's models, and the
+        caller is already parsing them.
+        """
+        start = 0
+        for index in range(len(self._entries) - 1, -1, -1):
+            if self._entries[index].type == ENTRY_COMPACTION:
+                start = index + 1
+                break
+        return [
+            dict(entry.payload["usage"])
+            for entry in self._entries[start:]
+            if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict)
+        ]
+
     def pending_prunes(self) -> dict[str, str]:
         """``{target entry id: notice}`` for every un-folded prune entry.
 

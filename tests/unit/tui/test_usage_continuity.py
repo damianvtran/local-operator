@@ -239,6 +239,49 @@ async def test_a_compacted_resume_reports_nothing_rather_than_the_old_context(
 
 
 @pytest.mark.asyncio
+async def test_turns_taken_after_a_compaction_are_still_restored(tmp_path: Path) -> None:
+    """The refusal is scoped to readings the pass invalidated, not to the file.
+
+    The complement of the test above, and the reason the boundary is taken from
+    the TRANSCRIPT's append order rather than from the replayed list: a session
+    that compacted and then ran more turns has a perfectly good newest reading.
+    Refusing it because the file contains a marker anywhere would send every
+    such resume back to the local estimate — the original bug, reintroduced for
+    the majority of long conversations, which are exactly the ones that compact.
+    """
+    transcript = Transcript(tmp_path / "sess")
+    stale = _assistant(output=100, context=900_000)
+    await transcript.append_message(Message.user("old"))
+    await transcript.append_message(stale)
+    await transcript.append_compaction(
+        summary="what happened earlier",
+        first_kept_entry_id=stale.id,
+        tokens_before=900_000,
+    )
+    # Three ordinary turns since the pass; the last one is the live reading.
+    for context in (120_000, 140_000, 160_000):
+        await transcript.append_message(Message.user("q"))
+        await transcript.append_message(_assistant(output=50, context=context))
+
+    async def _stream(request: Any, signal: Any = None):  # pragma: no cover - never called
+        if False:
+            yield None
+
+    session = Session(
+        model=_spec(),
+        stream_fn=_stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["system"],
+    )
+
+    restored = session.restored_usage()
+    assert restored is not None, "a turn taken after the pass is a valid reading"
+    assert restored.context_tokens == 160_000
+    assert restored.context_tokens != 900_000, "and it is not the pre-compaction one"
+
+
+@pytest.mark.asyncio
 async def test_the_baseline_never_loads_the_tokenizer(tmp_path: Path) -> None:
     """The boot-path measurement keeps its documented chars/4 contract.
 
