@@ -69,6 +69,8 @@ import hashlib
 import json
 import os
 import re
+import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -253,6 +255,34 @@ def _clip_to_entry_cap(text: str, cap: int) -> tuple[str, bool]:
             return "", False
 
 
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Atomically replace ``path`` through a unique same-directory temp.
+
+    Same-directory keeps ``os.replace`` atomic. A unique name is load-bearing
+    now that oversized tool results spill from worker threads: two identical
+    outputs share the same content digest, so the old deterministic
+    ``<digest>.txt.tmp`` let one writer rename the other's temp away.
+    """
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            # Record the name BEFORE the first byte. A full disk can raise
+            # from `write`; the finally block must still remove the partial
+            # file, which is invisible to the store's entry accounting.
+            tmp_path = Path(stream.name)
+            stream.write(data)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
 class SpillStore:
     """Bounded, content-addressed store of full tool outputs.
 
@@ -261,12 +291,18 @@ class SpillStore:
     that cannot be written must not be able to fail a tool call.
     """
 
-    __slots__ = ("_root",)
+    __slots__ = ("_root", "_write_lock")
 
     def __init__(self, root: Path | None = None) -> None:
         # ``None`` means "resolve per call", so an instance built before a test
         # relocated the config dir still follows the relocation.
         self._root = root
+        # One write transaction is content + sidecar + eviction. Worker-thread
+        # spilling made those phases concurrent across tools; serializing the
+        # whole unit prevents one writer's sweep from deleting another's
+        # half-installed or just-installed digest. Oversized spills are rare,
+        # so one store lock is simpler and safer than per-digest lock lifetime.
+        self._write_lock = threading.Lock()
 
     @property
     def root(self) -> Path:
@@ -283,6 +319,18 @@ class SpillStore:
     # -- write -------------------------------------------------------------
 
     def write(self, text: str, *, tool_name: str = "", session_id: str = "") -> SpillMeta | None:
+        """Store one output as an install+evict transaction.
+
+        The lock covers both atomic entry files and the eviction sweep: a
+        concurrent writer's digest cannot be deleted during its
+        content-before-sidecar interval or immediately after installation.
+        """
+        with self._write_lock:
+            return self._write_locked(text, tool_name=tool_name, session_id=session_id)
+
+    def _write_locked(
+        self, text: str, *, tool_name: str = "", session_id: str = ""
+    ) -> SpillMeta | None:
         """Store ``text`` and return its metadata, or ``None`` on failure.
 
         ``None`` is a normal outcome, not an error: a read-only home
@@ -328,34 +376,29 @@ class SpillStore:
             return None
 
     def _write_entry(self, digest: str, data: bytes, meta: SpillMeta) -> None:
-        """Write content and sidecar. Content first, atomically, then meta.
+        """Write content and sidecar atomically through unique temp names.
 
-        The content is written to a temp name and renamed, so a crash mid-write
-        cannot leave a truncated entry that a later read would serve as if it
-        were whole. The sidecar is written second: an entry with content but no
-        sidecar is invisible to :meth:`stat` and gets swept by the next
-        eviction, whereas a sidecar pointing at absent content would be a
-        handle that resolves to nothing.
+        Content first, then metadata: content without a sidecar is invisible
+        to :meth:`stat` and swept by eviction, while metadata pointing at
+        absent content would create a handle that resolves to nothing. Both
+        files use unique same-directory temps so concurrent writers of the
+        same content digest cannot rename one another's staging file away or
+        interleave a sidecar.
         """
-        content_path = self._content_path(digest)
-        tmp_path = content_path.with_suffix(".txt.tmp")
-        tmp_path.write_bytes(data)
-        os.replace(tmp_path, content_path)
-        self._meta_path(digest).write_text(
-            json.dumps(
-                {
-                    "digest": meta.digest,
-                    "bytes": meta.bytes,
-                    "lines": meta.lines,
-                    "complete": meta.complete,
-                    "tool_name": meta.tool_name,
-                    "session_id": meta.session_id,
-                    "created_ms": meta.created_ms,
-                    "last_read_ms": meta.last_read_ms,
-                }
-            ),
-            encoding="utf-8",
-        )
+        _atomic_write_bytes(self._content_path(digest), data)
+        encoded_meta = json.dumps(
+            {
+                "digest": meta.digest,
+                "bytes": meta.bytes,
+                "lines": meta.lines,
+                "complete": meta.complete,
+                "tool_name": meta.tool_name,
+                "session_id": meta.session_id,
+                "created_ms": meta.created_ms,
+                "last_read_ms": meta.last_read_ms,
+            }
+        ).encode("utf-8")
+        _atomic_write_bytes(self._meta_path(digest), encoded_meta)
 
     # -- read --------------------------------------------------------------
 
@@ -570,6 +613,11 @@ class SpillStore:
         return evicted
 
     def prune_all(self) -> int:
+        """Delete every entry as one transaction; returns the count removed."""
+        with self._write_lock:
+            return self._prune_all_locked()
+
+    def _prune_all_locked(self) -> int:
         """Delete every entry. Returns the count removed (tests, teardown)."""
         removed = 0
         for digest, _size, _recency, _session in self._entries():

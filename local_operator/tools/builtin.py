@@ -51,9 +51,10 @@ import mimetypes
 import os
 import re
 import signal as signal_module
+import threading
 import time
 import traceback
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -941,6 +942,45 @@ ToolExecutor = Callable[
     Awaitable[ToolResult],
 ]
 
+#: Process-wide path transaction locks shared by ``read``, ``edit`` and
+#: ``write``. Tool ``concurrency="exclusive"`` is scoped to one AgentLoop;
+#: parent/child sessions own separate loops and can otherwise enter two
+#: thread-backed read-modify-write transactions on the same file at once.
+#: Fixed stripes keep the table bounded (no lock per model-controlled path);
+#: a collision only serializes two unrelated mutations, which is a safe,
+#: rare cost. Reads take the same stripe so they cannot observe a truncated
+#: file between a writer's open and close.
+_FILE_TRANSACTION_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+@contextlib.contextmanager
+def _file_transaction(path: Path) -> Iterator[None]:
+    """Lock the canonical path and, when it exists, its filesystem identity.
+
+    The path stripe is always held, so a transaction that creates a file
+    cannot be bypassed by a second caller that observes the new inode. The
+    inode stripe additionally coalesces hardlinks. Symlink/case aliases share
+    the resolved, case-folded path key. Multiple stripes are acquired in
+    numeric order to make overlapping alias sets deadlock-free.
+    """
+    canonical = ("path", str(path.resolve(strict=False)).casefold())
+    keys: list[object] = [canonical]
+    try:
+        stat = path.stat()
+    except OSError:
+        pass
+    else:
+        keys.append(("inode", stat.st_dev, stat.st_ino))
+    indices = sorted({hash(key) % len(_FILE_TRANSACTION_LOCKS) for key in keys})
+    locks = [_FILE_TRANSACTION_LOCKS[index] for index in indices]
+    for lock in locks:
+        lock.acquire()
+    try:
+        yield
+    finally:
+        for lock in reversed(locks):
+            lock.release()
+
 
 def _guard(tool_name: str) -> Callable[[ToolExecutor], ToolExecutor]:
     """Wrap an execute coroutine so unexpected exceptions become error results.
@@ -1352,10 +1392,7 @@ async def execute_bash(
             await abort_waiter
 
     if aborted:
-        partial = _bash_output_summary(
-            b"".join(stdout_chunks).decode("utf-8", errors="replace"),
-            b"".join(stderr_chunks).decode("utf-8", errors="replace"),
-        )
+        partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
         return _error(
             tool_call_id,
             "bash",
@@ -1363,43 +1400,27 @@ async def execute_bash(
             f"{params.command}\n{partial}",
         )
 
-    stdout_raw = b"".join(stdout_chunks).decode("utf-8", errors="replace")
-    stderr_raw = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+    # Decoding and, for oversized output, spilling/eliding run in a thread:
+    # a command that printed megabytes turns this tail into a multi-MB
+    # decode, a multi-MB join, a disk write of the spill and string slicing
+    # to elide it — all synchronous, all on the loop that renders the TUI,
+    # and the reason a batch of concurrent bash calls used to freeze the
+    # frame at the moment they finished together.
+    stdout_raw, stderr_raw = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
     return_code = process.returncode if process.returncode is not None else -1
 
     # Both streams may end up carrying a marker, so reserve room for two.
     budget = TOOL_OUTPUT_LIMIT_CHARS - 2 * len(BASH_TRUNCATION_MARKER)
     spill_details: dict[str, Any] | None = None
     if len(stdout_raw) + len(stderr_raw) > budget:
-        # ONE spill for the WHOLE transcript, in exactly the framing the model
-        # already sees. Spilling the two streams separately would hand out two
-        # handles for one command and make "line 900" ambiguous; spilling a
-        # differently-framed copy would make the footer's line numbers point
-        # somewhere other than where they resolve.
-        combined = _bash_output_summary(stdout_raw, stderr_raw)
-        meta = _spill(combined, "bash", context)
-        stdout_budget, stderr_budget = _stream_budgets(
-            stdout_raw, stderr_raw, budget, failed=(return_code != 0 or timed_out)
+        stdout, stderr, footer, spill_details = await asyncio.to_thread(
+            _bash_oversized_streams,
+            stdout_raw,
+            stderr_raw,
+            budget,
+            return_code != 0 or timed_out,
+            context,
         )
-        footer = ""
-        if meta is None:
-            stdout = truncate_output(stdout_raw, stdout_budget)
-            stderr = truncate_output(stderr_raw, stderr_budget)
-        else:
-            spill_details = {"spill": _spill_detail(meta)}
-            # Offsets map each stream's local line numbers onto the combined
-            # transcript the handle serves: line 1 is the '--- stdout ---'
-            # banner, and the stderr banner sits after the whole stdout block.
-            stdout_lines = len(stdout_raw.splitlines()) if stdout_raw else 1
-            stdout, stdout_span = _elide_inline(stdout_raw, stdout_budget, offset=1)
-            stderr, stderr_span = _elide_inline(stderr_raw, stderr_budget, offset=2 + stdout_lines)
-            # Suggest the STDERR gap when the command failed and stderr is the
-            # stream that lost content: on a failing run that is where the
-            # model needs to look, and a footer that points at the stdout gap
-            # instead sends it to the least useful region of the output.
-            failed = return_code != 0 or timed_out
-            suggested = (stderr_span if failed and stderr_span else None) or stdout_span
-            footer = _spill_footer(meta, suggested)
     else:
         stdout, stderr = stdout_raw, stderr_raw
         footer = ""
@@ -1408,6 +1429,66 @@ async def execute_bash(
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
+
+
+def _bash_partial_summary(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) -> str:
+    """Both streams' partial text under the abort receipt's framing."""
+    return _bash_output_summary(
+        b"".join(stdout_chunks).decode("utf-8", errors="replace"),
+        b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+    )
+
+
+def _decode_chunks(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) -> tuple[str, str]:
+    """Join and decode both captured streams off the event loop."""
+    return (
+        b"".join(stdout_chunks).decode("utf-8", errors="replace"),
+        b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+    )
+
+
+def _bash_oversized_streams(
+    stdout_raw: str,
+    stderr_raw: str,
+    budget: int,
+    failed: bool,
+    context: ToolContext | None,
+) -> tuple[str, str, str, dict[str, Any] | None]:
+    """The oversized-output tail of ``bash``: spill once, elide both streams.
+
+    Synchronous by design — ``asyncio.to_thread`` is the only caller. The
+    framing decisions moved here verbatim from the loop-bound block so the
+    bytes a model reads do not change with the thread they are built on.
+
+    ONE spill for the WHOLE transcript, in exactly the framing the model
+    already sees. Spilling the two streams separately would hand out two
+    handles for one command and make "line 900" ambiguous; spilling a
+    differently-framed copy would make the footer's line numbers point
+    somewhere other than where they resolve.
+    """
+    combined = _bash_output_summary(stdout_raw, stderr_raw)
+    meta = _spill(combined, "bash", context)
+    stdout_budget, stderr_budget = _stream_budgets(stdout_raw, stderr_raw, budget, failed=failed)
+    spill_details: dict[str, Any] | None = None
+    footer = ""
+    if meta is None:
+        stdout = truncate_output(stdout_raw, stdout_budget)
+        stderr = truncate_output(stderr_raw, stderr_budget)
+    else:
+        spill_details = {"spill": _spill_detail(meta)}
+        # Offsets map each stream's local line numbers onto the combined
+        # transcript the handle serves: line 1 is the '--- stdout ---'
+        # banner, and the stderr banner sits after the whole stdout block.
+        stdout_lines = len(stdout_raw.splitlines()) if stdout_raw else 1
+        stdout, stdout_span = _elide_inline(stdout_raw, stdout_budget, offset=1)
+        stderr, stderr_span = _elide_inline(stderr_raw, stderr_budget, offset=2 + stdout_lines)
+        # Suggest the STDERR gap when the command failed and stderr is the
+        # stream that lost content: on a failing run that is where the
+        # model needs to look, and a footer that points at the stdout gap
+        # instead sends it to the least useful region of the output.
+        suggested = (stderr_span if failed and stderr_span else None) or stdout_span
+        footer = _spill_footer(meta, suggested)
+    return stdout, stderr, footer, spill_details
 
 
 def build_bash_tool() -> AgentTool:
@@ -1662,6 +1743,38 @@ def _encode_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, s
         # against a later re-read, has no way to reconcile the two.
         summary += f"; source {width}x{height} {info.mime_type}"
     return payload, wire_mime, summary
+
+
+def _joined_capped_list_body(
+    full_items: list[str],
+    shown_items: list[str],
+    tool_name: str,
+    context: ToolContext | None,
+) -> tuple[str, dict[str, Any] | None]:
+    """``_capped_list_body`` over two item lists, joined off the loop.
+
+    The joins live in here — and not in the caller's ``to_thread`` argument
+    list, where Python would evaluate them on the event loop before the call
+    — because joining thousands of match lines is exactly the multi-MB
+    string work this exists to move.
+    """
+    return _capped_list_body("\n".join(full_items), "\n".join(shown_items), tool_name, context)
+
+
+def _spilled_list_body(
+    full_lines: list[str],
+    shown_text: str,
+    tool_name: str,
+    context: ToolContext | None,
+) -> tuple[str, dict[str, Any] | None]:
+    """Join a spill's full line set while preserving an authored shown body.
+
+    Grep's current renderer adds context lines and paging instructions to
+    ``shown_text``; only the recoverable match lines belong in the spill.
+    Keeping the join here means the caller's ``to_thread`` truly moves the
+    multi-megabyte work rather than eagerly evaluating it on the event loop.
+    """
+    return _capped_list_body("\n".join(full_lines), shown_text, tool_name, context)
 
 
 def _capped_list_body(
@@ -1977,6 +2090,46 @@ def _structural_summary_result(
     return _text(tool_call_id, "read", header + "\n" + body + footer, details=details)
 
 
+def _list_dir_entries(path: Path) -> list[str]:
+    """One directory's entries, directories marked with a trailing ``/``.
+
+    Synchronous by design: ``asyncio.to_thread`` is the only caller, and the
+    shape is exactly what the loop-bound listing used to build inline.
+    """
+    return sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
+
+
+def _read_file_snapshot(path: Path) -> tuple[int, ImageInfo | None, bytes | None]:
+    """Stat, classify and read one snapshot under the mutation stripe.
+
+    ``None`` data means the classified snapshot exceeded its applicable cap.
+    Keeping all three operations in one transaction prevents a writer from
+    swapping text for an image (or a small file for an oversized one) between
+    the limit/classification checks and the returned bytes.
+    """
+    with _file_transaction(path):
+        size = path.stat().st_size
+        info = sniff_image_file(str(path))
+        limit = READ_IMAGE_LIMIT_BYTES if info else READ_FILE_LIMIT_BYTES
+        data = None if size > limit else path.read_bytes()
+        return size, info, data
+
+
+def _decode_text_lines(data: bytes) -> tuple[str, list[str]]:
+    """Decode file bytes as UTF-8 and split, preserving the source too.
+
+    The source feeds Python structural summaries; rebuilding it from
+    ``splitlines`` would normalize line endings and lose the exact text the
+    parser and summary footer describe. Strict-decode-then-replace is
+    preserved verbatim: only invalid UTF-8 pays the second pass.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = data.decode("utf-8", errors="replace")
+    return text, text.splitlines()
+
+
 @_guard("read")
 async def execute_read(
     tool_call_id: str,
@@ -2032,7 +2185,10 @@ async def execute_read(
             return _error(tool_call_id, "read", "User declined to read this file.")
 
     if path.is_dir():
-        entries = sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
+        # iterdir in a thread: a wide directory (a node_modules, a build
+        # output) is tens of thousands of stat calls, and the loop this
+        # coroutine rides is the one rendering the TUI.
+        entries = await asyncio.to_thread(_list_dir_entries, path)
         return _text(
             tool_call_id,
             "read",
@@ -2040,17 +2196,13 @@ async def execute_read(
             details={"path": str(path)},
         )
 
-    # Stat and SNIFF before reading the body: an oversized file is refused
-    # instead of loaded, and the applicable ceiling depends on what the file
-    # is. Classification is by CONTENT, never by extension — a `.png` holding
-    # an HTML error page must not reach a provider as an image, and a
-    # screenshot saved with no extension at all is still a screenshot.
-    # `sniff_image_file` reads at most 64 KB and never imports a decoder, so a
-    # text read pays a short header read to learn it is a text read.
-    size = path.stat().st_size
-    info = sniff_image_file(str(path))
+    # Stat, content sniff and body read are one worker-thread transaction.
+    # Classification is by CONTENT, never extension — and it must describe
+    # the same bytes returned below. A concurrent in-process edit/write takes
+    # the same path stripe and cannot swap the file between these decisions.
+    size, info, data = await asyncio.to_thread(_read_file_snapshot, path)
     limit = READ_IMAGE_LIMIT_BYTES if info else READ_FILE_LIMIT_BYTES
-    if size > limit:
+    if data is None:
         advice = (
             "Resize it first (bash + sips/magick)."
             if info
@@ -2062,11 +2214,11 @@ async def execute_read(
             f"File too large to read ({size} bytes; limit {limit} bytes): {path}. {advice}",
         )
 
-    data = path.read_bytes()
-
     if info:
         try:
-            payload, wire_mime, summary = _encode_image_for_model(data, info)
+            payload, wire_mime, summary = await asyncio.to_thread(
+                _encode_image_for_model, data, info
+            )
         except ValueError as exc:
             # A text error, never an image block. Forwarding undecodable bytes
             # gets a 400 from the provider that no retry clears, because the
@@ -2100,11 +2252,10 @@ async def execute_read(
             )
         return _error(tool_call_id, "read", f"Binary file not readable as text: {path}")
 
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        text = data.decode("utf-8", errors="replace")
-    lines = text.splitlines()
+    # Decode + split in a thread: a 2 MB text read is a 2 MB decode and a
+    # full pass to break lines, and the same loop renders the TUI. Keep the
+    # source beside the lines for the structural-summary path below.
+    text, lines = await asyncio.to_thread(_decode_text_lines, data)
 
     if params.range:
         try:
@@ -2141,7 +2292,14 @@ async def execute_read(
         and path.suffix == ".py"
         and len(lines) >= PYTHON_SUMMARY_MIN_LINES
     ):
-        summarized = _structural_summary_result(tool_call_id, path, text, context)
+        # ``ast.parse`` plus the declaration walk are pure-Python CPU over
+        # the whole file. Main added this path after the original liveness
+        # fix; it belongs behind the same thread boundary as decode, or a
+        # large Python read simply reintroduces the render-loop stall under
+        # a new name.
+        summarized = await asyncio.to_thread(
+            _structural_summary_result, tool_call_id, path, text, context
+        )
         if summarized is not None:
             return summarized
 
@@ -2393,6 +2551,44 @@ async def execute_edit(
     if not path.is_file():
         return _error(tool_call_id, "edit", f"File does not exist: {path}")
 
+    # Read/match/replace/write/diff in a thread. Main's multi-hunk edit grew
+    # substantially after the first liveness fix, but its contract is the
+    # same load: file IO plus pure-Python matching and difflib over the whole
+    # file. Keeping that work on the Textual loop merely moved the reported
+    # freeze from the old one-hunk path into the new implementation.
+    outcome = await asyncio.to_thread(_edit_file_result, path, hunks, params.anchor_line)
+    if isinstance(outcome, str):
+        return _error(tool_call_id, "edit", outcome)
+    total_replacements, details = outcome
+    return _text(
+        tool_call_id,
+        "edit",
+        f"Edited {path}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied.",
+        details=details,
+    )
+
+
+def _edit_file_result(
+    path: Path,
+    hunks: list[EditHunk],
+    anchor_line: int | None,
+) -> tuple[int, dict[str, Any]] | str:
+    """Serialize one file transaction across parent/child AgentLoops."""
+    with _file_transaction(path):
+        return _edit_file_result_locked(path, hunks, anchor_line)
+
+
+def _edit_file_result_locked(
+    path: Path,
+    hunks: list[EditHunk],
+    anchor_line: int | None,
+) -> tuple[int, dict[str, Any]] | str:
+    """The current multi-hunk edit engine, synchronous for ``to_thread``.
+
+    A string is the exact refusal the tool returns. Counting, ambiguity
+    resolution and mutation all happen against one file snapshot, so moving
+    the engine off-loop cannot split the read/decide/write transaction.
+    """
     with path.open("r", encoding="utf-8", newline="") as stream:
         original = stream.read()
     current = original
@@ -2400,40 +2596,36 @@ async def execute_edit(
 
     for index, hunk in enumerate(hunks):
         if hunk.old_text == "":
-            return _error(tool_call_id, "edit", f"hunk {index + 1}: old_text must be non-empty")
+            return f"hunk {index + 1}: old_text must be non-empty"
         windows = _match_windows(current, hunk.old_text)
         if not windows:
             advice = (
-                f" — or the range around line {params.anchor_line}"
-                if params.anchor_line
+                f" — or the range around line {anchor_line}"
+                if anchor_line
                 else " to get the current text"
             )
-            return _error(
-                tool_call_id,
-                "edit",
+            return (
                 f"hunk {index + 1}: old_text not found (exact and whitespace-tolerant "
-                f"matchers both failed). Re-read the file{advice} and retry.",
+                f"matchers both failed). Re-read the file{advice} and retry."
             )
         chosen = windows
         if len(windows) > 1 and not hunk.replace_all:
-            if params.anchor_line is not None:
+            if anchor_line is not None:
                 anchored = []
-                for w in windows:
-                    first_line = _line_of_offset(current, w[0])
-                    last_line = _line_of_offset(current, max(w[1] - 1, w[0]))
-                    if first_line <= params.anchor_line <= last_line:
-                        anchored.append(w)
+                for window in windows:
+                    first_line = _line_of_offset(current, window[0])
+                    last_line = _line_of_offset(current, max(window[1] - 1, window[0]))
+                    if first_line <= anchor_line <= last_line:
+                        anchored.append(window)
                 if len(anchored) == 1:
                     chosen = anchored
             if len(chosen) > 1:
-                return _error(
-                    tool_call_id,
-                    "edit",
-                    f"hunk {index + 1}: old_text matches {len(chosen)} places; include more "
-                    "surrounding context, give anchor_line, or set replace_all=true.",
+                return (
+                    f"hunk {index + 1}: old_text matches {len(chosen)} places; include "
+                    "more surrounding context, give anchor_line, or set replace_all=true."
                 )
         # Apply back-to-front so earlier offsets stay valid within this hunk.
-        for start, end, matched in sorted(chosen, key=lambda w: w[0], reverse=True):
+        for start, end, matched in sorted(chosen, key=lambda window: window[0], reverse=True):
             exact = matched == hunk.old_text
             replacement = (
                 hunk.new_text
@@ -2452,13 +2644,7 @@ async def execute_edit(
     if current != original:
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
-    details = _diff_details(str(path), original, current)
-    return _text(
-        tool_call_id,
-        "edit",
-        f"Edited {path}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied.",
-        details=details,
-    )
+    return total_replacements, _diff_details(str(path), original, current)
 
 
 def build_edit_tool() -> AgentTool:
@@ -2577,6 +2763,35 @@ async def execute_write(
     # Write-tier approval is the loop's gate; see execute_bash.
     path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
 
+    # The read-modify-write-diff block runs in a thread: the loop this
+    # coroutine rides is the SAME loop that renders the TUI, and a previous
+    # revision of a rewritten file plus the unified diff over it are
+    # megabyte-scale CPU (difflib is pure Python) at exactly the moment a
+    # concurrent sibling tool is also settling. On the loop that read as the
+    # intermittent whole-screen freeze; off it, the frame keeps animating.
+    existed, details = await asyncio.to_thread(_write_file_result, path, params.content)
+    verb = "Overwrote" if existed else "Created"
+    return _text(
+        tool_call_id,
+        "write",
+        f"{verb} {path} ({len(params.content)} chars).",
+        details=details,
+    )
+
+
+def _write_file_result(path: Path, content: str) -> tuple[bool, dict[str, Any]]:
+    """Serialize one overwrite transaction across parent/child AgentLoops."""
+    with _file_transaction(path):
+        return _write_file_result_locked(path, content)
+
+
+def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str, Any]]:
+    """The filesystem half of ``write``: read prior, write new, diff both.
+
+    Synchronous by design — ``asyncio.to_thread`` is the only caller, and
+    keeping it a plain function means the abort/approval decisions stay on
+    the loop where their timeouts live.
+    """
     existed = path.exists()
     previous = ""
     if existed:
@@ -2587,15 +2802,8 @@ async def execute_write(
             # cannot report a meaningful diff for it.
             previous = ""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(params.content, encoding="utf-8")
-    verb = "Overwrote" if existed else "Created"
-    details = _diff_details(str(path), previous, params.content)
-    return _text(
-        tool_call_id,
-        "write",
-        f"{verb} {path} ({len(params.content)} chars).",
-        details=details,
-    )
+    path.write_text(content, encoding="utf-8")
+    return existed, _diff_details(str(path), previous, content)
 
 
 def build_write_tool() -> AgentTool:
@@ -2759,11 +2967,6 @@ def _walk_files(root: Path) -> list[Path]:
     return _walk_entries(root)
 
 
-# ---------------------------------------------------------------------------
-# glob
-# ---------------------------------------------------------------------------
-
-
 class GlobParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2874,11 +3077,14 @@ async def execute_glob(
         )
     # Spill the COMPLETE list before capping. The 500-path cap silently threw
     # the tail away, so a model looking for a file that sorted late was told
-    # it did not exist; now the whole list is one range read away.
+    # it did not exist; now the whole list is one range read away. The join
+    # and spill ride a thread because a whole-tree glob is thousands of
+    # paths and the spill a disk write of all of them.
     total = len(matches)
-    full = "\n".join(matches)
     shown = matches[:GLOB_RESULT_LIMIT]
-    body, spill_details = _capped_list_body(full, "\n".join(shown), "glob", context)
+    body, spill_details = await asyncio.to_thread(
+        _joined_capped_list_body, matches, shown, "glob", context
+    )
     header = f"{len(shown)} match(es) for '{params.pattern}'"
     if total > len(shown):
         header += f" of {total} (capped at {GLOB_RESULT_LIMIT})"
@@ -3314,8 +3520,11 @@ async def execute_grep(
     # decoration, recoverable by re-running with a narrower pattern/range).
     spill_lines = [f"{rel}:{lineno}:{text}" for rel, lineno, text, _kind in matches]
     shown_block = body
-    body_text, spill_details = _capped_list_body(
-        "\n".join(spill_lines), shown_block, "grep", context
+    # The join and spill ride a thread: multi-MB string joins plus the
+    # spill's disk write were the loop-bound tail that froze the frame when
+    # several searches settled together.
+    body_text, spill_details = await asyncio.to_thread(
+        _spilled_list_body, spill_lines, shown_block, "grep", context
     )
     header = f"{shown} match(es) for '{params.pattern}'"
     if total > shown:
