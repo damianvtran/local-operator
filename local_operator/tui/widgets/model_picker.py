@@ -535,8 +535,16 @@ class ModelPicker(Static):
         # Suppressed when it carries nothing the selector already said, which is
         # every model whose name resolution declined to shorten it — those rows
         # would otherwise print their own id twice.
+        #
+        # Compared case-INSENSITIVELY, which is what the rule above always
+        # meant. ChatGPT's Codex catalogue titles its display names off the slug
+        # (``gpt-5.6-luna`` -> ``GPT-5.6-Luna``), so an exact comparison let
+        # every row in that family print `openai/gpt-5.6-luna  (GPT-5.6-Luna)`
+        # and spend ~16 cells restating its own id. Names that genuinely differ
+        # keep their parenthetical: `Claude Opus 5` and `GPT-4.1 mini` still
+        # differ from their selectors once folded.
         name = row.label.strip()
-        if name and name not in (row.model_id, row.selector):
+        if name and name.casefold() not in (row.model_id.casefold(), row.selector.casefold()):
             # Measured against a layout that ALWAYS reserves the numbers run,
             # even at the widths where it is not painted. Sized against the
             # painted layout instead, the annotation GREW as the window shrank:
