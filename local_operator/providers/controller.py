@@ -465,20 +465,35 @@ class ProviderController:
         current Codex catalogue rejects a subscription token without it. Other
         providers ignore the value, while ``is_oauth`` still selects Anthropic's
         bearer header instead of its API-key header.
+
+        The lookup follows ``store_credentials_as``, because the credential a
+        login flavour needs is not stored under its own id. ``openai-device``
+        and ``xai-oauth`` are login flavours of ``openai`` and ``xai`` -- the
+        registry says so, and ``discovery._static_rows`` already follows it for
+        the bundled rows -- and the login writes ONE row, under the aliased
+        name. Asking ``AuthStore`` for the literal id (its ``WHERE provider = ?``
+        is exact) therefore found nothing, so the flavour listed anonymously:
+        for ``openai-device`` that meant no OAuth, no account scope, no
+        account-scoped catalogue, and the picker offering that logged-in
+        ChatGPT account the bundled ``gpt-4o``/``o3`` rows under a second
+        prefix -- the very ids this listing exists to stop presenting as
+        current.
         """
-        access = await self.auth_store.get_oauth_access(provider)
+        definition = get_provider_definition(provider)
+        credential_id = (definition.store_credentials_as or provider) if definition else provider
+        access = await self.auth_store.get_oauth_access(credential_id)
         if access is not None and access.kind == "oauth" and access.access_token:
             return access.access_token, True, access.account_id or access.org_id
         if access is not None and access.access_token:
             return access.access_token, False, None
         try:
-            stored = await self.auth_store.get_api_key(provider)
+            stored = await self.auth_store.get_api_key(credential_id)
         except Exception:  # noqa: BLE001 — a refresh failure just means no listing
             stored = None
         # The environment is the last tier of the same cascade the stream uses, so
         # a key set there has to reach the listing too: otherwise the provider a
         # session is ACTUALLY RUNNING ON is the one whose catalogue stays empty.
-        return stored or resolve_env_key(provider), False, None
+        return stored or resolve_env_key(credential_id), False, None
 
     async def _fetch_one(
         self,

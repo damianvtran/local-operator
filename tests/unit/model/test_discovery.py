@@ -259,6 +259,46 @@ def test_openai_oauth_without_an_account_scope_falls_back_without_a_request() ->
     assert client.calls == []
 
 
+def test_an_unrecognised_visibility_value_does_not_hide_every_model() -> None:
+    """This listing may PRUNE the registry, so the visibility test is a denylist.
+
+    Testing ``!= "list"`` dropped every row the moment the endpoint renamed or
+    added a value, and a listing that parses to nothing then emptied the whole
+    OpenAI picker. Showing one internal helper is the far smaller harm.
+    """
+    body = {
+        "models": [
+            {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "visible"},
+            {"slug": "codex-auto-review", "visibility": "HIDE"},
+        ]
+    }
+    rows = fetch_models(
+        "openai",
+        api_key="chatgpt-token",
+        is_oauth=True,
+        account_id="acct-42",
+        client=_StubClient([_Response(200, body)]),
+    )
+
+    assert rows is not None
+    assert [row.id for row in rows] == ["gpt-5.6-sol"], "unknown value hid a real model"
+
+
+def test_a_codex_row_may_spell_its_id_the_public_way() -> None:
+    """``slug`` with no fallback made one renamed key cost every row."""
+    body = {"models": [{"id": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna"}]}
+    rows = fetch_models(
+        "openai",
+        api_key="chatgpt-token",
+        is_oauth=True,
+        account_id="acct-42",
+        client=_StubClient([_Response(200, body)]),
+    )
+
+    assert rows is not None
+    assert [row.id for row in rows] == ["gpt-5.6-luna"]
+
+
 # -- Anthropic transport ------------------------------------------------------
 
 
@@ -1048,6 +1088,132 @@ def test_openai_api_key_and_oauth_catalogues_do_not_share_a_cache(tmp_path) -> N
         "https://api.openai.com/v1/models",
         discovery.OPENAI_CHATGPT_MODELS_URL,
     ]
+
+
+def test_an_unscoped_oauth_run_never_prunes_from_the_api_key_document(tmp_path) -> None:
+    """The pruning decision must require the SAME account scope the cache key
+    and the transport require.
+
+    Without the account id ``_cache_key`` degrades to the shared unscoped
+    document, so an OAuth run read the listing an API KEY wrote and then used
+    it to prune the registry -- 11 bundled ids down to 1, with no HTTP request
+    issued and a reassuring ``cached`` status. The same path accepted a
+    document written before the account-scoped catalogue existed, so an upgrade
+    hit it too.
+    """
+    client = _StubClient([_Response(200, {"data": [{"id": "api-only"}]})])
+
+    available_models("openai", api_key="sk-api", client=client, cache_dir=tmp_path)
+    models, status = available_models(
+        "openai",
+        api_key="chatgpt-token",
+        is_oauth=True,
+        account_id=None,
+        client=client,
+        cache_dir=tmp_path,
+    )
+
+    assert status == "cached"
+    listed = {model.id for model in models}
+    assert set(static_models("openai")) <= listed, "an unscoped run pruned the registry"
+    assert len(client.calls) == 1, "the second run must not issue a request"
+
+
+def test_a_codex_listing_that_parses_to_nothing_keeps_the_bundled_models(tmp_path) -> None:
+    """Upstream schema drift must cost "no new models", never "no models".
+
+    A 200 whose rows all drop (a renamed key, an unknown visibility value, a
+    catalogue filtered by the pinned client version) pruned the registry to
+    EMPTY and cached the emptiness for the 24h TTL, so the picker offered no
+    OpenAI model at all and issued no request that could recover it.
+    """
+    client = _StubClient([_Response(200, {"models": []})])
+
+    models, status = available_models(
+        "openai",
+        api_key="chatgpt-token",
+        is_oauth=True,
+        account_id="acct-42",
+        client=client,
+        cache_dir=tmp_path,
+    )
+
+    assert status == "empty"
+    assert {model.id for model in models} == set(static_models("openai"))
+
+
+def test_a_subscription_token_is_never_spent_on_the_generic_endpoint() -> None:
+    """One predicate drives the endpoint choice, the cache scope AND the prune.
+
+    They were spelled three separate ways and disagreed: the prune test omitted
+    the account id and keyed off the credential-storage id rather than the
+    provider actually fetched. Denying the predicate must therefore stop the
+    request too, not fall through to ``api.openai.com/v1/models`` -- that wire
+    rejects a subscription credential, so trying it would burn a request and
+    report a listing outage for a token that was simply asked the wrong thing.
+    """
+    client = _StubClient([_Response(200, {"data": [{"id": "gpt-4.1"}]})])
+
+    rows = fetch_models(
+        "openai",
+        api_key="chatgpt-token",
+        is_oauth=True,
+        account_id=None,
+        client=client,
+    )
+
+    assert rows is None
+    assert client.calls == [], "an unscoped OAuth listing must issue no request"
+
+
+def test_listing_authority_requires_every_condition_the_request_needs() -> None:
+    """The prune predicate is the only destructive one, so it may not be
+    weaker than the predicate that decides the request is issuable.
+
+    ``openai-device`` shares OpenAI's credential row and IS on the
+    account-scoped route. A sibling that shared the row WITHOUT being on that
+    route would receive a generic ``/v1/models`` snapshot -- explicitly a
+    partial entitlement list -- and, under the old ``storage_id == "openai"``
+    test, prune the bundled catalogue from it.
+    """
+    scoped = discovery._serves_account_scoped_catalogue
+    kw = {"is_oauth": True, "api_key": "tok", "account_id": "acct-42"}
+
+    assert scoped("openai", **kw) is True
+    assert scoped("openai-device", **kw) is True
+    # Not on the account-scoped route, whatever credential row it shares.
+    assert scoped("openai-enterprise", **kw) is False
+    assert scoped("openrouter", **kw) is False
+    # Every condition the request itself needs is required here too.
+    assert scoped("openai", is_oauth=False, api_key="tok", account_id="acct-42") is False
+    assert scoped("openai", is_oauth=True, api_key=None, account_id="acct-42") is False
+    assert scoped("openai", is_oauth=True, api_key="tok", account_id=None) is False
+
+
+def test_openai_device_shares_the_account_scoped_document(tmp_path) -> None:
+    """``store_credentials_as`` is what puts ``openai-device`` on the same
+    account-scoped route and the same cache document as ``openai``.
+
+    It has no bundled models of its own, so reading it off the provider id
+    instead would list a device-flow login against an empty registry and cache
+    the answer under a second name for the same account.
+    """
+    client = _StubClient([_Response(200, _OPENAI_CODEX_BODY)])
+
+    models, status = available_models(
+        "openai-device",
+        api_key="chatgpt-token",
+        is_oauth=True,
+        account_id="acct-42",
+        client=client,
+        cache_dir=tmp_path,
+    )
+
+    assert status == "ok"
+    assert [model.id for model in models] == ["gpt-5.6-sol"]
+    assert client.calls[0][0] == discovery.OPENAI_CHATGPT_MODELS_URL
+    written = sorted(path.name for path in tmp_path.glob("*.json"))
+    assert written == ["openai.oauth.931c7c164da4.listing.json"], written
 
 
 def test_available_models_serves_a_fresh_cache_without_a_request(tmp_path) -> None:
