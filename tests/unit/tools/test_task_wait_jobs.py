@@ -275,6 +275,7 @@ async def test_task_batch_launches_concurrent_children_with_shared_context(tmp_p
     assert launched[1][2] == "scout"
     assert launched[2][3] == "hi"
     assert "3 subagent(s)" in result.text
+    assert result.details is not None
     assert result.details["jobs"][0]["job_id"] == "job-1"
 
 

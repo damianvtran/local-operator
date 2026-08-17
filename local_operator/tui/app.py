@@ -5524,7 +5524,13 @@ class OperatorApp(App[None]):
         fits in seven rows.
         """
         try:
-            data = self._session.context_breakdown()
+            session = self._session
+            if session is None:
+                return None
+            breakdown = getattr(session, "context_breakdown", None)
+            if not callable(breakdown):
+                return None
+            data = cast(dict[str, int], breakdown())
             total = data["total"]
             window = max(data["context_window"], 1)
             pct = total / window * 100

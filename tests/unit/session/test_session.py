@@ -1400,8 +1400,6 @@ async def test_error_run_journals_model_visible_incident(tmp_path):
 async def test_job_completion_auto_delivers_when_idle(tmp_path):
     """A settled model-owned job re-wakes the idle session: the result lands
     as a conversation turn without the model polling 'jobs'."""
-    from local_operator.harness.jobs import AsyncJobManager
-
     turn_count = {"n": 0}
 
     class TwoTurnStream:
@@ -1443,9 +1441,6 @@ async def test_job_completion_auto_delivers_when_idle(tmp_path):
 async def test_consumed_and_foreign_jobs_do_not_auto_deliver(tmp_path):
     """wait already returned the result (consumed) and host-registered job
     types stay quiet; only fresh model-owned work re-wakes the session."""
-    from local_operator.harness.jobs import AsyncJobManager
-    from local_operator.harness.types import Usage
-
     stream = ScriptedStream(
         [
             [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
@@ -1472,7 +1467,7 @@ async def test_consumed_and_foreign_jobs_do_not_auto_deliver(tmp_path):
         await asyncio.sleep(0.3)
         return "done"
 
-    streaming_id = session.jobs.register("task", "while-busy", slow_runner)
+    session.jobs.register("task", "while-busy", slow_runner)
     session._is_streaming = True
     try:
         await asyncio.sleep(0.45)  # settles while the session is "streaming"

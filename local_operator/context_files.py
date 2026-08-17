@@ -88,7 +88,7 @@ def discover_context_files(cwd: str | Path) -> list[Path]:
             except OSError:
                 digest = None  # unreadable: skip rather than partially trust
                 found_here = None
-            if found_here is not None and digest not in seen_digests:
+            if found_here is not None and digest is not None and digest not in seen_digests:
                 seen_digests.add(digest)
                 found.append(found_here)
         if directory == stop or directory == home or directory == directory.parent:

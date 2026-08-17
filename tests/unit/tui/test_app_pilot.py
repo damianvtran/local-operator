@@ -44,6 +44,9 @@ from tests.unit.tui.conftest import caret_cells, chevron_colour, composer_cells
 class FakeSession:
     """Records prompts/aborts; satisfies SessionProtocol."""
 
+    def context_breakdown(self) -> dict[str, int]:
+        return getattr(self, "_context_breakdown", {})
+
     def __init__(self) -> None:
         self.prompts: list[str] = []
         self.aborts: list[str] = []
@@ -3848,17 +3851,21 @@ async def test_context_command_renders_wire_schema_breakdown() -> None:
     """`/context` is the visible answer to MCP/tool-schema context cost: all
     wire categories, total/window percent, and cache-read row when present."""
     session = FakeSession()
-    session.context_breakdown = lambda: {
-        "instructions": 1200,
-        "tool_inventory": 400,
-        "tool_schemas": 6600,
-        "environment": 50,
-        "knowledge_mcp_goal": 900,
-        "messages": 10950,
-        "total": 20100,
-        "context_window": 200000,
-        "cache_read": 12800,
-    }
+    setattr(
+        session,
+        "_context_breakdown",
+        {
+            "instructions": 1200,
+            "tool_inventory": 400,
+            "tool_schemas": 6600,
+            "environment": 50,
+            "knowledge_mcp_goal": 900,
+            "messages": 10950,
+            "total": 20100,
+            "context_window": 200000,
+            "cache_read": 12800,
+        },
+    )
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()

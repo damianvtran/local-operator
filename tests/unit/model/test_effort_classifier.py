@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -78,7 +78,7 @@ async def test_session_stream_fn_freezes_effort_for_one_tool_loop(monkeypatch) -
         async def get_oauth_access(self, *args, **kwargs):
             return None
 
-    stream = SessionStreamFn(FakeAuth(), {"effort": {"auto": True}}, "session-x")
+    stream = SessionStreamFn(cast(Any, FakeAuth()), {"effort": {"auto": True}}, "session-x")
     # Avoid usage API work; it still consumes the boundary exactly like prod.
     monkeypatch.setattr(stream, "preflight_usage", lambda model: _noop())
     model = ModelSpec(

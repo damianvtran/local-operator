@@ -326,11 +326,9 @@ def _references_result(
     lines = _source_lines(path, cache)
     display = _display_path(path, root)
     refs: list[Any] = []
-    used: tuple[int, int] | None = None
     for line, column in _query_positions(params, script, lines):
         refs = list(script.get_references(line, column))
         if refs:
-            used = (line, column)
             break
     if not refs:
         if params.name and not _positions_for_name(script, params.name, lines):
@@ -512,6 +510,8 @@ async def execute_lsp(
     if not path.is_file():
         return _error(tool_call_id, "lsp", f"Not a file: {path}")
 
+    if jedi is None:
+        return _error(tool_call_id, "lsp", "jedi is not installed (install local-operator[lsp])")
     script = jedi.Script(path=str(path))
     cache: dict[str, list[str]] = {}
     if params.action == "definitions":

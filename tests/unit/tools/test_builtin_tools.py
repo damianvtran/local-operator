@@ -1372,7 +1372,7 @@ async def test_bash_steering_cancellation_backgrounds_the_command(tmp_path) -> N
         _call(
             tools,
             "bash",
-            {"command": f"sleep 0.6 && echo finished-marker"},
+            {"command": "sleep 0.6 && echo finished-marker"},
             context,
         )
     )
@@ -1382,6 +1382,7 @@ async def test_bash_steering_cancellation_backgrounds_the_command(tmp_path) -> N
 
     assert result.is_error is False
     assert "continues in the background" in result.text
+    assert result.details is not None
     job_id = result.details["job_id"]
     job = manager.get(job_id)
     assert job is not None and job.type == "bash"
@@ -1407,15 +1408,17 @@ async def test_bash_real_abort_still_kills(tmp_path) -> None:
     context = ToolContext(cwd=str(tmp_path), session_id="bg2", jobs=manager)
     tools = {t.name: t for t in create_tools(context)}
     sig = AbortSignal()
-    task = asyncio.create_task(
-        tools["bash"].execute(
+
+    async def run_bash() -> ToolResult:
+        return await tools["bash"].execute(
             "c",
-            {"command": f"sleep 5 && echo should-not-run"},
+            {"command": "sleep 5 && echo should-not-run"},
             sig,
             None,
             context,
         )
-    )
+
+    task = asyncio.create_task(run_bash())
     await asyncio.sleep(0.2)
     sig.abort("interrupted")
     task.cancel()

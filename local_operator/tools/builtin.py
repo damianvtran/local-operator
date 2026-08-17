@@ -56,7 +56,7 @@ import traceback
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -1270,9 +1270,10 @@ async def execute_bash(
                 transport.close()
             return "\n".join(part for part in (head, f"exit code: {code}", summary) if part)
 
-        timed_out_bg = False
         try:
-            bg_job_id = jobs.register("bash", f"bash: {command[:60]}", _detached, owner_id=None)
+            bg_job_id = cast(Any, jobs).register(
+                "bash", f"bash: {command[:60]}", _detached, owner_id=None
+            )
         except Exception:  # noqa: BLE001 — no manager slot: kill, don't leak
             _kill()
             raise
@@ -1820,8 +1821,9 @@ def _format_args(args: ast.arguments) -> str:
         parts.append("*")
     for i, arg in enumerate(args.kwonlyargs):
         rendered = ast.unparse(arg)
-        if i < len(args.kw_defaults) and args.kw_defaults[i] is not None:
-            rendered = f"{rendered}={ast.unparse(args.kw_defaults[i])}"
+        default = args.kw_defaults[i] if i < len(args.kw_defaults) else None
+        if default is not None:
+            rendered = f"{rendered}={ast.unparse(default)}"
         parts.append(rendered)
     if args.kwarg:
         parts.append("**" + ast.unparse(args.kwarg))
@@ -1852,7 +1854,7 @@ def _python_structural_summary_lines(source: str) -> tuple[list[str], int, int] 
 
     out: list[str] = []
 
-    def emit(node: ast.AST, depth: int) -> int:
+    def emit(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, depth: int) -> int:
         """Emit one symbol block; returns how many symbol lines it used."""
         used = 0
         pad = "    " * depth
@@ -1934,12 +1936,6 @@ def _structural_summary_result(
     if spill_details:
         details.update(spill_details)
     return _text(tool_call_id, "read", header + "\n" + body + footer, details=details)
-
-    footer = (
-        f'\n[read around a hit with read(path="{ref.handle}", '
-        f'range="{max(matches[0][0] - 10, 1)}-{matches[0][0] + 30}")]'
-    )
-    return _text(tool_call_id, "read", f"{header}:\n{body}{footer}", details=details)
 
 
 @_guard("read")
@@ -3114,7 +3110,9 @@ def _render_grep_body(
     last_rel = None
     for i in sorted(keep_set):
         rel, lineno, text, kind = records[i]
-        if last_rel is not None and (rel != last_rel or lineno != last_line + 1):
+        if last_rel is not None and (
+            last_line is None or rel != last_rel or lineno != last_line + 1
+        ):
             out.append("--")
         out.append(f"{rel}:{lineno}:{text}" if kind == "m" else f"{rel}:{lineno}-{text}")
         last_rel, last_line = rel, lineno
@@ -5005,7 +5003,7 @@ async def execute_wait(
     # Handing the result to the model HERE means auto-delivery must not
     # repeat it when the session next goes idle (see Session._on_job_completed
     # and AsyncJob.consumed).
-    jobs.mark_consumed(params.job_id)
+    cast(Any, jobs).mark_consumed(params.job_id)
     text, spill_details = _job_summary(job, context)
     details = {"job_id": job.id, "status": job.status}
     if spill_details:

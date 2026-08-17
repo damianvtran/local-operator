@@ -791,6 +791,8 @@ class McpManager:
         # so a flapping server still trips the breaker.
         self._backoff_index: dict[str, int] = {}
         self._on_tools_changed: ToolsChangedCallback | None = None
+        # Session-installed sink for model-visible MCP breaker incidents.
+        self.on_incident: Callable[[str, str], None] | None = None
         # Tool-name collision state keyed by stable origin key (MCP-09):
         # (server name, original tool name), never registration order.
         self._tool_meta: dict[str, McpToolMeta] = {}

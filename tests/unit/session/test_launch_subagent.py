@@ -515,7 +515,11 @@ async def test_scout_child_is_read_only_and_cannot_delegate(tmp_path, monkeypatc
     names = {tool.name for tool in child._tools}
     assert names <= {"read", "glob", "grep", "list_variables", "read_variable"}
     assert {"bash", "edit", "write", "task", "wait", "jobs", "wake"}.isdisjoint(names)
-    assert "scout mode" in child._context.messages[0].text if child._context.messages else True
+    assert (
+        "scout mode" in getattr(child._context.messages[0], "text", "")
+        if child._context.messages
+        else True
+    )
     await child.dispose()
     await parent.dispose()
 

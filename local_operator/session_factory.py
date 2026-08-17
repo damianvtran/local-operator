@@ -61,7 +61,6 @@ if TYPE_CHECKING:
     from local_operator.session.goal import GoalState
     from local_operator.session.protocol import SessionProtocol
     from local_operator.session.session import Session
-    from local_operator.session.transcript import Transcript
     from local_operator.skills.discovery import Skill
     from local_operator.skills.index import SkillIndex
     from local_operator.variables import VariableStore
@@ -346,7 +345,7 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     return prompt_approval
 
 
-def _latest_user_query(transcript: Transcript) -> str:
+def _latest_user_query(transcript: Any) -> str:
     """Extract the skill-selection query from the transcript.
 
     Per-turn selection embeds the last user message plus the latest
@@ -376,7 +375,7 @@ def _latest_user_query(transcript: Transcript) -> str:
     return "\n".join(part for part in (user_text, summary) if part)
 
 
-def _latest_compaction_id(transcript: Transcript) -> str | None:
+def _latest_compaction_id(transcript: Any) -> str | None:
     """Entry id of the newest compaction marker, or ``None`` without one.
 
     This is the freeze key for the knowledge block: selection normally
@@ -655,7 +654,7 @@ async def _select_knowledge_block(
         # index shapes in the wild implement ``select(query, ...)`` with the
         # historical signature, and there is no globs matching to do without
         # a cwd anyway.
-        select_kwargs: dict[str, Path] = {"cwd": Path(cwd)} if cwd else {}
+        select_kwargs: dict[str, Any] = {"cwd": Path(cwd)} if cwd else {}
         picked = await hooks.index.select(query, **select_kwargs) if hooks.index is not None else []
         if hooks.agent_hint_index is not None:
             matching_agents = await hooks.agent_hint_index.select(query, k=1)
@@ -724,7 +723,7 @@ class _SessionPlan:
 
 def _make_system_blocks_provider(
     tools: list[AgentTool],
-    transcript: Transcript,
+    transcript: Any,
     hooks: _KnowledgeHooks,
     cwd: str | None = None,
     goal_state: "GoalState | None" = None,

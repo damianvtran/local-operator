@@ -21,6 +21,7 @@ from local_operator.harness.types import (
     StreamUsageEvent,
     TextContent,
     ToolCall,
+    ToolResult,
 )
 from local_operator.providers.clients import (
     AnthropicClient,
@@ -551,7 +552,7 @@ async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
             headers={"content-type": "text/event-stream"},
         )
 
-    async def unused_execute(*_args: Any, **_kwargs: Any) -> None:
+    async def unused_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
         raise AssertionError("wire serialization must not execute tools")
 
     spec = ModelSpec(
