@@ -522,6 +522,10 @@ class ProviderController:
             api_key=api_key,
             access_token=access_token,
             account_id=account_id,
+            # The raw row lets split-token providers (QwenCloud Token Plan:
+            # sk-sp inference key vs. OAuth usage token) spend the right one,
+            # where access_token is already the wire-mapped key.
+            oauth_creds=access.raw if access is not None and access.kind == "oauth" else None,
         )
         if report is not None and not report.identity and access is not None:
             # Whose account this is. The field existed and no fetcher ever set it, so

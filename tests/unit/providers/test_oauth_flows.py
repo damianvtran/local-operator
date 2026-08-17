@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import urllib.parse
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -761,3 +762,111 @@ def test_only_anthropic_offers_a_pasted_code_and_none_require_one() -> None:
 
     paste = {p.id for p in PROVIDER_REGISTRY if p.login is not None and p.paste_code_flow}
     assert paste == {"anthropic"}, paste
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_token_plan_login_captures_key_and_device_grant() -> None:
+    """The one credential row carries BOTH halves: the pasted sk-sp key the
+    wire spends, and the device-flow management token only usage spends."""
+    import time
+
+    from local_operator.providers.oauth.qwencloud import (
+        DEVICE_CODE_PATH,
+        DEVICE_TOKEN_PATH,
+        login_qwencloud_token_plan,
+    )
+
+    auth_urls: list[str] = []
+    callbacks = LoginCallbacks(
+        on_auth_url=lambda url, instructions=None: auth_urls.append(url),
+        on_progress=lambda message: None,
+        on_manual_code_input=lambda: "sk-sp-test",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == DEVICE_CODE_PATH:
+            # The init URL must carry the S256 challenge (RFC 7636).
+            assert request.url.params["code_challenge_method"] == "S256"
+            return httpx.Response(
+                200,
+                json={
+                    "Success": True,
+                    "Data": {
+                        "Token": "device-token",
+                        "VerificationUrl": "https://account.qwencloud.com/sso/OIDCAuth",
+                        "ExpiresIn": 300,
+                        "Interval": 1,
+                    },
+                },
+            )
+        assert request.url.path == DEVICE_TOKEN_PATH
+        assert request.url.params["token"] == "device-token"
+        assert "code_verifier" in request.url.params
+        return httpx.Response(
+            200,
+            json={
+                "Success": True,
+                "Data": {
+                    "Status": "complete",
+                    "Credentials": {
+                        "AccessToken": "mgmt-access",
+                        "RefreshToken": "mgmt-refresh",
+                        "ExpireTime": "2030-01-01T00:00:00Z",
+                        "User": {"AliyunId": "damian-aliyun", "Email": "damian@example.com"},
+                    },
+                },
+            },
+        )
+
+    creds = await login_qwencloud_token_plan(
+        callbacks, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    assert creds["access"] == "mgmt-access"
+    assert creds["refresh"] == "mgmt-refresh"
+    assert creds["api_key"] == "sk-sp-test"
+    assert creds["account_id"] == "damian-aliyun"
+    assert creds["email"] == "damian@example.com"
+    assert creds["expires"] == int(datetime(2030, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    assert creds["authorized_at"] <= int(time.time() * 1000)
+    assert auth_urls == ["https://account.qwencloud.com/sso/OIDCAuth"]
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_token_plan_login_rejects_non_token_plan_keys() -> None:
+    """A key that is not sk-… cannot be a Token Plan key; fail with guidance
+    rather than storing a credential the wire will 401 on."""
+    from local_operator.providers.oauth.qwencloud import login_qwencloud_token_plan
+
+    callbacks = LoginCallbacks(on_manual_code_input=lambda: "not-a-qwencloud-key")
+    with pytest.raises(Exception, match="Token Plan key"):
+        await login_qwencloud_token_plan(callbacks)
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_token_plan_login_expired_device_code_is_terminal() -> None:
+    from local_operator.providers.oauth.qwencloud import (
+        DEVICE_CODE_PATH,
+        login_qwencloud_token_plan,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == DEVICE_CODE_PATH:
+            return httpx.Response(
+                200,
+                json={
+                    "Success": True,
+                    "Data": {
+                        "Token": "device-token",
+                        "VerificationUrl": "https://account.qwencloud.com/sso/OIDCAuth",
+                        "ExpiresIn": 300,
+                        "Interval": 1,
+                    },
+                },
+            )
+        return httpx.Response(200, json={"Success": True, "Data": {"Status": "expired_token"}})
+
+    callbacks = LoginCallbacks(on_manual_code_input=lambda: "sk-sp-test")
+    with pytest.raises(Exception, match="expired"):
+        await login_qwencloud_token_plan(
+            callbacks, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
