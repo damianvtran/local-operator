@@ -196,6 +196,8 @@ class ModelInfo(BaseModel):
         context_window (Optional[int]): Context window size of the model.
         supports_images (Optional[bool]): Whether the model supports images.
         supports_prompt_cache (bool): Whether the model supports prompt caching.
+        supports_responses_api (bool): Whether the model supports OpenAI's
+            Responses API.
         cache_writes_price (Optional[float]): Cost per million tokens for cache writes.
         cache_reads_price (Optional[float]): Cost per million tokens for cache reads.
         description (Optional[str]): Description of the model.
@@ -212,6 +214,7 @@ class ModelInfo(BaseModel):
     context_window: Optional[int] = None
     supports_images: Optional[bool] = None
     supports_prompt_cache: bool = False
+    supports_responses_api: bool = False
     cache_writes_price: Optional[float] = None
     cache_reads_price: Optional[float] = None
     description: str = Field(..., description="Description of the model")

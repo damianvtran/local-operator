@@ -1,5 +1,6 @@
 import pytest
 
+from local_operator.model.configure import build_model_spec
 from local_operator.model.registry import (
     ModelInfo,
     _anthropic_family,
@@ -7,6 +8,26 @@ from local_operator.model.registry import (
     anthropic_models,
     get_model_info,
 )
+
+
+@pytest.mark.parametrize(
+    "provider, model_id, supported",
+    [
+        ("openai", "gpt-5", True),
+        ("openai", "gpt-5.4", True),
+        ("openai", "gpt-5.3-codex", True),
+        ("openai", "gpt-4.1", False),
+        ("openai", "gpt-4o", False),
+        ("openrouter", "openai/gpt-5.4", False),
+    ],
+)
+def test_responses_api_capability_is_pinned_to_direct_openai_gpt5(
+    provider: str, model_id: str, supported: bool
+) -> None:
+    spec = build_model_spec(provider, model_id)
+    assert spec.supports_responses_api is supported
+    if supported:
+        assert spec.supports_prompt_cache is True
 
 
 def test_model_info_price_must_be_non_negative() -> None:

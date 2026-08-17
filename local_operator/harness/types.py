@@ -958,6 +958,10 @@ class ModelSpec(BaseModel):
     supports_tools: bool = True
     supports_images: bool = True
     supports_prompt_cache: bool = False
+    # Public OpenAI Responses routing is a model capability, not a provider-wire
+    # guess: compatibility providers may serve the same model id while exposing
+    # only chat/completions.
+    supports_responses_api: bool = False
     base_url: str | None = None  # override for OpenAI-compatible endpoints
     temperature: float = 0.2
     top_p: float = 0.9
@@ -1018,6 +1022,10 @@ class ChatRequest(BaseModel):
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
     tool_choice: Literal["auto", "none", "required"] = "auto"
+    # Stable request-prefix identity used by providers' server-side prompt
+    # caches. Session hosts populate it once from their session id; keeping it
+    # on the request lets retries and fallback clones preserve the same value.
+    prompt_cache_key: str | None = None
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:

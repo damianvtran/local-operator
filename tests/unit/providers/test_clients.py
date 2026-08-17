@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from local_operator.harness.types import (
+    AgentTool,
     ChatRequest,
     ImageContent,
     Message,
@@ -26,6 +27,7 @@ from local_operator.providers.clients import (
     MockClient,
     OpenAICompatClient,
     _anthropic_stream_error,
+    client_for_spec,
     raise_for_status,
 )
 from local_operator.providers.failover import ProviderError
@@ -493,6 +495,163 @@ def _responses_sse() -> bytes:
         },
     ]
     return _sse(events)
+
+
+def _public_responses_sse() -> bytes:
+    return _sse(
+        [
+            {
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_weather",
+                    "name": "get_weather",
+                },
+            },
+            {"type": "response.output_text.delta", "delta": "Checking"},
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "output_index": 1,
+                "delta": '{"city":',
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "output_index": 1,
+                "delta": '"Paris"}',
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_public_1",
+                    "usage": {
+                        "input_tokens": 80,
+                        "output_tokens": 9,
+                        "input_tokens_details": {"cached_tokens": 48},
+                    },
+                },
+            },
+        ]
+    )
+
+
+async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            content=_public_responses_sse(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def unused_execute(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("wire serialization must not execute tools")
+
+    spec = ModelSpec(
+        provider="openai",
+        model_id="gpt-5.4",
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+        reasoning=True,
+        reasoning_effort="high",
+        reasoning_efforts=("low", "medium", "high"),
+        supports_sampling_params=False,
+    )
+    client = OpenAICompatClient(
+        base_url="https://api.openai.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    events = await _collect(
+        client.stream(
+            ChatRequest(
+                model=spec,
+                system_blocks=["Be concise."],
+                messages=[Message.user("weather in Paris?")],
+                tools=[
+                    AgentTool(
+                        name="get_weather",
+                        description="Get weather",
+                        parameters={
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                        execute=unused_execute,
+                    )
+                ],
+                prompt_cache_key="session-123",
+            ),
+            "sk-public",
+        )
+    )
+
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert captured["headers"]["authorization"] == "Bearer sk-public"
+    for private_header in ("chatgpt-account-id", "openai-beta", "originator"):
+        assert private_header not in captured["headers"]
+    body = captured["body"]
+    assert body["input"] == [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "weather in Paris?"}],
+        }
+    ]
+    assert body["tools"] == [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        }
+    ]
+    assert body["reasoning"] == {"effort": "high"}
+    assert body["prompt_cache_key"] == "session-123"
+    assert body["prompt_cache_retention"] == "24h"
+
+    assert [event.delta for event in events if isinstance(event, StreamTextDelta)] == ["Checking"]
+    tool_events = [event for event in events if isinstance(event, StreamToolCallDelta)]
+    assert tool_events[0].id == "call_weather" and tool_events[0].name == "get_weather"
+    assert json.loads("".join(event.argument_delta for event in tool_events)) == {"city": "Paris"}
+    usage = [event.usage for event in events if isinstance(event, StreamUsageEvent)][0]
+    assert (usage.input_tokens, usage.output_tokens, usage.cache_read_tokens) == (80, 9, 48)
+    assert events[-1].stop_reason == "toolUse"
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "deepseek"])
+async def test_compat_providers_stay_on_chat_completions_for_responses_model(
+    provider: str,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            content=_sse([{"choices": [{"delta": {}, "finish_reason": "stop"}]}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    spec = ModelSpec(
+        provider=provider,
+        model_id="openai/gpt-5.4",
+        supports_responses_api=True,
+    )
+    client = client_for_spec(spec, http_client=http, openai_api="responses")
+    await _collect(client.stream(ChatRequest(model=spec, messages=[Message.user("hi")]), "key"))
+    assert captured["url"].endswith("/chat/completions")
+    await http.aclose()
 
 
 async def test_openai_oauth_routes_to_codex_responses_with_required_headers() -> None:

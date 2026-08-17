@@ -600,19 +600,16 @@ def _stream_timeout(total: float) -> httpx.Timeout:
 
 
 class OpenAICompatClient:
-    """``POST {base_url}/chat/completions`` with SSE streaming.
+    """Stream OpenAI-compatible chat/completions or OpenAI Responses.
 
-    Tool-call deltas are assembled by ``index`` (name/id arrive on the first
-    chunk, arguments stream in pieces). Usage comes from the final chunk
-    (``stream_options={"include_usage": true}``), including
-    ``prompt_tokens_details.cached_tokens``.
+    Tool-call deltas are normalized onto the same harness events on both
+    routes. Usage includes cached input tokens when the provider reports them.
 
     ChatGPT OAuth credentials (``oauth_access`` with ``kind == "oauth"`` and
-    an ``org_id``) are routed to ChatGPT's Codex Responses endpoint instead.
-    Subscription tokens are rejected by both ``chat/completions`` and the
-    public API's ``/responses`` endpoint; the Codex endpoint also requires its
-    account, beta, and originator headers. Plain API keys keep
-    ``chat/completions``.
+    an ``org_id``) always use ChatGPT's private Codex Responses endpoint and
+    headers. Ordinary API keys use the public ``/responses`` route only when
+    this client is configured for it and the ``ModelSpec`` advertises support;
+    compatibility providers and explicit opt-outs keep chat/completions.
     """
 
     def __init__(
@@ -622,8 +619,17 @@ class OpenAICompatClient:
         http_client: httpx.AsyncClient | None = None,
         extra_headers: Mapping[str, str] | None = None,
         timeout: float = 600.0,
+        openai_api: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        if openai_api is None:
+            # Direct construction remains useful in wire tests and extensions.
+            # Only the canonical public base is safe to recognize implicitly;
+            # every provider-registry construction passes an explicit mode.
+            openai_api = (
+                "responses" if self._base_url == "https://api.openai.com/v1" else "chat_completions"
+            )
+        self._openai_api = openai_api
         self._extra_headers = dict(extra_headers or {})
         self._owns_client = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
@@ -748,23 +754,33 @@ class OpenAICompatClient:
             if isinstance(block, dict):
                 block["cache_control"] = {"type": "ephemeral"}
 
-    def _responses_mode(self, oauth_access: "OAuthAccess | None") -> bool:
-        """ChatGPT OAuth ⇒ Responses endpoint; plain API keys stay on completions."""
+    def _codex_responses_mode(self, oauth_access: "OAuthAccess | None") -> bool:
+        """Whether this credential is a ChatGPT subscription OAuth grant."""
         return bool(
             oauth_access is not None and oauth_access.kind == "oauth" and oauth_access.org_id
         )
 
+    def _public_responses_mode(
+        self, request: ChatRequest, oauth_access: "OAuthAccess | None"
+    ) -> bool:
+        """Whether an ordinary OpenAI API key should use public Responses."""
+        return (
+            not self._codex_responses_mode(oauth_access)
+            and self._openai_api == "responses"
+            and request.model.supports_responses_api
+        )
+
     def _build_responses_body(self, request: ChatRequest) -> dict[str, Any]:
-        """Responses-API body; ``input`` accepts chat-completions-shaped messages."""
+        """Public Responses body using native input items and flat tools."""
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
-            "input": [_message_to_openai(m) for m in request.messages],
+            "input": _messages_to_openai_responses(request.messages),
         }
         if request.system_blocks:
             body["instructions"] = "\n\n".join(request.system_blocks)
         if request.tools:
-            body["tools"] = _tools_to_openai(request.tools)
+            body["tools"] = _tools_to_openai_responses(request.tools)
             body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
                 request.tool_choice, "auto"
             )
@@ -775,21 +791,22 @@ class OpenAICompatClient:
         effort = _reasoning_effort(request)
         if effort is not None:
             body["reasoning"] = {"effort": effort}
-        if request.stop_sequences:
-            body["stop"] = list(request.stop_sequences)
+        if request.model.supports_prompt_cache and request.prompt_cache_key:
+            # The 24h policy is meaningful only with a stable key. SessionStreamFn
+            # supplies one per transcript, and retries preserve it on ChatRequest.
+            body["prompt_cache_key"] = request.prompt_cache_key
+            body["prompt_cache_retention"] = "24h"
         return body
 
     def _build_codex_responses_body(self, request: ChatRequest) -> dict[str, Any]:
         """ChatGPT Codex body: Responses-shaped, with public-API-only keys removed."""
         body = self._build_responses_body(request)
         body["store"] = False
-        body["input"] = _messages_to_openai_responses(request.messages)
+        body.pop("prompt_cache_key", None)
+        body.pop("prompt_cache_retention", None)
         body.pop("max_output_tokens", None)
         body.pop("temperature", None)
         body.pop("top_p", None)
-        body.pop("stop", None)
-        if request.tools:
-            body["tools"] = _tools_to_openai_responses(request.tools)
         return body
 
     async def stream(
@@ -798,8 +815,11 @@ class OpenAICompatClient:
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
-        if self._responses_mode(oauth_access):
-            async for event in self._stream_responses(request, api_key, oauth_access):
+        codex_responses = self._codex_responses_mode(oauth_access)
+        if codex_responses or self._public_responses_mode(request, oauth_access):
+            async for event in self._stream_responses(
+                request, api_key, oauth_access, codex=codex_responses
+            ):
                 yield event
             return
         url = f"{self._base_url}/chat/completions"
@@ -883,19 +903,26 @@ class OpenAICompatClient:
         request: ChatRequest,
         api_key: str | None,
         oauth_access: "OAuthAccess | None",
+        *,
+        codex: bool,
     ) -> AsyncIterator[StreamEvent]:
-        """SSE parse for ChatGPT's Codex Responses endpoint."""
-        url = CODEX_RESPONSES_URL
+        """Normalize public OpenAI and private ChatGPT Responses SSE."""
+        url = CODEX_RESPONSES_URL if codex else f"{self._base_url}/responses"
+        body = (
+            self._build_codex_responses_body(request)
+            if codex
+            else self._build_responses_body(request)
+        )
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
         tool_call_count = 0
-        # output-item index -> tool-call index (function_call items only).
+        # Output item/call ids -> normalized tool-call index.
         call_indexes: dict[str, int] = {}
 
         async with self._http.stream(
             "POST",
             url,
-            json=self._build_codex_responses_body(request),
+            json=body,
             headers=self._headers(api_key, oauth_access),
         ) as response:
             if response.status_code >= 400:
@@ -915,14 +942,20 @@ class OpenAICompatClient:
                         index = tool_call_count
                         tool_call_count += 1
                         call_id = item.get("call_id") or item.get("id") or ""
-                        call_indexes[call_id] = index
+                        item_id = item.get("id") or ""
+                        if call_id:
+                            call_indexes[call_id] = index
+                        if item_id:
+                            call_indexes[item_id] = index
                         yield StreamToolCallDelta(index=index, id=call_id, name=item.get("name"))
                 elif event_type == "response.function_call_arguments.delta":
-                    call_id = payload.get("call_id") or ""
+                    call_id = payload.get("call_id") or payload.get("item_id") or ""
                     delta = payload.get("delta")
                     if delta:
+                        fallback_index = int(payload.get("output_index", 0) or 0)
                         yield StreamToolCallDelta(
-                            index=call_indexes.get(call_id, 0), argument_delta=delta
+                            index=call_indexes.get(call_id, fallback_index),
+                            argument_delta=delta,
                         )
                 elif event_type == "response.output_text.delta":
                     delta = payload.get("delta")
@@ -1584,7 +1617,12 @@ class MockClient:
         yield StreamEndEvent(stop_reason="stop", usage=Usage(input_tokens=10, output_tokens=8))
 
 
-def client_for_spec(spec: ModelSpec, *, http_client: httpx.AsyncClient | None = None) -> WireClient:
+def client_for_spec(
+    spec: ModelSpec,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+    openai_api: str = "responses",
+) -> WireClient:
     """Build the wire client for a ``ModelSpec`` via the provider registry.
 
     Unknown providers raise :class:`ValueError` — the legacy fallback to the
@@ -1622,4 +1660,9 @@ def client_for_spec(spec: ModelSpec, *, http_client: httpx.AsyncClient | None = 
         from local_operator.providers.oauth.kimi import kimi_common_headers
 
         extra_headers = kimi_common_headers()
-    return OpenAICompatClient(base_url=base, http_client=http_client, extra_headers=extra_headers)
+    return OpenAICompatClient(
+        base_url=base,
+        http_client=http_client,
+        extra_headers=extra_headers,
+        openai_api=openai_api if spec.provider == "openai" else "chat_completions",
+    )

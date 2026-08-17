@@ -213,6 +213,12 @@ _NO_SAMPLING_PARAMS = re.compile(
     r"claude-[a-z]+-(?:[5-9]|\d{2,})(?!\d)" r"|(?:^|[/:-])o[1-9](?:-|$)" r"|gpt-5"
 )
 
+#: OpenAI introduced the public Responses route for the GPT-5 generation. The
+#: direct `/v1/models` listing exposes ids but no capability flags, so an
+#: uncurated current snapshot still needs a family rule; older registry rows
+#: remain explicitly off through ``ModelInfo.supports_responses_api``'s default.
+_OPENAI_RESPONSES_API = re.compile(r"^gpt-5(?:[.-]|$)")
+
 
 def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = None) -> ModelSpec:
     """Derive a harness ``ModelSpec`` from the model's resolved metadata.
@@ -242,6 +248,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     max_output = UNKNOWN_MAX_OUTPUT
     supports_images = True
     supports_cache = False
+    supports_responses_api = False
     if info is not None:
         # Legacy sentinels: -1 means "no data", not a real limit.
         if info.context_window and info.context_window > 0:
@@ -251,8 +258,12 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         if info.supports_images is not None:
             supports_images = info.supports_images
         supports_cache = info.supports_prompt_cache
+        supports_responses_api = bool(getattr(info, "supports_responses_api", False))
 
     definition = get_provider_definition(canonical)
+    if canonical == "openai" and _OPENAI_RESPONSES_API.search(model_name.lower()):
+        supports_responses_api = True
+        supports_cache = True
     lowered = model_name.lower()
     effort_levels = supported_efforts(model_name)
     # A model with an effort ladder reasons BY DEFINITION, whatever its name
@@ -318,6 +329,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         supports_tools=True,
         supports_images=supports_images,
         supports_prompt_cache=supports_cache,
+        supports_responses_api=supports_responses_api,
         base_url=definition.base_url if definition else None,
         reasoning=reasoning,
         supports_sampling_params=supports_sampling_params,
@@ -1392,6 +1404,16 @@ def configure_model(
     )
 
 
+def _openai_api_mode(settings: Mapping[str, Any] | None) -> str:
+    """Resolve the direct OpenAI wire route, defaulting safely to Responses."""
+    providers = settings.get("providers") if isinstance(settings, Mapping) else None
+    openai = providers.get("openai") if isinstance(providers, Mapping) else None
+    configured = openai.get("api") if isinstance(openai, Mapping) else None
+    # Only the explicit opt-out disables Responses. Old config files have no
+    # providers block, and malformed values must not accidentally change route.
+    return "chat_completions" if configured == "chat_completions" else "responses"
+
+
 # ---------------------------------------------------------------------------
 # stream_fn factory
 # ---------------------------------------------------------------------------
@@ -1434,7 +1456,11 @@ class SessionStreamFn:
     def _client_for(self, spec: ModelSpec) -> WireClient:
         from local_operator.providers.clients import client_for_spec
 
-        return client_for_spec(spec, http_client=self._http)
+        return client_for_spec(
+            spec,
+            http_client=self._http,
+            openai_api=_openai_api_mode(self._settings),
+        )
 
     def set_notice_handler(
         self, handler: Callable[[str, str], Awaitable[None] | None] | None
@@ -1670,6 +1696,13 @@ class SessionStreamFn:
         self, request: ChatRequest, signal: AbortSignal | None
     ) -> AsyncIterator[StreamEvent]:
         from local_operator.providers.failover import stream_with_failover
+
+        if self._session_id and request.prompt_cache_key is None:
+            # The transcript directory name is stable for the session and
+            # already scopes credential stickiness. Reusing it here keeps every
+            # turn on the same provider cache without coupling the harness loop
+            # to session storage.
+            request = request.model_copy(update={"prompt_cache_key": self._session_id})
 
         await self.preflight_usage(request.model)
         async for event in stream_with_failover(
