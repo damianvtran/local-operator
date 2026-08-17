@@ -60,10 +60,12 @@ cp ~/.some-other-agent/AGENTS.md "$CONFIG_ROOT/system_prompt.md"
 How the content is used:
 
 - It is appended to the packaged persona inside the **first** system block, wrapped in a `<user_instructions>` tag, under a "User's custom instructions" heading. Framing is "the operator's default expectations"; an explicit instruction in the live conversation still wins.
-- It is read **once, at session start**, and closed over for the whole session. That block is byte-stable for prompt caching, so re-reading it per turn would invalidate the cached prefix. **An edit takes effect in the next session, not the running one** — restart to pick it up.
-- Subagents inherit it, for the same reason they inherit `/goal`: a machine-wide preference must not depend on the parent remembering to restate it in a task prompt.
+- It is read **once, at session start**, and closed over for the whole session. That block is byte-stable for prompt caching, so re-reading it per turn would invalidate the cached prefix. **In the CLI and TUI an edit takes effect in the next session, not the running one** — restart to pick it up. The server and desktop app build a session per turn, so there an edit lands on the following message.
+- Subagents inherit it, for the same reason they inherit `/goal`: a machine-wide preference must not depend on the parent remembering to restate it in a task prompt. A child re-reads the file when it starts, so a subagent launched after an edit can see newer instructions than its parent.
 - An agent profile's own `agents/<id>/system_prompt.md` is **appended to** the global file, not a replacement — a profile specializes behaviour without discarding machine-wide preferences. Set it with `agent_registry.set_agent_system_prompt` or the agent system-prompt endpoint.
 - An unreadable file degrades to "no custom instructions" rather than failing the session, and undecodable bytes are replaced rather than discarding the file, so a bad edit never costs a startup or the rest of your preferences.
+
+The content is capped at 64,000 characters, past which it is truncated with an explicit marker and a logged warning, because it is re-sent as the cached prefix of every request. The global file and an agent profile's prompt are bounded separately so neither can crowd the other out: each is guaranteed at least 16,000 characters and may spend whatever the other leaves, so a file under that share costs the other source nothing.
 
 Keep the file free of secrets and of absolute home paths (prefer `~/`) when it may be shared. For task-specific knowledge that should load only when relevant, prefer a skill (`extensions` guide) over adding bulk here: this file is in context for every single turn.
 

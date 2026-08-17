@@ -1742,7 +1742,12 @@ class AgentRegistry:
             if not system_prompt_path.exists():
                 return ""
 
-            with open(system_prompt_path, "r", encoding="utf-8") as f:
+            # ``utf-8-sig`` strips a BOM a Windows editor writes, which would
+            # otherwise survive into the system prompt ahead of the first
+            # rule; ``errors="replace"`` keeps a mis-encoded profile from
+            # raising ``UnicodeDecodeError`` into session startup. Matches how
+            # the global instructions file is read in ``session_factory``.
+            with open(system_prompt_path, "r", encoding="utf-8-sig", errors="replace") as f:
                 return f.read()
         except IOError as e:
             logging.error(f"Error reading system prompt for agent {agent_id}: {str(e)}")
