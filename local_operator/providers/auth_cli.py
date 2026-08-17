@@ -29,11 +29,22 @@ if TYPE_CHECKING:  # lazy at runtime: the CLI top level must not import these
 def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     """print-based callbacks for terminal logins.
 
-    The paste-code prompt is attached ONLY for providers that declare
-    ``paste_code_flow`` (a trap otherwise: for the rest it races the loopback HTTP
-    callback and leaves the terminal blocked). It runs in a thread via
-    ``asyncio.to_thread(input, ...)`` so the callback server keeps serving
-    the browser redirect while the prompt is pending.
+    The paste prompt is attached for providers that ACCEPT one, which is two
+    distinct cases and used to be read as one:
+
+    - ``requires_paste_prompt`` \u2014 pasting is the whole login (every
+      "paste your API key" provider). Gating these on ``paste_code_flow``, as
+      this did, attached no prompt and made the login fail every time with
+      "requires an interactive code prompt" \u2014 for eight of the eleven
+      providers that offer one.
+    - ``paste_code_flow`` \u2014 Anthropic's optional fallback, raced against the
+      loopback callback for the case where the browser is on another machine.
+
+    A loopback-only provider still gets NO prompt: there the prompt races the
+    HTTP callback and leaves the terminal blocked on a line nobody will type.
+
+    The prompt runs in a thread via ``asyncio.to_thread(input, ...)`` so the
+    callback server keeps serving the browser redirect while it is pending.
     """
 
     def on_auth_url(url: str, instructions: str | None = None) -> None:
@@ -44,14 +55,24 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     def on_progress(message: str) -> None:
         print(message)
 
+    # The prompt says what it wants. "Paste the code here" is wrong for the
+    # providers this now serves \u2014 they want an API key off a dashboard, and a
+    # user told to paste a "code" goes looking for an OAuth code that does not
+    # exist for them.
+    prompt = (
+        "Paste your API key here (empty to cancel): "
+        if definition.paste_prompt_required
+        else "Paste the code here (empty to cancel): "
+    )
+
     async def on_manual_code_input() -> str | None:
         try:
-            value = await asyncio.to_thread(input, "Paste the code here (empty to cancel): ")
+            value = await asyncio.to_thread(input, prompt)
         except (EOFError, KeyboardInterrupt):
             return None
         return value.strip() or None
 
-    manual_input = on_manual_code_input if definition.paste_code_flow else None
+    manual_input = on_manual_code_input if definition.accepts_paste_prompt else None
     return LoginCallbacks(
         on_auth_url=on_auth_url, on_progress=on_progress, on_manual_code_input=manual_input
     )
