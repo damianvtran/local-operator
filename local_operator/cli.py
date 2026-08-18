@@ -143,10 +143,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "mistral",
             "openrouter",
             "xai",
+            "zai",
             "test",
         ],
         help="Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, "
-        "alibaba, google, mistral, test, openrouter, xai)",
+        "alibaba, google, mistral, test, openrouter, xai, zai)",
     )
     parser.add_argument(
         "--model",

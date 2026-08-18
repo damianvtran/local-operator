@@ -24,6 +24,7 @@ LEGACY_HOSTING_NAMES = [
     "kimi",
     "alibaba",
     "xai",
+    "zai",
 ]
 
 
@@ -54,6 +55,25 @@ def test_openai_definition_oauth_fields() -> None:
     device = get_provider_definition("openai-device")
     assert device is not None
     assert device.store_credentials_as == "openai"
+
+
+def test_zai_definition() -> None:
+    """Z.AI is an API-key provider on the CODING-plan base URL.
+
+    The base URL is asserted because the general `/api/paas/v4` endpoint accepts
+    the same key but bills the account balance instead of coding-plan quota — a
+    silent wrong-budget bug rather than a visible failure.
+    """
+    definition = get_provider_definition("zai")
+    assert definition is not None
+    assert definition.login is not None
+    assert definition.env_keys == "ZAI_API_KEY"
+    assert definition.wire == "openai-compat"
+    assert definition.base_url == "https://api.z.ai/api/coding/paas/v4"
+    # Search vocabulary only \u2014 nothing ROUTES on these (that is what the
+    # registry's own docstring promises), but the picker must offer the name
+    # users came here for, which is the model family rather than the company.
+    assert set(definition.search_aliases) == {"glm", "zhipu", "bigmodel", "z-ai"}
 
 
 def test_anthropic_definition() -> None:

@@ -96,6 +96,7 @@ DEFAULT_MODEL_NAMES: dict[str, str] = {
     "mistral": "mistral-large-latest",
     "radient": "auto",
     "xai": "grok-3",
+    "zai": "glm-5.3",
 }
 
 # Sensible ModelSpec fallbacks when the legacy registry knows nothing.
@@ -380,6 +381,10 @@ VALIDATION_ENDPOINTS: dict[str, ValidationDescriptor] = {
     "mistral": ValidationDescriptor("https://api.mistral.ai/v1/models"),
     "ollama": ValidationDescriptor("http://localhost:11434/api/tags", header_style="none"),
     "xai": ValidationDescriptor("https://api.x.ai/v1/models"),
+    # Validated against the coding-plan base so a key that works here is a key
+    # that works for inference; the general `/api/paas/v4` listing would accept
+    # keys that cannot spend coding-plan quota.
+    "zai": ValidationDescriptor("https://api.z.ai/api/coding/paas/v4/models"),
 }
 
 
@@ -977,6 +982,10 @@ _AGGREGATOR_NAMESPACE: dict[str, str] = {
     "xai": "x-ai",
     "alibaba": "qwen",
     "kimi": "moonshotai",
+    # Z.AI's own listing quotes no prices, and GLM is resold on OpenRouter under
+    # the `z-ai/` namespace (verified against GET https://openrouter.ai/api/v1/models
+    # on 2026-08-17). Newer ids not yet carried there fall back to the static rows.
+    "zai": "z-ai",
 }
 
 #: A trailing Anthropic-style release stamp: `claude-opus-4-5-20251101`.
