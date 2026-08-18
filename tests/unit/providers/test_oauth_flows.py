@@ -934,6 +934,7 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         "alibaba",
         "alibaba-token-plan",
         "alibaba-token-plan-oauth",
+        "zai",
     }, required
 
     # And the union a host actually gates on: required plus Anthropic's optional
