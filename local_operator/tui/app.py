@@ -41,6 +41,7 @@ from textual.css.query import NoMatches
 from textual.events import DescendantBlur, DescendantFocus, TextSelected
 from textual.geometry import Size
 from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
@@ -100,7 +101,7 @@ from local_operator.tui.markdown_theme import (
     install_markdown_theme,
 )
 from local_operator.tui.terminal_title import TerminalTitle, terminal_title_enabled
-from local_operator.tui.widgets.approval import ApprovalBlock
+from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
 from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
@@ -752,7 +753,7 @@ class OperatorApp(App[None]):
         # TURN-scoped latch that drains the asks belonging to a turn the user
         # stopped (a queued asker wakes when the front prompt settles, and
         # without the latch it would mount a fresh question for a dead turn).
-        self._approval: ApprovalBlock | None = None
+        self._approval: ApprovalPrompt | None = None
         # The one live `ask` picker and the future the tool call is parked on.
         # Held as a PAIR because settling one without the other is the failure
         # both halves exist to prevent: a dismissed screen whose future is still
@@ -867,6 +868,23 @@ class OperatorApp(App[None]):
         # with the input when the panel becomes a card. One row does double duty
         # — zero extra height (D3/D17).
         with Container(id="input-dock"):
+            # The prompt host: where a question the turn is PARKED ON lives.
+            #
+            # Above the band and inside the dock, and both halves of that are
+            # deliberate. Inside the dock, because a question anchored to the
+            # composer stays put while the user scrolls the transcript back to
+            # find what they need to answer it — the whole point of moving these
+            # surfaces out of `ModalScreen`, which covered the conversation it
+            # was asking about. Above the band, because the band is STATUS
+            # (subagent jobs, todos) and this is a BLOCKER: the thing being
+            # waited on belongs closest to the composer, and a status list that
+            # grew and shrank underneath the question would shift it under the
+            # user's cursor mid-answer.
+            #
+            # Zero rows when empty, like the band: a transparent positioner
+            # holding at most one prompt. Mounted once and kept, so a question
+            # never has to await a mount before it can be shown.
+            yield Container(id="prompt-host")
             # The dock band (subagent + todo) lives INSIDE the same bottom-docked
             # container as the input shell, ABOVE it (D-15-01). A sibling
             # `dock: bottom` overlapped the input (Textual anchors same-edge
@@ -1952,6 +1970,13 @@ class OperatorApp(App[None]):
         # can currently hold keeps the ~50 ms before the timer from showing a
         # card overhanging the frame with its prose clipped mid-word.
         self.call_after_refresh(self._sync_overlay_layout, force=True)
+        # A live prompt re-budgets itself against the new size (its own
+        # `on_resize` does that), and whether it can be drawn AT ALL can change
+        # with it: shrinking past the point where even its footer fits hides the
+        # card, and the host's separation row must go with it or the dock keeps
+        # a row for a prompt painting nothing. Deferred for the same reason as
+        # the mount path — the card's own resize has to land first.
+        self.call_after_refresh(self._sync_prompt_host)
 
     def on_welcome_view_block_resized(self, message: WelcomeView.BlockResized) -> None:
         """The splash changed height, so the composition around it has moved.
@@ -2420,17 +2445,40 @@ class OperatorApp(App[None]):
         # while still taking focus off the composer the card is pointed at —
         # a turn parked on an answer the user can neither see nor reach.
         self._close_aside()
-        block = ApprovalBlock(tool_name, description, on_answer=self._latch_approval_answer)
-        self._approval = block
-        self._append_block(block)
+        prompt = ApprovalPrompt(tool_name, description, on_answer=self._latch_approval_answer)
+        self._approval = prompt
+        # The QUESTION goes in the dock, where it cannot scroll away from the
+        # turn it is blocking and where it reliably owns its own answer keys.
+        # The transcript gets a RECEIPT instead, and only once the answer is in
+        # (below): a receipt written up front would have to be rewritten, and a
+        # transcript block that changes after later blocks were appended is the
+        # one thing the transcript's finalize discipline forbids.
+        self._mount_prompt(prompt)
         # The turn is now parked on the user, and the working line says so —
         # this is the one wait in a turn that the agent is not responsible for.
         self._refresh_working_activity()
         try:
-            return await block.wait()
+            return await prompt.wait()
         finally:
-            block.restore_focus()
-            if self._approval is block:
+            self._unmount_prompt(prompt)
+            # The decision belongs in the conversation: what was asked, and what
+            # was answered. Appended after the fact so the transcript records a
+            # settled fact rather than a question it would then have to revise.
+            #
+            # Guarded, because this runs on the way OUT of a gate that several
+            # paths can end — including a stop, a `/clear`, and app teardown.
+            # The transcript may already be gone by then (`NoMatches` on
+            # `#transcript`), and a receipt is a nice-to-have on that path while
+            # the future underneath it is not: raising here would propagate out
+            # of the approval gate and fail the tool call itself.
+            if prompt.answered:
+                try:
+                    self._append_block(
+                        ApprovalBlock.receipt(tool_name, description, prompt.answer or "n")
+                    )
+                except Exception:  # pragma: no cover - teardown races only
+                    logger.debug("no transcript to record the approval in", exc_info=True)
+            if self._approval is prompt:
                 self._approval = None
             self._refresh_working_activity()
 
@@ -2472,10 +2520,17 @@ class OperatorApp(App[None]):
             if not future.done():
                 future.set_result(result)
 
-        screen = AskPickerScreen(questions)
-        self._ask_screen = screen
+        # The subagent page hides the transcript and the aside floats over it,
+        # and this card is mounted in the dock underneath both: behind either
+        # one the question would be invisible while still holding focus, so the
+        # turn would be parked on an answer the user can neither see nor reach.
+        # The same yield the approval prompt makes, for the same reason.
+        self._close_subagent_view()
+        self._close_aside()
+        card = AskPickerScreen(questions, answered)
+        self._ask_screen = card
         self._ask_pending = future
-        self.push_screen(screen, answered)
+        self._mount_prompt(card)
         # The turn is parked on the user, and the working line and terminal
         # title say so — the same treatment an unanswered approval gets, for the
         # same reason: a spinner over a wait the agent is not responsible for is
@@ -2485,8 +2540,8 @@ class OperatorApp(App[None]):
             return await future
         except asyncio.CancelledError:
             # The tool call was cancelled out from under the question (steering,
-            # a stop, or teardown). Take the picker off screen: a modal left up
-            # for a call that no longer exists holds the keyboard hostage.
+            # a stop, or teardown). Take the card down: a question left up for a
+            # call that no longer exists holds the keyboard hostage.
             self._settle_ask_picker()
             raise
         finally:
@@ -2505,37 +2560,119 @@ class OperatorApp(App[None]):
         because the third was never reached would be a worse report than an
         honest partial one.
         """
-        screen = self._ask_screen
+        card = self._ask_screen
         self._ask_screen = None
         pending = self._ask_pending
         self._ask_pending = None
         if pending is not None and not pending.done():
-            pending.set_result(screen.answers_so_far() if screen is not None else None)
-        if screen is not None and screen.is_attached:
-            # `pop_screen` rather than `dismiss`: the callback would resolve a
-            # future that is already settled above, and this path can run while
-            # the app is being torn down, where dismiss's own mount checks are
-            # the ones that raise.
-            #
-            # And only while the picker IS the top screen, because `pop_screen`
-            # takes whatever the stack ends with rather than a named screen: with
-            # anything mounted above the question — a palette or a picker the
-            # user opened while the agent waited on them — this dismissed THAT
-            # screen and left the settled picker mounted, holding the keyboard
-            # on a future nobody is waiting for. Below the top it is cut out of
-            # the stack instead: `remove()` on its own detaches the widget and
-            # leaves the stack entry behind, so the next pop would resume a
-            # screen that no longer exists.
+            pending.set_result(card.answers_so_far() if card is not None else None)
+        if card is not None:
+            # Mark the card settled BEFORE unmounting it. Its own settle
+            # callback resolves the future this method has just resolved by
+            # hand, and a second `set_result` raises out of whichever path
+            # loses the race; `settle` is idempotent, so claiming it here is
+            # what makes the unmount below unable to double-answer.
+            card.settle(None)
+            self._unmount_prompt(card)
+
+    def _mount_prompt(self, card: Widget) -> None:
+        """Put a prompt into the dock's prompt host, above the status band.
+
+        One place rather than at each call site, because both surfaces that use
+        it (the ``ask`` picker and the approval prompt) have the same two
+        failure modes if this is done by hand: mounting into the transcript,
+        where the question scrolls away from the turn it is blocking, and
+        leaving a previous prompt mounted, where two cards compete for focus and
+        the lower one is unanswerable.
+        """
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - only before the dock is composed
+            logger.debug("prompt host is not mounted yet", exc_info=True)
+            return
+        host.mount(card)
+        # The host reserves rows only while it holds something, so the dock
+        # collapses back to the composer when nothing is being asked.
+        host.display = True
+        # ...and only while that something can actually be drawn. On a terminal
+        # too short for even the card's footer the card hides itself, and a host
+        # left visible would keep its own separation row for a prompt painting
+        # nothing — one row of chrome that pushed the dock past the screen and
+        # made it scrollable (measured at 20x8: virtual_size 7 against size 6).
+        # Read from the card AFTER it has laid out, because that is when it
+        # knows; `call_after_refresh` is what makes this a read of a settled
+        # value rather than of the state before the mount.
+        self.call_after_refresh(self._sync_prompt_host)
+
+    def on_ask_picker_screen_drawable_changed(
+        self, message: AskPickerScreen.DrawableChanged
+    ) -> None:
+        """A prompt gained or lost the ability to draw itself; re-fit the host.
+
+        Both directions matter. Losing it (the terminal shrank past the card's
+        minimum) must give the host's separation row back, or the dock keeps a
+        row for a question painting nothing; regaining it must take the row
+        again, or the card would be drawn flush against the band below it.
+        """
+        message.stop()
+        self._sync_prompt_host()
+
+    def _sync_prompt_host(self) -> None:
+        """Hide the prompt host when what it holds cannot be drawn.
+
+        The host owns its own visibility (it is the only writer), and asks the
+        prompt whether there is anything to show. Two writers is what this
+        replaced: the card set the host False on an undrawable paint while the
+        app set it True on the next mount, and which one stuck depended on
+        ordering.
+        """
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - only during teardown
+            return
+        children = [child for child in host.children]
+        host.display = bool(children) and any(
+            getattr(child, "is_drawable", True) for child in children
+        )
+
+    def _unmount_prompt(self, card: Widget) -> None:
+        """Take a prompt out of the dock and hand focus back to the composer.
+
+        Focus first and unconditionally: the card TAKES focus to receive its
+        answer keys, so removing it without restoring focus leaves the app with
+        nothing focused and every subsequent keystroke going nowhere — the user
+        types their next instruction into a dead terminal.
+        """
+        restore = getattr(card, "restore_focus", None)
+        if callable(restore):
             try:
-                stack = self._screen_stack
-                if stack and stack[-1] is screen:
-                    self.pop_screen()
-                else:
-                    if screen in stack:
-                        stack.remove(screen)
-                    screen.remove()
+                restore()
             except Exception:  # pragma: no cover - teardown races only
-                logger.debug("ask picker was already gone", exc_info=True)
+                logger.debug("could not restore focus from a prompt", exc_info=True)
+        try:
+            if card.is_attached:
+                card.remove()
+        except Exception:  # pragma: no cover - teardown races only
+            logger.debug("prompt was already gone", exc_info=True)
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - only during teardown
+            return
+        # Hidden unconditionally, not on `not host.children`: `Widget.remove()`
+        # is deferred (it returns an awaitable and the child is still in
+        # `children` on this frame), so the emptiness test read the card that
+        # was on its way out and left the host displayed — a row of dock chrome
+        # standing after the question was answered. The host holds at most one
+        # prompt and this runs as that prompt leaves, so "empty" is what it is
+        # about to be; a prompt raised after this re-shows it on mount.
+        host.display = False
+        # Nothing focused is not a state this app can sit in: if the card's own
+        # restore target had gone away, the composer is where the caret belongs.
+        try:
+            if self.screen is not None and self.screen.focused is None:
+                self._editor().focus()
+        except Exception:  # pragma: no cover - no composer in reduced hosts
+            logger.debug("no composer to hand focus back to", exc_info=True)
 
     def _latch_approval_answer(self, answer: str) -> None:
         """What an answer means beyond the one call. Runs BEFORE the future.
@@ -2616,7 +2753,12 @@ class OperatorApp(App[None]):
         approval = self._approval
         if approval is not None and not approval.answered:
             approval.resolve(False)
-            approval.restore_focus()
+            # Take the card out of the dock as well as answering it. The prompt
+            # is no longer a transcript block that can repaint itself into a
+            # receipt in place: it is docked chrome, so a settled one left
+            # mounted would sit above the composer holding focus on a decision
+            # that has already been made.
+            self._unmount_prompt(approval)
         self._approval = None
 
     def _approvals_are_denied(self, epoch: int) -> bool:
@@ -2643,7 +2785,7 @@ class OperatorApp(App[None]):
             # latch hook too, so the frame carried the same statement twice in the
             # loudest ink it has.
             approval.resolve(True, answer="y")
-            approval.restore_focus()
+            self._unmount_prompt(approval)
         self._approval = None
 
     def _allow_approvals_again(self) -> None:

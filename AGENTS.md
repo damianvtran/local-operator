@@ -73,8 +73,28 @@ takes about a minute.
 
 ### 1. Render the screen to an SVG still
 
-Textual can export exactly what it painted. Drive the app with `run_test`,
-put it in the state you care about, and save a frame:
+Two of these already exist and are worth reusing before writing a new one:
+`scripts/ask_shot.py` and `scripts/approval_shot.py` capture the `ask` picker
+and the tool-approval prompt over a seeded conversation, at any terminal size:
+
+```sh
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/ask_shot.py out.svg 100x30
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/approval_shot.py out.svg 100x30
+```
+
+Both seed real transcript blocks first, which is what makes "does this surface
+still let me read the conversation?" an answerable question rather than a
+screenshot of an empty app. `approval_shot.py` takes a third argument, `focus`,
+which puts focus in the composer before the shot — the state that used to send
+the prompt's answer keys into the prompt buffer.
+
+**Note that both force the approval gate on** (`app._set_approve_all(False)`).
+The app reads the developer's own `tool_approval_mode` from `~/.local-operator`,
+so on a machine set to `auto` a naive capture shows a frame with no prompt in it
+at all, and it looks like the surface is broken rather than skipped.
+
+For anything else, Textual can export exactly what it painted. Drive the app
+with `run_test`, put it in the state you care about, and save a frame:
 
 ```python
 # /tmp/shot.py — env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py out.svg

@@ -11,8 +11,30 @@ hypothetical: it is the reported freeze this module fixes, reproduced as two
 
 So the TUI answers approvals ITSELF. The app installs
 :meth:`OperatorApp.request_tool_approval` as the session's approval handler and
-this block is the surface: one focused card holding the question, resolved by a
-keystroke into an :class:`asyncio.Future` the engine is awaiting.
+this module is the surface, in TWO widgets with one job each:
+
+- :class:`ApprovalPrompt` is the live question, anchored in the dock above the
+  composer. It is where the user answers.
+- :class:`ApprovalBlock` is the transcript RECEIPT — what was asked, what was
+  answered — so the decision survives in the conversation after the question
+  has gone.
+
+The split is a fix, not a refactor. One widget used to do both, mounted in the
+transcript, and that made two defects inevitable:
+
+- **The question scrolled away.** A transcript block moves with the transcript,
+  so a prompt raised during a busy turn ended up above the fold, and the turn
+  was parked on an answer the user could not see they owed.
+- **Its keys typed into the composer.** The block took focus to receive `y`/`n`,
+  but any click or keystroke in the composer took focus back, and from then on
+  the advertised answer keys went into the prompt buffer as text. The user
+  pressed `y`, watched a `y` appear in the composer, and the tool went on
+  waiting — reported as "the key press is misleading".
+
+Anchored in the dock, the question cannot scroll away, and it presents its
+answers as a SELECTABLE LIST (arrows plus Enter, or a click) rather than as
+letters the user must aim at a focused widget. The letter keys still work for
+anyone who knows them; they are no longer the only way in.
 
 Design constraints:
 
@@ -34,17 +56,23 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rich.cells import cell_len
 from rich.console import Group, RenderableType
 from rich.style import Style
 from rich.text import Text
+from textual.app import SkipAction
 from textual.events import Key
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import SPINE_INDENT, TranscriptBlock
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from local_operator.harness.types import AskQuestion
 
 #: What each key does, in the order the row prints them. Kept as data so the
 #: hint row and the key handler cannot disagree about what is on offer.
@@ -253,12 +281,19 @@ class _Row:
 
 
 class ApprovalBlock(TranscriptBlock):
-    """One pending approval: a focused, amber-tinted question row.
+    """One approval decision, as a row in the transcript.
 
-    Lifecycle: constructed with the tool name and the resolved description,
-    mounted, focused. :meth:`resolve` settles the future and repaints the row as
-    a receipt (what was asked, what was answered) so the transcript keeps the
-    decision instead of the question vanishing without a trace.
+    Since the live question moved into the dock (:class:`ApprovalPrompt`), the
+    normal way this block reaches the screen is :meth:`receipt`: already
+    answered, recording what was asked and what was decided so the conversation
+    keeps the decision after the card is gone.
+
+    It can still be constructed PENDING and resolved in place, and that path is
+    kept deliberately rather than deleted: it is how a host that has no dock
+    (the reduced test harnesses, and any embedder mounting a transcript on its
+    own) can still show and settle an approval. Under the full app nothing takes
+    it, because a question that lives in the transcript is a question that
+    scrolls away from the turn it is blocking.
     """
 
     #: Always give the question a blank row above it: it interrupts whatever
@@ -315,6 +350,25 @@ class ApprovalBlock(TranscriptBlock):
         self._on_answer = on_answer
         self._restore_focus: object | None = None
         self._refresh_row()
+
+    @classmethod
+    def receipt(cls, tool_name: str, description: str, answer: str) -> "ApprovalBlock":
+        """An already-settled block recording a decision the dock card took.
+
+        Built settled rather than constructed-then-resolved so it never spends a
+        frame as a pending question: this block is appended to the transcript
+        AFTER the answer is in, and a row that painted itself as an unanswered
+        prompt first would flash a question the user has already answered.
+
+        Its future is resolved on the spot and nobody awaits it — the engine was
+        parked on the dock card's future, which is settled by the time this
+        exists. Resolving it anyway keeps the invariant this module is built on
+        (every future it creates is resolved exactly once) true by construction
+        rather than by argument.
+        """
+        block = cls(tool_name, description)
+        block.resolve(answer in ("y", "a", "A"), answer=answer)
+        return block
 
     # -- the awaited half ----------------------------------------------------
     def wait(self) -> asyncio.Future[bool]:
@@ -411,7 +465,18 @@ class ApprovalBlock(TranscriptBlock):
         event.stop()
 
     def on_mount(self) -> None:
-        """Take focus, remembering what had it so it can be handed back."""
+        """Take focus while PENDING, remembering what had it.
+
+        An already-answered block takes nothing: the normal way this widget
+        reaches the screen now is :meth:`receipt`, appended after the dock card
+        settled, and a receipt that grabbed focus would take the caret out of
+        the composer the instant the user answered — measured as the composer
+        losing focus immediately after `y`, so the next thing typed went
+        nowhere. Only a live question, in a host with no dock, still needs the
+        keys.
+        """
+        if self.answered:
+            return
         self.add_class("approval-pending")
         screen = self.screen
         self._restore_focus = screen.focused if screen is not None else None
@@ -836,3 +901,257 @@ class ApprovalBlock(TranscriptBlock):
         # Two rows while pending (question + hints), one once answered. Answered
         # from state so the spacing rule never renders the block to find out.
         return self._answer is None
+
+
+#: The three answers the gate can take, in the order the card lists them.
+#:
+#: Ordered allow, deny, allow-all: the reverse of the hint row's refuse-first
+#: order, and deliberately so. That row sheds choices from the right under
+#: width pressure, so its order is a PRIORITY ranking; this is a LIST the user
+#: reads top to bottom, where the ordinary answer belongs first and the
+#: session-wide one last. "Allow all" sits at the bottom because it is the only
+#: row here that outlives the call: a list that put it under the cursor would
+#: make disarming the gate for the whole session the thing Enter does by
+#: reflex.
+#:
+#: Each row carries the CONSEQUENCE as its description, because that is what
+#: the user is actually deciding between, and the letter it answers to, so the
+#: keys stay discoverable now that they are no longer the only way in.
+APPROVAL_CHOICES: tuple[tuple[str, str, str], ...] = (
+    ("Allow", "y", "run this call, and ask again next time"),
+    ("Deny", "n", "refuse this call; the turn continues"),
+    ("Allow all", "A", "stop asking for this session"),
+)
+
+#: Answer key -> the label the picker hands back, so the two ways of answering
+#: (a letter, or a selected row) converge on ONE value before anything acts on
+#: it. Built from the table above rather than repeated, because a letter that
+#: disagreed with its row would be a gate that approves what the user refused.
+APPROVAL_KEY_BY_LABEL: dict[str, str] = {label: key for label, key, _ in APPROVAL_CHOICES}
+
+#: The KEY the user presses for allow-all, and the ANSWER that decision is
+#: recorded as. They differ on purpose and the difference has bitten once.
+#:
+#: The key is capital ``A`` so that a user typing an ordinary sentence into a
+#: focused card cannot disarm the session's approval gate with the most common
+#: letter in English. The answer is lowercase ``a`` because that is the token
+#: the app's latch (:meth:`OperatorApp._latch_approval_answer`) and the
+#: receipt's own wording already match on. Reported as ``A``, the latch simply
+#: did not fire: "allow all" answered the one call and the very next tool asked
+#: again, which is the opposite of what the row promises.
+ALLOW_ALL_KEY = "A"
+ALLOW_ALL_ANSWER = "a"
+
+
+def approval_question(tool_name: str, description: str) -> "AskQuestion":
+    """The approval gate as a question the anchored picker can put to the user.
+
+    Reusing the ``ask`` picker rather than growing a second list widget is what
+    makes the two prompts behave identically: one card, one set of movement
+    keys, one hit-test, one row budget that keeps the conversation on screen.
+    Both surfaces are the same interaction — the agent needs an answer before it
+    can go on — and the app had two different answers to how that should look.
+
+    No free-text row (``allow_free_text=False`` where this is mounted): the gate
+    returns a boolean plus a scope, so a typed answer would be an invitation to
+    write prose that nothing can read.
+    """
+    from local_operator.harness.types import AskOption, AskQuestion
+
+    detail = " ".join(strip_control_sequences(description).split())
+    for marker in (OUTSIDE_MARKER, UNRESOLVABLE_MARKER):
+        if detail.startswith(marker):
+            # The hazard is stated in the QUESTION, where it belongs, rather
+            # than left as the parser's bracket token in front of the target.
+            words = HAZARD_WORDS if marker == OUTSIDE_MARKER else HAZARD_WORDS_UNRESOLVABLE
+            detail = f"{words}{detail[len(marker):].strip()}"
+            break
+    question = f"Allow {strip_control_sequences(tool_name)}? {detail}".rstrip()
+    return AskQuestion(
+        id="approval",
+        question=question,
+        options=[
+            AskOption(label=label, description=consequence)
+            for label, _key, consequence in APPROVAL_CHOICES
+        ],
+    )
+
+
+class ApprovalPrompt(AskPickerScreen):
+    """The live approval question, anchored in the dock above the composer.
+
+    Subclasses the ``ask`` picker so the two prompts are the same surface: the
+    same row budget that keeps the conversation on screen, the same movement
+    keys, the same hit-test, the same focus discipline. What it adds is the
+    approval gate's own contract:
+
+    - it answers an :class:`asyncio.Future` with a BOOLEAN, not a label list;
+    - the answer letters (``y``/``n``/``A``) still work, because muscle memory
+      exists and the hint row has advertised them for as long as this prompt
+      has;
+    - Escape DENIES rather than skips. There is no such thing as an unanswered
+      approval: the tool is either allowed to run or it is not, and a question
+      that quietly went away would leave the engine parked forever.
+
+    The transcript keeps a separate receipt (:class:`ApprovalBlock`), so the
+    decision survives in the conversation after this card is gone.
+    """
+
+    #: Kept in sync with the letters offered in the footer. A letter that
+    #: answered here without appearing there would be undiscoverable; one that
+    #: appeared there without answering here is the defect this rework exists
+    #: to remove.
+    _ANSWER_KEYS = frozenset(key for _label, key, _why in APPROVAL_CHOICES)
+
+    #: Escape must reach the APP, which stops the run, rather than answering
+    #: this one question.
+    #:
+    #: On the ``ask`` picker Escape means "leave this question unanswered",
+    #: which is a real outcome the tool reports. On an approval there is no such
+    #: outcome — the tool either runs or it does not — and Escape means STOP
+    #: everywhere else in this app. Answering here instead cost the user one
+    #: press per queued prompt before the run actually stopped, with each press
+    #: looking like it had done nothing (the defect the transcript prompt
+    #: recorded in its own BINDINGS note).
+    #:
+    #: Filtering the inherited ``BINDINGS`` list does NOT achieve this: Textual
+    #: merges bindings up the MRO (``_merged_bindings``), so the parent's
+    #: ``escape`` survives whatever this class's own list says — measured, with
+    #: the card still answering ``n`` and ``action_stop`` never running. The
+    #: binding is left in place and its ACTION is refused instead, so the key
+    #: bubbles to the app, which denies every queued prompt and aborts the turn.
+    #: The footer still says `esc deny`, because denial is what that stop does
+    #: to this particular call.
+    def action_cancel(self) -> None:
+        """Refuse the key so it reaches the app's stop. See the note above."""
+        raise SkipAction()
+
+    def __init__(
+        self,
+        tool_name: str,
+        description: str,
+        on_answer: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__(
+            [approval_question(tool_name, description)],
+            self._answered,
+            allow_free_text=False,
+            # A UNIQUE id per prompt, not the bare "approval-prompt".
+            #
+            # Approvals are serialized, but the handover is not instantaneous:
+            # a queued asker wakes the moment the front prompt's future
+            # resolves, which is BEFORE the awaiting frame reaches its `finally`
+            # and unmounts that prompt. For those few pump hops both widgets are
+            # attached, and a fixed id makes Textual refuse the mount with
+            # `DuplicateIds` — observed as two concurrent `bash` approvals
+            # crashing the mount of the second.
+            widget_id=f"approval-prompt-{id(self):x}",
+            title="the agent needs your approval",
+            # Not "skip": escaping an approval denies the call and stops the
+            # turn. A footer that offered to skip a gate would be describing a
+            # third outcome that does not exist.
+            exit_hint=("esc", "deny"),
+        )
+        self.tool_name = strip_control_sequences(tool_name)
+        self.description = strip_control_sequences(description)
+        self._answer: str | None = None
+        # `get_running_loop`, not `get_event_loop`: the future must belong to
+        # the loop that will await it, and stating that precondition turns a
+        # future built from a sync context into an immediate error rather than
+        # a future nobody resolves. (3.14 removes the implicit-loop fallback.)
+        self._future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._on_answer = on_answer
+
+    # -- the awaited half ----------------------------------------------------
+    def wait(self) -> asyncio.Future[bool]:
+        """The future the engine awaits. Resolved exactly once."""
+        return self._future
+
+    @property
+    def answered(self) -> bool:
+        return self._answer is not None
+
+    @property
+    def answer(self) -> str | None:
+        """The key the user answered with, or ``None`` while still pending."""
+        return self._answer
+
+    def resolve(self, approved: bool, *, answer: str | None = None) -> None:
+        """Settle the gate (idempotent) with the decision.
+
+        Idempotent because several paths can end one prompt — the keystroke, the
+        selected row, an abort, a transcript clear, unmount — and a second
+        ``set_result`` on a settled future raises. Losing that race must not
+        take the app down.
+        """
+        if self._answer is not None:
+            return
+        self._answer = answer or ("y" if approved else "n")
+        # BEFORE `set_result`, and a direct call rather than a posted message:
+        # the app owns what an answer MEANS beyond this call (latching "allow
+        # all"), and a queued asker wakes the moment the future resolves. Routed
+        # through the message pump, the flag landed several pump hops LATER, so
+        # the waiter read a stale policy and asked the user again for the second
+        # tool of the same batch — immediately after they pressed "allow all".
+        if self._on_answer is not None:
+            self._on_answer(self._answer)
+        if not self._future.done():
+            self._future.set_result(approved)
+        # Settle the picker half too, so the base class cannot later call back
+        # into `_answered` for a gate that is already decided.
+        self.settle(None)
+
+    # -- answering -----------------------------------------------------------
+    def _answer_with(self, key: str) -> None:
+        """Settle from one of the answer KEYS, whichever route produced it.
+
+        The single place the key -> (approved, recorded answer) mapping lives,
+        so a click on a row and a keystroke cannot disagree about what the user
+        authorised. It is also where ``A`` becomes ``a``: see
+        :data:`ALLOW_ALL_ANSWER`.
+        """
+        if key == ALLOW_ALL_KEY:
+            self.resolve(True, answer=ALLOW_ALL_ANSWER)
+            return
+        self.resolve(key == "y", answer=key)
+
+    def _answered(self, answers: dict[str, list[str]] | None) -> None:
+        """Bridge the picker's label answer onto the gate's boolean.
+
+        ``None`` (Escape, or the app tearing the card down) is a DENIAL, not a
+        skip: the engine is parked on this future, and the honest reading of "I
+        am not answering this" for a permission gate is that permission was not
+        given.
+        """
+        if self._answer is not None:
+            return
+        chosen = (answers or {}).get("approval") or []
+        label = chosen[0] if chosen else ""
+        key = APPROVAL_KEY_BY_LABEL.get(label)
+        if key is None:
+            self.resolve(False, answer="n")
+            return
+        self._answer_with(key)
+
+    def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        """The answer letters, kept working beside the selectable list.
+
+        These are why the prompt is focusable at all, and they predate the list:
+        anyone who has used this app has pressed `y`. They are handled here
+        rather than as BINDINGS because the base class dispatches its own
+        ``on_key`` first for the free-text row, and a binding would fire after
+        it — so the letters have to be taken at the same level to be certain of
+        arriving.
+
+        Case matters on ``A`` and only on ``A``. It disarms the gate for the
+        whole session, and this card takes focus: a user who did not notice and
+        kept typing would otherwise hit the most common letter in English and
+        permanently disable the gate with no receipt.
+        """
+        character = event.character
+        if character is None:
+            return
+        if character in self._ANSWER_KEYS:
+            event.stop()
+            event.prevent_default()
+            self._answer_with(character)
