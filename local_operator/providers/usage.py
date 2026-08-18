@@ -559,10 +559,6 @@ async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> Usa
 ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
 
 
-#: The `unit` enum Z.AI uses to describe a quota window's period. Only the
-#: values observed on live coding-plan accounts are mapped; anything else falls
-#: through to a generic label rather than being guessed at, because mislabelling
-#: a monthly cap as hourly would make an exhausted plan look like it resets soon.
 def _is_zai_chat_model(code: str) -> bool:
     """Whether a ``usageDetails`` code names a GLM chat model.
 
@@ -586,6 +582,11 @@ def _is_zai_chat_model(code: str) -> bool:
     return code.strip().lower().startswith("glm")
 
 
+#: The `unit` enum Z.AI uses to describe a quota window's period. Only the
+#: values observed on live coding-plan accounts are mapped; anything else falls
+#: through to a generic label rather than being guessed at, because mislabelling
+#: a monthly cap as hourly would make an exhausted plan look like it resets soon.
+#:
 #: Only the NAME is carried. An earlier revision paired each unit with a
 #: duration in seconds, which nothing read: the reset time arrives as an
 #: absolute ``nextResetTime`` from the vendor, so a locally derived window
