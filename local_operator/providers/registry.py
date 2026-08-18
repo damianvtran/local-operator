@@ -31,6 +31,12 @@ RefreshFn = Callable[..., Awaitable[dict[str, Any]]]
 GetApiKeyFn = Callable[[dict[str, Any]], str]
 EnvKeys = str | Callable[[], str | None] | None
 
+#: Attribute a login callable sets on itself to declare "I cannot complete
+#: without reading text from the user". Read by
+#: ``ProviderDefinition.__post_init__``, which is what carries the requirement
+#: from the flow that has it out to the hosts that must honour it.
+PASTE_PROMPT_ATTR = "__lo_requires_paste_prompt__"
+
 
 @dataclasses.dataclass(frozen=True)
 class ProviderDefinition:
@@ -49,6 +55,19 @@ class ProviderDefinition:
       Nothing routes on these; they only make the provider findable, which
       matters because the company name and the name on the model a user came
       here for are frequently different.
+
+    Two DIFFERENT things describe "this login may read text from the user", and
+    conflating them is what broke every paste-a-key login (see
+    ``paste_prompt_required`` below):
+
+    - ``paste_code_flow`` — the login has a loopback/device path AND *also*
+      accepts a pasted code as a FALLBACK, raced against the callback. Anthropic
+      only. Attaching a prompt to any other loopback provider deadlocks the
+      terminal, which is why hosts gate on it.
+    - ``paste_prompt_required`` — the login has no other path at all: reading
+      the key IS the flow, so a host that attaches no prompt cannot log in and
+      the flow can only fail. Derived, not stored (see the property), because
+      the login callable already knows.
     """
 
     id: str
@@ -64,10 +83,69 @@ class ProviderDefinition:
     base_url: str | None = None
     wire: WireFormat = "openai-compat"
     search_aliases: tuple[str, ...] = ()
+    #: Whether this login cannot complete without reading text from the user.
+    #: NOT a host preference and not a fallback marker: a host that ignores it
+    #: turns the login into a guaranteed error, which is the defect this field
+    #: exists to make impossible to reintroduce.
+    #:
+    #: Left unset in every registration below and DERIVED in ``__post_init__``
+    #: from the login callable itself, which is the only thing that actually
+    #: knows whether it prompts. Declaring it per provider would be one more
+    #: line to forget, and forgetting it is exactly how the paste-a-key
+    #: providers shipped unloggable-into: the requirement lived in the login
+    #: body and nothing carried it out to the hosts.
+    requires_paste_prompt: bool = False
+
+    def __post_init__(self) -> None:
+        """Adopt the login callable's own paste requirement.
+
+        ``create_api_key_login`` and the QwenCloud thunk tag themselves with
+        :data:`PASTE_PROMPT_ATTR`; a provider built from one inherits the tag
+        with no per-provider bookkeeping, so adding a paste-a-key provider
+        cannot silently produce a login no host can drive. An explicit ``True``
+        passed by a caller is honoured and never downgraded.
+        """
+        if not self.requires_paste_prompt and getattr(self.login, PASTE_PROMPT_ATTR, False):
+            # The dataclass is frozen (definitions are shared, module-level and
+            # read from every surface), so the derivation goes through
+            # ``object.__setattr__`` — the documented way to complete a frozen
+            # instance's own construction.
+            object.__setattr__(self, "requires_paste_prompt", True)
+
+    @property
+    def paste_prompt_required(self) -> bool:
+        """Whether a host MUST attach ``on_manual_code_input`` to log in.
+
+        The one question a host should ask. ``paste_code_flow`` answers a
+        narrower one ("may a prompt race the loopback callback?"), and hosts
+        that asked it instead attached no prompt to the paste-a-key providers —
+        whose login is nothing but that prompt — so `/login alibaba` and every
+        sibling failed with "requires an interactive code prompt" before it
+        could ask for anything.
+        """
+        return self.requires_paste_prompt
+
+    @property
+    def accepts_paste_prompt(self) -> bool:
+        """Whether a host may offer a paste prompt for this provider at all.
+
+        The union of the two cases: a required prompt, and Anthropic's optional
+        fallback. Hosts attach a prompt on this and on nothing else, so a
+        loopback-only provider still never gets one (attaching it there races
+        the HTTP callback and leaves the terminal blocked — the trap the
+        ``paste_code_flow`` gate was originally protecting).
+        """
+        return self.requires_paste_prompt or self.paste_code_flow
 
 
-def _lazy_login(module: str, attr: str) -> LoginFn:
-    """Dynamic-import thunk: keeps OAuth deps out of startup imports."""
+def _lazy_login(module: str, attr: str, *, requires_paste_prompt: bool = False) -> LoginFn:
+    """Dynamic-import thunk: keeps OAuth deps out of startup imports.
+
+    ``requires_paste_prompt`` is carried on the returned callable rather than
+    passed to the provider entry, because the whole point of the thunk is that
+    the real login module is NOT imported at registry build time — so the only
+    place the requirement can be stated without paying that import is here.
+    """
 
     async def login(
         callbacks: LoginCallbacks,
@@ -81,6 +159,8 @@ def _lazy_login(module: str, attr: str) -> LoginFn:
             return await fn(callbacks, signal=signal, open_browser=open_browser, **kwargs)
         return await fn(callbacks, signal=signal, **kwargs)
 
+    if requires_paste_prompt:
+        setattr(login, PASTE_PROMPT_ATTR, True)
     return login
 
 
@@ -113,6 +193,12 @@ def create_api_key_login(provider_label: str, auth_url: str, instructions: str =
     Opens the dashboard URL, prompts for a paste, returns the trimmed key:
     prompt for a paste, return the trimmed key (a ``str`` — AuthStore
     stores it as an ``api_key`` credential with ``source="login"``).
+
+    The prompt is the ENTIRE flow, which is why the returned callable tags
+    itself with :data:`PASTE_PROMPT_ATTR`: a host that attaches no
+    ``on_manual_code_input`` cannot log in to any of these providers, so the
+    requirement has to reach the host rather than being discovered as an error
+    after the browser has already been opened.
     """
 
     async def login(callbacks: LoginCallbacks, **_kwargs: Any) -> str:
@@ -120,17 +206,38 @@ def create_api_key_login(provider_label: str, auth_url: str, instructions: str =
         # http.server, ssl, email and 150-odd other modules (~138 ms), and this
         # registry is on the model picker's path — every interactive session
         # paid for a loopback HTTP server it only needs if the user logs in.
-        from local_operator.providers.oauth.callback_server import maybe_await
+        from local_operator.providers.oauth.callback_server import (
+            LoginCancelledError,
+            maybe_await,
+        )
 
+        if callbacks.on_manual_code_input is None:
+            # Checked BEFORE the URL is surfaced. A host with no prompt cannot
+            # finish this flow, and announcing "opening your browser to
+            # authorize" first told the user to go and get a key that was then
+            # refused — the failure this check replaces. Every shipped host now
+            # attaches a prompt (see ``accepts_paste_prompt``), so this is a
+            # contract violation by an embedder rather than a user-facing path,
+            # and it says which hook is missing instead of naming a key prompt
+            # the user was never offered.
+            raise ValueError(
+                f"{provider_label} login reads an API key, but this interface "
+                "provided no on_manual_code_input callback to read it with."
+            )
         if callbacks.on_auth_url is not None:
             await maybe_await(callbacks.on_auth_url(auth_url, instructions=instructions or None))
-        if callbacks.on_manual_code_input is None:
-            raise ValueError(f"{provider_label} login requires an interactive code prompt")
         pasted = await maybe_await(callbacks.on_manual_code_input())
         if pasted is None:
-            raise ValueError(f"{provider_label} login cancelled")
-        return pasted.strip()
+            raise LoginCancelledError(f"{provider_label} login cancelled")
+        key = pasted.strip()
+        if not key:
+            # An empty paste is a CANCEL, not a credential. Storing it would
+            # write a blank api_key row that shadows a working env key and turns
+            # every later request into an auth error with no visible cause.
+            raise LoginCancelledError(f"{provider_label} login cancelled")
+        return key
 
+    setattr(login, PASTE_PROMPT_ATTR, True)
     return login
 
 
@@ -331,7 +438,15 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         id="alibaba-token-plan-oauth",
         search_aliases=("token-plan",),
         name="QwenCloud Token Plan (usage OAuth)",
-        login=_lazy_login("local_operator.providers.oauth.qwencloud", "login_qwencloud_token_plan"),
+        # Paste-requiring as well as device-flow: this login collects the
+        # ``sk-sp-…`` inference key BEFORE it starts the device flow, so it is
+        # unusable from a host that cannot prompt (see
+        # ``login_qwencloud_token_plan``).
+        login=_lazy_login(
+            "local_operator.providers.oauth.qwencloud",
+            "login_qwencloud_token_plan",
+            requires_paste_prompt=True,
+        ),
         store_credentials_as="alibaba-token-plan",
         base_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
     ),
