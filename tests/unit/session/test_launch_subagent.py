@@ -732,3 +732,90 @@ async def test_scout_preamble_reaches_the_provider_turn(tmp_path, monkeypatch):
     assert "[scout mode:" in first_user.text
     assert "Map the repo." in first_user.text
     await parent.dispose()
+
+
+class LongStream:
+    """A child turn that streams many deltas, yielding the loop between each.
+
+    A real provider suspends on network I/O between chunks. Reproducing that
+    suspension is what makes this a concurrency test rather than a CPU
+    benchmark: without it the generator never yields and nothing else could
+    run no matter how the harness behaved.
+    """
+
+    def __init__(self, deltas: int = 2000, chunk_chars: int = 1200) -> None:
+        self.deltas = deltas
+        self.chunk = "lorem ipsum dolor " * max(1, chunk_chars // 18)
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        async def gen():
+            for _ in range(self.deltas):
+                await asyncio.sleep(0)
+                yield StreamTextDelta(delta=self.chunk)
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+
+@pytest.mark.asyncio
+async def test_the_loop_stays_responsive_while_several_subagents_run(tmp_path, monkeypatch):
+    """Concurrent children must not stall the event loop they share.
+
+    THE regression this guards. One asyncio loop serves the parent session,
+    every subagent and the TUI's repaint, and the per-turn compaction gate
+    used to tokenize the whole history INLINE on it. With several children
+    streaming at once that made one child's threshold check freeze all of
+    them: measured at 2.5 s of maximum loop stall (worst single stall 860 ms,
+    with 116 of 121 stall samples inside the tokenizer). The user-visible
+    symptom was an agent reporting that its subagents "only run when I yield".
+
+    The measurement is a watchdog that asks to be woken every 5 ms and records
+    how late it actually was. That overshoot IS the window in which nothing
+    else on the loop could be serviced, which is exactly what a starved
+    sibling experiences. Asserting on the watchdog rather than on wall-clock
+    time keeps this about responsiveness and not about machine speed.
+
+    The workload is calibrated, not arbitrary. It has to build a history big
+    enough that the gate's tokenizer pass is expensive, because that is the
+    stretch under test; at a smaller size both variants pass and the test
+    proves nothing. Measured on this workload against the pre-fix tree and
+    this one: worst stall 1353 ms before, 139 ms after. The 1 s bound sits an
+    order of magnitude above the fixed behaviour (so a loaded CI box does not
+    flake it) and comfortably below the broken one.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, LongStream())
+
+    stop = asyncio.Event()
+    lateness: list[float] = []
+
+    async def watchdog() -> None:
+        loop = asyncio.get_running_loop()
+        while not stop.is_set():
+            before = loop.time()
+            await asyncio.sleep(0.005)
+            lateness.append(loop.time() - before - 0.005)
+
+    watcher = asyncio.create_task(watchdog())
+    await asyncio.sleep(0.05)
+    lateness.clear()
+
+    job_ids = [parent._launch_subagent(label=f"c{i}", prompt="do the work") for i in range(6)]
+
+    def all_settled() -> bool:
+        jobs = [parent.jobs.get(job_id) for job_id in job_ids]
+        return all(job is not None and job.status != "running" for job in jobs)
+
+    try:
+        await wait_for(all_settled, timeout=60.0)
+    finally:
+        stop.set()
+        await watcher
+
+    assert lateness, "the watchdog never ran — the measurement itself is broken"
+    worst = max(lateness)
+    assert worst < 1.0, (
+        f"the event loop stalled for {worst * 1000:.0f} ms while subagents ran; "
+        "a synchronous stretch is starving concurrent children"
+    )
+    await parent.dispose()

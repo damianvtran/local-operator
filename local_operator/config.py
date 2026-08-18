@@ -171,6 +171,15 @@ DEFAULT_CONFIG = Config(
             # and Tavily keyless are both bounded fallbacks, so the default
             # rotates between them rather than depending on one free service.
             "web_search": dict(DEFAULT_WEB_SEARCH_CONFIG),
+            # Subagent controls. ``models`` maps the lo/med/hi effort tiers to
+            # "provider/model" selectors; ``max_running`` caps how many
+            # background jobs (subagents AND backgrounded bash, which share one
+            # pool) may run concurrently per session. Absent by default so the
+            # ceiling lives in one place — AsyncJobManager's own default —
+            # rather than being duplicated into every generated config file.
+            # Set it when the machine or the models in use want a different
+            # ceiling than the built-in one.
+            "subagents": {},
             # Ceilings on the ephemeral session store (see
             # local_operator.session.retention). Any of the three set to 0
             # disables that dimension; all three at 0 restores the unbounded
