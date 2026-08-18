@@ -1367,6 +1367,16 @@ class AskPickerScreen(Container):
             self._composer_has_draft(),
             tuple(self._window()),
             self.question_index,
+            # The refused-Enter complaint replaces the key hints entirely, and
+            # it is cleared by any key that changes the answer — so it moves
+            # without the window or the question moving.
+            self._rejected,
+            # What the footer's ladder offers on a multi-select depends on
+            # whether anything is ticked (`_chosen` feeds `_rejection`), and on
+            # a free-text row on what has been typed into it.
+            self.state.selected,
+            tuple(sorted(self.state.checked)),
+            self.state.typed,
         )
 
     def repaint_if_stale(self) -> None:
