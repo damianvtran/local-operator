@@ -1572,3 +1572,104 @@ def test_the_footer_fingerprint_covers_everything_the_footer_says() -> None:
                                 footer,
                             )
                         seen[fingerprint] = footer
+
+
+@pytest.mark.asyncio
+async def test_sending_a_message_does_not_hand_the_keyboard_to_the_question() -> None:
+    """The user's next message must never become the answer to a question.
+
+    The focus hand-back (D17) has to key on the user DELETING their way to
+    empty, not on the buffer being empty: `on_text_area_changed` fires for any
+    document change, and sending a message empties the buffer too. Keyed on
+    emptiness, sending handed the caret to the card — and the user's next line
+    was typed into a question they had stopped looking at, with the space
+    ticking a row and Enter answering it.
+
+    Measured end to end before the fix: `please check the schema` sent,
+    `ok next` typed, Enter, and the ask resolved `{'s': ['next']}` from a line
+    meant for the agent (F9, agent review round 6).
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.editor import Editor
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "please check the schema":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.1)
+
+        asked = asyncio.create_task(
+            app.request_user_choice([_question(multi=True, labels=("Drop", "next"))])
+        )
+        for _ in range(16):
+            await pilot.pause()
+        assert isinstance(app.screen.focused, Editor)
+
+        # Send it. The send empties the buffer, which must NOT be read as the
+        # user finishing with the composer.
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause(0.05)
+        assert session.prompts[-1:] == ["please check the schema"], session.prompts
+        assert isinstance(app.screen.focused, Editor), "sending handed over the keyboard"
+
+        # The next message is typed, not answered.
+        for character in "ok next":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.2)
+        assert app.query_one(Editor).text == "ok next"
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause(0.05)
+        assert not asked.done(), "a chat message answered the agent's question"
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_a_collapsed_card_never_takes_the_keyboard() -> None:
+    """A card drawing no options has nothing to do with the keyboard.
+
+    `not answer_keys()` is true for two different reasons and only one wants
+    focus: a multi-select, whose answers the composer cannot reach, and a
+    COLLAPSED card, which is drawing nothing. Focus on the latter buys nothing
+    — there is no cursor to move and the permissive keys are refused there
+    anyway (D9) — so taking it is pure theft (F9, agent review round 6).
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 13)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "hmm":
+            await pilot.press(character)
+        await pilot.pause(0.1)
+
+        asked = asyncio.create_task(app.request_user_choice([_long_question()]))
+        for _ in range(16):
+            await pilot.pause()
+        card = app._ask_screen
+        assert card is not None
+        assert not card.visible_rows, "this size is meant to draw no options"
+
+        for _ in range(len("hmm")):
+            await pilot.press("backspace")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen.focused, Editor)
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
