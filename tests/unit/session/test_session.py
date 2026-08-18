@@ -30,11 +30,17 @@ from local_operator.harness.types import (
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
+    ToolCall,
     ToolResult,
     Usage,
 )
 from local_operator.providers.failover import ProviderError
-from local_operator.session.session import IMAGE_DROPPED_NOTICE, Session
+from local_operator.session.session import (
+    IMAGE_DROPPED_NOTICE,
+    SESSION_INCIDENT_MESSAGE_TYPE,
+    Session,
+    _paired_prefix,
+)
 from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
 
@@ -2248,3 +2254,49 @@ async def test_dispose_does_not_suppress_the_turns_own_flush(tmp_path):
         if isinstance(message, Message) and message.role == "tool"
     }
     assert not calls - results, f"dispose left a dangling tool_use: {sorted(calls - results)}"
+
+
+def test_paired_prefix_is_not_defeated_by_a_custom_message_in_the_tail():
+    """A persistable ``CustomMessage`` must not shield an unanswered assistant.
+
+    ``journal_incident`` appends straight to the live context and
+    ``_on_mcp_incident`` fires it from a background task, so an MCP breaker
+    tripping mid-batch leaves ``[..., assistant(tool_calls), session_incident]``.
+    A tail scan that stopped at the first non-assistant entry declared that
+    legal and persisted the dangling ``tool_use`` beneath it — R1's corruption
+    through a narrower door (review round 2, R5).
+
+    The custom itself is KEPT: it is real history, and dropping it would lose
+    the incident the model needs to see on resume.
+    """
+    answered = Message(role="assistant", content=[TextContent(text="A1")])
+    answered.tool_calls = [ToolCall(id="c1", name="work", arguments={})]
+    result = Message(
+        role="tool", tool_call_id="c1", tool_name="work", content=[TextContent(text="R1")]
+    )
+    unanswered = Message(role="assistant", content=[TextContent(text="A2")])
+    unanswered.tool_calls = [ToolCall(id="c2", name="work", arguments={})]
+    incident = CustomMessage(
+        custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "MCP server 'linear': breaker tripped"},
+    )
+
+    prompt = Message.user("go")  # bound once: Message.user() mints a fresh id
+
+    kept = _paired_prefix([prompt, answered, result, unanswered, incident])
+
+    assert unanswered not in kept, "a custom in the tail shielded an unanswered assistant"
+    assert incident in kept, "the incident must survive — it is real history"
+    assert kept == [prompt, answered, result, incident]
+
+    # And the ordinary cases still behave: an ANSWERED tail is untouched, and a
+    # run of unanswered assistants under several customs is fully trimmed.
+    answered_tail = [answered, result]
+    assert _paired_prefix(answered_tail) == answered_tail
+    assert _paired_prefix([answered, result, unanswered, incident, incident]) == [
+        answered,
+        result,
+        incident,
+        incident,
+    ]

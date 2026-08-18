@@ -391,16 +391,37 @@ def _paired_prefix(messages: Sequence[AgentMessage]) -> list[AgentMessage]:
     dropping it loses nothing a resume needs — while everything completed
     before it is kept, which is the whole point of the flush.
 
-    Only the TAIL is trimmed. An unanswered assistant message earlier in the
-    list already has its results appended after it.
+    Only the TAIL is trimmed, and "tail" means *up to the last real answer*.
+    A ``CustomMessage`` in the tail does NOT prove the list is legal: it is not
+    a ``Message``, and one can land on the live context while a tool batch is
+    still in flight. ``journal_incident`` appends straight to
+    ``_context.messages``, and ``_on_mcp_incident`` fires it through
+    ``_spawn_background`` — so an MCP breaker tripping mid-batch leaves
+    ``[..., assistant(tool_calls), session_incident]``. A scan that stopped at
+    the first non-assistant entry would see the incident, declare the tail
+    clean, and persist the unanswered assistant beneath it — the very row this
+    function exists to refuse (review round 2, R5; reproduced as
+    ``DANGLING: ['c2']``).
+
+    So customs are stepped OVER and kept, while unanswered assistant messages
+    beneath them are dropped; the scan stops at the first ``role="tool"``,
+    which is a real answer and therefore a genuinely legal tail. Re-listing a
+    custom that was already persisted is harmless — ``_persist_new_messages``
+    dedups by id.
     """
     out = list(messages)
+    keep_tail: list[AgentMessage] = []
     while out:
         tail = out[-1]
-        if isinstance(tail, Message) and tail.role == "assistant" and tail.tool_calls:
-            out.pop()
-            continue
-        break
+        if isinstance(tail, Message):
+            if tail.role == "assistant" and tail.tool_calls:
+                out.pop()  # unanswered: never persist it
+                continue
+            break  # a tool result or a plain message: the tail is legal
+        # A non-Message (custom) proves nothing about legality. Hold it aside
+        # and keep looking underneath it.
+        keep_tail.append(out.pop())
+    out.extend(reversed(keep_tail))
     return out
 
 
@@ -2119,9 +2140,17 @@ class Session:
         # flag BEFORE it aborts and awaits the in-flight turn, precisely so
         # that turn's persistence "must land on a live transcript" — so a
         # ``_disposed`` guard here would suppress the one flush dispose is
-        # waiting for. The transcript is still open at that point (it is closed
-        # after the awaited turn returns), and an append is idempotent, so the
-        # correct behaviour on a disposing session is to write, not to skip.
+        # waiting for.
+        #
+        # Writing is safe at any point in teardown, and for a stronger reason
+        # than "the transcript is still open": there is no open handle to lose.
+        # ``Transcript`` has no ``close()``; ``flush()`` is an explicit no-op
+        # ("writes are flushed per append"), and ``_append`` opens, writes and
+        # closes the file per call. So a disposing — or already disposed —
+        # session can still append, which also means the late flush from a turn
+        # that outlives dispose's 5s shielded wait still lands (review round 2,
+        # R6: the earlier wording here described a lifecycle that does not
+        # exist, and would send the next reader hunting for a close to race).
         try:
             await self._persist_new_messages(_paired_prefix(messages))
         except asyncio.CancelledError:
