@@ -124,10 +124,11 @@ class ChildInfo:
 
     job_id: str
     label: str
-    #: ``running`` | ``queued`` | ``starting`` | ``paused`` | ``completed`` |
-    #: ``failed`` | ``cancelled`` | ``gone``. Derived in
+    #: ``running`` | ``queued`` | ``starting`` | ``pausing`` | ``paused`` |
+    #: ``completed`` | ``failed`` | ``cancelled`` | ``gone``. Derived in
     #: :meth:`SubagentComms.roster`; ``gone`` covers a record whose job row was
-    #: swept without a recorded outcome.
+    #: swept without a recorded outcome, and ``pausing`` a pause that has been
+    #: asked for but has not yet landed (defensive — see :meth:`_describe`).
     status: str
     #: Whether ``hub op='resume'`` can pick this child back up right now. The
     #: single fact the caller acts on, computed once here rather than
@@ -440,7 +441,14 @@ class SubagentComms:
         # wait) rather than an invitation to resume something unexamined. The
         # old default meant any status added to the branch above was born
         # silently resumable.
-        resumable = status in ("completed", "failed", "cancelled", "paused")
+        # ``gone`` belongs here: it means the job row was swept without a
+        # recorded outcome, which says nothing about the transcript. ``resume``
+        # asks only whether the record has a readable transcript and no live
+        # twin, so omitting ``gone`` made the roster refuse a resume that would
+        # in fact have succeeded — the same disagreement as F1, in the safe
+        # direction. The later branches still veto it when there is genuinely
+        # nothing to resume.
+        resumable = status in ("completed", "failed", "cancelled", "paused", "gone")
         detail = detail if resumable else "not resumable in this state"
         if status in ("running", "queued", "starting"):
             resumable, detail = False, "still running; cancel or pause it first"

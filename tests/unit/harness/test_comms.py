@@ -1607,3 +1607,27 @@ def test_an_unknown_status_is_not_born_resumable(tmp_path):
 
     assert row.status == "some_future_state"  # reached the enumeration...
     assert row.resumable is False  # ...and was not born resumable
+
+
+def test_a_swept_row_with_a_transcript_is_still_resumable(tmp_path):
+    """R3: ``gone`` says the job row was swept, not that the work is lost.
+
+    ``resume`` asks only whether the record has a readable transcript and no
+    live twin — it never consults the row's status. Leaving ``gone`` out of the
+    resumable enumeration therefore refused a resume that would have succeeded:
+    the same roster/``resume`` disagreement as F1, pointing the safe way. It is
+    still a lie about the child, and this is the state a parent reaches by
+    coming back to a long-settled subagent, which is the feature's whole point.
+    """
+    comms, jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    # Row swept with no recorded outcome: the ``gone`` fallback.
+    del jobs.jobs["job-1"]
+
+    [row] = comms.roster()
+
+    assert row.status == "gone"
+    assert row.resumable is True
+    # And the invariant: nothing in resume() disagrees.
+    assert comms._live_twin(comms._records["job-1"]) is None
