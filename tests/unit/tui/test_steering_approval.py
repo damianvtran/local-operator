@@ -492,12 +492,14 @@ async def test_approvals_command_restores_prompting() -> None:
         app._run_slash_command("/approvals auto")
         await pilot.pause(0.1)
         assert app._approve_all is True
-        assert any("auto-approve" in row for row in rows(app))  # band says so
+        # The band's alarm is a bare `!` in the trailing cell now — the session
+        # name took the words that used to be there.
+        assert any(row.rstrip().endswith("!") for row in rows(app))
 
         app._run_slash_command("/approvals ask")
         await pilot.pause(0.1)
         assert app._approve_all is False
-        assert not any("auto-approve" in row for row in rows(app))
+        assert not any(row.rstrip().endswith("!") for row in rows(app))
         # And the gate really asks again.
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: x"))
         await pilot.pause(0.3)

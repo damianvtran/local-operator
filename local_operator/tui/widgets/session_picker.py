@@ -170,7 +170,6 @@ def render_rows(
     fg = theme_mod.semantic_color("fg")
     muted = theme_mod.semantic_color("muted")
     dim = theme_mod.semantic_color("dim")
-    accent = theme_mod.semantic_color("label")
 
     ages = [format_age(max(0.0, now - row.mtime)) for row in rows]
     name_col, age_col, id_col = plan_columns(rows, width, ages)
@@ -179,7 +178,7 @@ def render_rows(
     for index, (row, age) in enumerate(zip(rows, ages)):
         current = index == selected
         # A ground behind the whole row, as the command picker paints: a bare
-        # accent chevron gives a mouse user almost nothing, and it is the only
+        # caret gives a mouse user almost nothing, and the ground is the only
         # selection signal an unnamed row would otherwise have.
         if current:
             ground = theme_mod.semantic_color(
@@ -192,9 +191,16 @@ def render_rows(
         row_bg = Style(bgcolor=ground)
 
         line = Text(no_wrap=True, overflow="ellipsis")
+        # The caret is MUTED, like both sibling pickers — command_picker's D17
+        # note gives the reason and ask_picker restates it: the row GROUND says
+        # "selected", so the mark only has to point. It was `label`, the ramp's
+        # violet meta ink for tips and skill labels, which said "meta" where the
+        # frame meant "position", made the one cool mark on a warm card, and on
+        # paper measured 4.45:1 on `tint-select` — under AA on the one row being
+        # read. `muted` is 7.53:1 dark / 6.37:1 light there (D5).
         line.append(
             _pad_cells(CURSOR if current else "", GUTTER_CELLS),
-            style=row_bg + Style(color=accent),
+            style=row_bg + Style(color=muted),
         )
         # An unnamed session is one whose transcript could not be read or that
         # has no user turn yet. Saying so beats an empty cell, which reads as a

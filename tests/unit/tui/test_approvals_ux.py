@@ -222,7 +222,10 @@ async def test_the_saved_default_is_in_force_in_the_next_session(config_dir: Pat
         # assertion above and still stop the first tool of the session.
         assert await _gate(session)("bash", "run: ls") is True
         assert not relaunched.query(ApprovalBlock), "auto-approve still mounted a prompt"
-        assert "auto-approve always" in _band(relaunched)
+        # The band's trailing cell is the alarm. It no longer spells the mode out
+        # — the session NAME owns that slot now — so `auto` and `always` are one
+        # glyph here, and `/approvals` is what distinguishes them.
+        assert _band(relaunched).rstrip().endswith("!")
 
 
 @pytest.mark.asyncio
@@ -291,8 +294,9 @@ async def test_an_unwritable_config_still_switches_the_session(
         assert app._approve_all is True, "the session was denied the mode it asked for"
         assert app._approvals_default_auto is False
         assert "could not save default" in _notices(app)[-1]
-        band = _band(app)
-        assert "auto-approve" in band and "always" not in band
+        # Still alarmed: the session got the mode, only the promise about the
+        # NEXT session failed, and the band never claimed that part anyway.
+        assert _band(app).rstrip().endswith("!")
 
 
 # -- the list: offered, not remembered ----------------------------------------
@@ -518,20 +522,29 @@ async def test_the_band_and_the_gate_agree_through_every_route(config_dir: Path)
             await asyncio.wait_for(pending, 2)
             return False
 
+        def band_is_alarmed() -> bool:
+            """Whether the band's trailing cell is the disarmed-gate alarm.
+
+            The segment is a bare `!` now — the session name took the words —
+            so both scopes look identical here on purpose: the band's promise is
+            "no tool will ask", and "until when" is `/approvals`' answer.
+            """
+            return _band(app).rstrip().endswith("!")
+
         assert await gate_runs_without_asking() is False
-        assert "auto-approve" not in _band(app)
+        assert band_is_alarmed() is False
 
         await _submit(pilot, app, "/approvals auto")
         assert await gate_runs_without_asking() is True
-        assert "auto-approve" in _band(app) and "always" not in _band(app)
+        assert band_is_alarmed() is True
 
         await _submit(pilot, app, "/approvals default auto")
         assert await gate_runs_without_asking() is True
-        assert "auto-approve always" in _band(app)
+        assert band_is_alarmed() is True
 
         await _submit(pilot, app, "/approvals ask")
         assert await gate_runs_without_asking() is False
-        assert "auto-approve" not in _band(app)
+        assert band_is_alarmed() is False
 
 
 @pytest.mark.asyncio
@@ -597,6 +610,8 @@ async def test_the_allow_all_key_reports_and_paints_like_the_command(
         assert await asyncio.wait_for(pending, 2) is True
 
         assert app._approve_all is True
-        assert "auto-approve" in _band(app)
-        assert "always" not in _band(app), "a keystroke must not claim a saved default"
+        # One glyph for both scopes: the band says "no tool will ask", and the
+        # keystroke's session-only scope is proved by the config below staying
+        # unwritten rather than by a word in the band.
+        assert _band(app).rstrip().endswith("!")
         assert _saved_mode(config_dir) is None

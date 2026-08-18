@@ -20,6 +20,7 @@ import pytest
 
 from local_operator.harness.types import ImageContent, NoticeEvent, TextContent
 from local_operator.session.mcp_status import McpStartupOutcome
+from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
@@ -69,6 +70,11 @@ class FakeSession:
         )
         self.preflight_calls = 0
         self.preflight_notice: str | None = None
+        # The REAL holder, not a bare string: `user_set` precedence (a human
+        # rename outranks every generated title, forever) is behaviour the TUI
+        # relies on, and a fake that reimplements it as a plain assignment
+        # would let a regression in that rule pass every pilot test.
+        self._name_state = ConversationName()
 
     @property
     def session_id(self) -> str:
@@ -139,11 +145,14 @@ class FakeSession:
 
     @property
     def conversation_name(self) -> str:
-        return getattr(self, "_name", "")
+        return self._name_state.text
+
+    @property
+    def conversation_name_state(self) -> ConversationName:
+        return self._name_state
 
     def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
-        self._name = (text or "").strip()
-        return self._name
+        return self._name_state.set(text, user_set=user_set)
 
     async def complete_once(self, system: str, prompt: str) -> str:
         # No title: the naming worker must be inert in the pilot tests, and
@@ -3270,6 +3279,73 @@ async def test_boot_warms_session_imports_before_awaiting_the_factory() -> None:
 
     assert calls[:2] == ["warm", "factory"], calls
     assert warm_thread and warm_thread[0] != loop_thread
+
+
+@pytest.mark.asyncio
+async def test_quitting_during_boot_never_paints_into_the_dismantled_screen() -> None:
+    """The boot worker must be cancelled BEFORE the widget tree is pruned.
+
+    Textual's shutdown prunes every screen and widget first and cancels workers
+    afterwards, so a boot worker that wakes in between resumes into
+    ``_adopt_session`` → ``_render_resumed_history`` → ``_transcript_view()``,
+    where the ``#transcript`` re-lookup for a transcript that is no longer in the
+    tree raises ``NoMatches`` — and ``exit_on_error`` turns it into
+    ``WorkerFailed``, i.e. a traceback for anyone who quits while the session is
+    still starting (the import warm-up alone is ~700 ms; see
+    ``_warm_session_imports``). It is that crash which surfaced in this suite's
+    per-width app loops as a ``NoMatches`` on a screen still wearing ``boot``:
+    sweeping only the hop's duration across an app's lifetime hit it 6 times in
+    301 apps, so a loop that tears one app down per width meets it eventually.
+
+    So the ordering is the contract, and the arrangement below pins it rather
+    than sampling it: the factory is held until the prune has FINISHED, then
+    released with ticks to spare before Textual's own ``cancel_all``. Patching
+    ``App._close_all`` is the only seam that brackets the prune — nothing public
+    runs between it and the cancellation it races. Restoring the app's order
+    (dropping ``OperatorApp._shutdown``, or textual renaming what it overrides)
+    fails here again.
+    """
+    from textual.app import App
+    from textual.worker import WorkerState
+
+    factory_gate = asyncio.Event()
+
+    async def warm() -> None:
+        await factory_gate.wait()
+
+    pruned_then_released: list[str] = []
+    original_close_all = App._close_all
+
+    async def close_all(self: App[None]) -> None:
+        await original_close_all(self)
+        pruned_then_released.append("pruned")
+        factory_gate.set()
+        # Ticks for the boot worker to be scheduled in the window Textual leaves
+        # open between the prune and its own `workers.cancel_all()`.
+        for _ in range(4):
+            await asyncio.sleep(0)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(OperatorApp, "_warm_session_imports", staticmethod(warm))
+    monkeypatch.setattr(App, "_close_all", close_all)
+    try:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            boot_worker = next(w for w in app.workers if w.group == "session")
+            # The premise: boot is still in flight, so teardown genuinely races
+            # it. Without this the test could pass by never having a race.
+            assert app._session is None
+    finally:
+        monkeypatch.undo()
+
+    assert pruned_then_released == ["pruned"]
+    # Cancelled at its own await instead of resuming into the dead tree: no
+    # adoption, no query, and the worker carries no error for `_handle_exception`
+    # to exit the app with.
+    assert boot_worker.state is WorkerState.CANCELLED, boot_worker.state
+    assert app._session is None
+    assert app._exception is None, app._exception
 
 
 class _MeasuredSession(FakeSession):
