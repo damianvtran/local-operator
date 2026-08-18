@@ -146,6 +146,19 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
         value = credential.get(field)
         if value:
             return str(value)
+    # The per-provider constant asks "is this an OAuth credential?", and it used
+    # to answer by testing for a refresh token. That is the same blind spot the
+    # type derivation above had: an OAuth credential whose token NEVER EXPIRES
+    # carries no refresh token by design (Z.AI's coding-plan sign-in mints
+    # exactly that), so it fell through to `None` and every re-login left
+    # another row. Five sign-ins meant five rows, and `/usage` rendered the one
+    # account five times over.
+    #
+    # A declared type answers the question directly; the refresh/access pair
+    # stays as the fallback for the callers that declare nothing, which is how
+    # every existing provider reaches this line.
+    if credential.get("type") == "oauth" and credential.get("access"):
+        return f"oauth:{provider}"
     if credential.get("refresh") and credential.get("access"):
         return f"oauth:{provider}"
     return None

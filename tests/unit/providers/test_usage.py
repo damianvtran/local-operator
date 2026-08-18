@@ -1417,8 +1417,20 @@ class TestZaiSignInReportsUsage:
         assert _FETCHERS["zai-oauth"] == ("zai-quota", "zai-quota")
 
     def test_a_signed_in_account_is_reported_as_capable_of_usage(self) -> None:
+        """`usage_kinds` returns BOOLEANS, so this asserts truth, not presence.
+
+        An `is not None` check here would pass for a provider with no quota
+        route at all -- `(False, False)` is two non-None values -- which is
+        exactly the state this test exists to rule out. The negative control
+        below is what makes the positive one mean something.
+        """
         from local_operator.providers.usage import usage_kinds
 
         oauth_kind, api_key_kind = usage_kinds("zai")
-        assert oauth_kind is not None, "a signed-in Z.AI account reports no usage"
-        assert api_key_kind is not None
+        assert oauth_kind is True, "a signed-in Z.AI account reports no usage"
+        assert api_key_kind is True
+        assert usage_kinds("zai-oauth") == (True, True)
+
+        # The control: a provider with no quota endpoint answers False/False on
+        # the same instrument, so the assertions above can distinguish the two.
+        assert usage_kinds("ollama") == (False, False)

@@ -383,8 +383,11 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # Pinned by the provider's OAuth client registration; port fallback is
         # refused, which `ZaiOAuthFlow` states again as `allow_port_fallback`.
         callback_port=54548,
-        # Paste-the-redirect-URL fallback for when the browser cannot reach this
-        # machine (a remote or headless session), as for anthropic.
+        # Paste fallback for when the browser cannot reach this machine (a
+        # remote or headless session), as for anthropic. The prompt accepts the
+        # whole redirect URL from the address bar, which is what a user has in
+        # front of them in that situation, as well as a bare authorization
+        # code; `_parse_pasted_callback` owns the shapes.
         paste_code_flow=True,
         base_url="https://api.z.ai/api/coding/paas/v4",
         # No refresh_token: the minted key never expires, so there is nothing to

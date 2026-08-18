@@ -1227,3 +1227,91 @@ class TestZaiSignInMintsADurableKey:
         # identity that `_FETCHERS["zai-oauth"]` needs for quota reporting.
         assert access.kind == "oauth"
         assert access.email == "damian@example.com"
+
+
+class TestPastedCallbackParsing:
+    """Z2: the "paste the redirect URL" fallback has to accept a redirect URL.
+
+    This prompt is the escape hatch for a browser that cannot reach this
+    machine's loopback port (a remote or headless session), and what a user
+    copies in that situation is the address bar. The handler only understood
+    `code#state` and a bare code, so a pasted URL was forwarded to the token
+    endpoint verbatim AS the authorization code: the advertised fallback could
+    not complete a login at all.
+    """
+
+    def test_a_pasted_redirect_url_yields_its_code_and_state(self) -> None:
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        assert _parse_pasted_callback("http://localhost:54548/callback?code=abc123&state=st-1") == (
+            "abc123",
+            "st-1",
+        )
+
+    def test_a_url_without_state_still_yields_the_code(self) -> None:
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        assert _parse_pasted_callback("http://localhost:54548/callback?code=abc123") == (
+            "abc123",
+            "",
+        )
+
+    def test_state_carried_in_the_fragment_is_found(self) -> None:
+        """Some providers keep `state` out of the query so it stays out of logs."""
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        assert _parse_pasted_callback("https://example.com/cb?code=c1#state=s9") == ("c1", "s9")
+
+    def test_percent_encoding_is_decoded(self) -> None:
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        code, _ = _parse_pasted_callback("http://localhost:54548/callback?code=sp%20ace&state=s")
+        assert code == "sp ace"
+
+    def test_the_anthropic_code_hash_state_shape_is_unchanged(self) -> None:
+        """The regression guard: Anthropic renders one `code#state` copy target,
+        and adding URL parsing must not disturb it."""
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        assert _parse_pasted_callback("the-code#the-state") == ("the-code", "the-state")
+
+    def test_a_bare_code_is_unchanged(self) -> None:
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        assert _parse_pasted_callback("bare-code-only") == ("bare-code-only", "")
+
+    def test_an_error_redirect_is_reported_rather_than_sent_as_a_code(self) -> None:
+        """A denied grant redirects with `error` and no `code`. Forwarding that
+        URL as the code produces an opaque provider-side rejection; the user is
+        still at the prompt and can be told what actually happened."""
+        from local_operator.providers.oauth.callback_server import (
+            LoginError,
+            _parse_pasted_callback,
+        )
+
+        with pytest.raises(LoginError, match="access_denied"):
+            _parse_pasted_callback(
+                "http://localhost:54548/callback?error=access_denied"
+                "&error_description=User+said+no"
+            )
+
+    def test_a_url_with_no_code_at_all_is_reported(self) -> None:
+        from local_operator.providers.oauth.callback_server import (
+            LoginError,
+            _parse_pasted_callback,
+        )
+
+        with pytest.raises(LoginError, match="no authorization code"):
+            _parse_pasted_callback("http://localhost:54548/callback")

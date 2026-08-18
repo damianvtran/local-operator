@@ -31,6 +31,58 @@ from local_operator.harness.types import AbortSignal
 DEFAULT_TIMEOUT_SECONDS = 300.0
 
 
+def _parse_pasted_callback(pasted: str) -> tuple[str, str]:
+    """Pull ``(code, state)`` out of whatever the user actually pasted.
+
+    Three shapes reach this prompt, and which one a user produces depends on
+    what their provider's browser page shows them, not on what we asked for:
+
+    1. The whole redirect URL (``http://localhost:54548/callback?code=..&state=..``),
+       which is what a user copies from the address bar when the browser is on
+       another machine and cannot reach this loopback port. This is the shape
+       the "paste the redirect URL" fallback exists for.
+    2. ``code#state``, which Anthropic renders as a single copy target.
+    3. A bare authorization code.
+
+    Handling only (2) and (3) meant a pasted URL was sent to the token endpoint
+    verbatim AS the authorization code, so the fallback advertised for remote
+    and headless sessions could not complete a login at all. Query parameters
+    are tried first because a URL is unambiguous: it has a scheme and a
+    ``code`` parameter, neither of which a bare code or a ``code#state`` pair
+    can produce.
+    """
+    if "://" in pasted:
+        parsed = urllib.parse.urlsplit(pasted)
+        query = urllib.parse.parse_qs(parsed.query)
+        code = (query.get("code") or [""])[0].strip()
+        if code:
+            # `state` may ride in the query (the ordinary case) or in the
+            # fragment, which some providers use to keep it out of server logs.
+            state = (query.get("state") or [""])[0].strip()
+            if not state and parsed.fragment:
+                frag = urllib.parse.parse_qs(parsed.fragment)
+                state = (frag.get("state") or [""])[0].strip() or parsed.fragment.strip()
+            return code, state
+        # A URL with no `code` is an error redirect or a mis-copy. Falling
+        # through would send the whole URL as the code and produce an opaque
+        # provider-side rejection, so say what is wrong while the user is still
+        # at the prompt.
+        error = (query.get("error") or [""])[0].strip()
+        if error:
+            description = (query.get("error_description") or [""])[0].strip()
+            detail = f" ({description})" if description else ""
+            raise LoginError(f"Authorization failed: {error}{detail}")
+        raise LoginError(
+            "That URL carries no authorization code. Copy the full address bar "
+            "contents after approving the sign-in."
+        )
+    # Providers hand users "code#state" in the redirect URL fragment.
+    if "#" in pasted:
+        code, _, frag_state = pasted.partition("#")
+        return code.strip(), frag_state.strip()
+    return pasted, ""
+
+
 class LoginError(Exception):
     """Base error for interactive login failures."""
 
@@ -363,11 +415,7 @@ class OAuthCallbackFlow(ABC):
             while pasted is None:
                 await asyncio.Future()  # declined; keep waiting for the browser
             pasted = pasted.strip()
-            # Providers hand users "code#state" in the redirect URL fragment.
-            if "#" in pasted:
-                code, _, frag_state = pasted.partition("#")
-                return code.strip(), frag_state.strip()
-            return pasted, ""
+            return _parse_pasted_callback(pasted)
 
         async def _abort_watch() -> tuple[str, str]:
             assert self._signal is not None
