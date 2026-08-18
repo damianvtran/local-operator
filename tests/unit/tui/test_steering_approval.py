@@ -88,13 +88,14 @@ class SteerableSession(FakeSession):
         self.approval_handler = handler
 
 
-def _ask_question(qid: str, text: str):  # type: ignore[no-untyped-def]
+def _ask_question(qid: str, text: str, *, multi: bool = False):  # type: ignore[no-untyped-def]
     """A minimal `ask` question, for tests that need one beside an approval."""
     from local_operator.harness.types import AskOption, AskQuestion
 
     return AskQuestion(
         id=qid,
         question=text,
+        multi=multi,
         options=[
             AskOption(label="Drop", description=""),
             AskOption(label="Backfill", description=""),
@@ -1922,3 +1923,100 @@ async def test_answering_one_prompt_does_not_move_the_caret_off_a_draft() -> Non
             await asked
         except (asyncio.CancelledError, Exception):
             pass
+
+
+@pytest.mark.asyncio
+async def test_nothing_takes_the_keyboard_from_someone_mid_sentence() -> None:
+    """The invariant, stated once over every path that can move focus.
+
+    Six separate findings across this review were the same defect reaching the
+    caret by a different door: the mount (D12), an empty buffer (F9), a
+    rewording deletion (D18), a resize (F10), a sibling prompt settling (F11),
+    and the overlap hand-off. Each was fixed where it was found, which is how
+    the next door stayed open long enough for a reviewer to walk through it.
+
+    So this asserts the property rather than the instances: with a draft in the
+    composer and a question live, NOTHING moves the caret. A new path that
+    forgets the rule fails here even if nobody thought to write a test for that
+    path — which is the point.
+    """
+    draft = "mid sentence"
+
+    async def _drafting(app, pilot, ask, *, multi=False, approval=False, overlap=False):
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in draft:
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.1)
+        futures = []
+        if overlap:
+            futures.append(
+                asyncio.create_task(app.request_user_choice([_ask_question("stale", "Which?")]))
+            )
+            for _ in range(12):
+                await pilot.pause(0.02)
+            futures.append(asyncio.ensure_future(ask("bash", "run: make")))
+        elif approval:
+            futures.append(asyncio.ensure_future(ask("bash", "run: make")))
+        else:
+            futures.append(
+                asyncio.create_task(
+                    app.request_user_choice([_ask_question("stale", "Which?", multi=multi)])
+                )
+            )
+        for _ in range(20):
+            await pilot.pause(0.02)
+        return futures
+
+    async def _mount(app, pilot):
+        return None
+
+    async def _resize_one_column(app, pilot):
+        await pilot.resize_terminal(99, 30)
+
+    async def _shrink_below_minimum_and_grow(app, pilot):
+        await pilot.resize_terminal(40, 6)
+        for _ in range(8):
+            await pilot.pause(0.05)
+        await pilot.resize_terminal(100, 30)
+
+    async def _poll_tick(app, pilot):
+        app._refresh_band()
+
+    async def _settle_the_sibling(app, pilot):
+        assert app._approval is not None
+        app._approval.resolve(False, answer="n")
+
+    async def _clear_the_transcript(app, pilot):
+        app.action_clear_transcript()
+
+    cases = (
+        ("mount, ask", _mount, {}),
+        ("mount, approval", _mount, {"approval": True}),
+        ("mount, multi-select", _mount, {"multi": True}),
+        ("a one-column resize", _resize_one_column, {"approval": True}),
+        ("a shrink past the minimum and back", _shrink_below_minimum_and_grow, {}),
+        ("the 1 Hz poll", _poll_tick, {}),
+        ("a sibling prompt settling", _settle_the_sibling, {"overlap": True}),
+        ("clearing the transcript", _clear_the_transcript, {}),
+    )
+
+    for label, action, kwargs in cases:
+        session = SteerableSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            ask = await _booted_gate(pilot, session)
+            futures = await _drafting(app, pilot, ask, **kwargs)
+            await action(app, pilot)
+            for _ in range(12):
+                await pilot.pause(0.05)
+
+            assert isinstance(app.screen.focused, Editor), f"{label} took the keyboard"
+            assert app.query_one(Editor).text == draft, f"{label} disturbed the draft"
+
+            for future in futures:
+                future.cancel()
+                try:
+                    await future
+                except (asyncio.CancelledError, Exception):
+                    pass
