@@ -6119,11 +6119,11 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
 # hub — parent↔subagent messaging and control
 # ---------------------------------------------------------------------------
 # One tool, two shapes, chosen by who is being built for (see
-# ``build_hub_tool``). ONE tool rather than five (send/ask/steer/cancel/resume)
-# because they share a target and a body and differ only in intent — five
-# entries would spend five tool-schema slots and five descriptions on one
-# concept, and the model would still have to learn which of them means "and
-# wait for the answer". Named ``hub`` after the surface the same ops have in
+# ``build_hub_tool``). ONE tool rather than seven (list/send/ask/steer/pause/
+# cancel/resume) because they share a target and a body and differ only in
+# intent — seven entries would spend seven tool-schema slots and seven
+# descriptions on one concept, and the model would still have to learn which of
+# them means "and wait for the answer". Named ``hub`` after the surface the same ops have in
 # omp, whose shape this follows deliberately: ``to`` addresses one peer or
 # ``"all"``, delivery returns per-recipient receipts, and asking is a send
 # that waits.
@@ -6140,11 +6140,14 @@ class HubParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["send", "ask", "steer", "cancel", "resume"] = Field(
+    op: Literal["list", "send", "ask", "steer", "pause", "cancel", "resume"] = Field(
         description=(
-            "send: a note, no reply waited for. ask: a question, blocks for the "
-            "subagent's answer. steer: change what it is doing (becomes part of its "
-            "instructions). cancel: stop it. resume: relaunch a stopped subagent "
+            "list: every subagent you launched with its status and whether it can be "
+            "resumed — including finished, failed and paused ones the 'jobs' tool no "
+            "longer shows. send: a note, no reply waited for. ask: a question, blocks "
+            "for the subagent's answer. steer: change what it is doing (becomes part "
+            "of its instructions). pause: stop it now but keep it resumable. cancel: "
+            "stop it for good. resume: relaunch a stopped, paused or failed subagent "
             "against its own transcript so it continues where it left off."
         )
     )
@@ -6154,19 +6157,25 @@ class HubParams(BaseModel):
     # ``tool.parameters`` untouched). A construct one provider rejects would
     # fail every request in the session, not just the hub call — no builtin
     # here uses a non-nullable anyOf, and this is not the tool to be first.
-    to: list[str] = Field(
-        min_length=1,
+    # Nullable rather than absent for op='list', which addresses nobody. The
+    # anyOf this renders is the NULLABLE kind (``[array, null]``), the same
+    # shape ``message`` below has always had and the one every provider in the
+    # matrix accepts; the construct the comment above warns about is a
+    # non-nullable union of two real types.
+    to: list[str] | None = Field(
+        default=None,
         description=(
-            "Who to address: job ids from 'task'/'jobs', subagent labels, or "
-            '["all"] for every running subagent. Several ids address several '
-            "subagents. 'ask' and 'resume' take exactly one."
+            "Who to address: job ids from 'task'/'jobs'/'hub op=list', subagent "
+            'labels, or ["all"] for every running subagent. Several ids address '
+            "several subagents. 'ask' and 'resume' take exactly one. Omit for "
+            "op='list', which addresses nobody."
         ),
     )
     message: str | None = Field(
         default=None,
         description=(
             "The body. Required for send/ask/steer, and for resume (what to do next); "
-            "ignored by cancel."
+            "ignored by list/pause/cancel."
         ),
     )
     timeout_ms: int = Field(
@@ -6222,6 +6231,57 @@ def _hub_targets(comms: Any, raw: Any) -> tuple[list[str], list[str]]:
             if job_id not in ids:
                 ids.append(job_id)
     return ids, errors
+
+
+def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
+    """Render the subagent roster for ``op='list'``.
+
+    Every row states the one thing the caller acts on \u2014 whether the child can
+    be resumed \u2014 rather than leaving it to be inferred from the status, since
+    ``completed``, ``failed``, ``cancelled`` and ``paused`` are all resumable
+    while ``running`` is not, which is the opposite of the intuitive reading.
+    """
+    rows = comms.roster()
+    if not rows:
+        return _text(
+            tool_call_id,
+            "hub",
+            "no subagents launched in this session",
+            # ``useless`` is mirrored into details as well as set on the
+            # result: the flag drives the renderer, and compaction's pruning
+            # pass reads the key — the same pairing the delivery path below
+            # uses.
+            details={"op": "list", "count": 0, "useless": True},
+            useless=True,
+        )
+    lines = [f"{len(rows)} subagent(s):"]
+    for row in rows:
+        age = f", {row.age_s:.0f}s" if row.age_s is not None else ""
+        extras = "resumable" if row.resumable else (row.detail or "not resumable")
+        lines.append(f"- {row.label} ({row.job_id}): {row.status}{age} — {extras}")
+        if row.resumable and row.detail:
+            lines.append(f"    {row.detail}")
+    if any(row.resumable for row in rows):
+        lines.append("")
+        lines.append("Resume one with hub op='resume' and an instruction for what to do next.")
+    return _text(
+        tool_call_id,
+        "hub",
+        "\n".join(lines),
+        details={
+            "op": "list",
+            "count": len(rows),
+            "children": [
+                {
+                    "job_id": row.job_id,
+                    "label": row.label,
+                    "status": row.status,
+                    "resumable": row.resumable,
+                }
+                for row in rows
+            ],
+        },
+    )
 
 
 def _hub_receipt_lines(deliveries: list[Any]) -> list[str]:
@@ -6283,8 +6343,18 @@ async def _execute_hub_parent(
     except ValidationError as exc:
         return _validation_error(tool_call_id, "hub", exc)
 
-    if params.op != "cancel" and not (params.message or "").strip():
+    if params.op == "list":
+        return _hub_list(tool_call_id, comms)
+
+    if params.op not in ("cancel", "pause") and not (params.message or "").strip():
         return _error(tool_call_id, "hub", f"op='{params.op}' needs a message.")
+
+    if not params.to:
+        return _error(
+            tool_call_id,
+            "hub",
+            f"op='{params.op}' needs a 'to' target; use op='list' to see the subagents.",
+        )
 
     ids, errors = _hub_targets(comms, params.to)
     if not ids:
@@ -6340,6 +6410,8 @@ async def _execute_hub_parent(
             deliveries.append(comms.send(job_id, message))
         elif params.op == "steer":
             deliveries.append(comms.steer(job_id, message))
+        elif params.op == "pause":
+            deliveries.append(await comms.pause(job_id))
         else:
             deliveries.append(await comms.cancel(job_id))
 
@@ -6396,11 +6468,13 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
         label="Subagent hub",
         describe_approval=_describe_hub_approval,
         description=(
-            "Talk to the subagents you launched with 'task': send a note, ask one a "
-            "question and get its answer (use this to find out whether a quiet child is "
-            "stuck), steer one onto a different course, cancel one, or resume a stopped "
-            "one against its own transcript. Address them by job id, by label, or "
-            '"all".'
+            "Talk to and control the subagents you launched with 'task': list them all "
+            "with their status (including finished, failed and paused ones 'jobs' no "
+            "longer shows), send a note, ask one a question and get its answer (use "
+            "this to find out whether a quiet child is stuck), steer one onto a "
+            "different course, pause one so it can be picked up later, cancel one, or "
+            "resume a stopped, paused or failed one against its own transcript so it "
+            'continues where it left off. Address them by job id, by label, or "all".'
         ),
         parameters=HubParams.model_json_schema(),
         # Write, like 'task' and 'wake': these ops redirect, kill and restart
