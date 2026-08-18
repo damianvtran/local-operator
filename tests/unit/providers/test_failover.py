@@ -2398,3 +2398,134 @@ class TestTheTurnWideCeiling:
 
         # Reached attempt 6 rather than being capped at 3.
         assert attempts[0] == 6, attempts[0]
+
+
+class TestTheCeilingIsPerProviderNotPerTurn:
+    """R23: a chain stops being a chain if the primary spends its allowance.
+
+    The server-fault ceiling was counted across the whole turn, so a primary
+    outage consumed all of it and every fallback target got ONE attempt with no
+    retries -- a fallback that would have succeeded on its second try never got
+    one. Each target is a different service having a different day.
+    """
+
+    async def test_a_fallback_gets_a_real_budget_after_a_primary_storm(self, tmp_path: Any) -> None:
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        for i in range(4):  # enough accounts to exhaust the primary's ceiling
+            store.upsert_credential(
+                "openai",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+        store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "fallback", "refresh": "r", "expires": None},
+        )
+
+        per_provider: dict[str, int] = {}
+
+        def overloaded_then_fallback_recovers(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            provider = request.model.provider
+            per_provider[provider] = per_provider.get(provider, 0) + 1
+            # The fallback succeeds on its SECOND attempt -- it must be given one.
+            if provider == "anthropic" and per_provider[provider] >= 2:
+                return _clean_stream()
+            raise ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(overloaded_then_fallback_recovers)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request(),
+                store,
+                {
+                    "retry": {
+                        "enabled": True,
+                        "fallbackChains": {"default": ["anthropic/claude-opus-5"]},
+                    }
+                },
+                client_for,
+                session_id="s",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert per_provider.get("anthropic", 0) >= 2, per_provider
+
+
+class TestARestoredBudgetIsTheConfiguredOne:
+    """R24: the restore-once path must express the budget the user asked for.
+
+    Zeroing the counter but re-entering the predicate as "not yet rotated"
+    re-capped the restored pass at the first-bearer allowance: a lone credential
+    got the same 8 requests whatever `maxRetries` said -- short of a configured
+    10, and double a configured 2. Wrong in both directions, which is the tell
+    that the mechanism was not saying what it meant.
+    """
+
+    @staticmethod
+    async def _requests_for(store: Any, max_retries: int) -> int:
+        attempts = [0]
+
+        def always_500(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts[0] += 1
+            raise ProviderError(500, "blip", retryable=True)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(always_500)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                async for _ in stream_with_failover(
+                    _request(),
+                    store,
+                    {"retry": {"enabled": True, "maxRetries": max_retries}},
+                    client_for,
+                    session_id="s",
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+        return attempts[0]
+
+    async def test_a_lone_credential_scales_with_the_configured_budget(self, tmp_path: Any) -> None:
+        """The point is that it MOVES with the setting; the earlier form
+        returned the same number for every value."""
+        from local_operator.providers.auth_store import AuthStore
+
+        counts = []
+        for max_retries in (2, 4, 10):
+            store = AuthStore(db_path=tmp_path / f"auth-{max_retries}.db")
+            store.upsert_credential(
+                "openai",
+                {"type": "oauth", "access": "only", "refresh": "r", "expires": None},
+            )
+            counts.append(await self._requests_for(store, max_retries))
+
+        assert counts[0] < counts[1] < counts[2], counts
+        # And a lone credential rides out a blip that clears late, as it did
+        # before any of this work (main recovered through attempt 11).
+        assert counts[2] >= 11, counts

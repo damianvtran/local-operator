@@ -793,10 +793,13 @@ MAX_SAME_CREDENTIAL_USAGE_RETRIES = 2
 # observed rather than predicted.
 MAX_SAME_CREDENTIAL_SERVER_RETRIES = 2
 
-#: Hard ceiling on the requests ONE turn will aim at a provider for server-side
-#: faults, across every credential it rotates through. The per-credential cap
-#: above bounds each account; this bounds their PRODUCT, which is the quantity
-#: that actually reaches the provider. Without it, widening rotation to walk the
+#: Hard ceiling on the requests one turn will aim at ONE PROVIDER for
+#: server-side faults, across every credential it rotates through. The
+#: per-credential cap above bounds each account; this bounds their PRODUCT,
+#: which is the quantity that actually reaches that provider. Counted per
+#: fallback target, because each target is a different service: rationing the
+#: fallback for the primary's outage is how a chain stops being a chain.
+#: Without it, widening rotation to walk the
 #: whole pool multiplied the load by the pool size at exactly the moment the
 #: provider was asking for less: 44 requests over ~190s for four accounts,
 #: measured, against 22 before. Twelve keeps a four-account pool walkable (each
@@ -829,6 +832,7 @@ def _same_credential_retry_allowed(
     retry: "RetrySettings",
     *,
     has_rotated: bool = False,
+    rotation_exhausted: bool = False,
     server_fault_requests: int = 0,
 ) -> bool:
     if not error.retryable:
@@ -856,6 +860,13 @@ def _same_credential_retry_allowed(
         # per-credential allowance and the turn moves on. `has_untried_sibling`
         # is the driver's OBSERVATION that rotation is still producing new
         # bearers, not a prediction from the credential table.
+        if rotation_exhausted:
+            # Rotation has been tried and there is no other credential, so the
+            # small allowances below -- which exist ONLY to get a turn moving to
+            # another account -- have nothing left to buy. The bearer in hand
+            # gets exactly the budget the user configured: no more (it was
+            # asked for) and no less (it is all there is).
+            return transport_retries < retry.max_retries
         if has_rotated:
             return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_SERVER_RETRIES)
         # Not yet rotated. The first bearer gets a SMALL allowance rather than
@@ -1316,11 +1327,6 @@ async def stream_with_failover(
 
     reported: ProviderError | None = None
     reported_score = -1
-    # Requests this turn has aimed at a provider that answered with a
-    # server-side fault, counted across every credential AND every fallback
-    # target: the ceiling is about what the provider receives, not about how
-    # the attempts were distributed.
-    server_fault_requests = 0
     clients: dict[tuple[str, str | None], "WireClient"] = {}
     rng = random.Random()
 
@@ -1379,6 +1385,16 @@ async def stream_with_failover(
         current_token: str | None = None
         transport_retries = 0
         retry_same_key = False
+        # Requests aimed at THIS target's provider that came back a server-side
+        # fault, counted across every credential it rotates through.
+        #
+        # Per target, not per turn. A turn-wide counter let the primary's storm
+        # spend the whole allowance and leave each fallback a single attempt
+        # with no retries -- so a fallback that would have succeeded on its
+        # second try never got one, which defeats the entire point of having a
+        # chain. Each provider is a different service having a different day,
+        # and the ceiling is about what ONE provider receives.
+        server_fault_requests = 0
         # The last credential that actually produced a bearer, and whether its
         # configured budget has already been handed back once rotation ran out.
         last_access: "OAuthAccess | None" = None
@@ -1419,7 +1435,11 @@ async def stream_with_failover(
                     ):
                         exhausted_budget_restored = True
                         access = last_access
-                        transport_retries = 0
+                        # `transport_retries` is deliberately NOT reset: the
+                        # attempts already spent on this bearer are part of the
+                        # budget the user configured, so carrying them makes the
+                        # TOTAL exactly `max_retries` rather than the allowance
+                        # plus a second full budget on top.
                         error = None
                     else:
                         break  # rotation exhausted for this provider
@@ -1488,6 +1508,7 @@ async def stream_with_failover(
                     # different bearer for this request? See
                     # `_rotation_has_produced_a_sibling`.
                     has_rotated=_request_has_rotated(state),
+                    rotation_exhausted=exhausted_budget_restored,
                     server_fault_requests=server_fault_requests,
                 ):
                     # 5xx/network-style failures use the configured budget.
@@ -1543,6 +1564,7 @@ async def stream_with_failover(
                     transport_retries,
                     retry,
                     has_rotated=_request_has_rotated(state),
+                    rotation_exhausted=exhausted_budget_restored,
                     server_fault_requests=server_fault_requests,
                 ):
                     transport_retries += 1
