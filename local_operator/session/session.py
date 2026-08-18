@@ -514,6 +514,14 @@ class Session:
         #: delegated to it. Held here for the ``_build_tool_context`` reason
         #: above: a rebuilt context must keep pointing at the same instance.
         subagent_comms: Any | None = None,
+        #: The user's persistent agent registry, when the host keeps one. Two
+        #: readers: the ``agent`` tool (list/author role profiles) and role
+        #: resolution for ``task(agent=...)``. Held on the session for the
+        #: ``_build_tool_context`` reason above, and typed ``Any`` to keep the
+        #: heavy ``local_operator.agents`` module out of this import graph.
+        #: ``None`` means no registry: the ``agent`` tool is not advertised and
+        #: delegation falls back to the packaged starter profiles.
+        agent_registry: Any | None = None,
         conversation_name: ConversationName | None = None,
         system_blocks_provider: Callable[[], list[str]] | Callable[[], Awaitable[list[str]]],
     ) -> None:
@@ -535,6 +543,7 @@ class Session:
         self._variables = variables
         self._job_id = job_id
         self._subagent_comms = subagent_comms
+        self.agent_registry = agent_registry
         # The conversation's title. A holder rather than a plain string for
         # the same reason the goal is one: the title arrives on a DETACHED
         # naming task after the host already built its status chrome, and
@@ -1571,6 +1580,7 @@ class Session:
             subagent_comms=self.subagent_comms,
             variables=self._variables,
             job_id=self._job_id,
+            agent_registry=self.agent_registry,
             delegated_tools={
                 tool.name: tool for tool in self._tools if tool.name.startswith("mcp__")
             },
@@ -1606,8 +1616,25 @@ class Session:
         )
 
     def _resolve_subagent_model(self, agent: str, effort: str | None) -> ModelSpec | None:
-        """Effort tier -> ModelSpec via config; None keeps the parent's model."""
-        wanted = effort or ("lo" if agent == "scout" else None)
+        """Effort tier -> ModelSpec via config; None keeps the parent's model.
+
+        Precedence: an explicit ``effort`` on the launch beats the role's own
+        default, which beats the session model. That order is what lets a role
+        say "this job is usually cheap" while a caller who knows this instance
+        is hard can still pay for the better model.
+        """
+        wanted = effort
+        if wanted is None and agent and agent != "task":
+            try:
+                from local_operator.agent_profiles import resolve_profile
+
+                profile = resolve_profile(agent, registry=self.agent_registry)
+            except Exception:  # noqa: BLE001 - tier lookup must not fail a spawn
+                profile = None
+            if profile is not None:
+                wanted = profile.effort
+        if wanted is None and agent == "scout":
+            wanted = "lo"
         if wanted is None:
             return None
         try:
