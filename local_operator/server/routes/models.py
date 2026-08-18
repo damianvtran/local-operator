@@ -21,6 +21,7 @@ from local_operator.model.registry import (
     SupportedHostingProviders,
     anthropic_models,
     deepseek_models,
+    glm_models,
     google_models,
     kimi_models,
     mistral_models,
@@ -329,6 +330,16 @@ async def list_models(
                     )
             elif provider_detail.id == "xai":
                 for model_name, model_info in xai_models.items():
+                    models.append(
+                        ModelEntry(
+                            id=model_name,
+                            name=model_info.name,
+                            provider=provider_detail.id,
+                            info=model_info,
+                        )
+                    )
+            elif provider_detail.id == "zai":
+                for model_name, model_info in glm_models.items():
                     models.append(
                         ModelEntry(
                             id=model_name,

@@ -292,7 +292,7 @@ def test_usage_enabled_provider_ids(controller) -> None:
     ids = controller.usage_enabled_providers()
     assert "openrouter" in ids
     assert "deepseek" in ids
-    assert "zai" not in ids, "unreachable: no ProviderDefinition exists for it"
+    assert "zai" in ids, "reachable: ProviderDefinition, credential path and fetcher all exist"
     assert ids == sorted(ids)
 
 

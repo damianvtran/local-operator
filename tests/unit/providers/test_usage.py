@@ -9,6 +9,7 @@ exercised through it.
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Any
 
@@ -47,6 +48,57 @@ def _recording_client(payload, status: int = 200) -> tuple[httpx.AsyncClient, li
         return httpx.Response(status, json=payload)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler)), urls
+
+
+def test_num_never_yields_a_value_that_crashes_downstream() -> None:
+    """``_num`` is the single coercion boundary all nine fetchers share, so its
+    contract is what keeps "a quota fetcher never raises" true for fields nobody
+    has thought of yet.
+
+    Pinned at this level rather than only through one provider because the
+    guarantee is module-wide: a caller is entitled to assume anything `_num`
+    returns can be compared, formatted, and passed to ``int()``. ``json.loads``
+    accepts bare ``NaN``/``Infinity``, and an integer literal can exceed float
+    range (``10**400`` parses, then raises ``OverflowError`` on conversion) —
+    all of which must become ``None`` rather than a value that detonates later.
+    """
+    from local_operator.providers.usage import _num
+
+    # Unusable inputs become None...
+    for bad in (
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        10**400,
+        -(10**400),
+        "abc",
+        "",
+        None,
+        [],
+        {},
+        object(),
+    ):
+        assert _num(bad) is None, bad
+
+    # ...and everything returned survives the operations callers perform on it:
+    # `int()` (which is what raised before), formatting, and comparison. NaN
+    # would pass an `int()` check by raising, so the finiteness is asserted
+    # directly rather than implied by an always-true comparison.
+    for good, expected in (
+        (0, 0.0),
+        (-5, -5.0),
+        (3.14, 3.14),
+        ("42", 42.0),
+        ("3.5", 3.5),
+        (1787009983644, 1787009983644.0),
+        (10**15, 1e15),
+    ):
+        value = _num(good)
+        assert value == expected
+        assert math.isfinite(value)  # type: ignore[arg-type]
+        assert isinstance(int(value), int)  # type: ignore[arg-type]
+
+    assert _num(None, 7.0) == 7.0
 
 
 def test_usage_health_shared_window_reaches_reserve() -> None:
@@ -263,6 +315,327 @@ async def test_deepseek_reports_a_balance_per_currency() -> None:
     units = {lim.id: lim.amount.unit for lim in report.limits}
     assert units["deepseek:balance:cny"] == "unknown"
     assert units["deepseek:balance:usd"] == "usd"
+
+
+#: A REAL Z.AI coding-plan quota body, captured from
+#: `GET https://api.z.ai/api/monitor/usage/quota/limit` on 2026-08-17. Pinned
+#: verbatim because the shape is the whole contract here: the TOKENS_LIMIT rows
+#: carry ONLY a percentage (no absolute counts), and TIME_LIMIT inverts the
+#: obvious reading of its fields — `usage` is the limit, `currentValue` the
+#: amount consumed. An invented payload would have hidden both.
+_ZAI_QUOTA_PAYLOAD: dict[str, Any] = {
+    "code": 200,
+    "msg": "Operation successful",
+    "data": {
+        "limits": [
+            {
+                "type": "TOKENS_LIMIT",
+                "unit": 3,
+                "number": 5,
+                "percentage": 12,
+                "nextResetTime": 1787009983644,
+            },
+            {
+                "type": "TOKENS_LIMIT",
+                "unit": 6,
+                "number": 1,
+                "percentage": 42,
+                "nextResetTime": 1787542072998,
+            },
+            {
+                "type": "TIME_LIMIT",
+                "unit": 5,
+                "number": 1,
+                "usage": 4000,
+                "currentValue": 0,
+                "remaining": 4000,
+                "percentage": 0,
+                "nextResetTime": 1789615672998,
+                "usageDetails": [
+                    {"modelCode": "search-prime", "usage": 0},
+                    {"modelCode": "web-reader", "usage": 0},
+                    {"modelCode": "zread", "usage": 0},
+                ],
+            },
+        ],
+        "level": "max",
+    },
+    "success": True,
+}
+
+
+@pytest.mark.asyncio
+async def test_zai_reports_token_and_feature_windows() -> None:
+    """The coding plan quotes token windows as a bare percentage, so the report is
+    built from the fraction rather than inventing token counts to display."""
+    client = _client_for(_ZAI_QUOTA_PAYLOAD)
+    async with client:
+        report = await fetch_usage(client, "zai", api_key="zai-key")
+    assert report is not None
+    ids = [lim.id for lim in report.limits]
+    assert ids == ["zai:tokens:5hour", "zai:tokens:1week", "zai:features:zread:1month"]
+
+    five_hour = report.limits[0]
+    assert five_hour.amount.fraction() == pytest.approx(0.12)
+    # No absolute counts in the payload, so the renderer is told to speak percent.
+    assert five_hour.amount.unit == "percent"
+    assert five_hour.amount.used is None
+    assert five_hour.shared is True
+    assert five_hour.resets_at_ms == 1787009983644
+    assert report.notes == "coding plan: max"
+
+
+@pytest.mark.asyncio
+async def test_zai_zread_bucket_is_a_tier_not_the_account_cap() -> None:
+    """Exhausting the search/web-reader/zread bucket stops those tools, not the
+    plan, so it must not be rendered as the umbrella limit that gates every
+    request."""
+    client = _client_for(_ZAI_QUOTA_PAYLOAD)
+    async with client:
+        report = await fetch_usage(client, "zai", api_key="zai-key")
+    assert report is not None
+    zread = report.limits[-1]
+    assert zread.tier == "zread"
+    assert zread.shared is False
+    # TIME_LIMIT inverts the field names: `usage` is the limit, not the usage.
+    assert zread.amount.limit == 4000
+    assert zread.amount.used == 0
+    assert zread.amount.unit == "requests"
+
+
+@pytest.mark.asyncio
+async def test_zai_hostile_window_fields_do_not_raise() -> None:
+    """A quota fetcher must never raise: the caller drops a ``None`` report, but
+    an exception escapes to the UI.
+
+    ``json.loads`` accepts bare ``NaN``/``Infinity``, and ``int()`` rejects both
+    (ValueError / OverflowError) — so a vendor could crash the usage panel with
+    a field that is only ever read to build a LABEL. A quoted ``"unit"`` must
+    also still resolve its window name rather than silently degrading.
+    """
+    # Served as RAW BYTES, not through the JSON-encoding helper: `json.dumps`
+    # refuses to emit NaN/Infinity, so round-tripping the payload would destroy
+    # the very values under test. This is what the vendor can actually put on
+    # the wire — `json.loads` parses both without complaint.
+    body = b"""
+        {"success": true, "code": 200, "data": {"limits": [
+            {"type": "TOKENS_LIMIT", "unit": NaN, "number": 5, "percentage": 10},
+            {"type": "TOKENS_LIMIT", "unit": Infinity, "number": NaN, "percentage": 20},
+            {"type": "TOKENS_LIMIT", "unit": "3", "number": "5", "percentage": 30}
+        ]}}
+        """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(client, "zai", api_key="zai-key")
+    assert report is not None
+    # Unmappable units degrade to the generic label; a quoted unit still maps.
+    # Only TWO rows survive: both unmappable rows generate the id
+    # `zai:tokens:quota`, and the dedupe keeps the first rather than rendering
+    # two identical panel rows.
+    labels = [lim.label for lim in report.limits]
+    assert labels == ["Token quota (quota)", "Token quota (5 hour)"]
+    assert [lim.id for lim in report.limits] == ["zai:tokens:quota", "zai:tokens:5hour"]
+
+
+@pytest.mark.asyncio
+async def test_zai_never_raises_on_any_hostile_numeric_field() -> None:
+    """The never-raise contract, enforced over the whole cross-product.
+
+    A previous round fixed the two call sites a review happened to quote and
+    left the defect class open: `nextResetTime` still crashed on Infinity, and
+    an oversized integer (``10**400`` parses, then raises ``OverflowError`` on
+    `float()`) took out every numeric field at once. Testing one field with one
+    bad value is what let that through, so this walks every field with every
+    hostile value rather than trusting a spot check.
+    """
+    nasty: list[Any] = [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        10**400,
+        -(10**400),
+        -1,
+        "3",
+        "abc",
+        "",
+        None,
+        True,
+        [],
+        {},
+    ]
+    fields = ["unit", "number", "percentage", "usage", "currentValue", "remaining", "nextResetTime"]
+    for row_type in ("TOKENS_LIMIT", "TIME_LIMIT"):
+        for field in fields:
+            for value in nasty:
+                row: dict[str, Any] = {
+                    "type": row_type,
+                    "unit": 3,
+                    "number": 1,
+                    "percentage": 10,
+                    field: value,
+                }
+                payload = {"success": True, "data": {"limits": [row]}}
+                # `allow_nan=True` + raw bytes: the strict encoder in
+                # `_client_for` refuses NaN/Infinity, which would quietly drop
+                # the values this test exists to exercise.
+                body = json.dumps(payload, allow_nan=True, default=str).encode()
+
+                def handler(request: httpx.Request, _body: bytes = body) -> httpx.Response:
+                    return httpx.Response(
+                        200, content=_body, headers={"content-type": "application/json"}
+                    )
+
+                client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+                async with client:
+                    # The assertion is that this line returns at all.
+                    await fetch_usage(client, "zai", api_key="k")
+
+    # The ENVELOPE shapes, not just the leaf values. The numeric sweep above
+    # feeds well-formed containers, so the `isinstance` guards on `data`, on
+    # `limits`, and on each row were load-bearing with nothing standing over
+    # them: dropping the `data`-is-a-dict or the row-is-a-dict check turns a
+    # hostile body into an AttributeError rather than a dropped report, and no
+    # test noticed.
+    for envelope in (
+        {"success": True, "data": "nope"},
+        {"success": True, "data": [1, 2]},
+        {"success": True, "data": None},
+        {"success": True, "data": {"limits": "nope"}},
+        {"success": True, "data": {"limits": None}},
+        {"success": True, "data": {"limits": ["nope", 3, None]}},
+        {"success": True, "data": {}},
+    ):
+        client = _client_for(envelope)
+        async with client:
+            assert await fetch_usage(client, "zai", api_key="k") is None, envelope
+
+
+@pytest.mark.asyncio
+async def test_zai_feature_bucket_is_the_breakdown_with_no_chat_model() -> None:
+    """The classification must survive Z.AI changing its own feature codes.
+
+    Every positive test is a maintenance dependency on a vendor enum: requiring
+    all known codes breaks on a rename, and requiring a SUBSET of them breaks on
+    a rename *and* on an addition. Both fail toward ``shared=True``, which
+    `usage_health` applies to every model — so a user with most of their token
+    quota intact is told the account is depleted because the vendor shipped a
+    new tool. The cases below are therefore mostly about codes this code has
+    never seen; the live shape is the easy one.
+    """
+
+    async def classify(codes: list[str]) -> UsageLimit:
+        payload = {
+            "success": True,
+            "data": {
+                "limits": [
+                    {
+                        "type": "TIME_LIMIT",
+                        "unit": 5,
+                        "number": 1,
+                        "usage": 100,
+                        "currentValue": 1,
+                        "usageDetails": [{"modelCode": c, "usage": 0} for c in codes],
+                    }
+                ]
+            },
+        }
+        client = _client_for(payload)
+        async with client:
+            report = await fetch_usage(client, "zai", api_key="k")
+        assert report is not None
+        return report.limits[0]
+
+    # The live shape today.
+    assert (await classify(["search-prime", "web-reader", "zread"])).tier == "zread"
+    # The bucket shrinks to one feature.
+    assert (await classify(["zread"])).tier == "zread"
+    # Z.AI ADDS a tool code we have never seen. A subset-of-known test fails
+    # here and marks the row shared; this must stay a tier.
+    added = await classify(["search-prime", "web-reader", "zread", "deep-research"])
+    assert added.tier == "zread"
+    assert added.shared is False
+    # Z.AI RENAMES every feature code. Still no chat model, so still a tier.
+    renamed = await classify(["search-prime-v2", "web-reader-v2", "zread-v2"])
+    assert renamed.tier == "zread"
+    assert renamed.shared is False
+
+    # An account-wide cap whose breakdown mentions a feature alongside real chat
+    # models is NOT the feature bucket, and must stay shared or the health check
+    # that should gate the account skips it.
+    mixed = await classify(["glm-5.3", "zread"])
+    assert mixed.tier == ""
+    assert mixed.shared is True
+    # A cap denominated in a model that does not exist yet: the shape test has
+    # to catch it, because the registry cannot.
+    future = await classify(["glm-6.0", "zread"])
+    assert future.tier == ""
+    assert future.shared is True
+    # Chat models only, and no breakdown at all: both the plain request cap.
+    assert (await classify(["glm-5.3", "glm-4.6"])).shared is True
+    # Vendor strings are not identifiers we mint, so a capitalised or padded
+    # model id is still a model id — a classification that turned on case would
+    # silently demote a real account cap to a tier.
+    assert (await classify(["GLM-5.3", "zread"])).shared is True
+    assert (await classify([" glm-5.3 ", "zread"])).shared is True
+    plain = await classify([])
+    assert plain.tier == ""
+    assert plain.shared is True
+
+
+@pytest.mark.asyncio
+async def test_zai_labels_fit_the_usage_panel_label_column() -> None:
+    """A label the panel cannot render is a window the user can never read.
+
+    The panel caps its label column at a third of its content width, and the
+    panel itself is capped at ``PANEL_MAX_WIDTH``, so the ceiling is a constant
+    24 cells no matter how wide the terminal is. `Zread feature quota (1 month)`
+    needed 31 and truncated mid-parenthesis at EVERY width, leaving the only row
+    on the panel whose reset period was unavailable. Pinned here rather than in
+    the TUI tests because the label is written in this module.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.tui.widgets.usage_panel import (
+        PANEL_MAX_WIDTH,
+        PANEL_PADDING_CELLS,
+        TIER_INDENT,
+    )
+
+    cap = max(12, (PANEL_MAX_WIDTH - PANEL_PADDING_CELLS) // 3)
+    client = _client_for(_ZAI_QUOTA_PAYLOAD)
+    async with client:
+        report = await fetch_usage(client, "zai", api_key="zai-key")
+    assert report is not None
+    for limit in report.limits:
+        width = cell_len(limit.label) + (len(TIER_INDENT) if limit.tier else 0)
+        assert width <= cap, f"{limit.label!r} needs {width} cells, panel caps at {cap}"
+
+
+@pytest.mark.asyncio
+async def test_zai_business_failure_on_a_200_is_not_a_report() -> None:
+    """The envelope reports business-level failure with an HTTP 200, so a
+    successful transport is not by itself a usable quota reading.
+
+    The payload deliberately carries a FULL, well-formed ``data.limits`` block
+    that would parse into real rows if it were trusted. An unsuccessful body
+    with no ``data`` key would bail at the later structural guard instead, so
+    the test would pass with the envelope check deleted and prove nothing.
+    """
+    client = _client_for(
+        {
+            "code": 401,
+            "msg": "unauthorized",
+            "success": False,
+            "data": _ZAI_QUOTA_PAYLOAD["data"],
+        }
+    )
+    async with client:
+        report = await fetch_usage(client, "zai", api_key="bad")
+    assert report is None
 
 
 @pytest.mark.asyncio
@@ -760,10 +1133,10 @@ def test_usage_supported() -> None:
     assert usage_supported("openrouter") is True
     assert usage_supported("deepseek") is True
     assert usage_supported("nonsense") is False
-    # `zai` had a working fetcher and no ProviderDefinition, so no code path could
-    # ever supply its credential: `/login zai` raised, its env var was never read,
-    # and the set advertised a provider nobody could reach.
-    assert usage_supported("zai") is False
+    # `zai` previously had a working fetcher and no ProviderDefinition, so no code
+    # path could ever supply its credential. It is supported now because the
+    # registry entry, the credential path and the fetcher landed together.
+    assert usage_supported("zai") is True
 
 
 def test_usage_kinds_distinguishes_no_endpoint_from_no_credential() -> None:
@@ -789,7 +1162,7 @@ def test_the_advertised_set_is_the_dispatch_table() -> None:
     from local_operator.providers import usage as usage_mod
 
     assert usage_mod.USAGE_PROVIDERS == frozenset(usage_mod._FETCHERS)
-    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 10
+    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 11
     assert not hasattr(usage_mod, "OAUTH_USAGE_PROVIDERS")
 
 
