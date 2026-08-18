@@ -432,8 +432,8 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
         )
     if installed is None:
         return _error(tool_call_id, "agent", f"could not install starter {name!r}")
-    profile, already_there = installed
-    if already_there:
+    profile, already_installed = installed
+    if already_installed:
         # Say the no-op out loud. `install` is the only verb here that sounds
         # like "put the shipped one back", so answering "installed" to a
         # deliberate skip leaves an operator believing they restored the

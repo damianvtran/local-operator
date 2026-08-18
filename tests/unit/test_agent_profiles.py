@@ -194,8 +194,8 @@ class TestInstall:
         registry = AgentRegistry(tmp_path)
         result = install_seed("reviewer", registry=registry)
         assert result is not None
-        profile, already_there = result
-        assert profile.agent_id and not already_there
+        profile, already_installed = result
+        assert profile.agent_id and not already_installed
         agent = registry.get_agent_by_name("reviewer")
         assert agent is not None
         assert "role" in agent.tags
@@ -207,14 +207,14 @@ class TestInstall:
         registry = AgentRegistry(tmp_path)
         first_result = install_seed("reviewer", registry=registry)
         assert first_result is not None
-        first, first_already = first_result
-        assert not first_already
+        first, first_already_installed = first_result
+        assert not first_already_installed
         registry.set_agent_system_prompt(str(first.agent_id), "EDITED")
 
         second_result = install_seed("reviewer", registry=registry)
         assert second_result is not None
-        second, second_already = second_result
-        assert second_already, "a second install is a deliberate no-op and must say so"
+        second, second_already_installed = second_result
+        assert second_already_installed, "a second install is a deliberate no-op and must say so"
         assert second.agent_id == first.agent_id
         assert second.instructions == "EDITED"
         assert len([a for a in registry.list_agents() if a.name == "reviewer"]) == 1

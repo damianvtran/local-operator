@@ -410,7 +410,7 @@ def install_seed(
     registry: "AgentRegistry",
     overwrite: bool = False,
 ) -> tuple[AgentProfile, bool] | None:
-    """Copy a packaged seed into the registry; return ``(profile, was_already_there)``.
+    """Copy a packaged seed into the registry; return ``(profile, already_installed)``.
 
     The second element is why this returns a tuple: the caller has to be able
     to tell "I installed it" from "it was already there and I left it alone",
