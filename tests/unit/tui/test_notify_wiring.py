@@ -754,3 +754,91 @@ async def test_a_later_batch_is_not_masked_by_the_previous_ones_ids() -> None:
         app.on_subagent_ended(SubagentEnded(job_id="j2", label="b", status="completed"))
         await pilot.pause()
     assert notifier.calls[before:] == []  # `j1` still running: correctly silent
+
+
+@pytest.mark.asyncio
+async def test_the_handled_set_is_empty_whenever_a_deferral_arms() -> None:
+    """Round 6, N6. The safety invariant behind `_settled_child_ids`.
+
+    The set is cleared in four places — on delivery, on a fresh deferral, at a
+    turn boundary and on session reload — and those clears mutually mask under
+    mutation, so removing any one of them left the suite green while the shipped
+    code stayed correct only by redundancy. What actually matters is the
+    invariant they collectively maintain: **an arming deferral must never carry
+    ids from an earlier one**, or the next batch's guard skips a child that is
+    genuinely still running (the B2 false finish, arriving through the
+    exclusion instead of through the count).
+
+    Asserted directly, across the interleavings that reach the arming point by
+    different routes, so a future editor who removes a clear breaks a test that
+    names the property rather than one that happens to notice.
+    """
+    from local_operator.tui.events import SubagentEnded, TurnStarted
+
+    session = JobsSession(running_tasks=2)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+
+        # Route 1: deferral armed by a turn ending with children live.
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        assert app._completion_deferred is True
+        assert app._settled_child_ids == set()
+
+        # Handle one child, then arm a FRESH deferral from a new turn: the
+        # previous batch's id must not survive into it.
+        app.on_subagent_ended(SubagentEnded(job_id="j1", label="a", status="completed"))
+        await pilot.pause()
+        app.on_turn_started(TurnStarted())
+        assert app._settled_child_ids == set()
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        assert app._completion_deferred is True
+        assert app._settled_child_ids == set()
+
+        # Route 2: through delivery. Drain the batch, then arm again.
+        session.running_tasks = 2
+        for job_id in ("j1", "j2"):
+            app.on_subagent_ended(SubagentEnded(job_id=job_id, label=job_id, status="completed"))
+        await pilot.pause()
+        assert app._completion_deferred is False
+        assert app._settled_child_ids == set()
+        app.on_turn_started(TurnStarted())
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        assert app._settled_child_ids == set()
+
+
+@pytest.mark.asyncio
+async def test_a_deferral_armed_without_a_turn_boundary_starts_empty() -> None:
+    """Round 6, N6, second half: the clear on the ARMING path specifically.
+
+    The four clear points mask one another — a deferral usually re-arms after a
+    turn boundary that has already emptied the set, so removing the clear on
+    the arming path alone leaves every other test green. This reaches the
+    arming point WITHOUT an intervening boundary (a job result re-enters and
+    settles the turn directly), which is the one route where the arming clear
+    is the only thing standing between a stale id and a false finish.
+    """
+    from local_operator.tui.events import SubagentEnded
+
+    session = JobsSession(running_tasks=2)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        # `j1` is handled; its id is now in the set and the manager has not
+        # settled it, so the row is still listed.
+        app.on_subagent_ended(SubagentEnded(job_id="j1", label="a", status="completed"))
+        await pilot.pause()
+        assert app._settled_child_ids == {"j1"}
+        # Another turn settles with both children still live and NO boundary in
+        # between. If `j1` survived into this deferral, the guard would count
+        # only `j2`, and `j2`'s end would then announce a finish over a child
+        # that is still running.
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        assert app._settled_child_ids == set()
+        before = len(notifier.calls)
+        app.on_subagent_ended(SubagentEnded(job_id="j2", label="b", status="completed"))
+        await pilot.pause()
+    assert notifier.calls[before:] == []  # `j1` still running: correctly silent
