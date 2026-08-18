@@ -42,6 +42,9 @@ ECHO_POLICY = {
     "new": False,
     "reload": False,
     "resume": False,
+    # The label of the conversation, not words the model is told: the receipt
+    # quotes the title that ended up in force, which is more than what was typed.
+    "rename": False,
     "model": False,
     # A setting, not words the model is told: the receipt names the level that
     # is now in force and the band carries it from then on.

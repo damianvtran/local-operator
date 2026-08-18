@@ -127,6 +127,13 @@ async def _booted_gate(
     process installed its handler at ~0.39s and every later one at ~0.30s — so
     each of these tests passed when the file ran whole and failed when run
     alone, on `main` as much as here.
+
+    Paired with :func:`_boot` rather than replacing it, because they wait on two
+    different facts and a caller here needs both. `_boot` waits for the app to
+    ADOPT a session, which is what a submit needs; this waits for that session's
+    approval GATE to be installed, which is what an approval test needs, and the
+    gate is installed after the adoption. Calling only one leaves the other
+    race open.
     """
     for _ in range(100):
         if session.approval_handler is not None:
@@ -138,6 +145,34 @@ async def _booted_gate(
 def rows(app: OperatorApp) -> list[str]:
     """The painted frame as plain text, one entry per row."""
     return [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+
+
+async def _boot(pilot: Any, app: OperatorApp) -> None:
+    """Wait for the session to be ADOPTED, rather than for a fixed duration.
+
+    Every test here begins by submitting into a booted app, and the boot is
+    asynchronous: ``OperatorApp`` awaits a session factory and adopts the result.
+    Waiting a flat ``pause(0.25)`` for that assumed a duration nothing enforces
+    — measured on this machine, adoption takes ~0.03s on a warm run and **2.3s**
+    on a cold one (first import of the session graph). On the cold run the first
+    submit landed before ``self._session`` existed, was dropped on the floor, and
+    the test failed on an assertion two lines later with no hint that the boot
+    was the cause: ``assert [] == ['first task']``.
+
+    That made the whole file load-dependent. It failed deterministically on a
+    cold cache and passed on a warm one, which is exactly the shape that reads as
+    "flaky" and gets re-run instead of fixed.
+
+    Polls the same condition the app's own readiness depends on, with a generous
+    ceiling: the ceiling is a deadlock guard, not a timing assumption, so a slow
+    machine costs nothing and a genuinely broken boot still fails rather than
+    hanging.
+    """
+    for _ in range(400):
+        if app._session is not None:
+            return
+        await pilot.pause()
+    raise AssertionError("the app never adopted a session")
 
 
 async def _submit(pilot: Any, app: OperatorApp, text: str) -> None:
@@ -157,7 +192,7 @@ async def test_mid_turn_submit_steers_instead_of_prompting() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         await _submit(pilot, app, "first task")
         assert session.prompts == ["first task"]
 
@@ -182,7 +217,7 @@ async def test_escape_stops_a_running_turn() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
 
         editor = app.query_one(Editor)
         editor.text = "kept"
@@ -214,7 +249,7 @@ async def test_empty_assistant_message_mounts_no_block() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         await _submit(pilot, app, "make a game")
         app.post_message(TurnStarted())
         app.post_message(AssistantMessageStart())
@@ -252,6 +287,7 @@ async def test_approval_prompt_resolves_from_a_keystroke() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         pending = asyncio.ensure_future(ask("bash", "run: rm -rf /tmp/x"))
         # Waited on the CONDITION, not a duration. The card takes focus on
@@ -291,6 +327,7 @@ async def test_n_denies_one_tool_and_lets_the_turn_continue() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         session.streaming = True
         pending = asyncio.ensure_future(ask("write", "write: /etc/hosts"))
@@ -313,6 +350,7 @@ async def test_escape_denies_the_prompt_and_stops_the_turn() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         session.streaming = True
         first = asyncio.ensure_future(ask("write", "write: /etc/hosts"))
@@ -334,6 +372,7 @@ async def test_allow_all_latches_for_the_session() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         first = asyncio.ensure_future(ask("bash", "run: make"))
         await pilot.pause(0.3)
@@ -360,6 +399,7 @@ async def test_interrupt_denies_a_parked_approval() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         session.streaming = True
         pending = asyncio.ensure_future(ask("bash", "run: sleep 99"))
@@ -376,6 +416,7 @@ async def test_clearing_the_transcript_settles_a_pending_approval() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         pending = asyncio.ensure_future(ask("bash", "run: make"))
         await pilot.pause(0.3)
@@ -398,7 +439,7 @@ async def test_escape_closes_an_open_picker_before_it_stops_anything() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         session.streaming = True  # a stop IS available, so precedence is observable
 
         editor = app.query_one(Editor)
@@ -432,6 +473,7 @@ async def test_a_queued_ask_is_denied_rather_than_re_asked_after_a_stop() -> Non
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         session.streaming = True
         first = asyncio.ensure_future(ask("bash", "run: one"))
@@ -458,6 +500,7 @@ async def test_allow_all_is_seen_by_an_already_queued_ask() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         first = asyncio.ensure_future(ask("bash", "run: one"))
         second = asyncio.ensure_future(ask("write", "write: two"))
@@ -481,6 +524,7 @@ async def test_lowercase_a_does_not_disarm_the_gate() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         pending = asyncio.ensure_future(ask("bash", "run: one"))
         for _ in range(100):
@@ -516,16 +560,18 @@ async def test_approvals_command_restores_prompting() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         app._run_slash_command("/approvals auto")
         await pilot.pause(0.1)
         assert app._approve_all is True
-        assert any("auto-approve" in row for row in rows(app))  # band says so
+        # The band's alarm is a bare `!` in the trailing cell now — the session
+        # name took the words that used to be there.
+        assert any(row.rstrip().endswith("!") for row in rows(app))
 
         app._run_slash_command("/approvals ask")
         await pilot.pause(0.1)
         assert app._approve_all is False
-        assert not any("auto-approve" in row for row in rows(app))
+        assert not any(row.rstrip().endswith("!") for row in rows(app))
         # And the gate really asks again.
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: x"))
         await pilot.pause(0.3)
@@ -552,7 +598,7 @@ async def test_ctrl_c_twice_exits_and_offers_the_resume_command(
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         session.streaming = True
 
         await pilot.press("ctrl+c")
@@ -584,7 +630,7 @@ async def test_a_slow_second_ctrl_c_is_a_fresh_interrupt_not_an_exit() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         session.streaming = True
 
         await pilot.press("ctrl+c")
@@ -605,7 +651,7 @@ async def test_an_empty_message_end_keeps_the_streamed_prose() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         await _submit(pilot, app, "say something")
         app.post_message(TurnStarted())
         app.post_message(AssistantMessageStart())
@@ -667,6 +713,7 @@ async def test_clearing_the_transcript_does_not_disarm_later_prompts() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         ask = await _booted_gate(pilot, session)
         session.streaming = True
 
@@ -696,7 +743,7 @@ async def test_approvals_ask_clears_a_latched_deny() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         session.streaming = True
         app._deny_queued_approvals()  # what a stop leaves behind
         assert app._approvals_are_denied(app._turn_epoch) is True
@@ -722,7 +769,7 @@ async def test_the_resume_hint_is_withheld_until_the_session_is_on_disk() -> Non
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         # FakeSession's id has no directory on disk, so there is nothing to offer.
         assert app.resume_hint() == ""
         await pilot.press("ctrl+c")
@@ -745,7 +792,7 @@ async def test_the_prompt_never_hides_its_target_or_overflows(width: int) -> Non
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(width, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         view.append_block(
             ApprovalBlock("write_file", "[outside workspace] write: /Users/x/deep/config.yml")
@@ -775,7 +822,7 @@ async def test_the_answered_receipt_stays_on_one_row(width: int) -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(width, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         block = ApprovalBlock("write_file", "[outside workspace] write: /Users/x/deep/config.yml")
         app.query_one(TranscriptView).append_block(block)
         await pilot.pause(0.1)
@@ -809,7 +856,7 @@ async def test_the_hint_row_sheds_whole_choices(width: int) -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(width, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         app.query_one(TranscriptView).append_block(ApprovalBlock("bash", "run: make"))
         await pilot.pause(0.2)
         painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
@@ -845,7 +892,7 @@ async def test_a_dangerous_ask_never_paints_like_a_safe_one(width: int) -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(width, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         view.append_block(ApprovalBlock("write_file", f"{OUTSIDE_MARKER} write: /tmp/x/keys"))
         view.append_block(ApprovalBlock("write_file", "write: /tmp/x/keys"))
@@ -882,7 +929,7 @@ async def test_a_narrow_prompt_keeps_the_end_of_the_path(detail: str, expected_t
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(52, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
         await pilot.pause(0.2)
         painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
@@ -904,7 +951,7 @@ async def test_a_turn_start_racing_the_stop_cannot_revive_a_denied_ask() -> None
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         session.streaming = True
         first = asyncio.ensure_future(_approval_gate(session)("bash", "run: one"))
         await pilot.pause(0.25)
@@ -933,6 +980,7 @@ async def test_approvals_auto_answers_the_question_on_screen() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         await _booted_gate(pilot, session)
         session.streaming = True
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: make"))
@@ -965,7 +1013,7 @@ async def test_the_prompt_cannot_be_repainted_from_a_tool_argument() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         block = ApprovalBlock("bash", f"run: {payload}")
         app.query_one(TranscriptView).append_block(block)
         await pilot.pause(0.2)
@@ -990,7 +1038,7 @@ async def test_a_pending_prompt_does_not_widen_the_tool_ledger() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(90, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         view.append_block(ToolCard("t1", "bash", {}, ""))
         await pilot.pause(0.1)
@@ -1012,7 +1060,7 @@ async def test_clearing_the_transcript_forgets_the_ledger_width() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         view.append_block(ToolCard("t1", "mcp__linear_create_initiative", {}, ""))
         await pilot.pause(0.1)
@@ -1034,7 +1082,7 @@ async def test_a_tall_notice_is_separated_from_what_precedes_it() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(40, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         short = NoticeBlock("resumed session 4c1f", "info")
         tall = NoticeBlock(
@@ -1065,7 +1113,7 @@ async def test_a_call_being_dictated_shows_a_row_that_moves() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="write")))
         await pilot.pause(0.1)
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
@@ -1109,7 +1157,7 @@ async def test_an_adopted_row_times_the_tool_not_the_dictation() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="write")))
         await pilot.pause(0.55)  # "dictation" time that must not be billed
         app.post_message(
@@ -1145,7 +1193,7 @@ async def test_the_composing_row_sheds_its_label_before_its_facts() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(34, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         app.post_message(
             ToolComposing(
                 ToolCallComposeEvent(tool_call_id="c1", tool_name="write", argument_bytes=12700)
@@ -1196,6 +1244,7 @@ async def test_a_dictated_name_moves_its_own_row_but_not_the_shared_column() -> 
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(110, 24)) as pilot:
+        await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         settled = ToolCard("s1", "read", {}, None)
         view.append_block(settled)
@@ -1253,17 +1302,46 @@ async def test_a_marker_rung_exists_between_the_words_and_the_glyph() -> None:
     for width in range(90, 19, -1):
         app = OperatorApp(lambda: _factory(SteerableSession()))
         async with app.run_test(size=(width, 20)) as pilot:
+            await _boot(pilot, app)
             view = app.query_one(TranscriptView)
             view.append_block(ApprovalBlock("write_file", f"{OUTSIDE_MARKER} write: /etc/hosts"))
-            await pilot.pause(0.05)
-            row = next(
-                (
-                    strip.text
-                    for strip in app.screen._compositor.render_strips()
-                    if "write_file" in strip.text
-                ),
-                "",
-            )
+            # Wait for the row to SETTLE, not for 50ms and not merely for it to
+            # be non-empty. A flat pause is a guess about how long a compositor
+            # pass takes, and when it lost the race the width was measured off a
+            # frame the user never sees, dropped out of `both`, and SPLIT THE
+            # BAND — so `len(runs) == 1` failed with a plausible two-run result
+            # ([49, 39, 28]) that pointed at the hazard ladder instead of at the
+            # clock. Measured ~1-2 failures in 9 full-suite runs on unmodified
+            # main, and 2 in 8 under CPU contention.
+            #
+            # Waiting for a NON-EMPTY row does not fix it, which is the trap
+            # here: instrumenting the failing sweep shows `empties=0` and ~33
+            # frames carrying the intermediate "words" rung — `?` present, `!`
+            # absent. That frame is non-empty, so a first-non-empty read accepts
+            # it and classifies the width false exactly as an unpainted frame
+            # would. The defect was never emptiness; it is reading a frame that
+            # has not finished reflowing.
+            #
+            # So the read is repeated until it stops changing: two consecutive
+            # identical rows with a pause between them. That is the same rule
+            # the rest of this suite follows — wait for the condition, not for a
+            # duration — and it holds the band under the load that splits it.
+            # The ceiling is a deadlock guard rather than a timing assumption.
+            row = ""
+            for _ in range(200):
+                await pilot.pause()
+                current = next(
+                    (
+                        strip.text
+                        for strip in app.screen._compositor.render_strips()
+                        if "write_file" in strip.text
+                    ),
+                    "",
+                )
+                if current and current == row:
+                    break
+                row = current
+            assert row, f"the approval row never painted at width {width}"
         if PROMPT_GLYPH in row and HAZARD_GLYPH in row:
             both.append(width)
 
@@ -1298,6 +1376,7 @@ async def test_the_two_hazards_spell_out_different_sentences() -> None:
     for label, (detail, expected) in cases.items():
         app = OperatorApp(lambda: _factory(SteerableSession()))
         async with app.run_test(size=(96, 20)) as pilot:
+            await _boot(pilot, app)
             app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
             await pilot.pause(0.1)
             row = next(
@@ -1332,6 +1411,7 @@ async def test_the_verbose_threshold_measures_this_row_s_own_clause() -> None:
     for width in range(66, 61, -1):
         app = OperatorApp(lambda: _factory(SteerableSession()))
         async with app.run_test(size=(width, 20)) as pilot:
+            await _boot(pilot, app)
             app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
             await pilot.pause(0.05)
             row = next(
@@ -1367,6 +1447,7 @@ async def test_a_background_jobs_approval_survives_the_parents_stop_latch() -> N
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         for _ in range(12):
             await pilot.pause()
         # Arm the latch exactly as a stop during the parent's turn does.

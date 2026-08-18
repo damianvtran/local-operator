@@ -391,6 +391,15 @@ class JobManagerProtocol(Protocol):
 
     async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool: ...
 
+    # ``settled_event(job_id) -> asyncio.Event`` is deliberately NOT declared
+    # here. This Protocol is ``runtime_checkable`` and ``ToolContext.jobs``
+    # validates against it, so every method added becomes mandatory for every
+    # existing implementation — a host (or a test double) written against the
+    # older surface would stop validating the moment this shipped. ``wait``
+    # therefore probes for it with ``getattr`` and falls back to polling, which
+    # keeps the optimization opt-in for third-party managers rather than
+    # breaking them. See ``tools.builtin._await_any_settled``.
+
 
 @runtime_checkable
 class SubagentLauncher(Protocol):
@@ -549,6 +558,14 @@ class ToolContext(BaseModel):
     # (createIf) rather than advertised and always failing — the same
     # convention ``wake_scheduler`` uses.
     subagent_launcher: "SubagentLauncher | None" = None
+    # The user's persistent agent registry (``local_operator.agents``), behind
+    # the ``agent`` tool and behind role resolution for ``task(agent=...)``.
+    # Typed ``Any`` because that module is heavy (dill, yaml, the whole agent
+    # state machine) and importing it here would pull it into every process
+    # that merely wants a tool type. ``None`` means the host keeps no registry:
+    # the ``agent`` tool is then not advertised (createIf) and delegation falls
+    # back to packaged starter profiles.
+    agent_registry: Any = None
     # The session's background job manager. Declared as a Protocol because
     # the concrete class lives in ``harness.jobs``, which imports this
     # module (import cycle). The ``wait``/``job`` tools read it; ``None``
@@ -1115,13 +1132,91 @@ class ChatRequest(BaseModel):
     #:
     #: ``False`` for a turn and for an aside: their deltas reach the transcript
     #: as they arrive, and a retry would re-render text the user already read.
-    #: ``True`` for the one-shot errands that collect the whole stream before
-    #: returning a string — the compaction summary and auto-naming — where a
-    #: stalled read (``_guarded_chunks`` gives up after 180s of silence) used to
-    #: be a permanent failure because the driver had already forwarded events it
+    #: ``True`` for the one-shot errand that collects the whole stream before
+    #: returning a string — the compaction summary — where a stalled read
+    #: (``_guarded_chunks`` gives up after 180s of silence) used to be a
+    #: permanent failure because the driver had already forwarded events it
     #: could not take back. A failed compaction is not cosmetic: the context it
-    #: was meant to shrink keeps growing.
+    #: was meant to shrink keeps growing. Auto-naming is the opposite case and
+    #: sets ``isolated`` instead — see below.
     replayable: bool = False
+    #: This call is DECORATION running alongside a user turn, and it must not be
+    #: able to change anything the turn depends on.
+    #:
+    #: Transport policy like ``replayable`` above, and it exists because
+    #: auto-naming stopped waiting for the turn to finish. A title that arrives
+    #: after the work is done is a title nobody needed, so the naming call now
+    #: runs CONCURRENTLY with the turn — and a second in-flight request shares
+    #: more than bandwidth with it. SIX pieces of session-wide state sit in the
+    #: path of an ordinary request, and each is a live route by which a
+    #: decorative failure could degrade the user's turn. Each line names where
+    #: the denial is enforced, because an enumeration with an unlisted member is
+    #: worse than no enumeration:
+    #:
+    #: 1. ``FailoverRouteState`` is session-sticky. A naming failure that walked
+    #:    to a fallback target would ``activate`` it with a 60-second cooldown,
+    #:    moving the TURN onto the fallback model — and a naming SUCCESS on the
+    #:    primary would ``clear`` a pin the turn is relying on.
+    #:    *Denied in* ``stream_with_failover``: ``route_state = None``, which
+    #:    kills the target narrowing, the ``activate`` and the ``clear``.
+    #: 2. ``AuthStore.rotate_sibling`` mutates the session's sticky credential,
+    #:    so an auth failure on a title would re-point the turn's account.
+    #:    *Denied in* ``stream_with_failover``: ``retry.enabled = False``, which
+    #:    also removes the fallback chain and the backoff budget — every
+    #:    rotation path sits behind it.
+    #: 3. ``SessionStreamFn`` consumes a pending message boundary to classify
+    #:    auto-effort. Whoever arrives first spends it, so a naming call would
+    #:    freeze the turn's effort from ITS prompt and emit an "auto effort"
+    #:    notice for a request the user never made.
+    #:    *Denied in* ``SessionStreamFn.__call__``: the isolated branch returns
+    #:    before the classification.
+    #: 4. The quota preflight can block a credential and activate a fallback
+    #:    route for the whole session.
+    #:    *Denied in* ``SessionStreamFn.__call__``: same early return, which is
+    #:    also what leaves ``_message_boundary_pending`` unspent (the preflight
+    #:    is what clears it).
+    #: 5. The session's prompt cache key identifies a request PREFIX. A naming
+    #:    call's prefix is a different system block, so sharing the key buys no
+    #:    hit and writes a competing entry under the turn's name.
+    #:    *Denied in* ``SessionStreamFn.__call__``: same early return, so the
+    #:    key is never copied onto the request.
+    #: 6. The credential CASCADE mutates routing state on what looks like a
+    #:    read: ``AuthStore._resolve`` blocks an OAuth row whose refresh raises
+    #:    (so ``_usable_key_rows`` hides it from every later resolve, and the
+    #:    turn re-resolves on each tool-loop request) and writes or clears the
+    #:    session's sticky credential on the way through its tiers. A transient
+    #:    failure on the token endpoint during a title call could therefore
+    #:    block the credential the turn is transacting on and repoint stickiness
+    #:    to a sibling — the "cold cache prefix, alternating identity headers"
+    #:    failure ``create_stream_fn`` warns about. This one is upstream of both
+    #:    switches above, so neither reaches it.
+    #:    *Denied in* ``_resolve_access_for_provider``, which passes
+    #:    ``read_only=request.isolated`` into ``get_oauth_access`` /
+    #:    ``get_api_key`` → ``AuthStore._resolve``: no ``block_credential``, no
+    #:    ``_set_sticky`` write and none cleared.
+    #:
+    #: So an isolated request gets exactly ONE attempt on the model it names:
+    #: no fallback chain, no sticky route read or written, no credential
+    #: rotation, no backoff sleep, no preflight, no boundary classification, no
+    #: routing decision taken by its credential resolve, and not the session's
+    #: cache key. It still resolves credentials under the session id, so that
+    #: READ lands on the same account the turn is on whenever that account is
+    #: usable, which is the point. What it cannot do is take the turn anywhere:
+    #: if its own resolve finds the sticky credential's refresh broken it may
+    #: serve ITSELF from a sibling, but the sticky pointer and the block list
+    #: come out of the call exactly as they went in, so the turn's next resolve
+    #: still lands where it did before. A successful OAuth refresh does persist
+    #: the rotated token, which is that account's own bookkeeping rather than a
+    #: decision about where requests go. It fails fast and alone, which is what
+    #: lets the caller swallow the failure (see
+    #: ``session.naming.generate_title``) without the turn ever knowing a second
+    #: call happened.
+    #:
+    #: Enforced in three places, tested in three: ``stream_with_failover``
+    #: (1, 2, and the retry budget), ``SessionStreamFn.__call__`` (3, 4, 5) and
+    #: the read-only resolve (6). That the naming call actually SETS this flag
+    #: is tested separately, over a real ``Session`` and a capturing stream fn.
+    isolated: bool = False
 
 
 class StreamTextDelta(BaseModel):

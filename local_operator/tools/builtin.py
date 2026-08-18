@@ -5307,18 +5307,29 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
 
 
 class TaskItem(BaseModel):
-    """One slice of a task batch. ``agent`` picks the tier: "task" is the
-    full child; "scout" is a read-only research child (lookups only) for
-    investigation that should not pay for — or risk — write tools. ``effort``
-    routes to a configured model tier (values.subagents.models lo/med/hi)."""
+    """One slice of a task batch. ``agent`` names the ROLE the child runs as —
+    a registered profile or a packaged starter (reviewer, coder, architect,
+    manager, designer, scout); the role supplies standing guidance and may
+    restrict the child's tools. ``effort`` routes to a configured model tier
+    (values.subagents.models lo/med/hi)."""
 
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(description="Short label for this subagent (shown in the jobs list).")
     prompt: str = Field(description="The full instructions this subagent runs.")
-    agent: Literal["task", "scout"] = Field(
+    # Free-form rather than a Literal: roles are user data, so the valid set is
+    # whatever the operator's registry holds plus the packaged starters, and
+    # baking today's names into the schema would make an operator-authored role
+    # unlaunchable. An unknown name degrades to a full child (see
+    # ``harness.subagent._resolve_role``) rather than failing the launch.
+    agent: str = Field(
         default="task",
-        description='"task" = full child; "scout" = read-only research child.',
+        description=(
+            "Role for this subagent: 'task' (full child, no role), 'scout' "
+            "(read-only research), or any role from the `agent` tool — e.g. "
+            "'reviewer', 'coder', 'architect', 'manager', 'designer'. A role "
+            "carries vetted guidance and may restrict tools."
+        ),
     )
     effort: Literal["lo", "med", "hi"] | None = Field(
         default=None,
@@ -5336,6 +5347,20 @@ class TaskParams(BaseModel):
     prompt: str | None = Field(
         default=None,
         description="Single-task form: the instructions the subagent runs.",
+    )
+    # Mirrors of the TaskItem fields for the SINGLE-task form. Without these,
+    # ``task(label=..., prompt=..., agent="reviewer")`` — the most natural way
+    # to ask for one reviewer — fails schema validation (extra="forbid"), and
+    # the caller has to discover that a role is only reachable through the
+    # batch form. Observed live: a model hit exactly that error, then retried
+    # with ``tasks=[...]``, paying a wasted round trip to learn it.
+    agent: str | None = Field(
+        default=None,
+        description="Single-task form: role for the subagent (see 'tasks[].agent').",
+    )
+    effort: Literal["lo", "med", "hi"] | None = Field(
+        default=None,
+        description="Single-task form: model tier for the subagent.",
     )
     context: str = Field(
         default="",
@@ -5363,6 +5388,11 @@ class TaskParams(BaseModel):
         single = self.label is not None
         if single and self.tasks:
             raise ValueError("pass either 'tasks' (batch) or label/prompt, not both")
+        if not single and (self.agent or self.effort):
+            # Silently ignoring these would be worse than refusing: the caller
+            # believes it asked for a role, and every child in the batch would
+            # run without one.
+            raise ValueError("in the batch form, set 'agent'/'effort' on each tasks[] item")
         if not single and not self.tasks:
             raise ValueError("nothing to launch: pass 'tasks' or label/prompt")
         if not single and not self.context.strip() and len(self.tasks) == 1:
@@ -5376,12 +5406,22 @@ class TaskParams(BaseModel):
 class WaitParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    job_id: str = Field(description="Job id returned by the 'task' tool (or listed by 'jobs').")
+    job_id: str | list[str] = Field(
+        description=(
+            "Job id from 'task' (or 'jobs'). Pass a LIST to wake on the first "
+            "of several to finish — the way to await a fan-out without polling "
+            "each child in turn."
+        )
+    )
     wait_ms: int = Field(
-        default=30_000,
+        default=300_000,
         gt=0,
         le=300_000,
-        description="Max ms to block for the job to settle (capped at 300000).",
+        description=(
+            "Max ms to block before reporting back (capped at 300000). The "
+            "call returns as soon as a job settles, so a generous budget costs "
+            "nothing when the work finishes early."
+        ),
     )
 
 
@@ -5433,7 +5473,17 @@ async def execute_task(
         )
     items: list[TaskItem] = list(params.tasks)
     if params.label is not None and params.prompt is not None:
-        items.append(TaskItem(label=params.label, prompt=params.prompt))
+        # ``agent`` falls back to TaskItem's own default rather than being
+        # passed as None, which the field does not accept; ``effort`` is
+        # already Optional there and passes through unchanged.
+        items.append(
+            TaskItem(
+                label=params.label,
+                prompt=params.prompt,
+                agent=params.agent or "task",
+                effort=params.effort,
+            )
+        )
 
     def _full_prompt(item: TaskItem) -> str:
         if not params.context.strip():
@@ -5477,8 +5527,10 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
         describe_approval=_describe_task_approval,
         description=(
             "Launch background subagents — one, or a whole concurrent batch "
-            "('tasks' + shared 'context') in a single call. agent='scout' is "
-            "a read-only research child; effort picks a configured model tier."
+            "('tasks' + shared 'context') in a single call. 'agent' names a "
+            "role carrying vetted guidance (reviewer, coder, architect, "
+            "manager, designer, scout — see the `agent` tool); effort picks a "
+            "configured model tier."
         ),
         parameters=TaskParams.model_json_schema(),
         # Spawns autonomous child work, so it rides the write gate just like
@@ -5511,36 +5563,78 @@ async def execute_wait(
             "wait",
             "job tracking is not available in this session (no job manager attached).",
         )
-    job = jobs.get(params.job_id)
-    if job is None:
-        return _error(tool_call_id, "wait", f"unknown job {params.job_id}")
+    job_ids = [params.job_id] if isinstance(params.job_id, str) else list(params.job_id)
+    job_ids = [job_id for job_id in dict.fromkeys(job_ids) if job_id]
+    if not job_ids:
+        return _error(tool_call_id, "wait", "no job id given")
+    missing = [job_id for job_id in job_ids if jobs.get(job_id) is None]
+    if missing:
+        return _error(tool_call_id, "wait", f"unknown job {', '.join(missing)}")
+
+    def _settled() -> Any:
+        """The first of the awaited jobs that is no longer running, or None."""
+
+        for job_id in job_ids:
+            job = jobs.get(job_id)
+            if job is not None and job.status != "running":
+                return job
+        return None
+
+    def _still_running() -> list[str]:
+        """The awaited ids that are still running, in the order given.
+
+        The unsettled branches report THIS rather than ``job_ids[0]``: on the
+        multi-id path the first id is simply the first the caller passed and
+        may itself have settled, so pinning it in ``details`` tells a caller
+        that reads the payload (rather than parsing the text) about the wrong
+        job.
+        """
+
+        return [
+            job_id
+            for job_id in job_ids
+            if (row := jobs.get(job_id)) is not None and row.status == "running"
+        ]
 
     deadline = time.monotonic() + params.wait_ms / 1000.0
-    while job.status == "running":
+    job = _settled()
+    while job is None:
         if signal is not None and signal.aborted:
+            running = _still_running()
             return _text(
                 tool_call_id,
                 "wait",
-                f"job {params.job_id} still running (wait aborted)",
-                details={"job_id": params.job_id, "status": "running"},
+                f"job {', '.join(running or job_ids)} still running (wait aborted)",
+                details={"job_id": (running or job_ids)[0], "status": "running"},
             )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            running = _still_running()
             return _text(
                 tool_call_id,
                 "wait",
-                f"job {params.job_id} still running after {params.wait_ms}ms",
-                details={"job_id": params.job_id, "status": "running"},
+                f"job {', '.join(running or job_ids)} still running after {params.wait_ms}ms",
+                details={"job_id": (running or job_ids)[0], "status": "running"},
             )
-        await asyncio.sleep(min(0.05, remaining))
-        job = jobs.get(params.job_id)
-        if job is None:
-            return _error(tool_call_id, "wait", f"job {params.job_id} disappeared")
+        await _await_any_settled(jobs, job_ids, remaining, signal)
+        job = _settled()
+        if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
+            return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
     # Handing the result to the model HERE means auto-delivery must not
     # repeat it when the session next goes idle (see Session._on_job_completed
     # and AsyncJob.consumed).
-    cast(Any, jobs).mark_consumed(params.job_id)
+    cast(Any, jobs).mark_consumed(job.id)
     text, spill_details = _job_summary(job, context)
+    if len(job_ids) > 1:
+        still = [
+            job_id
+            for job_id in job_ids
+            if job_id != job.id
+            and (other := jobs.get(job_id)) is not None
+            and other.status == "running"
+        ]
+        if still:
+            text += f"\n({len(still)} still running: {', '.join(still)})"
     details = {"job_id": job.id, "status": job.status}
     if spill_details:
         details.update(spill_details)
@@ -5552,6 +5646,72 @@ async def execute_wait(
     )
 
 
+async def _await_any_settled(
+    jobs: Any,
+    job_ids: list[str],
+    remaining: float,
+    signal: AbortSignal | None = None,
+) -> None:
+    """Sleep until one of ``job_ids`` settles, the wait is aborted, or
+    ``remaining`` seconds pass.
+
+    Event-driven where the host supports it. The measured problem this fixes:
+    across recorded sessions, 70% of ``wait`` calls hit their deadline, and the
+    old implementation spent those waits re-reading a status field every 50 ms
+    — 6000 wakeups per five-minute wait, all on the one event loop shared by
+    the parent turn, every sibling child, and the TUI repaint.
+
+    The ABORT is raced alongside the settle events, not checked between
+    sleeps. The old 50 ms poll re-read ``signal.aborted`` on every tick, so
+    parking on the settle events alone silently made the abort branch dead for
+    a job that never settles: an aborted wait sat for its whole budget (up to
+    five minutes) instead of returning. The TUI masks that through its own
+    interruptible-tool poll, but that is a different mechanism and does not
+    cover deadline-tripped signals or non-TUI embedders relying on the
+    documented ``AbortSignal`` contract.
+
+    Falls back to the poll loop when the manager predates ``settled_event``
+    (a third-party job manager satisfying the older protocol must keep
+    working), and the poll there is 100 ms rather than 50 ms because nothing
+    observes the difference: the caller is a model waiting on a job that runs
+    for minutes.
+    """
+
+    getter = getattr(jobs, "settled_event", None)
+    if getter is None:
+        await asyncio.sleep(min(0.1, remaining))
+        return
+    try:
+        # Only ids that STILL HAVE A ROW. An id whose row the retention sweep
+        # evicted mid-wait gets a pre-set event (nothing will ever settle it),
+        # which would return from `asyncio.wait` immediately and spin the
+        # caller's `while` loop at full speed until its deadline — burning the
+        # event loop this function exists to protect, and faster than the poll
+        # it replaced. Skipping those ids parks on the siblings that can still
+        # fire; when NONE can, there is nothing to wait for and the caller's
+        # own disappeared/timeout branches are the right answer, so sleep out
+        # the remainder rather than returning into a hot loop.
+        events = [getter(job_id) for job_id in job_ids if jobs.get(job_id) is not None]
+    except Exception:  # noqa: BLE001 - a manager that cannot make events polls
+        await asyncio.sleep(min(0.1, remaining))
+        return
+    if not events and signal is None:
+        await asyncio.sleep(remaining)
+        return
+    waiters = [asyncio.ensure_future(event.wait()) for event in events]
+    if signal is not None:
+        waiters.append(asyncio.ensure_future(signal.wait()))
+    try:
+        await asyncio.wait(waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        # Every waiter is cancelled, including the one that completed: leaving
+        # a pending future behind on the timeout path would leak one task per
+        # wait call for the life of the session.
+        for waiter in waiters:
+            waiter.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+
+
 def build_wait_tool(context: ToolContext) -> AgentTool | None:
     if context.jobs is None:
         return None
@@ -5559,8 +5719,10 @@ def build_wait_tool(context: ToolContext) -> AgentTool | None:
         name="wait",
         label="Wait for job",
         description=(
-            "Block up to wait_ms for a background job to settle, returning its "
-            "final output/status. Times out if still running."
+            "Block until a background job settles (or wait_ms elapses), returning "
+            "its final output/status. Pass a LIST of job ids to wake on the first "
+            "one to finish. Returns the moment work settles, so prefer one "
+            "generous wait over repeated short ones."
         ),
         parameters=WaitParams.model_json_schema(),
         # read-only observation of job state; blocks the turn but changes nothing.

@@ -697,7 +697,7 @@ produce a report for a typical user:
 
 | Defect | Fix |
 |---|---|
-| `zai` was in `USAGE_PROVIDERS` with a working fetcher and **no `ProviderDefinition`** — `/login zai` raised, its env var was never read, no code path could supply its credential | deleted (fetcher, set entry, test) |
+| `zai` was in `USAGE_PROVIDERS` with a working fetcher and **no `ProviderDefinition`** — `/login zai` raised, its env var was never read, no code path could supply its credential | deleted (fetcher, set entry, test). **Superseded:** `zai` was re-added as a complete provider — registry entry, `ZAI_API_KEY`/paste login, GLM model rows with pricing, and `fetch_zai_quota` — landing together rather than a fetcher alone. See "Z.AI provider" below. |
 | One fetcher per provider, so Kimi's OAuth-only route made `KIMI_API_KEY` users unreachable; `/provider` advertised quota and the table was empty forever | `_FETCHERS` is now `(oauth, api_key)` pairs; added `fetch_moonshot_balance` (plain Bearer, the key the registry already stores) |
 | DeepSeek had no fetcher despite a documented endpoint and a stored key | added `fetch_deepseek_balance`, one limit per currency (a CNY balance rendered as USD is wrong by ~7x) |
 | Three surfaces disagreed: `/provider` used `is_usable`, bare `/usage` used `has_any_credential`, `/usage <p>` resolved the env tier | all three call one predicate, `ProviderController.can_report_usage` = `is_usable(p) and (has_any_credential(p) or usage_kinds(p)[1])`. `is_usable` alone was too coarse: five of the eight providers are OAuth-only for usage, so an `ANTHROPIC_API_KEY`-only install was advertised four providers it could not read |
@@ -1950,3 +1950,88 @@ provider refused a real PNG, `6956424f` means we corrupted it ourselves.
 Evidence: `tests/unit/compaction/test_snapcompact.py` (persistence round trip)
 and `tests/unit/session/test_compact_now.py` (a non-empty archive replaying as
 valid PNGs through the live render path).
+
+## Z.AI provider (`zai`)
+
+Z.AI (GLM) is a first-class provider: registry definition, model listing,
+usage/quota reporting and cost accounting. It supersedes the earlier removal
+recorded above — the point of that defect was that a fetcher without a
+`ProviderDefinition` is unreachable by construction, so all four halves land
+together here.
+
+**Wire.** `openai-compat` on `https://api.z.ai/api/coding/paas/v4`. The
+coding-plan prefix is deliberate: the general `/api/paas/v4` endpoint accepts
+the same key but bills the account balance instead of coding-plan quota, which
+is a silently wrong budget rather than a visible failure. omp routes GLM over
+the Anthropic-shaped proxy instead; the OpenAI-compatible endpoint was chosen
+here because it needs no new wire client and was verified to stream text, tool
+calls and usage correctly.
+
+**Model rows carry the metadata the listing does not.** `GET /models` answers
+with bare `{id, object, created, owned_by}` — no pricing, no context window, no
+capabilities. Discovery therefore merges live ids OVER the static `glm_models`
+rows rather than replacing them; a listing-only catalogue would report every GLM
+as free, non-caching and 0-context. Prices are USD per million tokens and are
+Z.AI's own DIRECT list rates. They deliberately do not match OpenRouter's
+`z-ai/*` listings, which quote less for most GLM ids (`glm-5.2` at
+$0.462/$1.452 against Z.AI's $1.40/$4.40) because the aggregator resells at its
+own discounted rates — a user billed directly by Z.AI pays the direct rate, so
+quoting the aggregator's number here would under-report every session. The
+OpenRouter namespace remains registered only as the fallback for ids this table
+does not price at all.
+
+**Quota shape, verified against a live account.** `GET
+/api/monitor/usage/quota/limit` returns a `{code,msg,data,success}` envelope
+that reports business-level failure with an HTTP 200, so a successful transport
+is not by itself a usable reading. Two row types share the payload and neither
+reads the way its name suggests:
+
+- `TOKENS_LIMIT` rows on a coding plan carry **only** `percentage` — no
+  absolute used/limit/remaining. The report is built from the fraction and the
+  unit is `percent`; inventing token counts from a percentage would put a
+  fabricated number in front of the user.
+- `TIME_LIMIT` is a **request** allowance, and its fields are inverted relative
+  to every other vendor here: `usage` is the limit, `currentValue` the amount
+  consumed.
+- A `TIME_LIMIT` whose `usageDetails` name **no chat model** is the separate
+  Zread feature bucket, tagged `tier="zread"` and NOT `shared` — exhausting it
+  stops those tools, not the plan. The test is spelled in the negative because
+  every positive form is a dependency on a vendor enum: requiring the known
+  feature codes (or requiring the listed codes to be a subset of them) breaks
+  the moment Z.AI renames or adds one, and it breaks toward `shared=True`,
+  which `usage_health` applies to every model — telling a user with most of
+  their token quota intact that the account is depleted. Chat model ids are the
+  stable property, since the account-wide cap is denominated in them.
+
+Live evidence (real credential, real endpoints, through local-operator's own
+code paths):
+
+```
+fetch_usage(client, "zai")   -> coding plan: max
+  zai:tokens:5hour           Token quota (5 hour)     12% used  ok  resets in 1h
+  zai:tokens:1week           Token quota (1 week)     42% used  ok  resets in 6d4h
+  zai:features:zread:1month  Zread quota (1 month) 0/4000 req   ok  resets in 30d4h
+
+fetch_models("zai")          -> 9 live rows (glm-4.5 … glm-5.3), all ctx=0/unpriced
+merge_models(glm_models, …)  -> 9 rows, glm-5.3 ctx=1,000,000 in=$1.4 out=$4.4
+
+client_for_spec(zai/glm-5.3) -> OpenAICompatClient
+  streaming text : "HELLO_ZAI"   usage in=20 out=33  cost $0.00017320
+  tool calling   : get_weather   {"city":"Toronto"}
+  bad key        : ProviderError: authentication failed (HTTP 401)
+```
+
+Cost math needs no zai-specific code: `_cache_tokens_are_inside_input` keys on
+the WIRE format, so an openai-compat provider gets the correct
+subtract-cached-from-prompt behaviour for free. `calculate_cost` on the real
+1M/1M case returns $5.80 (1.40 + 4.40), and a 1M-prompt/500k-cache-read call
+returns $1.53 — the cache read priced at $0.26/Mtok rather than silently at the
+input rate.
+
+Evidence: `tests/unit/providers/test_usage.py` (seven zai cases pinned to a
+payload captured live on 2026-08-17 — the percentage-only rows, the inverted
+`TIME_LIMIT` fields, the feature-bucket classification including renamed and
+added codes, the label-width budget, a hostile-input sweep asserting the fetcher
+never raises, and the 200-with-`success:false` path), `tests/unit/providers/test_registry.py`
+(definition, coding-plan base URL, search aliases), and the `/login` picker and
+usage-panel frames captured from the real `OperatorApp`.

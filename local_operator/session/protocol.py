@@ -28,6 +28,7 @@ from local_operator.harness.types import (
     ModelSpec,
     Usage,
 )
+from local_operator.session.naming import ConversationName
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +115,17 @@ class SessionProtocol(Protocol):
         """The conversation's title ("" until one is set or generated)."""
         ...
 
+    @property
+    def conversation_name_state(self) -> ConversationName:
+        """The title holder, not just the string.
+
+        A host that re-titles a drifting conversation needs the ``user_set``
+        precedence flag before it spends a call: an explicit rename outranks
+        every generated title forever, and reading only the text cannot tell
+        a human's name from a model's.
+        """
+        ...
+
     def set_conversation_name(self, text: str, *, user_set: bool = True) -> str:
         """Name the conversation; returns the title in force afterwards.
 
@@ -123,11 +135,13 @@ class SessionProtocol(Protocol):
         ...
 
     async def complete_once(self, system: str, prompt: str) -> str:
-        """One non-tool provider call for host-side side errands.
+        """One cheap, isolated, single-attempt provider call for a host errand.
 
         Not a turn: no tools, no history, no transcript entry. Hosts use it
         for small derived text (conversation auto-naming) without rebuilding
-        the provider's auth cascade. Never await it on a turn's critical path.
+        the provider's auth cascade. It runs CONCURRENTLY with a live turn, so
+        an implementation must make it unable to move anything the turn
+        depends on — see ``ChatRequest.isolated``.
         """
         ...
 

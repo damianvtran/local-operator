@@ -260,6 +260,10 @@ def test_inventory_block_matches_default_tool_order() -> None:
             # has to carry both or the tool drops out of the inventory.
             has_ui=True,
             ask_user=_fake_ask_for_blocks,
+            # `agent` is createIf-gated on a registry to persist roles into;
+            # only its PRESENCE is read here, since this test is about the
+            # ORDER of a fully-capable inventory.
+            agent_registry=object(),
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)

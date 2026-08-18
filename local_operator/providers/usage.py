@@ -56,6 +56,7 @@ code path here owns a client.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -151,6 +152,7 @@ FetcherKind = Literal[
     "deepseek-balance",
     "xai-oauth",
     "qwencloud-token-plan",
+    "zai-quota",
 ]
 
 #: Provider id (canonical) -> ``(oauth_fetcher, api_key_fetcher)``.
@@ -168,11 +170,12 @@ FetcherKind = Literal[
 #: is what :func:`usage_kinds` reports so the UI can say WHICH credential is
 #: missing instead of showing nothing.
 #:
-#: ``zai`` is absent rather than fixed. It had a working fetcher and a passing
-#: test, but no ``ProviderDefinition`` — so `/login zai` raised, its env var was
-#: never read, and no code path could insert the credential row the fetcher
-#: needed. It was unreachable by construction, and advertising an unreachable
-#: provider is worse than being merely incomplete.
+#: ``zai`` was previously absent for exactly this reason: it had a working
+#: fetcher and a passing test, but no ``ProviderDefinition`` — so `/login zai`
+#: raised, its env var was never read, and no code path could insert the
+#: credential row the fetcher needed. It is present now because the registry
+#: entry, the credential path and this fetcher landed together; the pairing is
+#: the point, and re-adding one without the others would recreate the defect.
 _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
     "openrouter": (None, "openrouter"),
     "anthropic": ("anthropic-oauth", None),
@@ -184,6 +187,10 @@ _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
     "xai-oauth": ("xai-oauth", None),
     "alibaba-token-plan": ("qwencloud-token-plan", None),
     "alibaba-token-plan-oauth": ("qwencloud-token-plan", None),
+    # The coding-plan key is the only credential Z.AI issues for this route, and
+    # the same raw key authenticates both inference and the quota endpoint, so
+    # the api-key slot serves it and there is no OAuth half to route.
+    "zai": (None, "zai-quota"),
 }
 
 #: Providers with a live quota endpoint, for callers that only need the question
@@ -544,6 +551,241 @@ async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> Usa
         return None
     notes = None if payload.get("is_available", True) else "account not available for requests"
     return UsageReport(provider="deepseek", limits=limits, notes=notes)
+
+
+#: Z.AI's coding-plan quota endpoint. Lives on the API host but OUTSIDE the
+#: `/api/coding/paas/v4` inference prefix, so it is spelled absolutely here
+#: rather than derived from the provider's ``base_url``.
+ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+
+
+def _is_zai_chat_model(code: str) -> bool:
+    """Whether a ``usageDetails`` code names a GLM chat model.
+
+    A SHAPE test rather than a lookup against the shipped catalogue, and the
+    distinction is the whole point: every id in ``glm_models`` already starts
+    with ``glm``, so a registry check would answer nothing the prefix does not
+    while dragging ``model.registry`` (~300 ms cold) onto a path that runs
+    inside a quota parse. What the prefix buys is the ids that do NOT exist
+    yet — a model launched after this release must not be mistaken for a
+    feature code.
+
+    Case-folded because the codes are vendor strings, not identifiers we mint,
+    and ``GLM-6`` naming a model while ``glm-6`` does not would be a
+    classification that turns on capitalisation.
+
+    The known feature codes (``search-prime``, ``web-reader``, ``zread``) share
+    no prefix with the model family, so the test is unambiguous today; it is
+    the tie-break for unknown codes that matters, and it resolves them to
+    "feature", which fails toward leaving the account cap alone.
+    """
+    return code.strip().lower().startswith("glm")
+
+
+#: The `unit` enum Z.AI uses to describe a quota window's period. Only the
+#: values observed on live coding-plan accounts are mapped; anything else falls
+#: through to a generic label rather than being guessed at, because mislabelling
+#: a monthly cap as hourly would make an exhausted plan look like it resets soon.
+#:
+#: Only the NAME is carried. An earlier revision paired each unit with a
+#: duration in seconds, which nothing read: the reset time arrives as an
+#: absolute ``nextResetTime`` from the vendor, so a locally derived window
+#: length would be a second, unreconciled answer to a question already
+#: answered — and the one that drifts if a window is redefined.
+_ZAI_WINDOW_UNITS: dict[int, str] = {
+    3: "hour",
+    4: "day",
+    5: "month",
+    6: "week",
+}
+
+
+def _zai_window(item: dict[str, Any]) -> tuple[str, int | None]:
+    """``(window_label, resets_at_ms)`` for one Z.AI limit row.
+
+    ``unit`` names the period and ``number`` how many of them, so a 5-hour
+    window arrives as ``unit=3, number=5``. ``nextResetTime`` is epoch
+    milliseconds on live payloads, but is accepted in seconds too and
+    disambiguated by magnitude, matching how the other fetchers here treat
+    ambiguous vendor timestamps.
+    """
+    # `_num` rather than a bare cast on EVERY field, including the ones read
+    # only to build a label: a quota fetcher must never raise (the caller drops
+    # a None report, but an exception escapes to the UI), and `int()` is the
+    # trap — `json.loads` accepts bare NaN/Infinity and an oversized integer,
+    # all of which blow up on conversion rather than returning something odd.
+    # `_num` rejects both the unconvertible and the non-finite, so anything that
+    # reaches an `int()` below is already known-safe. Strings are coerced too,
+    # since a vendor that starts quoting `"unit": "3"` would otherwise silently
+    # lose the window name while still reporting the numbers.
+    count = _num(item.get("number")) or 1
+    unit = _num(item.get("unit"))
+    mapped = _ZAI_WINDOW_UNITS.get(int(unit)) if unit is not None else None
+    label = "quota" if mapped is None else f"{int(count)} {mapped}"
+    reset = _num(item.get("nextResetTime"))
+    resets_ms: int | None = None
+    if reset is not None and reset > 0:
+        resets_ms = int(reset if reset > 1_000_000_000_000 else reset * 1000)
+    return label, resets_ms
+
+
+async def fetch_zai_quota(client: httpx.AsyncClient, api_key: str) -> UsageReport | None:
+    """Z.AI GLM Coding Plan quota from the monitor endpoint.
+
+    Two row types share one payload and mean different things:
+
+    - ``TOKENS_LIMIT`` is the token allowance for a rolling window. On live
+      coding-plan accounts these rows carry ONLY ``percentage`` — no absolute
+      used/limit/remaining — so the report is built from the fraction and the
+      unit is ``percent``. Inventing token counts from a percentage would put a
+      fabricated number in front of the user.
+    - ``TIME_LIMIT`` is a REQUEST allowance despite the name. Its ``usage`` field
+      is the LIMIT and ``currentValue`` is the amount consumed — inverted
+      relative to every other vendor here, which is the trap worth naming.
+
+    A ``TIME_LIMIT`` row whose ``usageDetails`` name NO chat model is the
+    separate Zread feature bucket rather than the account-wide request cap, so
+    it is tagged as a tier and NOT marked shared: exhausting it stops those
+    tools, not the plan. The test is spelled in the negative on purpose — see
+    the note at the classification site.
+    """
+    payload = await _get_json(client, ZAI_QUOTA_URL, _bearer(api_key))
+    if payload is None:
+        return None
+    # The envelope reports business-level failure with a 200, so an unsuccessful
+    # body is not a usable report even though the transport succeeded.
+    if payload.get("success") is not True:
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    rows = data.get("limits")
+    if not isinstance(rows, list):
+        return None
+
+    limits: list[UsageLimit] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        row_type = item.get("type")
+        window, resets_ms = _zai_window(item)
+        percentage = _num(item.get("percentage"))
+        used = _num(item.get("currentValue"))
+        limit_value = _num(item.get("usage"))
+        remaining = _num(item.get("remaining"))
+
+        if row_type == "TOKENS_LIMIT":
+            if percentage is None and used is None:
+                continue
+            amount = UsageAmount(
+                used=used,
+                limit=limit_value,
+                remaining=remaining,
+                used_fraction=(
+                    min(max(percentage / 100.0, 0.0), 1.0) if percentage is not None else None
+                ),
+                # Absolute token counts are absent on coding-plan rows, so the
+                # renderer is told to speak in percent unless the vendor gave
+                # real numbers to show.
+                unit="tokens" if limit_value else "percent",
+            )
+            limits.append(
+                UsageLimit(
+                    id=f"zai:tokens:{window.replace(' ', '')}",
+                    label=f"Token quota ({window})",
+                    amount=amount,
+                    window=window,
+                    resets_at_ms=resets_ms,
+                    shared=True,
+                )
+            )
+        elif row_type == "TIME_LIMIT":
+            details = item.get("usageDetails")
+            codes = (
+                {
+                    str(d.get("modelCode"))
+                    for d in details
+                    if isinstance(d, dict) and d.get("modelCode")
+                }
+                if isinstance(details, list)
+                else set()
+            )
+            # A row is the feature bucket when its breakdown lists NO chat
+            # model — the question is asked in the negative deliberately.
+            #
+            # Every positive formulation is a maintenance dependency on a vendor
+            # enum, and each fails the moment that enum moves. Requiring all
+            # known feature codes breaks when Z.AI renames one; requiring the
+            # listed codes to be a SUBSET of the known ones breaks on a rename
+            # AND on an addition (a new tool code is not in our set, so the row
+            # stops looking like a feature bucket). Both fail in the direction
+            # that stops work: the row is reclassified as the account-wide cap
+            # with ``shared=True``, `usage_health` applies it to EVERY model,
+            # and a user with most of their token quota intact is told the
+            # account is depleted because the vendor shipped a new tool.
+            # Matching ANY known code fails the other way instead, demoting a
+            # genuine account cap that merely mentions a feature into a tier.
+            #
+            # Chat model ids are the stable property: the account-wide request
+            # cap is denominated in them, and a feature bucket never lists one.
+            # So an unrecognised code is read as a new FEATURE rather than a new
+            # model, which keeps a renamed or added tool inside the tier and
+            # leaves the account cap alone. An empty breakdown is not a feature
+            # bucket.
+            is_feature = bool(codes) and not any(_is_zai_chat_model(code) for code in codes)
+            if percentage is None and used is None:
+                continue
+            amount = UsageAmount(
+                used=used,
+                limit=limit_value,
+                remaining=remaining,
+                used_fraction=(
+                    min(max(percentage / 100.0, 0.0), 1.0) if percentage is not None else None
+                ),
+                unit="requests" if limit_value else "percent",
+            )
+            limits.append(
+                UsageLimit(
+                    id=(
+                        f"zai:features:zread:{window.replace(' ', '')}"
+                        if is_feature
+                        else f"zai:requests:{window.replace(' ', '')}"
+                    ),
+                    # "Zread quota", not "Zread feature quota": the usage
+                    # panel caps its label column at 24 cells (a third of the
+                    # panel's own 76-cell maximum), so the longer form truncated
+                    # mid-parenthesis at EVERY terminal width and the window was
+                    # unreachable — the only row on the panel that could not say
+                    # which period it resets over. The word "feature" is the
+                    # redundant one: the tier indent and the dimmed label ramp
+                    # already say this is not the account-wide cap.
+                    #
+                    # The bucket covers the non-chat tools together (today:
+                    # search-prime, web-reader, zread), so the label names one
+                    # member of a set. Kept because "Zread" is the name Z.AI's
+                    # own plan page gives this allowance, so it is the word a
+                    # user will recognise from their dashboard.
+                    label=("Zread quota" if is_feature else "Request quota") + f" ({window})",
+                    amount=amount,
+                    window=window,
+                    resets_at_ms=resets_ms,
+                    tier="zread" if is_feature else "",
+                    shared=not is_feature,
+                )
+            )
+
+    # Two rows of the same type and window collide on a generated id, and a
+    # duplicate id renders as two identical panel rows that disagree about
+    # nothing — the same defensive dedupe `fetch_xai_oauth` applies, for the
+    # same reason: the id is derived from vendor fields, so uniqueness is the
+    # vendor's promise rather than ours. First occurrence wins.
+    seen: set[str] = set()
+    limits = [limit for limit in limits if not (limit.id in seen or seen.add(limit.id))]
+    if not limits:
+        return None
+    level = data.get("level")
+    notes = f"coding plan: {level}" if isinstance(level, str) and level else None
+    return UsageReport(provider="zai", limits=limits, notes=notes)
 
 
 def _parse_iso_ms(value: Any) -> int | None:
@@ -1318,13 +1560,28 @@ async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> Usage
 
 
 def _num(value: Any, default: float | None = None) -> float | None:
-    """Coerce numeric/str fields defensively; None on garbage."""
+    """Coerce numeric/str fields defensively; None on garbage.
+
+    ``OverflowError`` is caught alongside the obvious two because a JSON body
+    may carry an integer too large for a float (``10**400`` parses fine and
+    then raises on conversion). Every vendor field in this module reaches a
+    fetcher through here, so catching it at the coercion boundary is what keeps
+    the "a quota fetcher never raises" contract true for all of them rather
+    than for the call sites someone remembered to guard.
+
+    Non-finite values are rejected rather than returned: ``json.loads`` accepts
+    bare ``NaN``/``Infinity``, and a float that survives coercion only to blow
+    up at the ``int()`` that formats it has merely moved the crash somewhere
+    harder to see. ``None`` here means "no usable number", which every caller
+    already handles.
+    """
     try:
         if value is None:
             return default
-        return float(value)
-    except (TypeError, ValueError):
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
         return default
+    return parsed if math.isfinite(parsed) else default
 
 
 async def _qwencloud_bss_call(
@@ -1573,6 +1830,8 @@ async def _run_fetcher(
         return await fetch_moonshot_balance(client, secret)
     if kind == "deepseek-balance":
         return await fetch_deepseek_balance(client, secret)
+    if kind == "zai-quota":
+        return await fetch_zai_quota(client, secret)
     if kind == "xai-oauth":
         return await fetch_xai_oauth(client, secret)
     if kind == "qwencloud-token-plan":

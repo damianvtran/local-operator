@@ -226,6 +226,23 @@ class Transcript:
         )
         async with self._lock:
             self._entries.append(entry)
+            # DELIBERATELY SYNCHRONOUS, and not an oversight — do not "fix"
+            # this into a to_thread the way :meth:`compact_file` legitimately
+            # is. This append has callers that never await it:
+            # ``Session.queue_aside`` persists a materialized aside through
+            # ``_spawn_background``, i.e. fire-and-forget. Every await inside
+            # this method widens the window between "the message reached the
+            # model" and "the message is on disk", and a reader that opens the
+            # transcript in that window sees a child's context missing a
+            # message it has already acted on.
+            #
+            # Measured, because the tradeoff was real: offloading this cut the
+            # worst loop stall at one workload (56 ms -> 22 ms) and made it
+            # WORSE at a larger one (298 ms -> 655 ms), while CI caught the
+            # visibility regression it introduced. The tokenizer offload in
+            # ``Session._offloaded`` is where the loop-responsiveness win
+            # actually comes from (1360 ms -> 56 ms); this write is a few
+            # hundred microseconds and is not worth a correctness hazard.
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(entry.to_json() + "\n")
                 handle.flush()
@@ -378,15 +395,41 @@ class Transcript:
                 if entry.type == ENTRY_MESSAGE and entry.id in prunes:
                     entry = _pruned_entry(entry, prunes[entry.id])
                 folded.append(entry)
-            payload = "".join(entry.to_json() + "\n" for entry in folded)
-            reclaimed = before - len(payload.encode("utf-8"))
+            # Re-serializing and rewriting the WHOLE transcript is proportional
+            # to session length (hundreds of ms on a long one), and it runs on
+            # the loop every session shares. Off to a worker: the ``_lock`` held
+            # across the await keeps it exclusive against appends, and the
+            # ``os.replace`` is still atomic, so an interrupted rewrite leaves
+            # the original intact exactly as before.
+            payload, reclaimed = await asyncio.to_thread(self._render_folded, folded, before)
             if reclaimed < min_reclaim_bytes:
                 return 0
-            tmp = self.path.with_suffix(self.path.suffix + ".compact")
-            tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, self.path)
+            await asyncio.to_thread(self._replace_file, payload)
             self._entries = folded
             return reclaimed
+
+    @staticmethod
+    def _render_folded(folded: list[TranscriptEntry], before: int) -> tuple[str, int]:
+        """Serialize the folded entries and price the rewrite.
+
+        Worker-thread half of :meth:`compact_file`: this is the O(session)
+        string building, kept out of the loop. Returns the payload alongside
+        the bytes it reclaims so the caller can decide whether the rewrite is
+        worth doing without re-measuring.
+        """
+        payload = "".join(entry.to_json() + "\n" for entry in folded)
+        return payload, before - len(payload.encode("utf-8"))
+
+    def _replace_file(self, payload: str) -> None:
+        """Write the compacted transcript beside the old one and move it over.
+
+        Worker-thread half of :meth:`compact_file`. Crash safety is the whole
+        point of the temp-file dance: ``os.replace`` is atomic, so an
+        interrupted compaction leaves the original transcript readable.
+        """
+        tmp = self.path.with_suffix(self.path.suffix + ".compact")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, self.path)
 
     def flush(self) -> None:
         """Writes are flushed per append; provided for dispose() symmetry."""

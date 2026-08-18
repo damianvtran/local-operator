@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import urllib.parse
 from datetime import datetime, timezone
@@ -603,9 +604,15 @@ def test_xai_refresh_keeps_old_refresh_token_when_response_omits_one() -> None:
     assert creds["expires"] < int(time.time() * 1000) + 3600_000
 
 
-async def test_paste_prompt_gated_to_paste_code_flow_providers() -> None:
-    """PR-02: the CLI attaches the paste prompt ONLY for paste_code_flow
-    providers, and it is async (loop-friendly)."""
+async def test_paste_prompt_gated_to_providers_that_accept_one() -> None:
+    """PR-02: the CLI attaches the paste prompt to providers that ACCEPT one,
+    and to no others, and it is async (loop-friendly).
+
+    Three cases, because there are three and reading them as two is the defect:
+    a provider whose login IS the paste (``alibaba``), Anthropic's optional
+    fallback beside its loopback flow, and a loopback-only provider where a
+    prompt would race the HTTP callback and block the terminal.
+    """
     from local_operator.providers.auth_cli import _callbacks_interactive
     from local_operator.providers.registry import get_provider_definition
 
@@ -615,9 +622,145 @@ async def test_paste_prompt_gated_to_paste_code_flow_providers() -> None:
     assert paste_callbacks.on_manual_code_input is not None
     assert asyncio.iscoroutinefunction(paste_callbacks.on_manual_code_input)
 
+    # The regression this file previously asserted the wrong way round: a
+    # paste-a-key provider has no loopback path at all, so a host that attaches
+    # no prompt makes its login fail every single time.
+    alibaba_def = get_provider_definition("alibaba")
+    assert alibaba_def is not None and alibaba_def.paste_prompt_required
+    key_callbacks = _callbacks_interactive(alibaba_def)
+    assert key_callbacks.on_manual_code_input is not None
+    assert asyncio.iscoroutinefunction(key_callbacks.on_manual_code_input)
+
     openai_def = get_provider_definition("openai")
-    assert openai_def is not None and not openai_def.paste_code_flow
+    assert openai_def is not None and not openai_def.accepts_paste_prompt
     assert _callbacks_interactive(openai_def).on_manual_code_input is None
+
+
+async def test_every_paste_key_provider_can_actually_be_logged_into() -> None:
+    """The class-level regression: `/login <provider>` must never be a flow
+    that can only fail.
+
+    Enumerates every provider offering an interactive login and drives each
+    one's registered login callable with the CLI's own callbacks, rather than
+    checking the two the bug report happened to name. The reported failure
+    ("QwenCloud Token Plan login requires an interactive key prompt") was one
+    of EIGHT providers in this state, and a test naming providers individually
+    is exactly what let the other seven ship.
+
+    Only the paste-a-key providers are driven to completion here: they are the
+    ones whose whole login is local. A loopback/device provider is asserted to
+    be offered no prompt, which is the other half of the contract.
+    """
+    from local_operator.providers.auth_cli import _callbacks_interactive
+    from local_operator.providers.registry import PROVIDER_REGISTRY
+
+    drivable = [
+        p
+        for p in PROVIDER_REGISTRY
+        # The QwenCloud Token Plan requires a paste too, but continues into a
+        # device flow that would reach the network; it is driven with a mock
+        # transport in ``test_qwencloud_token_plan_login_captures_key_and_device_grant``.
+        if p.login is not None and p.paste_prompt_required and p.id != "alibaba-token-plan-oauth"
+    ]
+    # A non-zero control: if the filter ever matches nothing (a renamed field, a
+    # registry refactor) the loop below would pass by doing nothing at all.
+    assert len(drivable) >= 8, [p.id for p in drivable]
+
+    for definition in drivable:
+        callbacks = _callbacks_interactive(definition)
+        assert callbacks.on_manual_code_input is not None, definition.id
+        # Substitute the terminal read; everything else is the shipped path,
+        # including the registry's own login callable.
+        callbacks.on_manual_code_input = lambda: "sk-pasted-key"
+        login = definition.login
+        assert login is not None, definition.id
+        assert await login(callbacks) == "sk-pasted-key", definition.id
+
+
+def test_cli_hides_an_api_key_and_echoes_an_oauth_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 1 F2: an API key must not be echoed into the terminal scrollback.
+
+    ``CredentialManager`` and the web-search CLI already read this same class of
+    value through ``getpass``; the login prompt used ``input()``, and making the
+    paste-a-key providers work is what made that path reachable for nine real
+    provider keys.
+
+    The OAuth code branch deliberately stays echoed: it is single-use, expires
+    in minutes, and is a long opaque string the user needs to read back to check
+    the paste landed whole. Asserting BOTH is what makes this a discriminating
+    test rather than one that would pass on a blanket change either way.
+    """
+    import getpass as getpass_mod
+
+    from local_operator.providers.auth_cli import _callbacks_interactive
+    from local_operator.providers.registry import get_provider_definition
+
+    used: list[str] = []
+    monkeypatch.setattr(getpass_mod, "getpass", lambda *a, **k: used.append("getpass") or "sk-x")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: used.append("input") or "code#state")
+
+    key_def = get_provider_definition("alibaba")
+    assert key_def is not None
+    prompt = _callbacks_interactive(key_def).on_manual_code_input
+    assert prompt is not None
+    assert asyncio.run(_maybe(prompt())) == "sk-x"
+    assert used == ["getpass"], used
+
+    used.clear()
+    code_def = get_provider_definition("anthropic")
+    assert code_def is not None
+    prompt = _callbacks_interactive(code_def).on_manual_code_input
+    assert prompt is not None
+    assert asyncio.run(_maybe(prompt())) == "code#state"
+    assert used == ["input"], used
+
+
+async def _maybe(value: Any) -> Any:
+    """Await ``value`` when it is awaitable; the prompts are coroutines."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def test_paste_key_login_treats_an_empty_paste_as_a_cancel() -> None:
+    """An empty submit must not become a stored blank credential.
+
+    A blank ``api_key`` row is worse than no row: it shadows a working
+    environment key in the stream-time cascade, so every later request fails to
+    authenticate with nothing on screen to explain why.
+    """
+    from local_operator.providers.oauth.callback_server import LoginCancelledError
+    from local_operator.providers.registry import get_provider_definition
+
+    definition = get_provider_definition("alibaba")
+    assert definition is not None and definition.login is not None
+
+    for pasted in ("", "   ", None):
+        callbacks = LoginCallbacks(
+            on_auth_url=lambda url, instructions=None: None,
+            on_manual_code_input=lambda value=pasted: value,
+        )
+        with pytest.raises(LoginCancelledError):
+            await definition.login(callbacks)
+
+
+async def test_paste_key_login_reports_a_missing_prompt_without_opening_a_browser() -> None:
+    """A host that provides no prompt is told which hook it is missing, and the
+    user is not first sent to a dashboard to fetch a key that will be refused.
+
+    The ordering is the assertion: before this, the URL was surfaced and only
+    then did the flow discover it could not read anything.
+    """
+    from local_operator.providers.registry import get_provider_definition
+
+    definition = get_provider_definition("alibaba")
+    assert definition is not None and definition.login is not None
+
+    urls: list[str] = []
+    callbacks = LoginCallbacks(on_auth_url=lambda url, instructions=None: urls.append(url))
+    with pytest.raises(ValueError, match="on_manual_code_input"):
+        await definition.login(callbacks)
+    assert urls == [], "the browser must not be opened for a login that cannot complete"
 
 
 async def test_anthropic_login_via_browser_redirect_without_paste(
@@ -749,19 +892,56 @@ async def test_the_loopback_completes_a_login_with_no_manual_input() -> None:
     assert credentials["email"] == "you@example.com"
 
 
-def test_only_anthropic_offers_a_pasted_code_and_none_require_one() -> None:
-    """`paste_code_flow` is a FALLBACK marker, not a requirement.
+def test_only_anthropic_races_a_pasted_code_against_its_callback() -> None:
+    """`paste_code_flow` is a FALLBACK marker, and ONLY that.
 
     It matches the reference implementation exactly: Anthropic is the one
     loopback provider that also accepts a pasted code (for a browser on another
-    machine), and it is raced against the callback rather than awaited. Every
-    other interactive provider must be loopback-or-device-code only, because a
-    provider that silently demands typing is indistinguishable from a hang.
+    machine), raced against the callback rather than awaited. Attaching such a
+    prompt to any other loopback provider blocks the terminal on a line nobody
+    will type.
+
+    This test used to assert something wider and false in its name and
+    docstring — that no provider REQUIRES a paste — while asserting only the
+    narrow set below. Eight providers require one: their whole login is
+    "open the dashboard, paste the key", which is a different property with a
+    different field (``requires_paste_prompt``), asserted in the companion test.
+    Reading the two as one is what shipped `/login alibaba` unable to succeed.
     """
     from local_operator.providers.registry import PROVIDER_REGISTRY
 
     paste = {p.id for p in PROVIDER_REGISTRY if p.login is not None and p.paste_code_flow}
     assert paste == {"anthropic"}, paste
+
+
+def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
+    """Every paste-a-key login carries the flag hosts gate on.
+
+    Derived from the login callable rather than declared per provider, so this
+    also pins the derivation: a new ``create_api_key_login`` provider must show
+    up here without anyone remembering to set a field.
+    """
+    from local_operator.providers.registry import PROVIDER_REGISTRY
+
+    required = {p.id for p in PROVIDER_REGISTRY if p.login is not None and p.paste_prompt_required}
+    assert required == {
+        "xai",
+        "deepseek",
+        "google",
+        "mistral",
+        "openrouter",
+        "radient",
+        "alibaba",
+        "alibaba-token-plan",
+        "alibaba-token-plan-oauth",
+        "zai",
+    }, required
+
+    # And the union a host actually gates on: required plus Anthropic's optional
+    # fallback, and nothing else. A loopback-only provider appearing here would
+    # mean a prompt racing its HTTP callback.
+    accepts = {p.id for p in PROVIDER_REGISTRY if p.login is not None and p.accepts_paste_prompt}
+    assert accepts == required | {"anthropic"}, accepts
 
 
 @pytest.mark.asyncio
