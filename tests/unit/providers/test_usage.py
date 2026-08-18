@@ -494,6 +494,25 @@ async def test_zai_never_raises_on_any_hostile_numeric_field() -> None:
                     # The assertion is that this line returns at all.
                     await fetch_usage(client, "zai", api_key="k")
 
+    # The ENVELOPE shapes, not just the leaf values. The numeric sweep above
+    # feeds well-formed containers, so the `isinstance` guards on `data`, on
+    # `limits`, and on each row were load-bearing with nothing standing over
+    # them: dropping the `data`-is-a-dict or the row-is-a-dict check turns a
+    # hostile body into an AttributeError rather than a dropped report, and no
+    # test noticed.
+    for envelope in (
+        {"success": True, "data": "nope"},
+        {"success": True, "data": [1, 2]},
+        {"success": True, "data": None},
+        {"success": True, "data": {"limits": "nope"}},
+        {"success": True, "data": {"limits": None}},
+        {"success": True, "data": {"limits": ["nope", 3, None]}},
+        {"success": True, "data": {}},
+    ):
+        client = _client_for(envelope)
+        async with client:
+            assert await fetch_usage(client, "zai", api_key="k") is None, envelope
+
 
 @pytest.mark.asyncio
 async def test_zai_feature_bucket_is_the_breakdown_with_no_chat_model() -> None:
