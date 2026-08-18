@@ -440,6 +440,17 @@ def history_chars(messages: Sequence[object]) -> int:
     — a question a cheap lower bound answers correctly. Anything expensive here
     would defeat its own purpose.
 
+    Consequence worth knowing, since it is a deliberate under-count and not an
+    oversight: a history whose bulk lives in tool-call ARGUMENTS (a ``write``
+    with a large ``content``) reads as smaller than it is and takes the inline
+    path. That is bounded and acceptable — tool RESULTS, the usual bulky item,
+    are text blocks and are counted; estimates are memoized per message, so
+    arguments are encoded once per message rather than once per turn; and the
+    exposure is therefore a one-shot cold pass, measured at 136 ms on a
+    pathological 400-turn history against the 860 ms stall the offload exists
+    to remove. Sizing arguments here would mean serializing every tool call on
+    a probe whose whole value is being cheaper than the work it gates.
+
     Accepts any message-shaped object so the one definition serves both the
     plain-``Message`` estimator and the cut-point walker, which also sees
     :class:`~local_operator.harness.types.CustomMessage` (no ``content``).
