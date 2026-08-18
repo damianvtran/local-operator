@@ -6696,6 +6696,14 @@ class OperatorApp(App[None]):
         # than flushed for the same reason the notification is suppressed while
         # children run: the user is told when the work is actually over.
         self._completion_deferred = False
+        # The waiting latch is turn-scoped too, and clearing it HERE is what
+        # keeps it from going stale. `_refresh_working_activity` clears it when
+        # a question is answered, but an ABORTED turn does not go through that
+        # transition: Esc denies the parked approval and ends the turn with the
+        # latch still reading `approval`, so the NEXT turn's question was not a
+        # change and was silently never announced. A turn boundary is the one
+        # point at which no question can still be outstanding.
+        self._waiting_kind = None
         # D25: the ONE aggregate working line appears for the turn.
         self._working_fallback = DEFAULT_ACTIVITY
         self._start_working_block()

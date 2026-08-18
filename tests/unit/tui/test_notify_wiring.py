@@ -509,3 +509,34 @@ async def test_blurring_an_idle_session_announces_nothing() -> None:
         app.on_app_blur(AppBlur())
         await pilot.pause()
     assert notifier.kinds == []
+
+
+@pytest.mark.asyncio
+async def test_a_question_after_an_aborted_turn_is_still_announced() -> None:
+    """The waiting latch must not survive a turn boundary.
+
+    `_refresh_working_activity` clears the latch when a question is ANSWERED,
+    but an aborted turn never makes that transition: Esc denies the parked
+    approval and ends the turn with the latch still reading `approval`. The
+    next turn's question was therefore not a change, and was silently never
+    announced — a stale latch costing exactly the notification this feature
+    exists to send. Caught by the round-2 reviewer's probing, reproduced, and
+    pinned here.
+    """
+    from local_operator.tui.events import TurnStarted
+
+    session = JobsSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app._approval = ApprovalBlock("bash", "first", on_answer=lambda _: None)
+        app._refresh_working_activity()
+        # An abort ends the turn without the answered-transition that clears it.
+        app.on_turn_ended(TurnEnded(aborted=True, error=None))
+        await pilot.pause()
+        app.on_turn_started(TurnStarted())
+        app._approval = ApprovalBlock("write", "second", on_answer=lambda _: None)
+        app._refresh_working_activity()
+        await pilot.pause()
+    assert notifier.kinds == ["approval", "approval"]
