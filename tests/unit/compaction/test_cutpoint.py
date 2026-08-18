@@ -219,13 +219,9 @@ def test_a_cut_never_keeps_an_assistant_whose_call_is_unanswered():
     # siblings alive (`>= 0` and `any`-for-`all` both survived a single-budget
     # version of this test).
     #
-    # Two sibling mutants (`>= 0` for `>= index`, and `any` for `all`) survive
-    # this and are EQUIVALENT rather than uncaught: an assistant always
-    # precedes its own results in a well-formed history, so `result_at[id]` is
-    # either `-1` (no result at all, which every variant rejects) or greater
-    # than the assistant's own index — the three forms cannot disagree on any
-    # history the harness can produce. The `-1` default is the load-bearing
-    # part, and the mutant that changes it IS caught.
+    # Both halves of the predicate are load-bearing, and each is pinned by a
+    # sibling test below: `all` (not `any`) by the partially-answered case, and
+    # `>= index` (not `>= 0`) by the re-issued-id case.
     #
     # The property is about the CUT INDEX, which is all ``_is_valid_cut``
     # governs: an assistant holding an unanswered call may never BE the cut.
@@ -397,3 +393,73 @@ def test_marker_tokens_use_raw_encoder():
     summary = "summary text " * 50
     marker = CustomMessage(custom_type="compaction_summary", details={"summary": summary})
     assert _message_tokens(marker) == _encode_len(summary)
+
+
+def test_a_partially_answered_assistant_is_not_a_valid_cut():
+    """`all`, not `any`: EVERY call of the boundary assistant must be answered.
+
+    An assistant issuing two calls where only one result has arrived is the
+    case that separates the two forms. Keeping it strands the unanswered call
+    on the kept side with no result, which is the dangling-call corruption in
+    the other direction from an orphaned result.
+
+    This exists because an earlier comment here claimed `any` was an
+    equivalent mutant, reasoning that an assistant always precedes its own
+    results. That premise is true and does not bear on this case: what
+    separates `all` from `any` is PARTIAL answering, not ordering. The claim
+    was false and the coverage it argued against is this test.
+    """
+    partial = _assistant_with_call("answered")
+    partial.tool_calls.append(ToolCall(id="never", name="bash", arguments={"command": "ls"}))
+    messages = [
+        _big_user(),
+        _big_user(),
+        _big_user(),
+        partial,
+        _tool_result("answered"),
+        Message.user("tail"),
+    ]
+
+    # Sized so the backwards walk STOPS on the partial assistant: it is the cut
+    # candidate, and `all` vs `any` decides whether it is accepted there. A
+    # budget that lets the walk stop past it never consults the predicate at
+    # all — the first version of this test did exactly that and passed under
+    # the `any` mutant, pinning nothing.
+    budget = sum(estimate_tokens(m) for m in messages[3:])
+    cut = find_cut_point(messages, budget)
+
+    assert cut is not None
+    assert messages[cut] is not partial, (
+        "the cut kept an assistant whose second call has no result, stranding a "
+        "dangling call at the head of the kept window"
+    )
+    to_summarize, kept = prepare_partitions(messages, cut)
+    assert_partition_pair_integrity(to_summarize, kept)
+
+
+def test_an_assistant_reissuing_an_already_answered_id_is_not_a_valid_cut():
+    """`>= index`, not `>= 0`: the result must follow THIS assistant.
+
+    ``_result_indices`` keys by ``tool_call_id`` and last occurrence wins, so a
+    re-issued id can resolve to a result that sits BEFORE the assistant that
+    re-issued it. Comparing against ``0`` accepts that (a result exists
+    somewhere); comparing against ``index`` is what requires the result to be
+    on the kept side of this cut.
+    """
+    first = _assistant_with_call("x")
+    reissued = _assistant_with_call("x")
+    messages = [
+        _big_user(),
+        first,
+        _tool_result("x"),
+        reissued,
+        Message.user("after " + "word " * 200),
+    ]
+
+    cut = find_cut_point(messages, estimate_tokens(messages[4]) + 10)
+
+    assert cut is not None
+    assert messages[cut] is not reissued, (
+        "the cut kept an assistant whose only matching result precedes it, so "
+        "the kept window opens with a call nothing answers"
+    )
