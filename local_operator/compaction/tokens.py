@@ -35,19 +35,59 @@ invariants keep it honest:
 
 Cross-package consumers that keep derived caches can subscribe via
 :func:`register_invalidator` and are notified on every invalidation.
+
+Thread safety / why the async variants exist
+--------------------------------------------
+Encoding is the single most expensive synchronous stretch on the event loop
+(measured: ~90 ms for eight ~40 KB messages, and 116 of 121 samples in a
+stall trace of eight concurrent subagents landed inside ``_encode_len``).
+Because every session shares ONE event loop, that stretch does not merely
+slow the session doing the counting — it stops every sibling subagent, the
+parent's own stream, and the TUI repaint for its whole duration.
+
+tiktoken's ``encode`` is a Rust extension that RELEASES the GIL, so moving it
+to a worker thread genuinely buys parallelism rather than just moving the
+stall (measured: 90 ms → 0.7 ms of loop stall, 3x faster wall clock for the
+same work). ``Session._offloaded`` is the caller that does that hop, for
+histories past :data:`OFFLOAD_MIN_CHARS`; the functions here stay synchronous
+so they remain usable from a worker thread, from pure-CPU callers, and from
+tests.
+
+That makes the module-level cache reachable from worker threads, so the
+mutations that are NOT individually atomic — the LRU ``move_to_end`` +
+``popitem`` eviction sequence, and the lazy encoding singleton — are guarded
+by :data:`_CACHE_LOCK`. The lock deliberately covers only the dict/singleton
+bookkeeping (sub-microsecond) and never ``encode`` itself, so concurrent
+estimates still tokenize in parallel. Because the encode runs unlocked, an
+invalidation can land between a computation and its insert; that race is
+closed by :data:`_INFLIGHT_ESTIMATES` rather than by widening the lock.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
+import threading
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
 from local_operator.harness.types import Message, TextContent
 from local_operator.optional import missing_extra_error
 
 logger = logging.getLogger(__name__)
+
+#: Guards the estimate cache's non-atomic LRU sequences and the lazy tiktoken
+#: singleton, both of which are now reachable from ``asyncio.to_thread``
+#: workers. Held for dict bookkeeping only — never across ``encode``.
+_CACHE_LOCK = threading.Lock()
+
+#: Below this many characters of history, estimating inline is cheaper than a
+#: thread hop (~50-100 us round trip). Above it the encode dominates and the
+#: hop pays for itself many times over. Applied by ``Session._offloaded`` so
+#: callers do not each re-derive the trade-off.
+OFFLOAD_MIN_CHARS = 20_000
 
 #: Flat token cost charged per image block. Matches
 #: ``IMAGE_TOKEN_ESTIMATE``: vision providers bill images in fixed visual-token
@@ -73,22 +113,32 @@ def _get_encoding() -> object | None:
     4`` fallback, not crash compaction (or startup — loading is deferred to
     first use). The warning fires once per process, so it names the extra
     without turning into per-turn noise.
+
+    Locked because the estimators now run under ``asyncio.to_thread``: two
+    workers reaching a cold singleton together would otherwise both pay the
+    ~60 ms table load and both log the failure warning. The lock is
+    uncontended after the first call (the fast path returns before taking it).
     """
     global _ENCODING, _ENCODING_FAILED
     if _ENCODING is not None or _ENCODING_FAILED:
         return _ENCODING
-    try:
-        import tiktoken
+    with _CACHE_LOCK:
+        # Re-check under the lock: another worker may have loaded it while
+        # this one waited.
+        if _ENCODING is not None or _ENCODING_FAILED:
+            return _ENCODING
+        try:
+            import tiktoken
 
-        _ENCODING = tiktoken.get_encoding("cl100k_base")
-    except Exception as exc:  # noqa: BLE001 - degrade, never raise
-        _ENCODING_FAILED = True
-        logger.warning(
-            "%s; falling back to the chars/4 token estimate (%s)",
-            missing_extra_error("tokenizer", "Exact token counting"),
-            exc,
-        )
-    return _ENCODING
+            _ENCODING = tiktoken.get_encoding("cl100k_base")
+        except Exception as exc:  # noqa: BLE001 - degrade, never raise
+            _ENCODING_FAILED = True
+            logger.warning(
+                "%s; falling back to the chars/4 token estimate (%s)",
+                missing_extra_error("tokenizer", "Exact token counting"),
+                exc,
+            )
+        return _ENCODING
 
 
 #: Passed to every ``encode`` call. tiktoken REFUSES by default to encode text
@@ -251,6 +301,48 @@ _ESTIMATE_CACHE_MAX = 4096
 _INVALIDATORS: dict[int, Callable[[Message], None]] = {}
 
 
+@dataclass
+class _Inflight:
+    """One token computation that is running right now.
+
+    ``message_id`` is what an invalidation matches on; ``invalidated`` is the
+    flag it sets. A tiny mutable record rather than a tuple because the flag
+    is written by a different thread than the one that created it.
+    """
+
+    message_id: str
+    invalidated: bool = False
+
+
+#: In-flight computations, keyed by a unique ticket. Closes a
+#: lost-invalidation race that exists only because ``_compute_tokens``
+#: deliberately runs OUTSIDE :data:`_CACHE_LOCK`:
+#:
+#:   thread A reads the cache (miss) -> starts encoding
+#:   the loop mutates the message and invalidates it (``pop`` finds nothing)
+#:   thread A inserts the count it computed from the PRE-mutation message
+#:
+#: The stale value then survives forever, because the invalidation that should
+#: have removed it already ran. A computation registers a ticket before it
+#: encodes; an invalidation flags every ticket for that message id; the
+#: computation declines to cache a result whose ticket was flagged. The
+#: invalidation therefore wins without pulling the encode under the lock.
+#:
+#: Keyed by TICKET, not by message id, which is what makes the state bounded
+#: and ABA-free. Bounded: an entry exists only while a computation is
+#: running, so the dict is sized by concurrency (a handful), not by the
+#: number of messages ever seen — an earlier per-id counter leaked one entry
+#: per invalidation on the once-per-turn prune path, which never inserts and
+#: so never evicted (20k turns -> 20k entries, cache still empty). ABA-free:
+#: tickets are unique and never reused, so a stalled computation cannot
+#: observe a recycled value and mistake it for its own.
+_INFLIGHT_ESTIMATES: dict[int, "_Inflight"] = {}
+
+#: Source of ticket ids. Guarded by :data:`_CACHE_LOCK`; monotonic so a
+#: ticket is never reused within a process.
+_TICKET_SEQUENCE = itertools.count()
+
+
 def estimate_tokens(message: Message) -> int:
     """Estimated token cost of ``message`` as sent on the wire.
 
@@ -263,15 +355,44 @@ def estimate_tokens(message: Message) -> int:
     if not _is_settled(message):
         # Streaming assistant, still provisional: compute but never cache.
         return _compute_tokens(message)
-    cached = _ESTIMATE_CACHE.get(message.id)
-    if cached is not None:
-        _ESTIMATE_CACHE.move_to_end(message.id)
-        return cached
+    # Lock the LRU bookkeeping, not the encode. ``get`` + ``move_to_end`` and
+    # the insert + ``popitem`` eviction are each multi-step sequences on a
+    # shared OrderedDict, and the estimators now run in worker threads (see
+    # the module docstring), so an unguarded interleaving can evict an entry
+    # another thread is mid-promotion on. ``_compute_tokens`` stays OUTSIDE
+    # the lock: it is the expensive part, it releases the GIL, and holding the
+    # lock across it would re-serialize exactly what the offload exists to
+    # parallelize. Two threads racing the same uncached id therefore both
+    # compute it — wasteful but correct, and far cheaper than serializing.
+    with _CACHE_LOCK:
+        cached = _ESTIMATE_CACHE.get(message.id)
+        if cached is not None:
+            _ESTIMATE_CACHE.move_to_end(message.id)
+            return cached
+        # Register this computation BEFORE releasing the lock, so any
+        # invalidation that lands while it encodes can find and flag it.
+        ticket = next(_TICKET_SEQUENCE)
+        _INFLIGHT_ESTIMATES[ticket] = _Inflight(message_id=message.id)
 
-    tokens = _compute_tokens(message)
-    _ESTIMATE_CACHE[message.id] = tokens
-    while len(_ESTIMATE_CACHE) > _ESTIMATE_CACHE_MAX:
-        _ESTIMATE_CACHE.popitem(last=False)
+    try:
+        tokens = _compute_tokens(message)
+    except BaseException:
+        # The ticket must not outlive its computation, or the bound above
+        # ceases to hold the moment an encode raises.
+        with _CACHE_LOCK:
+            _INFLIGHT_ESTIMATES.pop(ticket, None)
+        raise
+
+    with _CACHE_LOCK:
+        inflight = _INFLIGHT_ESTIMATES.pop(ticket, None)
+        if inflight is None or inflight.invalidated:
+            # Invalidated mid-flight: return the value to THIS caller (it is
+            # the honest answer for the message as it was read) but leave the
+            # cache empty so the next reader recomputes from the current one.
+            return tokens
+        _ESTIMATE_CACHE[message.id] = tokens
+        while len(_ESTIMATE_CACHE) > _ESTIMATE_CACHE_MAX:
+            _ESTIMATE_CACHE.popitem(last=False)
     return tokens
 
 
@@ -309,6 +430,40 @@ def _compute_tokens(message: Message) -> int:
 def estimate_messages_tokens(messages: Sequence[Message]) -> int:
     """Sum of per-message estimates — the local context-size estimator."""
     return sum(estimate_tokens(m) for m in messages)
+
+
+def history_chars(messages: Sequence[object]) -> int:
+    """Rough size of a history in characters, for the offload decision.
+
+    Deliberately shallow: it walks text blocks only, skipping tool arguments,
+    because it exists to answer "is this big enough to be worth a thread hop?"
+    — a question a cheap lower bound answers correctly. Anything expensive here
+    would defeat its own purpose.
+
+    Consequence worth knowing, since it is a deliberate under-count and not an
+    oversight: a history whose bulk lives in tool-call ARGUMENTS (a ``write``
+    with a large ``content``) reads as smaller than it is and takes the inline
+    path. That is bounded and acceptable — tool RESULTS, the usual bulky item,
+    are text blocks and are counted; estimates are memoized per message, so
+    arguments are encoded once per message rather than once per turn; and the
+    exposure is therefore a one-shot cold pass, measured at 136 ms on a
+    pathological 400-turn history against the 860 ms stall the offload exists
+    to remove. Sizing arguments here would mean serializing every tool call on
+    a probe whose whole value is being cheaper than the work it gates.
+
+    Accepts any message-shaped object so the one definition serves both the
+    plain-``Message`` estimator and the cut-point walker, which also sees
+    :class:`~local_operator.harness.types.CustomMessage` (no ``content``).
+    """
+    total = 0
+    for message in messages:
+        content = getattr(message, "content", None)
+        if not content:
+            continue
+        for block in content:
+            if isinstance(block, TextContent):
+                total += len(block.text)
+    return total
 
 
 def messages_tokens_upper_bound(messages: Sequence[Message]) -> int:
@@ -400,8 +555,23 @@ def invalidate_message_cache(message: Message) -> None:
 
     MUST be called after any in-place mutation of a message (pruning blanks,
     streaming finalize). Idempotent; safe for never-cached messages.
+
+    The pop is locked for the same reason the LRU sequences in
+    :func:`estimate_tokens` are: a worker thread may be mid-eviction on the
+    same OrderedDict. Subscriber callbacks run OUTSIDE the lock — they are
+    arbitrary cross-package code and must never be able to deadlock the
+    estimator by re-entering it.
     """
-    _ESTIMATE_CACHE.pop(message.id, None)
+    with _CACHE_LOCK:
+        _ESTIMATE_CACHE.pop(message.id, None)
+        # Flag even when nothing was cached: the entry this invalidation is
+        # racing may not have been INSERTED yet (see _INFLIGHT_ESTIMATES).
+        # Popping a miss and returning is exactly how the stale value used to
+        # survive. Costs one pass over the in-flight computations, which are
+        # bounded by concurrency rather than by history size.
+        for inflight in _INFLIGHT_ESTIMATES.values():
+            if inflight.message_id == message.id:
+                inflight.invalidated = True
     for invalidator in list(_INVALIDATORS.values()):
         try:
             invalidator(message)
@@ -426,4 +596,11 @@ def register_invalidator(invalidator: Callable[[Message], None]) -> Callable[[],
 
 def clear_estimate_cache() -> None:
     """Wipe the whole estimate cache (tests, memory pressure)."""
-    _ESTIMATE_CACHE.clear()
+    with _CACHE_LOCK:
+        _ESTIMATE_CACHE.clear()
+        # In-flight computations are flagged rather than dropped: a caller
+        # that wipes the cache must not have a computation started before the
+        # wipe land in the fresh one. Their tickets are still removed by the
+        # computations themselves, so this leaks nothing.
+        for inflight in _INFLIGHT_ESTIMATES.values():
+            inflight.invalidated = True

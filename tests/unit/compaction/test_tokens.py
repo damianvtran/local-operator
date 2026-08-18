@@ -1,5 +1,7 @@
 """Token estimation: tiktoken path, fallback, memoization, invalidation."""
 
+import time
+
 import pytest
 
 from local_operator.compaction import tokens as tokens_mod
@@ -330,3 +332,242 @@ class TestApproxTextTokens:
         assert exact > 0
         assert approx >= exact, "a context readout must not under-report a Latin+JSON payload"
         assert (approx - exact) / exact < 0.20
+
+
+class TestThreadSafetyForOffloadedEstimation:
+    """The estimators run in worker threads now; the shared cache must hold.
+
+    Compaction's rulers are the largest synchronous stretch in a turn, and one
+    event loop serves the parent session, every subagent and the TUI repaint —
+    so counting inline made one agent's threshold check stall all of them
+    (measured: 2.5 s of loop stall with eight children running, 116 of 121
+    stall samples inside the encoder). ``Session._offloaded`` moves large
+    histories to ``asyncio.to_thread``, which makes this module's module-level
+    LRU cache and lazy encoding singleton reachable from several threads at
+    once. These tests pin the properties that makes safe.
+    """
+
+    def test_history_chars_sizes_both_message_kinds(self):
+        """The offload decision is made on this probe, so it must not raise on
+        a CustomMessage — the cut-point walker sees those, and an exception
+        here would abort a compaction rather than merely mis-size it."""
+        from local_operator.compaction.tokens import history_chars
+        from local_operator.harness.types import CustomMessage
+
+        messages = [
+            Message.user("abcde"),
+            CustomMessage(custom_type="compaction_summary", details={"summary": "x" * 100}),
+        ]
+        # Counts the text block, tolerates the content-less custom entry.
+        assert history_chars(messages) == 5
+
+    def test_concurrent_estimation_agrees_with_serial_estimation(self):
+        """Same messages, many threads, one answer.
+
+        Guards the LRU sequences (``get`` + ``move_to_end``, and insert +
+        ``popitem`` eviction) that are individually atomic but not atomic
+        together: an unguarded interleaving can evict an entry another thread
+        is mid-promotion on, which shows up as a wrong total rather than a
+        crash.
+        """
+        import concurrent.futures
+
+        messages = [Message.user(f"message {i} " + "lorem ipsum dolor " * 50) for i in range(40)]
+        expected = estimate_messages_tokens(messages)
+        clear_estimate_cache()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: estimate_messages_tokens(messages), range(24)))
+
+        assert set(results) == {expected}
+
+    def test_cache_stays_within_its_bound_under_concurrent_writers(self):
+        """Eviction must not be defeated (or overrun) by concurrent inserts:
+        the bound is what keeps a long-running process from leaking an entry
+        per message ever estimated."""
+        import concurrent.futures
+
+        def work(batch: int) -> None:
+            estimate_messages_tokens(
+                [Message.user(f"b{batch} m{i} text text text") for i in range(200)]
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(work, range(8)))
+
+        assert len(tokens_mod._ESTIMATE_CACHE) <= tokens_mod._ESTIMATE_CACHE_MAX
+
+    def test_the_encoding_singleton_loads_once_under_a_thread_race(self):
+        """Two workers reaching a cold singleton together must not both pay the
+        table load (~60 ms and ~44 MB RSS) nor both log the failure warning."""
+        import concurrent.futures
+
+        loads: list[int] = []
+        real_import = tokens_mod._get_encoding
+
+        tokens_mod._ENCODING = None
+        tokens_mod._ENCODING_FAILED = False
+
+        class _Sentinel:
+            def encode(self, text, **_kwargs):
+                return [0] * (len(text) // 4)
+
+        def fake_get_encoding(_name: str):
+            loads.append(1)
+            return _Sentinel()
+
+        import sys
+        import types
+
+        fake_tiktoken = types.ModuleType("tiktoken")
+        fake_tiktoken.get_encoding = fake_get_encoding  # type: ignore[attr-defined]
+        original = sys.modules.get("tiktoken")
+        sys.modules["tiktoken"] = fake_tiktoken
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                encodings = list(pool.map(lambda _: real_import(), range(16)))
+            assert len(loads) == 1, f"loaded the encoding {len(loads)} times"
+            assert len({id(e) for e in encodings}) == 1, "workers saw different encodings"
+        finally:
+            if original is not None:
+                sys.modules["tiktoken"] = original
+            else:
+                sys.modules.pop("tiktoken", None)
+            tokens_mod._ENCODING = None
+            tokens_mod._ENCODING_FAILED = False
+
+    def test_an_invalidation_during_a_computation_is_not_lost(self):
+        """A mutation that lands mid-encode must not leave a stale count.
+
+        `_compute_tokens` runs OUTSIDE `_CACHE_LOCK` on purpose (holding the
+        lock across the encode would re-serialize what the offload exists to
+        parallelize). That opens a window: a thread reads a cache miss, starts
+        encoding, and while it encodes the loop mutates the message and
+        invalidates it — the `pop` finds nothing, and the thread then inserts a
+        count describing the PRE-mutation message. Nothing ever clears it, so
+        the stale value survives for the life of the process.
+
+        Reproduced at 295/300 before the in-flight ticket bookkeeping existed.
+        This is
+        the exact silent-staleness the module contract forbids, and the
+        compaction gate's cheap upper-bound early return depends on it not
+        happening.
+        """
+        import threading
+
+        from local_operator.compaction import tokens as mod
+
+        real_compute = mod._compute_tokens
+        stale = 0
+        try:
+            for _ in range(25):
+                message = Message.user("lorem ipsum dolor " * 400)
+                clear_estimate_cache()
+                computing = threading.Event()
+
+                def slow_compute(msg, _real=real_compute):
+                    value = _real(msg)
+                    computing.set()
+                    time.sleep(0.002)  # hold the compute->insert window open
+                    return value
+
+                mod._compute_tokens = slow_compute
+                worker = threading.Thread(target=lambda: estimate_tokens(message))
+                worker.start()
+                computing.wait(timeout=5)
+                # Mutate + invalidate inside the window, exactly as pruning does.
+                message.content = [TextContent(text="blanked")]
+                invalidate_message_cache(message)
+                worker.join(timeout=5)
+                mod._compute_tokens = real_compute
+
+                cached = mod._ESTIMATE_CACHE.get(message.id)
+                if cached is not None and cached != real_compute(message):
+                    stale += 1
+        finally:
+            mod._compute_tokens = real_compute
+
+        assert stale == 0, f"{stale}/25 invalidations were lost, leaving a stale estimate"
+
+    def test_race_bookkeeping_cannot_grow_without_bound(self):
+        """The race fix must not become the leak the cache bound exists to stop.
+
+        Both paths, because the INSERT path alone hides the leak that matters.
+        An earlier per-message-id counter was pruned only on eviction, and
+        eviction only happens on an insert — so the once-per-turn path that
+        invalidates without ever estimating (a prune below the compaction
+        threshold, where the cheap upper bound returns early and the exact
+        estimator never runs) grew one permanent entry per turn, on a
+        module-global dict shared by every session. Measured 20,000 entries
+        after 20,000 such turns with the cache still empty.
+        """
+        from local_operator.compaction import tokens as mod
+
+        clear_estimate_cache()
+        for batch in range(20):
+            estimate_messages_tokens(
+                [Message.user(f"b{batch} m{i} hello world") for i in range(400)]
+            )
+        assert len(mod._ESTIMATE_CACHE) <= mod._ESTIMATE_CACHE_MAX
+
+        # The path that leaked: invalidate, never estimate.
+        for turn in range(5_000):
+            invalidate_message_cache(Message.user(f"turn {turn} tool output"))
+        assert not mod._INFLIGHT_ESTIMATES, (
+            f"{len(mod._INFLIGHT_ESTIMATES)} entries survived invalidations that "
+            "never ran an estimate; the race bookkeeping is leaking"
+        )
+
+    def test_a_stalled_computation_cannot_be_revived_by_cache_turnover(self):
+        """Race state is keyed by a unique ticket, never by message id.
+
+        With a per-id counter, evicting the id dropped its counter, so a later
+        read returned 0 — the same value a stalled computation had recorded
+        before it started encoding. That resurrects the exact lost-invalidation
+        bug the counter was added to fix, just behind a narrower window.
+        """
+        import threading
+
+        from local_operator.compaction import tokens as mod
+
+        real_compute = mod._compute_tokens
+        try:
+            clear_estimate_cache()
+            message = Message.user("lorem ipsum " * 400)
+            computing = threading.Event()
+
+            def slow_compute(msg, _real=real_compute):
+                value = _real(msg)
+                computing.set()
+                time.sleep(0.15)
+                return value
+
+            mod._compute_tokens = slow_compute
+            worker = threading.Thread(target=lambda: estimate_tokens(message))
+            worker.start()
+            computing.wait(timeout=5)
+
+            message.content = [TextContent(text="blanked")]
+            invalidate_message_cache(message)
+
+            # Re-cache at the CURRENT content BEFORE churning. This step is
+            # what makes the test able to fail: with per-id race state, this
+            # insert is what created the entry whose later eviction recycled
+            # the id's counter back to its initial value — the value the
+            # stalled worker recorded — reviving the stale insert. Without it
+            # there is nothing for the churn to evict, and the buggy
+            # implementation passes too.
+            mod._compute_tokens = real_compute
+            estimate_tokens(message)
+            # Churn the cache past its bound so any per-id state would recycle.
+            for i in range(mod._ESTIMATE_CACHE_MAX + 500):
+                estimate_tokens(Message.user(f"churn {i}"))
+            worker.join(timeout=5)
+
+            cached = mod._ESTIMATE_CACHE.get(message.id)
+            assert cached is None or cached == real_compute(message), (
+                "a stalled computation's pre-mutation count was cached after "
+                "cache turnover recycled its race state"
+            )
+        finally:
+            mod._compute_tokens = real_compute

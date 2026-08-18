@@ -164,6 +164,46 @@ class _CompactionPlan:
     tokens_before: int
 
 
+def _configured_max_running() -> dict[str, int]:
+    """``{"max_running": N}`` from config, or ``{}`` to keep the default.
+
+    The concurrent-job ceiling governs how many subagents (and backgrounded
+    bash jobs — they share one pool) may run at once. The right number is a
+    property of the operator's machine and models rather than of this code, so
+    it is configurable under ``values.subagents.max_running``, beside the
+    ``values.subagents.models`` tiers the launcher already reads.
+
+    Returns kwargs rather than a value so an unset or unusable config is
+    expressed by passing NOTHING, leaving ``AsyncJobManager``'s own default as
+    the single source of truth for it. Duplicating the default here is how the
+    two would later disagree.
+
+    Never raises: a malformed config must not stop a session from starting.
+    A non-positive value is rejected rather than honoured, because 0 would
+    deadlock every launch behind a gate that can never open.
+    """
+    try:
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+        if not isinstance(raw, dict):
+            return {}
+        value = raw.get("max_running")
+        if value is None:
+            return {}
+        parsed = int(value)
+        if parsed < 1:
+            logger.warning(
+                "subagents.max_running=%r must be >= 1; using the built-in default", value
+            )
+            return {}
+        return {"max_running": parsed}
+    except Exception:  # noqa: BLE001 — a bad config must not fail session startup
+        logger.warning("subagents.max_running could not be read; using the built-in default")
+        return {}
+
+
 def _coerce_compaction_settings(settings: Any) -> Any:
     """Defensive coercion (CL-01 belt): a dict-shaped ``compaction_settings``
     is validated into ``CompactionSettings``; already-typed or ``None`` pass
@@ -596,7 +636,17 @@ class Session:
         # on_job_complete: settled model-owned jobs auto-deliver back into the
         # conversation when the session is idle (see _on_job_completed) — the
         # model stops having to poll 'jobs' for work it already started.
-        self.jobs = AsyncJobManager(on_job_complete=self._on_job_completed)
+        #
+        # max_running is operator-configurable (``values.subagents.max_running``)
+        # because the right ceiling is a property of the machine and the models
+        # in use, not of this code: a local model on a laptop wants far fewer
+        # concurrent children than a hosted one. An unset or unusable config
+        # contributes NO kwarg, so the manager's own default stands and the
+        # behaviour is exactly what it was before this was configurable.
+        self.jobs = AsyncJobManager(
+            on_job_complete=self._on_job_completed,
+            **_configured_max_running(),
+        )
         self._wake = WakeScheduler(
             now=lambda: int(time.time() * 1000),
             deliver=self._deliver_wake,
@@ -1932,6 +1982,48 @@ class Session:
             self._compacting = False
             self._turn_lock.release()
 
+    @staticmethod
+    async def _offloaded(compaction_api: Any, name: str, *args: Any) -> Any:
+        """Call one compaction ruler off the event loop when it is worth it.
+
+        The rulers (``estimate_messages_tokens``, ``find_cut_point``) tokenize
+        the whole history and run on EVERY turn. One event loop serves the
+        parent session, every subagent and the TUI repaint, so counting inline
+        made one agent's threshold check stall all of them — measured at up to
+        860 ms with eight children running, with 116 of 121 stall samples
+        inside the encoder. tiktoken's ``encode`` releases the GIL, so a worker
+        thread converts that stall into real parallelism (measured: 90 ms of
+        loop stall becomes 0.7 ms, and the same work finishes ~3x sooner).
+
+        Resolved by NAME off the passed module rather than closed over at
+        import: the module is looked up per call (and tests substitute partial
+        doubles for it), so binding the function early would call the real
+        ruler while a test believed it had pinned one.
+
+        Small histories stay inline because the thread hop costs more than the
+        encode it saves, and a module that does not expose ``history_chars``
+        (a partial test double) is treated the same way — degrading to the
+        inline path is always correct, just slower, and must never be a crash.
+        """
+        func = getattr(compaction_api, name)
+        probe = getattr(compaction_api, "history_chars", None)
+        threshold = getattr(compaction_api, "OFFLOAD_MIN_CHARS", None)
+        if not callable(probe) or not isinstance(threshold, int):
+            return func(*args)
+        # ``args[0]`` is the history for both rulers; anything after it is a
+        # scalar setting, so sizing on the first argument is sufficient. The
+        # probe comes off a module resolved at runtime, so its return type is
+        # unknown here: a double that returns a non-number takes the inline
+        # path rather than raising, same as one that omits the probe entirely.
+        size = probe(args[0])
+        if not isinstance(size, int) or size < threshold:
+            return func(*args)
+        # Snapshot the sequence: the worker must never walk a list the loop
+        # could mutate underneath it (pruning mutates histories in place).
+        snapshot = list(args[0])
+        rest = args[1:]
+        return await asyncio.to_thread(lambda: func(snapshot, *rest))
+
     async def _plan_compaction(
         self, *, respect_threshold: bool
     ) -> _CompactionPlan | CompactionOutcome:
@@ -2020,14 +2112,27 @@ class Session:
             ):
                 return CompactionOutcome(ran=False, reason="below_threshold")
 
-        local_estimate = compaction_api.estimate_messages_tokens(llm_history)
+        # Both of the next two calls tokenize the whole history, and both used
+        # to run inline on the event loop EVERY turn. Because one loop serves
+        # the parent session, every subagent and the TUI repaint, that made one
+        # agent's threshold check a global stall: a stall trace of eight
+        # concurrent subagents put 116 of 121 blocking samples inside the
+        # encoder reached from here (worst single stall 860 ms).
+        # ``_offloaded`` hands large histories to a worker thread, where
+        # tiktoken's GIL release lets them run genuinely in parallel; small
+        # ones still run inline so a short session pays no thread-hop tax.
+        local_estimate = await self._offloaded(
+            compaction_api, "estimate_messages_tokens", llm_history
+        )
         context_tokens = compaction_api.compaction_context_tokens(provider_reported, local_estimate)
         if respect_threshold and not compaction_api.should_compact(
             context_tokens, self._model.context_window, settings
         ):
             return CompactionOutcome(ran=False, reason="below_threshold")
 
-        cut = compaction_api.find_cut_point(llm_history, settings.keep_recent_tokens)
+        cut = await self._offloaded(
+            compaction_api, "find_cut_point", llm_history, settings.keep_recent_tokens
+        )
         if cut is None or cut <= 0:
             # ``find_cut_point`` is the ONE definition of "worth summarizing":
             # the kept window has to reach ``keep_recent_tokens`` and at least
@@ -2124,7 +2229,9 @@ class Session:
             # saving a receipt can quote and the recovery band below compares
             # like with like. The provider's own figure is not available until
             # the next request.
-            tokens_after = compaction_api.estimate_messages_tokens(self._render_for_compaction())
+            tokens_after = await self._offloaded(
+                compaction_api, "estimate_messages_tokens", self._render_for_compaction()
+            )
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,
