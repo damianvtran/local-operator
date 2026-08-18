@@ -552,3 +552,35 @@ def test_a_store_inside_its_ceiling_does_not_warn(tmp_path, caplog):
     # Over the ceiling, but only by the live session — the healthy resting state.
     assert result.bytes_on_disk > 100_000
     assert not [r for r in caplog.records if "exempt from eviction" in r.message]
+
+
+def test_directories_that_could_not_be_deleted_are_still_counted_and_reported(
+    tmp_path, monkeypatch, caplog
+):
+    """A sweep that can delete nothing must not report an empty store.
+
+    Bytes selected for eviction but still on disk belong to neither the live
+    nor the surviving-history bucket, so they used to vanish from the
+    accounting: a read-only store holding 10 MB over its ceiling reported
+    ``bytes_on_disk=0`` and logged nothing at warning level, which is the blind
+    spot the byte accounting exists to close.
+    """
+    import logging
+
+    sessions = tmp_path / "sessions"
+    for i in range(3):
+        _session(sessions, f"stuck{i}", size=100_000, age_days=90)
+
+    def refuse(_path):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr("local_operator.session.retention.shutil.rmtree", refuse)
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.retention"):
+        result = sweep_sessions(sessions, max_sessions=0, max_bytes=1_000, max_age_days=30)
+
+    assert result.errors == 3
+    assert result.evicted == 0
+    assert result.bytes_remaining == 300_000, "stranded bytes vanished from the accounting"
+    assert result.bytes_on_disk == 300_000
+    assert any("could not delete" in record.message for record in caplog.records)

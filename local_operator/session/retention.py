@@ -135,7 +135,8 @@ class SweepResult:
     bytes_freed: int = 0
     #: Bytes of EVICTABLE history left after the sweep — what the ceilings
     #: actually govern. Not the size of the store: live sessions are exempt
-    #: and counted in ``bytes_live`` instead.
+    #: and counted in ``bytes_live`` instead. Includes directories the sweep
+    #: selected but could not delete, which are still occupying disk.
     bytes_remaining: int = 0
     #: Bytes held by sessions that were skipped because a live process still
     #: owns them. Reported separately so a caller measuring the footprint can
@@ -155,9 +156,9 @@ class SweepResult:
         ``bytes_remaining`` answers the narrower "how much of it is subject to
         the ceilings".
 
-        A FLOOR rather than an exact total when ``errors`` is non-zero: a
-        directory that failed to delete is counted in neither term, so a sweep
-        that could not remove what it selected under-reports by that much.
+        Directories the sweep selected but failed to delete are counted in
+        ``bytes_remaining``, so a sweep that could remove nothing reports the
+        store's real size rather than an empty one.
         """
         return self.bytes_remaining + self.bytes_live
 
@@ -499,6 +500,7 @@ def sweep_sessions(
     evicted = 0
     freed = 0
     errors = 0
+    stranded = 0
     for candidate in doomed:
         try:
             shutil.rmtree(candidate.path)
@@ -509,6 +511,12 @@ def sweep_sessions(
             # trade every time.
             logger.debug("session retention: cannot remove %s: %s", candidate.path, exc)
             errors += 1
+            # Selected for eviction and still on disk. Counted, because it is
+            # in neither of the other two buckets: without this a sweep that
+            # could delete nothing reported an empty store while the volume
+            # filled up, which is the exact blind spot the byte accounting
+            # exists to close.
+            stranded += candidate.size
             continue
         evicted += 1
         freed += candidate.size
@@ -517,7 +525,7 @@ def sweep_sessions(
         scanned=len(candidates),
         evicted=evicted,
         bytes_freed=freed,
-        bytes_remaining=sum(candidate.size for candidate in keep),
+        bytes_remaining=sum(candidate.size for candidate in keep) + stranded,
         bytes_live=live_bytes,
         errors=errors,
     )
@@ -562,6 +570,20 @@ def sweep_sessions(
             live_bytes / 1024 / 1024,
             max_bytes / 1024 / 1024,
             result.bytes_on_disk / 1024 / 1024,
+        )
+    # The other way the ceiling can fail to hold, and the one with a cause the
+    # operator can act on: the sweep SELECTED directories and could not delete
+    # them (read-only mount, permissions, a directory being written). Reported
+    # separately from the live-session case because it is a fault rather than a
+    # trade, and at warning level because ``errors`` alone is a count nobody
+    # reads — the bytes are what say the store is not shrinking.
+    if stranded > 0:
+        logger.warning(
+            "session retention: could not delete %d session %s holding %.1f MB; the store "
+            "cannot be brought under its ceiling until that is resolved",
+            errors,
+            "directory" if errors == 1 else "directories",
+            stranded / 1024 / 1024,
         )
     return result
 
