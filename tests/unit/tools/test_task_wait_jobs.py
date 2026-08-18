@@ -651,3 +651,29 @@ async def test_peek_and_cancel_reject_missing_or_unknown_ids(tmp_path):
     listed = await _call(tools, "jobs", {}, context)
     assert listed.is_error is False
     await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_peek_and_cancel_reach_jobs_the_listing_shows(tmp_path):
+    """Whatever `op="list"` shows, `peek` and `cancel` must be able to address.
+
+    Regression: scoping these two ops by `context.job_id` (and leaving `list`
+    unscoped) made the tool contradict itself inside a child session — it
+    listed a grandchild `task` job and then called that same id "unknown job",
+    because `run_subagent` registers those with `owner_id=None`.
+    """
+    manager = AsyncJobManager()
+    grandchild = manager.register("task", "grandchild", _slow_runner)
+    # A CHILD session's context: it carries a job_id of its own.
+    context = ToolContext(cwd=str(tmp_path), session_id="child", jobs=manager, job_id="child-job-1")
+    tools = _tools(context)
+
+    listed = await _call(tools, "jobs", {}, context)
+    assert grandchild in listed.text, "precondition: the listing shows the job"
+
+    peeked = await _call(tools, "jobs", {"op": "peek", "job_id": grandchild}, context)
+    assert peeked.is_error is False, "peek could not address a job the listing showed"
+
+    cancelled = await _call(tools, "jobs", {"op": "cancel", "job_id": grandchild}, context)
+    assert cancelled.is_error is False, "cancel could not address a job the listing showed"
+    await manager.dispose()

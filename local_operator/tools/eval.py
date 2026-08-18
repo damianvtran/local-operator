@@ -630,11 +630,12 @@ async def _run_in_background(
             "bash",
             f"eval: {code.strip().splitlines()[0][:60] if code.strip() else 'code'}",
             _runner,
-            # The owner is whoever asked for the work: a subagent's background
-            # job must stay inside that subagent's scope, or owner-scoped
-            # ``cancel``/``list`` stop containing it and its completion routes
-            # to the parent's fallback sink instead of the child's.
-            owner_id=context.job_id if context is not None else None,
+            # Unowned ON PURPOSE — see the matching note in bash's
+            # ``_detach_to_job``. An ``owner_id`` without a registered delivery
+            # sink (nothing calls ``register_delivery_sink``) dead-letters the
+            # completion instead of scoping it, so a subagent would never be
+            # told its own background job had finished.
+            owner_id=None,
             on_cancel=_kill_unstarted_kernel,
         )
     except Exception:  # noqa: BLE001 — no slot for the job: kill, don't leak

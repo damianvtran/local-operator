@@ -1396,10 +1396,16 @@ async def execute_bash(
                 "bash",
                 f"bash: {command[:60]}",
                 _detached,
-                # Scope the job to whoever asked for it: an unowned job escapes
-                # owner-scoped cancel/list and delivers to the top-level
-                # session's fallback sink instead of the subagent's own.
-                owner_id=context.job_id if context is not None else None,
+                # Unowned ON PURPOSE, matching how ``run_subagent`` registers
+                # its ``task`` jobs. An owner is only useful with a registered
+                # delivery sink, and nothing in this codebase calls
+                # ``register_delivery_sink`` — so setting one guarantees the
+                # opposite of what it looks like: the completion is
+                # DEAD-LETTERED ("no live sink for owner ...") and the caller
+                # is never told its background job finished, which is the whole
+                # point of running it detached. Revisit together with a sink
+                # implementation, not before.
+                owner_id=None,
                 on_cancel=_kill_unstarted,
             )
         except Exception:  # noqa: BLE001 — no manager slot: kill, don't leak
@@ -5981,18 +5987,21 @@ async def execute_jobs(
     if params.op in ("peek", "cancel"):
         if not params.job_id:
             return _error(tool_call_id, "jobs", f"op='{params.op}' requires job_id")
-        # Owner-scoped on both ops, matching the manager's invariant that a
-        # subagent cannot reach its parent's jobs: ``owner_id`` is None for the
-        # top-level session (which legitimately sees everything) and the
-        # subagent's job id inside a child, where a mismatch reads as
-        # not-found. Without it a child could cancel or read the output of work
-        # it does not own.
-        owner = context.job_id if context else None
-        job = jobs.get(params.job_id, owner_id=owner)
+        # Deliberately NOT owner-scoped, and the same choice ``op="list"``
+        # already makes. Scoping these by ``context.job_id`` looked like
+        # defence in depth and was a regression: ``run_subagent`` registers
+        # every ``task`` job with ``owner_id=None``, so inside a child session
+        # a scoped lookup misses its own grandchildren — the tool listed a job
+        # and then called that same id "unknown job". The isolation it was
+        # meant to add is structural rather than per-call anyway: each
+        # ``Session`` builds its own ``AsyncJobManager`` and nothing reassigns
+        # a child's, so a child's manager never holds its parent's rows and
+        # there is no cross-session id to reach in the first place.
+        job = jobs.get(params.job_id)
         if job is None:
             return _error(tool_call_id, "jobs", f"unknown job {params.job_id}")
         if params.op == "cancel":
-            cancelled = await jobs.cancel(params.job_id, owner_id=owner)
+            cancelled = await jobs.cancel(params.job_id)
             if not cancelled:
                 # cancel() refuses a job that already settled, which is not a
                 # failure worth erroring on: the caller wanted it stopped and

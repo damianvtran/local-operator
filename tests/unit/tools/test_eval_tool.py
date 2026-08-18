@@ -699,28 +699,40 @@ async def test_background_timeout_may_exceed_the_foreground_cap(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_background_job_is_scoped_to_its_owner(tmp_path) -> None:
-    """A subagent's background work stays inside that subagent's scope, so an
-    owner-scoped cancel from elsewhere cannot reach it."""
+async def test_background_job_stays_deliverable_inside_a_subagent(tmp_path) -> None:
+    """A background job must be registered UNOWNED, even in a child session.
+
+    Setting ``owner_id`` looks like scoping and is not: the manager routes an
+    owned completion exclusively through that owner's registered delivery sink,
+    nothing in this codebase registers one, so the completion is dead-lettered
+    and the caller is never told its job finished. That silently defeats the
+    entire mode, so the ownership is pinned here rather than left to look like
+    an oversight.
+    """
     from local_operator.harness.jobs import AsyncJobManager
 
-    manager = AsyncJobManager()
+    delivered: list[str] = []
+
+    async def fallback(job_id: str, text: str, job: object) -> None:
+        delivered.append(job_id)
+
+    manager = AsyncJobManager(on_job_complete=fallback)
     context = ToolContext(
         cwd=str(tmp_path), session_id="bg-own", jobs=manager, job_id="child-job-1"
     )
     tool = eval_tool.build_eval_tool()
     result = await tool.execute(  # type: ignore[operator]
-        "c1",
-        {"code": "import time\ntime.sleep(30)", "background": True, "timeout": 60},
-        None,
-        None,
-        context,
+        "c1", {"code": "'done'", "background": True, "timeout": 60}, None, None, context
     )
     job_id = str((result.details or {})["job_id"])
     row = manager.get(job_id)
-    assert row is not None and row.owner_id == "child-job-1"
-    # A different owner cannot see or cancel it.
-    assert manager.get(job_id, owner_id="someone-else") is None
-    assert await manager.cancel(job_id, owner_id="someone-else") is False
-    assert await manager.cancel(job_id, owner_id="child-job-1") is True
+    assert row is not None and row.owner_id is None
+
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        settled = manager.get(job_id)
+        if settled is not None and settled.status != "running":
+            break
+    await asyncio.sleep(0.2)
+    assert delivered == [job_id], "the child was never told its background job finished"
     await manager.dispose()
