@@ -1383,7 +1383,14 @@ async def test_a_prompt_never_eats_a_half_typed_prompt() -> None:
         await pilot.pause(0.1)
 
         pending = asyncio.ensure_future(ask("bash", "run: rm -rf ./build"))
-        await pilot.pause(0.3)
+        # Waited on the CONDITION rather than a duration. A fixed
+        # `pause(0.3)` is a bet on how long the mount takes, and CI lost it on
+        # the slower of the two Python versions: the prompt had not taken focus
+        # yet and the assertion below read the composer.
+        for _ in range(100):
+            if isinstance(app.screen.focused, ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
         # The question took focus (or its keys would type into the draft)...
         assert isinstance(app.screen.focused, ApprovalPrompt)
         # ...and left the draft exactly as it was.
@@ -1391,7 +1398,13 @@ async def test_a_prompt_never_eats_a_half_typed_prompt() -> None:
 
         await pilot.press("y")
         assert await asyncio.wait_for(pending, 2) is True
-        await pilot.pause(0.2)
+        # Same reason as above: the hand-back happens on the way out of the
+        # gate, which is a mount/unmount round trip rather than a synchronous
+        # step, so the wait is on the condition.
+        for _ in range(100):
+            if isinstance(app.screen.focused, Editor):
+                break
+            await pilot.pause(0.02)
         # Focus is handed back, and the sentence is still there to finish.
         assert isinstance(app.screen.focused, Editor)
         assert app.query_one(Editor).text == "please clean up the stale rows and then"
