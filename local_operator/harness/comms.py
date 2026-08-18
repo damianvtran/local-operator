@@ -388,16 +388,19 @@ class SubagentComms:
         detail: str | None = None
 
         if record.paused:
-            # The flag is set BEFORE the cancel is awaited (see ``pause``), and
-            # the runner's teardown - including _persist_inflight's disk write -
-            # happens inside that await. So there is a real window in which the
-            # record reads paused while the job is still running, and tool calls
-            # in one batch run concurrently, so a ``pause`` and a ``list`` can
-            # interleave into exactly it. Reporting ``resumable`` there would
-            # promise a resume that ``resume()`` refuses ("still running"), and
-            # a row promising a resume that then refuses is worse than an honest
-            # refusal. ``pausing`` is the truthful reading, and it resolves on
-            # its own a moment later.
+            # DEFENSIVE, not a window anyone can currently observe.
+            # ``pause`` sets this flag and then awaits ``jobs.cancel``, which
+            # stamps ``job.status = "cancelled"`` before its first suspension
+            # point — so no concurrent ``list`` gets to run in between, and a
+            # poll of a real parent/child session never saw this state. Do not
+            # read the branch as evidence that it can.
+            #
+            # It is kept because it costs one comparison and makes the
+            # roster/``resume`` invariant hold STRUCTURALLY rather than by luck
+            # about where an ``await`` happens to sit in another module. The
+            # settle-window guard below is the one that fires in practice; this
+            # is the same rule applied to the pause path so that adding an
+            # await inside ``cancel`` can never silently reopen the divergence.
             if self._is_running(record):
                 return ChildInfo(
                     job_id=record.job_id,

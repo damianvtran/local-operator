@@ -1506,19 +1506,24 @@ async def test_the_roster_records_a_real_childs_failure(tmp_path, monkeypatch):
 
 
 def test_the_roster_does_not_promise_a_resume_during_the_pause_window(tmp_path):
-    """Roster and ``resume`` must agree even mid-pause.
+    """Roster and ``resume`` must agree even in a paused-but-still-running state.
 
-    ``pause`` sets the flag before awaiting the cancel, and the runner's
-    teardown (including ``_persist_inflight``'s disk write) happens inside that
-    await — so the record reads paused while the job is still running. Tool
-    calls in one batch run concurrently, so a ``pause`` and a ``list`` really
-    can interleave into that window. Reporting the child resumable there
-    promises a resume that ``resume()`` refuses.
+    This state is NOT currently reachable in production, and the test says so
+    rather than implying otherwise: ``pause`` sets the flag and then awaits
+    ``jobs.cancel``, which stamps the row before its first suspension point, so
+    no concurrent ``list`` can observe the gap. The state is constructed here
+    directly.
+
+    It is worth a test anyway, because the guard's job is to make the
+    roster/``resume`` invariant hold structurally rather than by luck about
+    where an ``await`` sits in ``AsyncJobManager``. If someone later adds one
+    inside ``cancel``, this is what stops the divergence reopening silently.
     """
     comms, _jobs, _child, _parent = wire()
     (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
     comms.attach("job-1", FakeChild(), tmp_path)
-    comms._records["job-1"].paused = True  # flag set, cancel not yet landed
+    # Constructed, not raced into: see the docstring.
+    comms._records["job-1"].paused = True
 
     [row] = comms.roster()
 
@@ -1580,16 +1585,25 @@ async def test_cancelling_a_paused_child_abandons_the_pause(tmp_path):
     assert row.resumable is True
 
 
-def test_an_unknown_status_is_not_born_resumable():
+def test_an_unknown_status_is_not_born_resumable(tmp_path):
     """F4: resumability is enumerated, not defaulted.
 
     A status nobody has reasoned about is one the parent should not be invited
     to resume; the old default meant any status added to ``_describe`` was
     silently born resumable.
     """
-    comms, jobs, _child, _parent = wire(attach=False)
+    comms, jobs, _child, _parent = wire()
+    # A real transcript on disk and a settled record, so every EARLIER branch
+    # (still running, no session_dir, transcript missing, live twin) is passed
+    # and the enumeration is genuinely what decides. Without this the test
+    # passed on the old fail-open code too, proving nothing: ``session_dir is
+    # None`` short-circuited long before the status was consulted.
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    comms.detach("job-1")
     jobs.jobs["job-1"].status = "some_future_state"
 
     [row] = comms.roster()
 
-    assert row.resumable is False
+    assert row.status == "some_future_state"  # reached the enumeration...
+    assert row.resumable is False  # ...and was not born resumable
