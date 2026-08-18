@@ -211,6 +211,12 @@ STOPPED_STEER_NOTICE = "not sent — the turn was interrupted"
 #: :meth:`OperatorApp._sync_band_inset`.
 MIN_BAND_INSET_SCREEN_ROWS = 10
 
+#: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
+#: owns below itself (`padding: 0 0 1 0` in the sheet). Added to a panel's
+#: predicted content height so a predicted slot and a measured one mean the
+#: same thing — see :func:`_slot_rows`.
+_BAND_SLOT_RHYTHM_ROWS = 1
+
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
 #:
@@ -3426,14 +3432,21 @@ class OperatorApp(App[None]):
         composer plus its status band. What is left after those and the inset has
         to be at least one row, or the inset is taking the transcript's last row.
 
-        Deliberately CONSERVATIVE about the unknown case: before the first
-        layout every region measures zero, which would read as "everything
-        fits" and apply the inset to a band that may not have room for it —
-        the overflow only becoming visible, and then correcting itself, a tick
-        later. Withholding the row instead costs at most one tick of a missing
-        blank row on a panel that appeared during boot, which is the cheaper of
-        the two mistakes: panels normally appear mid-session, where the layout
-        is long since measured.
+        A slot that has just been un-hidden measures ZERO until Textual
+        re-arranges, and that is the common case rather than a boot-only edge:
+        every mid-session appearance — a todo list created, a subagent started —
+        runs this against an unmeasured slot. Guessing "it does not fit" there
+        was visibly wrong: the dock painted flush, then jumped down a row when
+        the 1 Hz poll re-ran the check, and the todo list took an item back into
+        its `… N more` count at the same moment. Measured on the real event path
+        at ~0.46 s of wall clock, because `SubagentStarted` fires exactly one
+        `_refresh_band` and nothing else runs until the poll.
+
+        So an unmeasured slot is PREDICTED rather than assumed away (see
+        :func:`_slot_rows`): each panel already knows how many rows it is about
+        to paint, and asking it is what lets the first pass answer honestly and
+        the first painted frame be the settled one. Zero is kept as the "no slot
+        at all" answer, which is the only case where refusing is right.
         """
         try:
             screen_height = self.screen.size.height
@@ -3448,9 +3461,9 @@ class OperatorApp(App[None]):
         # answer it happened to start with. A slot's `outer_size` covers its
         # content plus its own rhythm row and excludes the band's padding, so
         # this term means the same thing whether or not the class is applied.
-        band_rows = sum(slot.outer_size.height for slot in slots if slot.display)
+        band_rows = sum(_slot_rows(slot) for slot in slots if slot.display)
         if band_rows <= 0:
-            return False  # nothing measured yet; see the docstring
+            return False  # nothing to measure and nothing predicted: no slot
         # `+ 1` is the inset itself, and the `>= 1` is the transcript's floor:
         # the conversation keeps at least one row of its own. A band already too
         # tall for that fails here and simply does not get the row — which is the
@@ -6854,6 +6867,49 @@ class OperatorApp(App[None]):
 
     def on_subagent_ended(self, message: SubagentEnded) -> None:
         self._refresh_band()
+
+
+def _slot_rows(slot: Any) -> int:
+    """Rows a docked band slot occupies, measured if possible and predicted if not.
+
+    ``outer_size.height`` is the truth once Textual has arranged the slot, and it
+    is ZERO for one that has just been un-hidden — which is every mid-session
+    appearance of a panel, not a boot-only case. `_band_inset_fits` runs at
+    exactly that moment (the todo tool's own event, `SubagentStarted`), so a
+    measurement-only reading makes the first painted frame disagree with the
+    settled one: the dock lands flush and jumps down a row when the 1 Hz poll
+    re-asks, ~0.46 s later on the real event path.
+
+    The prediction asks the panel, because each already knows what it is about
+    to paint — the todo panel from its own row budget, the subagent panel from
+    the rows it has mounted — and adds the slot's own rhythm row
+    (`.band-slot { padding: 0 0 1 0 }`) so both branches mean the same thing.
+    A panel that answers neither contributes 1: it is displayed, so it is at
+    least a row, and under-counting is what puts a row back into the transcript
+    that the dock is about to take.
+    """
+    try:
+        measured = int(slot.outer_size.height)
+    except Exception:  # not a laid-out widget (reduced hosts)
+        measured = 0
+    predicted = 0
+    predict = getattr(slot, "predicted_rows", None)
+    if callable(predict):
+        try:
+            # `cast` because `getattr` on a duck-typed slot widens to `object`;
+            # the `except` below is what actually guards a bad implementation.
+            rows = cast(Callable[[], int], predict)()
+            predicted = max(1, int(rows)) + _BAND_SLOT_RHYTHM_ROWS
+        except Exception:  # a prediction must never break a repaint
+            logger.debug("band slot could not predict its height", exc_info=True)
+    # The LARGER of the two, never "measured if it looks measured". A slot is
+    # not simply arranged-or-not: mid-layout it reports a PARTIAL height, and
+    # trusting that over the prediction is a race — observed as an intermittent
+    # overflow where a 12-row subagent list measured 3, the inset was granted on
+    # the strength of it, and the rows then arrived. Both terms describe the same
+    # slot, so the larger is the safe one: it can only ever withhold the inset,
+    # which costs a blank row, where the smaller costs a scrollable screen.
+    return max(measured, predicted, 1)
 
 
 def _model_spec(session) -> Any | None:

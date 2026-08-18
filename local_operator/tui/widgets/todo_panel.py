@@ -319,6 +319,28 @@ class TodoPanel(Container):
             return 0
         return max(1, width - _BODY_RAIL_CELLS)
 
+    def predicted_rows(self) -> int:
+        """Content rows this panel will paint, for a caller that cannot measure.
+
+        The dock's inset check runs at the moment a panel appears, when the slot
+        has not been arranged yet and measures zero (see ``app._slot_rows``).
+        Answering from the painted body — falling back to the budget before the
+        first paint — is what lets that check be right on the first frame rather
+        than correcting itself a tick later, which the user sees as the dock
+        jumping.
+
+        Never raises and never returns less than one: a displayed panel is at
+        least a row, and under-counting hands the transcript a row the dock is
+        about to take.
+        """
+        try:
+            content = str(self._body.content)
+        except Exception:  # body not built yet
+            content = ""
+        if content:
+            return max(1, len(content.split("\n")))
+        return max(1, self._body_rows())
+
     def _body_rows(self) -> int:
         """Rows this paint may fill — header, items and any overflow marker.
 

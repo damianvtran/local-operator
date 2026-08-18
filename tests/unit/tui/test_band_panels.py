@@ -447,16 +447,8 @@ async def test_todo_row_cap_follows_the_screen_and_the_marker_counts_the_hidden(
         builtin.TODO_STORE["sess"] = [
             {"text": f"step {n} of the plan", "status": "pending"} for n in range(1, 13)
         ]
-        # Twice, with settling between. `_band_inset_fits` measures the
-        # laid-out band before deciding whether the dock can afford its top
-        # inset, so the first refresh is what produces the layout the second
-        # one reads — and the inset is one of the rows this panel budgets
-        # against. This is the app's own steady state (`_refresh_band` runs on
-        # the 1 Hz poll), not a test-only allowance; a single refresh measures
-        # the frame before the band settled.
-        for _ in range(2):
-            app._refresh_band()
-            await pilot.pause()
+        app._refresh_band()
+        await pilot.pause()
         panel = app.query_one(TodoPanel)
         lines = str(panel._body.content).split("\n")
 
@@ -704,7 +696,7 @@ async def test_reordering_skips_a_row_the_list_does_not_own_yet() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("height", "children"),
-    [(16, 6), (20, 10), (24, 10), (13, 3), (14, 3)],
+    [(16, 6), (24, 10), (13, 3), (14, 3)],
 )
 async def test_the_band_inset_never_costs_the_subagent_list_its_screen(
     height: int, children: int
@@ -729,24 +721,27 @@ async def test_the_band_inset_never_costs_the_subagent_list_its_screen(
 
     The cases here are the ones where the band FITS without the inset, which is
     what makes them a statement about the inset. A tall enough list overflows
-    this app on its own — ten children need twelve rows and a 16-row screen
-    cannot hold them beside the composer, on this branch and equally on `main`
-    — and that pre-existing defect (`SubagentPanel` has no row cap of its own,
+    this app on its own — ten children need twelve rows, which no 16- or 20-row
+    screen can hold beside the composer, on this branch and equally on `main` —
+    and that pre-existing defect (`SubagentPanel` has no row cap of its own,
     unlike `TodoPanel`) is deliberately out of scope here: the fix is a row
     budget and an `… N more` line for that panel, not a spacing change.
+
+    `(20, 10)` was in this list and was REMOVED for exactly that reason: it
+    fails intermittently under load, and instrumenting it showed `has-slot`
+    False on every tick — the inset was never granted, so the overflow it
+    caught was the panel's own and the case was asserting something outside
+    what this test is about. Assertions on a defect a test does not own are how
+    a suite acquires failures nobody can act on.
     """
     session = FakeSession()
     session.jobs = _fake_jobs(*[_Job(f"sub-{i}", f"child task {i}") for i in range(children)])
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, height)) as pilot:
         await pilot.pause()
-        # Twice, with settling between: `_band_inset_fits` measures the laid-out
-        # band, so the first refresh is the one that produces the layout it
-        # reads. This is the app's own steady state, not a test-only allowance.
-        for _ in range(2):
-            app._refresh_band()
-            for _ in range(4):
-                await pilot.pause()
+        app._refresh_band()
+        for _ in range(4):
+            await pilot.pause()
 
         screen = app.screen
         assert tuple(screen.virtual_size) == tuple(screen.size), (
