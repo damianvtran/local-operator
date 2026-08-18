@@ -1190,6 +1190,13 @@ async def test_the_footer_names_only_keys_that_work_where_the_caret_is() -> None
         assert "answer" in composer_footer, composer_footer
         assert "esc" in composer_footer, composer_footer
 
+        # The advertised range covers the OPTIONS and stops there: the
+        # free-text row cannot be answered by a digit (it is answered by typing
+        # into it, which needs the card to hold the caret), so naming it would
+        # point at a dead end.
+        assert "1-2" in composer_footer, composer_footer
+        assert str(card.other_row + 1) not in composer_footer.split("answer")[0], composer_footer
+
         await pilot.press("1")
         assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
 
