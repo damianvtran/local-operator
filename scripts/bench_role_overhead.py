@@ -88,25 +88,41 @@ def main() -> int:
     built = {tool.name: tool for tool in create_tools(context)}
 
     report: dict[str, int] = {}
+    missing: list[str] = []
     prompt_path = Path(__file__).resolve().parent.parent / "local_operator" / "prompts_md"
     report["system_prompt"] = tokens((prompt_path / "system.md").read_text(encoding="utf-8"))
     for name in TRACKED:
         tool = built.get(name)
-        report[name] = (
-            0
-            if tool is None
-            else tokens(
-                json.dumps(
-                    {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    }
-                )
+        if tool is None:
+            # RECORDED, not silently zeroed. A tool absent because this commit
+            # does not have it and a tool absent because the fixture failed to
+            # satisfy its createIf gate produce the same 0, and diffing two
+            # commits is this script's whole purpose: a degraded fixture would
+            # quietly report a SAVING where there is a cost. The caller decides
+            # which case it is; the script refuses to guess.
+            missing.append(name)
+            report[name] = 0
+            continue
+        report[name] = tokens(
+            json.dumps(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
             )
         )
     report["total"] = sum(report.values())
     print(json.dumps(report, indent=2, sort_keys=True))
+    if missing:
+        print(
+            "WARNING: not built on this commit (a 0 above may mean a broken fixture "
+            f"rather than an absent tool): {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        # Non-zero exit so a scripted before/after diff cannot silently compare
+        # a full inventory against a degraded one.
+        return 1
     return 0
 
 

@@ -273,3 +273,29 @@ async def test_a_job_swept_mid_wait_does_not_spin_the_loop() -> None:
     assert "still running" in result.text
     assert calls["n"] < 20, f"spun {calls['n']} times; the wait is busy-looping"
     await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_waiting_on_only_vanished_ids_does_not_raise() -> None:
+    """C17: the empty-events early return is load-bearing and nothing pinned
+    it — deleting it left the whole suite green, while `asyncio.wait([])`
+    raises `ValueError: Set of Tasks/Futures is empty.`
+
+    Asserted against the HELPER, not through `execute_wait`: the tool's own
+    "disappeared" check fires first and would mask the raise, which is exactly
+    why the round-2 suite did not notice. Round-2's spin test evicts only ONE
+    of two jobs, so a surviving sibling always kept the list non-empty.
+    """
+    from local_operator.tools.builtin import _await_any_settled
+
+    manager = AsyncJobManager(retention_ms=0)
+    job_id = manager.register("task", "A", _runner(0.01, "a"))
+    await asyncio.sleep(0.1)
+    assert manager.get(job_id) is None, "the retention sweep should have evicted it"
+
+    # Must return cleanly rather than raising, and must not return instantly
+    # (that is the busy spin C12 fixed).
+    started = time.perf_counter()
+    await asyncio.wait_for(_await_any_settled(manager, [job_id], 0.2, None), timeout=5.0)
+    assert time.perf_counter() - started >= 0.1
+    await manager.dispose()
