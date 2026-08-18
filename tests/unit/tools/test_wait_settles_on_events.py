@@ -242,3 +242,34 @@ async def test_the_timeout_names_a_job_that_is_actually_running() -> None:
     assert result.details["job_id"] == second
     assert first not in result.text
     await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_job_swept_mid_wait_does_not_spin_the_loop() -> None:
+    """C12: an evicted row yields a pre-set event, so `asyncio.wait` returned
+    at once, `_settled()` found nothing, and the caller's loop re-entered at
+    full speed — burning the event loop this path exists to protect, and faster
+    than the poll it replaced (measured 635/s)."""
+    import local_operator.tools.builtin as builtin_module
+
+    manager = AsyncJobManager(retention_ms=0)
+    context = ToolContext(cwd=".", jobs=manager)
+    calls = {"n": 0}
+    original = builtin_module._await_any_settled
+
+    async def counted(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        await original(*args, **kwargs)
+
+    settles_soon = manager.register("task", "A", _runner(0.15, "done"))
+    keeps_running = manager.register("task", "B", _runner(60.0))
+
+    builtin_module._await_any_settled = counted
+    try:
+        result = await _wait(context, job_id=[settles_soon, keeps_running], wait_ms=800)
+    finally:
+        builtin_module._await_any_settled = original
+
+    assert "still running" in result.text
+    assert calls["n"] < 20, f"spun {calls['n']} times; the wait is busy-looping"
+    await manager.dispose()

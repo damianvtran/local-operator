@@ -53,7 +53,7 @@ def _edit_fields(**overrides: Any) -> AgentEditFields:
 
 
 async def call(context: ToolContext, **args) -> str:
-    result = await execute_agent("tc", args, context=context)
+    result = await execute_agent("tc", args, None, None, context)
     return result.text
 
 
@@ -259,3 +259,51 @@ async def test_authoring_refuses_a_name_owned_by_a_non_role(context, registry, o
     registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
     body = await call(context, op=op, name="reviewer", description="d", instructions="x")
     assert "not a role" in body
+
+
+@pytest.mark.asyncio
+async def test_a_role_can_be_authored_as_a_delegating_one(context, registry) -> None:
+    """C14: `may_delegate` was preserved across updates but unreachable — no
+    role authored through this tool could ever coordinate, and an installed
+    manager's flag could not be revoked."""
+    await call(
+        context,
+        op="create",
+        name="lead",
+        description="coordinates multi-part work",
+        instructions="Coordinate.",
+        delegate=True,
+    )
+
+    def delegates() -> bool:
+        profile = resolve_profile("lead", registry=registry)
+        assert profile is not None
+        return profile.may_delegate
+
+    assert delegates() is True
+
+    await call(context, op="update", name="lead", instructions="Coordinate well.")
+    assert delegates() is True, "preserved across an unrelated update"
+
+    await call(context, op="update", name="lead", delegate=False)
+    assert delegates() is False, "revocable"
+
+
+@pytest.mark.asyncio
+async def test_the_tool_returns_an_error_result_instead_of_raising(context, registry) -> None:
+    """C13: `agent` was the only executor in the tree without `@_guard`, and
+    the harness contract is that tools never throw into the loop."""
+
+    def explode(*args, **kwargs):
+        raise PermissionError("agents dir is read-only")
+
+    registry.create_agent = explode  # type: ignore[method-assign]
+    result = await execute_agent(
+        "tc",
+        {"op": "create", "name": "x", "description": "d", "instructions": "i"},
+        None,
+        None,
+        context,
+    )
+    assert result.is_error
+    assert "PermissionError" in result.text or "read-only" in result.text

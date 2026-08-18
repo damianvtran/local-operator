@@ -318,3 +318,21 @@ def test_an_exact_match_still_wins_over_a_case_folded_one(tmp_path) -> None:
 
     profile = resolve_profile("triage", registry=registry)
     assert profile is not None and profile.instructions == "EXACT"
+
+
+def test_a_non_role_exact_match_does_not_shadow_the_operators_own_role(tmp_path) -> None:
+    """C11: the round-1 fold fix stopped at the exact lookup, so a non-role row
+    matching exactly discarded the hit and the fold never ran — reopening the
+    very bug the fold was added for, in the one arrangement its test missed."""
+    registry = AgentRegistry(tmp_path)
+    registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    role = registry.create_agent(
+        _edit_fields(name="Reviewer", description="house", tags=["role", "tools:read"])
+    )
+    registry.set_agent_system_prompt(role.id, "HOUSE RULES")
+
+    profile = resolve_profile("reviewer", registry=registry)
+
+    assert profile is not None
+    assert profile.agent_id == role.id, "the operator's own role must win"
+    assert profile.instructions == "HOUSE RULES"

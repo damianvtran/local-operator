@@ -46,11 +46,11 @@ from local_operator.agent_profiles import (
     MAX_INSTRUCTIONS_CHARS,
     AgentProfile,
     NameTakenError,
-    _profile_from_agent,
     install_seed,
     is_role,
     list_seeds,
     load_seed,
+    profile_from_agent,
     seed_tags,
 )
 from local_operator.harness.types import (
@@ -62,6 +62,7 @@ from local_operator.harness.types import (
 )
 from local_operator.tools.builtin import (
     _error,
+    _guard,
     _text,
     _validation_error,
     spill_truncate,
@@ -103,6 +104,13 @@ class AgentParams(BaseModel):
     effort: str | None = Field(
         default=None, description="create/update: default model tier (lo/med/hi)."
     )
+    delegate: bool | None = Field(
+        default=None,
+        description=(
+            "create/update: may this role launch its own subagents? Default no — "
+            "only coordinating roles should."
+        ),
+    )
 
 
 def _profile_line(profile: AgentProfile, *, installed: bool) -> str:
@@ -130,7 +138,7 @@ def _registered_profiles(registry: Any) -> list[AgentProfile]:
     targets would be noise at best and a privacy leak at worst.
     """
 
-    from local_operator.agent_profiles import _profile_from_agent
+    from local_operator.agent_profiles import profile_from_agent
 
     try:
         agents = registry.list_agents()
@@ -145,7 +153,7 @@ def _registered_profiles(registry: Any) -> list[AgentProfile]:
         if not is_role(agent):
             continue
         try:
-            profiles.append(_profile_from_agent(registry, agent))
+            profiles.append(profile_from_agent(registry, agent))
         except Exception:  # noqa: BLE001
             continue
     return sorted(profiles, key=lambda profile: profile.name.lower())
@@ -346,7 +354,7 @@ async def _op_write(
     # and handed the role the full write inventory, failing OPEN and reporting
     # success. An omitted field means "leave it alone", never "clear it";
     # clearing is done by naming the field with an empty value.
-    current = _profile_from_agent(registry, existing) if existing is not None else None
+    current = profile_from_agent(registry, existing) if existing is not None else None
 
     if params.tools is not None:
         tools = tuple(params.tools) or None
@@ -357,6 +365,11 @@ async def _op_write(
         effort = params.effort.strip() or None
     else:
         effort = current.effort if current is not None else None
+
+    if params.delegate is not None:
+        may_delegate = params.delegate
+    else:
+        may_delegate = current.may_delegate if current is not None else False
 
     description = (params.description or "").strip()
     if not description and current is not None:
@@ -369,10 +382,12 @@ async def _op_write(
         instructions=instructions,
         tools=tools,
         effort=effort,
-        # Preserved for the same reason as the allowlist: a role that
-        # coordinates must not stop coordinating because someone fixed a typo
-        # in its guidance.
-        may_delegate=current.may_delegate if current is not None else False,
+        # Settable, and preserved when not set, for the same reason as the
+        # allowlist: a role that coordinates must not stop coordinating
+        # because someone fixed a typo in its guidance — but a role authored
+        # here must also be ABLE to coordinate, which previously required
+        # hand-editing the tags.
+        may_delegate=may_delegate,
     )
     tags = list(seed_tags(profile))
 
@@ -424,6 +439,7 @@ async def _op_write(
     )
 
 
+@_guard("agent")
 async def execute_agent(
     tool_call_id: str,
     args: dict[str, Any],
@@ -431,7 +447,16 @@ async def execute_agent(
     on_update: Callable[[AgentToolUpdate], None] | None = None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    """Discover, install, and author reusable agent role profiles."""
+    """Discover, install, and author reusable agent role profiles.
+
+    ``@_guard`` for the same reason every sibling executor has it: the harness
+    contract is that tools never throw into the loop, and this one has live
+    raising paths — a read-only agents directory (PermissionError from
+    create/install) and a transient registry read failure followed by a name
+    that does exist (ValueError out of ``create_agent``'s uniqueness check).
+    The loop's outer net would catch those, but without the traceback tail that
+    makes them debuggable from a transcript.
+    """
 
     try:
         params = AgentParams(**args)

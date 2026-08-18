@@ -5682,9 +5682,21 @@ async def _await_any_settled(
         await asyncio.sleep(min(0.1, remaining))
         return
     try:
-        events = [getter(job_id) for job_id in job_ids]
+        # Only ids that STILL HAVE A ROW. An id whose row the retention sweep
+        # evicted mid-wait gets a pre-set event (nothing will ever settle it),
+        # which would return from `asyncio.wait` immediately and spin the
+        # caller's `while` loop at full speed until its deadline — burning the
+        # event loop this function exists to protect, and faster than the poll
+        # it replaced. Skipping those ids parks on the siblings that can still
+        # fire; when NONE can, there is nothing to wait for and the caller's
+        # own disappeared/timeout branches are the right answer, so sleep out
+        # the remainder rather than returning into a hot loop.
+        events = [getter(job_id) for job_id in job_ids if jobs.get(job_id) is not None]
     except Exception:  # noqa: BLE001 - a manager that cannot make events polls
         await asyncio.sleep(min(0.1, remaining))
+        return
+    if not events and signal is None:
+        await asyncio.sleep(remaining)
         return
     waiters = [asyncio.ensure_future(event.wait()) for event in events]
     if signal is not None:

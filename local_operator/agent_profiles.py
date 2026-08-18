@@ -293,7 +293,7 @@ def is_role(agent: "AgentData") -> bool:
     return any(str(tag).strip().lower() == ROLE_TAG for tag in (agent.tags or []))
 
 
-def _profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentProfile:
+def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentProfile:
     """Convert a registered agent into a role profile.
 
     ``when_to_use`` and the tool surface are carried in the agent's tags with a
@@ -367,13 +367,21 @@ def resolve_profile(
     if registry is not None:
         try:
             agent = registry.get_agent_by_name(key)
+            if agent is not None and not is_role(agent):
+                # An exact match that is NOT a role must not end the search.
+                # It used to, which reopened the very bug the fold was added
+                # for: with an ordinary agent named `reviewer` beside the
+                # operator's own `Reviewer` role, the exact hit was discarded
+                # as a non-role and the fold never ran, so the packaged seed
+                # silently shadowed the operator's role.
+                agent = None
             if agent is None:
                 # Case-insensitive retry, because ``load_seed`` folds case and
                 # an exact-only registry lookup would invert this function's
                 # whole point: ``task(agent="Reviewer")`` would find the
                 # PACKAGED seed while silently ignoring the operator's own
-                # ``Reviewer``. Exact match still wins; this only runs when it
-                # found nothing.
+                # ``Reviewer``. An exact ROLE match still wins; this only runs
+                # when the exact lookup yielded no role.
                 folded = key.casefold()
                 agent = next(
                     (
@@ -392,7 +400,7 @@ def resolve_profile(
         # ordinary chat agents, and honouring one of those would hand a child
         # the full write inventory under a role's name.
         if agent is not None and is_role(agent):
-            return _profile_from_agent(registry, agent)
+            return profile_from_agent(registry, agent)
     return load_seed(key)
 
 
@@ -434,7 +442,7 @@ def install_seed(
     if existing is not None and not is_role(existing) and not overwrite:
         raise NameTakenError(seed.name)
     if existing is not None and not overwrite:
-        return _profile_from_agent(registry, existing)
+        return profile_from_agent(registry, existing)
 
     tags = list(seed_tags(seed))
     if existing is None:
@@ -467,7 +475,7 @@ def install_seed(
     else:
         agent = existing
     registry.set_agent_system_prompt(agent.id, seed.instructions)
-    return _profile_from_agent(registry, agent)
+    return profile_from_agent(registry, agent)
 
 
 def seed_tags(profile: AgentProfile) -> tuple[str, ...]:
