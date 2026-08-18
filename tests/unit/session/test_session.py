@@ -2006,6 +2006,25 @@ async def test_completed_work_survives_cancellation(tmp_path):
     assert "go" in replayed
     assert "BEFORE-CANCEL-1" in replayed  # the batch that completed
     assert "FINISHED" in replayed  # and its tool result
+
+    # Pairing is asserted HERE, on the cancellation path itself, and not only
+    # in the dedicated dangling-call test. An earlier version of this test
+    # checked text alone, and text alone is satisfied by a transcript carrying
+    # an unanswered `tool_use` — so it ratified the corruption instead of
+    # catching it (review round 1, R2).
+    history = Transcript(session._transcript.directory).build_llm_history()
+    calls = {
+        call.id
+        for message in history
+        if isinstance(message, Message) and message.role == "assistant"
+        for call in message.tool_calls
+    }
+    results = {
+        message.tool_call_id
+        for message in history
+        if isinstance(message, Message) and message.role == "tool"
+    }
+    assert not calls - results, f"cancellation left a dangling tool_use: {sorted(calls - results)}"
     await session.dispose()
 
 
@@ -2170,3 +2189,62 @@ async def test_durability_flush_never_persists_a_dangling_tool_call(tmp_path):
     texts = [m.text for m in replayed if isinstance(m, Message) and m.text]
     assert "DONE-c1a" in texts and "DONE-c1b" in texts, f"completed work lost: {texts}"
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dispose_does_not_suppress_the_turns_own_flush(tmp_path):
+    """``dispose()`` sets ``_disposed`` BEFORE aborting and awaiting the
+    in-flight turn — deliberately, so that turn's persistence "must land on a
+    live transcript" (HC-14). A ``_disposed`` guard inside the durability
+    flush would therefore suppress exactly the flush dispose is waiting for
+    (review round 1, R3). Completed work must be on disk after a dispose that
+    lands mid-batch, and the tail must still be legal.
+    """
+    started = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        if tool_call_id == "c2":
+            started.set()
+            await asyncio.sleep(30)  # dispose lands here
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="work",
+            content=[TextContent(text=f"DONE-{tool_call_id}")],
+        )
+
+    work = AgentTool(name="work", parameters={"type": "object", "properties": {}}, execute=execute)
+
+    class Steps(ScriptedStream):
+        def __call__(self, request, signal):
+            self.requests.append(request)
+            index = len(self.requests)
+
+            async def gen():
+                yield StreamTextDelta(delta=f"STEP-{index}")
+                yield StreamToolCallDelta(index=0, id=f"c{index}", name="work", argument_delta="{}")
+                yield StreamEndEvent(stop_reason="toolUse")
+
+            return gen()
+
+    session = make_session(tmp_path, Steps([]), tools=[work])
+    asyncio.create_task(session.prompt("go"))
+    await started.wait()
+    await asyncio.sleep(0.05)
+    await session.dispose()
+
+    history = Transcript(session._transcript.directory).build_llm_history()
+    texts = [m.text for m in history if isinstance(m, Message) and m.text]
+    assert "STEP-1" in texts and "DONE-c1" in texts, f"dispose dropped completed work: {texts}"
+
+    calls = {
+        call.id
+        for message in history
+        if isinstance(message, Message) and message.role == "assistant"
+        for call in message.tool_calls
+    }
+    results = {
+        message.tool_call_id
+        for message in history
+        if isinstance(message, Message) and message.role == "tool"
+    }
+    assert not calls - results, f"dispose left a dangling tool_use: {sorted(calls - results)}"

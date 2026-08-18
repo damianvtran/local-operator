@@ -2115,10 +2115,13 @@ class Session:
         loop and the ``finally`` caller passes ``self._context.messages``
         itself.
         """
-        if self._disposed:
-            # A disposed session's transcript may already be flushed; its
-            # messages were persisted by the dispose path's awaited turn.
-            return
+        # Deliberately NOT gated on ``self._disposed``. ``dispose()`` sets that
+        # flag BEFORE it aborts and awaits the in-flight turn, precisely so
+        # that turn's persistence "must land on a live transcript" — so a
+        # ``_disposed`` guard here would suppress the one flush dispose is
+        # waiting for. The transcript is still open at that point (it is closed
+        # after the awaited turn returns), and an append is idempotent, so the
+        # correct behaviour on a disposing session is to write, not to skip.
         try:
             await self._persist_new_messages(_paired_prefix(messages))
         except asyncio.CancelledError:
