@@ -123,6 +123,61 @@ async def test_bash_timeout_kills_and_marks(tools, context) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bash_background_returns_a_job_id_without_waiting(tmp_path) -> None:
+    """`background=True` hands the command to a job instead of blocking a turn.
+
+    The command sleeps far longer than this call may take, so returning fast
+    is only possible if it really was detached rather than awaited.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    ctx = ToolContext(cwd=str(tmp_path), session_id="bgbash", jobs=manager)
+    tool = builtin.build_bash_tool()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    result = await tool.execute(  # type: ignore[operator]
+        "c1",
+        {"command": "echo starting; sleep 30", "background": True, "timeout": 120},
+        None,
+        None,
+        ctx,
+    )
+    elapsed = loop.time() - started
+    assert result.is_error is False
+    assert elapsed < 5.0, f"background bash blocked for {elapsed:.1f}s"
+    details = result.details or {}
+    job_id = str(details["job_id"])
+    assert details["backgrounded"] is True
+
+    # Output reaches the peek buffer while the command is still running.
+    deadline = loop.time() + 10
+    seen = ""
+    while loop.time() < deadline:
+        window = manager.read_output(job_id)
+        assert window is not None
+        seen = window[0]
+        if "starting" in seen:
+            break
+        await asyncio.sleep(0.05)
+    assert "starting" in seen
+    running = manager.get(job_id)
+    assert running is not None and running.status == "running"
+
+    await manager.cancel(job_id)
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bash_background_without_a_job_manager_is_refused(tools, context) -> None:
+    """Refused, not silently run in the foreground: a caller that asked not to
+    block must never be handed a call that blocks for the whole timeout."""
+    result = await _call(tools, "bash", {"command": "echo hi", "background": True}, context)
+    assert result.is_error is True
+    assert "job manager" in result.text
+
+
+@pytest.mark.asyncio
 async def test_bash_timeout_rejects_zero_and_huge(tools, context) -> None:
     zero = await _call(tools, "bash", {"command": "echo hi", "timeout": 0}, context)
     assert zero.is_error is True

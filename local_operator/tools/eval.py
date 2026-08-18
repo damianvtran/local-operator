@@ -40,7 +40,7 @@ import sys
 import time
 import uuid
 from collections import OrderedDict
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -96,6 +96,16 @@ class EvalParams(BaseModel):
         gt=0,
         le=EVAL_MAX_TIMEOUT_SECONDS,
         description="Max seconds before the kernel is killed (state is lost).",
+    )
+    background: bool = Field(
+        default=False,
+        description=(
+            "Run in a DEDICATED kernel and return a job id immediately instead "
+            "of waiting. Use for long work (training, large fetches, polling "
+            "loops); follow it with jobs(op='peek') to read new output as it "
+            "prints, and jobs(op='cancel') to stop it. The background kernel is "
+            "separate, so it neither sees nor changes the session namespace."
+        ),
     )
 
 
@@ -413,13 +423,23 @@ async def _read_crash_stderr(kernel: _Kernel) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-async def _exchange(kernel: _Kernel, request: dict[str, Any], request_id: str) -> dict[str, Any]:
+async def _exchange(
+    kernel: _Kernel,
+    request: dict[str, Any],
+    request_id: str,
+    on_stream: Callable[[str, str], None] | None = None,
+) -> dict[str, Any]:
     """Send one request line, await its response line by id.
 
     Lines that are not this request's response are skipped, not fatal: user
     code can write to fd 1 directly (the worker only intercepts the
     ``sys.stdout`` OBJECT), and a protocol that dies on stray bytes would
     lose a healthy kernel over noise. EOF before a response is a crash.
+
+    ``on_stream`` receives intermediate ``stream`` frames (channel, text) when
+    the request asked for them. They are progress only: the response still
+    carries the complete captured streams, so this callback never has to be
+    reconciled with the final result.
     """
     stdin = kernel.process.stdin
     assert stdin is not None  # piped at spawn
@@ -446,8 +466,133 @@ async def _exchange(kernel: _Kernel, request: dict[str, Any], request_id: str) -
             response = json.loads(line)
         except (ValueError, UnicodeError):
             continue
-        if isinstance(response, dict) and response.get("id") == request_id:
-            return response
+        if not isinstance(response, dict) or response.get("id") != request_id:
+            continue
+        channel = response.get("stream")
+        if channel:
+            # A progress frame, not the answer: publish it and keep reading.
+            if on_stream is not None:
+                with contextlib.suppress(Exception):
+                    on_stream(str(channel), str(response.get("text") or ""))
+            continue
+        return response
+
+
+async def _run_in_background(
+    tool_call_id: str,
+    params: EvalParams,
+    context: ToolContext | None,
+) -> ToolResult:
+    """Run ``code`` as a background job in a kernel of its own.
+
+    A DEDICATED kernel rather than the session's, for the same reason the tool
+    is ``exclusive`` in the first place: the namespace is state, and a job that
+    keeps mutating it for the next half hour would interleave with every
+    foreground call the model makes meanwhile. Isolation is the honest trade —
+    the background run cannot see session variables, and the tool description
+    says so, which is far better than a shared namespace that silently
+    corrupts. The kernel is never registered in ``_KERNELS``: it belongs to the
+    job, and it is killed when the job settles, times out, or is cancelled.
+    """
+    jobs = context.jobs if context is not None else None
+    if jobs is None:
+        return _error(
+            tool_call_id,
+            "eval",
+            "background=true needs a job manager, which this session has not "
+            "attached; re-run without background.",
+        )
+    try:
+        kernel = await _spawn(_safe_cwd(context))
+    except OSError as exc:
+        return _error(tool_call_id, "eval", f"failed to start Python kernel: {exc}")
+
+    code = params.code
+    timeout = params.timeout
+
+    async def _runner(job_id: str, job_signal: Any, report_progress: Any) -> str:
+        appender = getattr(jobs, "append_output", None)
+
+        def _publish(channel: str, text: str) -> None:
+            if appender is not None:
+                appender(job_id, text)
+            line = text.strip().splitlines()
+            if line:
+                report_progress(line[-1][:200])
+
+        request_id = uuid.uuid4().hex
+        exchange = asyncio.create_task(
+            _exchange(
+                kernel,
+                {"id": request_id, "code": code, "stream": True},
+                request_id,
+                _publish,
+            )
+        )
+        abort_waiter = asyncio.create_task(job_signal.wait()) if job_signal is not None else None
+        waiters: list[asyncio.Task[Any]] = [exchange]
+        if abort_waiter is not None:
+            waiters.append(abort_waiter)
+        try:
+            done, _pending = await asyncio.wait(
+                waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+            if exchange in done:
+                try:
+                    response = exchange.result()
+                except _WorkerCrash as exc:
+                    tail = exc.stderr[-_CRASH_STDERR_TAIL_CHARS:].strip() or "(no stderr)"
+                    return f"Python kernel crashed.\n--- stderr (tail) ---\n{tail}"
+                return _background_summary(response)
+            if abort_waiter is not None and abort_waiter in done:
+                return "CANCELLED: background kernel killed mid-run"
+            return f"TIMEOUT after {timeout}s: background kernel killed mid-run"
+        finally:
+            # The kernel is this job's alone; it dies with the job on every
+            # path, including cancellation, so a killed job cannot leave an
+            # interpreter (and whatever it spawned) running untracked.
+            for task in (exchange, abort_waiter):
+                if task is not None and not task.done():
+                    task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await task
+            _retire(kernel)
+
+    try:
+        job_id = cast(Any, jobs).register(
+            "bash",
+            f"eval: {code.strip().splitlines()[0][:60] if code.strip() else 'code'}",
+            _runner,
+            owner_id=None,
+        )
+    except Exception:  # noqa: BLE001 — no slot for the job: kill, don't leak
+        _retire(kernel)
+        raise
+    return _text(
+        tool_call_id,
+        "eval",
+        f"started in the background as job {job_id} (use jobs op='peek' for new "
+        f"output, op='cancel' to stop it); its result auto-delivers when it "
+        f"finishes.\nNOTE: a background run uses its own kernel, so it does not "
+        f"share the session namespace.",
+        details={"job_id": job_id, "backgrounded": True},
+    )
+
+
+def _background_summary(response: dict[str, Any]) -> str:
+    """Render a finished background run the way the foreground result reads."""
+    stdout = str(response.get("stdout") or "")
+    stderr = str(response.get("stderr") or "")
+    error = response.get("error")
+    result = response.get("result")
+    parts: list[str] = []
+    if error:
+        parts.append(str(error))
+    elif result is not None:
+        parts.append(f"result: {result}")
+    parts.append(f"--- stdout ---\n{stdout if stdout else '(empty)'}")
+    parts.append(f"--- stderr ---\n{stderr if stderr else '(empty)'}")
+    return "\n".join(parts)
 
 
 def _lost_state_error(tool_call_id: str, reason: str) -> ToolResult:
@@ -490,6 +635,9 @@ async def execute_eval(
             f"aborted ({signal.reason or 'aborted'}): code not run",
         )
 
+    if params.background:
+        return await _run_in_background(tool_call_id, params, context)
+
     key = _session_key(context)
     _reap_idle(time.monotonic())
 
@@ -520,7 +668,19 @@ async def execute_eval(
         waiters: list[asyncio.Task[Any]] = [exchange]
         if abort_waiter is not None:
             waiters.append(abort_waiter)
-        done, _pending = await asyncio.wait(waiters, timeout=params.timeout)
+        # FIRST_COMPLETED is load-bearing, not a micro-optimisation. asyncio.wait
+        # defaults to ALL_COMPLETED, and ``abort_waiter`` only completes if the
+        # session is aborted — so with a signal attached (which is every real
+        # call: the loop hands one to every tool) the default made this await
+        # block for the WHOLE ``timeout`` even after the kernel had already
+        # answered. The response was still correct, so the bug was invisible in
+        # the output and visible only as wall clock: a call whose code raised a
+        # NameError in microseconds sat for the full 300s the caller allowed.
+        # That also inverted the parameter's contract — ``timeout`` is a MAX, and
+        # raising it must never make a fast call slower.
+        done, _pending = await asyncio.wait(
+            waiters, timeout=params.timeout, return_when=asyncio.FIRST_COMPLETED
+        )
         if exchange in done:
             try:
                 response = exchange.result()
