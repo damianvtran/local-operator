@@ -14,6 +14,7 @@ import io
 import os
 import random
 import struct
+import subprocess
 import threading
 import time
 import zlib
@@ -166,6 +167,56 @@ async def test_bash_background_returns_a_job_id_without_waiting(tmp_path) -> Non
 
     await manager.cancel(job_id)
     await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bash_background_cancelled_before_start_kills_the_process_group(tmp_path) -> None:
+    """Cancel with ZERO intervening awaits must still kill the child.
+
+    `register` only schedules the runner, so a cancel in the same event-loop
+    turn never enters `_detached` and never reaches its cleanup — the process
+    was spawned before `register` and would survive, reparented to init. The
+    existing process-group test misses this because it sleeps before
+    cancelling, which lets the runner start.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    ctx = ToolContext(cwd=str(tmp_path), session_id="bgleak", jobs=manager)
+    tool = builtin.build_bash_tool()
+    marker = f"sleep {random.randint(700, 899)}"
+    result = await tool.execute(  # type: ignore[operator]
+        "c1", {"command": marker, "background": True, "timeout": 900}, None, None, ctx
+    )
+    job_id = str((result.details or {})["job_id"])
+
+    def _alive() -> int:
+        found = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
+        return len([pid for pid in found.stdout.split() if pid])
+
+    assert _alive() >= 1, "precondition: the command should be running"
+    await manager.cancel(job_id)  # no awaits in between
+    await asyncio.sleep(1.0)
+    assert _alive() == 0, "process survived a cancel that landed before the runner started"
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bash_background_survives_dispose_without_leaking(tmp_path) -> None:
+    """Session teardown right after backgrounding must not orphan the child."""
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    ctx = ToolContext(cwd=str(tmp_path), session_id="bgdisp", jobs=manager)
+    tool = builtin.build_bash_tool()
+    marker = f"sleep {random.randint(900, 1099)}"
+    await tool.execute(  # type: ignore[operator]
+        "c1", {"command": marker, "background": True, "timeout": 1200}, None, None, ctx
+    )
+    await manager.dispose()  # no awaits in between
+    await asyncio.sleep(1.0)
+    found = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
+    assert [pid for pid in found.stdout.split() if pid] == [], "dispose orphaned the child"
 
 
 @pytest.mark.asyncio

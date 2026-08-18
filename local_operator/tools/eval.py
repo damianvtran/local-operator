@@ -42,7 +42,7 @@ import uuid
 from collections import OrderedDict
 from typing import Any, Callable, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from local_operator.harness.types import (
     AbortSignal,
@@ -72,6 +72,12 @@ EVAL_DEFAULT_TIMEOUT_SECONDS = 30.0
 #: Hard cap on the caller-chosen timeout — same role as bash's: a call longer
 #: than this is a session bug, not a tool feature.
 EVAL_MAX_TIMEOUT_SECONDS = 300.0
+#: Cap for a BACKGROUND run. The foreground cap exists to stop one call
+#: blocking a turn for minutes; a background job blocks nothing, so that reason
+#: does not apply and holding it there would have contradicted the mode's own
+#: description ("training, large fetches, polling loops" — none of which fit in
+#: five minutes). Matches bash's background ceiling so the two modes agree.
+EVAL_MAX_BACKGROUND_TIMEOUT_SECONDS = 3600.0
 #: A kernel untouched for this long is closed on the NEXT eval call. On-access
 #: reaping rather than a background task: a timer would have to be owned by an
 #: event loop that outlives sessions, and 5 minutes of staleness costs nothing
@@ -94,9 +100,32 @@ class EvalParams(BaseModel):
     timeout: float = Field(
         default=EVAL_DEFAULT_TIMEOUT_SECONDS,
         gt=0,
-        le=EVAL_MAX_TIMEOUT_SECONDS,
-        description="Max seconds before the kernel is killed (state is lost).",
+        le=EVAL_MAX_BACKGROUND_TIMEOUT_SECONDS,
+        description=(
+            "Max seconds before the kernel is killed (state is lost). "
+            f"Foreground calls are capped at {EVAL_MAX_TIMEOUT_SECONDS:.0f}s; "
+            f"background=true allows up to "
+            f"{EVAL_MAX_BACKGROUND_TIMEOUT_SECONDS:.0f}s."
+        ),
     )
+
+    @model_validator(mode="after")
+    def _timeout_within_mode_cap(self) -> "EvalParams":
+        """Hold foreground calls to the lower cap.
+
+        The field bound has to admit the larger background ceiling, so the
+        foreground limit is enforced here instead of being quietly dropped.
+        Rejecting is the honest outcome: silently clamping would run the call
+        for a different duration than the caller asked for.
+        """
+        if not self.background and self.timeout > EVAL_MAX_TIMEOUT_SECONDS:
+            raise ValueError(
+                f"timeout must be <= {EVAL_MAX_TIMEOUT_SECONDS:.0f}s for a "
+                f"foreground call; pass background=true to run up to "
+                f"{EVAL_MAX_BACKGROUND_TIMEOUT_SECONDS:.0f}s as a job."
+            )
+        return self
+
     background: bool = Field(
         default=False,
         description=(
@@ -134,6 +163,14 @@ _KERNELS: OrderedDict[str, _Kernel] = OrderedDict()
 #: before it runs, which would strand the kill half-done — the same reason
 #: bash keeps its reader tasks referenced.
 _CLOSING: set[asyncio.Task[None]] = set()
+
+#: Live background kernels by job id. These are deliberately NOT in
+#: ``_KERNELS``: that registry is the per-SESSION namespace cache with its own
+#: LRU and idle reaping, and a background job's kernel is owned by the job, not
+#: the session. Tracked anyway so a background worker is never an untracked
+#: process — the entry is removed as soon as the kernel is retired, on every
+#: path (completion, timeout, cancel, pre-start teardown).
+_BACKGROUND_KERNELS: dict[str, asyncio.subprocess.Process] = {}
 
 
 class _WorkerCrash(Exception):
@@ -543,7 +580,7 @@ async def _run_in_background(
                 except _WorkerCrash as exc:
                     tail = exc.stderr[-_CRASH_STDERR_TAIL_CHARS:].strip() or "(no stderr)"
                     return f"Python kernel crashed.\n--- stderr (tail) ---\n{tail}"
-                return _background_summary(response)
+                return _background_summary(response, context)
             if abort_waiter is not None and abort_waiter in done:
                 return "CANCELLED: background kernel killed mid-run"
             return f"TIMEOUT after {timeout}s: background kernel killed mid-run"
@@ -556,18 +593,55 @@ async def _run_in_background(
                     task.cancel()
                     with contextlib.suppress(BaseException):
                         await task
+            _forget_kernel()
             _retire(kernel)
+
+    # Filled in once ``register`` returns the id; the runner and the teardown
+    # hook both need it to drop their tracking entry.
+    job_slot: dict[str, str | None] = {"id": None}
+
+    def _forget_kernel() -> None:
+        job_id = job_slot["id"]
+        if job_id is not None:
+            _BACKGROUND_KERNELS.pop(job_id, None)
+
+    def _kill_unstarted_kernel() -> None:
+        """Teardown for a cancel that lands before the runner is ever entered.
+
+        The kernel is spawned above, BEFORE ``register``, so between those two
+        points it is owned by nothing the manager can see. ``register`` only
+        schedules the runner, so a cancel in that same event-loop turn would
+        settle the row without the runner's ``finally`` ever running and leave
+        this interpreter alive, reparented to init. The manager drops this the
+        moment the runner starts, so the kernel is never killed twice.
+        """
+        _forget_kernel()
+        _retire(kernel)
 
     try:
         job_id = cast(Any, jobs).register(
+            # ``"bash"``, not a new ``"eval"`` literal, and that is
+            # load-bearing: ``session`` only auto-delivers jobs whose type is
+            # in ``("task", "bash")``, so a third literal would silently strip
+            # background evals of the completion message that is the whole
+            # point of running them detached. ``JobType`` would have to gain
+            # the member and every reader branch on it before this can change;
+            # the label carries the distinction meanwhile.
             "bash",
             f"eval: {code.strip().splitlines()[0][:60] if code.strip() else 'code'}",
             _runner,
-            owner_id=None,
+            # The owner is whoever asked for the work: a subagent's background
+            # job must stay inside that subagent's scope, or owner-scoped
+            # ``cancel``/``list`` stop containing it and its completion routes
+            # to the parent's fallback sink instead of the child's.
+            owner_id=context.job_id if context is not None else None,
+            on_cancel=_kill_unstarted_kernel,
         )
     except Exception:  # noqa: BLE001 — no slot for the job: kill, don't leak
         _retire(kernel)
         raise
+    job_slot["id"] = job_id
+    _BACKGROUND_KERNELS[job_id] = kernel.process
     return _text(
         tool_call_id,
         "eval",
@@ -579,8 +653,16 @@ async def _run_in_background(
     )
 
 
-def _background_summary(response: dict[str, Any]) -> str:
-    """Render a finished background run the way the foreground result reads."""
+def _background_summary(response: dict[str, Any], context: ToolContext | None) -> str:
+    """Render a finished background run the way the foreground result reads.
+
+    Passed through ``spill_truncate`` like every other eval and bash result:
+    the worker caps each stream at 1 MB, and a job that produced that much
+    would otherwise store it whole in ``result_text`` and hand all of it to the
+    model when the completion auto-delivers. The full text stays reachable
+    through the spill handle, which is the same bargain the foreground path
+    already makes.
+    """
     stdout = str(response.get("stdout") or "")
     stderr = str(response.get("stderr") or "")
     error = response.get("error")
@@ -592,7 +674,8 @@ def _background_summary(response: dict[str, Any]) -> str:
         parts.append(f"result: {result}")
     parts.append(f"--- stdout ---\n{stdout if stdout else '(empty)'}")
     parts.append(f"--- stderr ---\n{stderr if stderr else '(empty)'}")
-    return "\n".join(parts)
+    text, _spill_details = spill_truncate("\n".join(parts), "eval", context)
+    return text
 
 
 def _lost_state_error(tool_call_id: str, reason: str) -> ToolResult:

@@ -1376,9 +1376,31 @@ async def execute_bash(
             )
             return "\n".join(part for part in (head, f"exit code: {code}", summary) if part)
 
+        def _kill_unstarted() -> None:
+            """Teardown for a cancel that lands before the runner is entered.
+
+            The process is spawned before ``register``, and ``register`` only
+            SCHEDULES the runner — so a cancel (or a session ``dispose``) in
+            the same event-loop turn settles the row without ``_detached``
+            ever running, leaving the process group alive and reparented to
+            init with nothing tracking it. The manager drops this hook the
+            instant the runner starts, so the group is never killed twice.
+            """
+            _kill()
+            for reader in readers:
+                if not reader.done():
+                    reader.cancel()
+
         try:
             bg_job_id = cast(Any, jobs).register(
-                "bash", f"bash: {command[:60]}", _detached, owner_id=None
+                "bash",
+                f"bash: {command[:60]}",
+                _detached,
+                # Scope the job to whoever asked for it: an unowned job escapes
+                # owner-scoped cancel/list and delivers to the top-level
+                # session's fallback sink instead of the subagent's own.
+                owner_id=context.job_id if context is not None else None,
+                on_cancel=_kill_unstarted,
             )
         except Exception:  # noqa: BLE001 — no manager slot: kill, don't leak
             _kill()
@@ -1410,7 +1432,14 @@ async def execute_bash(
         # block a turn for its whole duration.
         background_jobs = context.jobs if context is not None else None
         if background_jobs is None:
+            # Tear down everything this call created before refusing. The
+            # readers are not the only owners: ``wait_task`` and the abort
+            # waiter were created above and would outlive the refusal as
+            # pending tasks holding the process handle.
             _kill()
+            wait_task.cancel()
+            if abort_waiter is not None and not abort_waiter.done():
+                abort_waiter.cancel()
             for reader in readers:
                 reader.cancel()
             return _error(
@@ -5952,11 +5981,18 @@ async def execute_jobs(
     if params.op in ("peek", "cancel"):
         if not params.job_id:
             return _error(tool_call_id, "jobs", f"op='{params.op}' requires job_id")
-        job = jobs.get(params.job_id)
+        # Owner-scoped on both ops, matching the manager's invariant that a
+        # subagent cannot reach its parent's jobs: ``owner_id`` is None for the
+        # top-level session (which legitimately sees everything) and the
+        # subagent's job id inside a child, where a mismatch reads as
+        # not-found. Without it a child could cancel or read the output of work
+        # it does not own.
+        owner = context.job_id if context else None
+        job = jobs.get(params.job_id, owner_id=owner)
         if job is None:
             return _error(tool_call_id, "jobs", f"unknown job {params.job_id}")
         if params.op == "cancel":
-            cancelled = await jobs.cancel(params.job_id)
+            cancelled = await jobs.cancel(params.job_id, owner_id=owner)
             if not cancelled:
                 # cancel() refuses a job that already settled, which is not a
                 # failure worth erroring on: the caller wanted it stopped and

@@ -400,7 +400,14 @@ def test_tool_shape() -> None:
     # The `i` intent field is the registry's injection, not ours.
     assert "i" not in properties
     assert "timeout" in properties
-    assert tool.parameters["properties"]["timeout"]["maximum"] == eval_tool.EVAL_MAX_TIMEOUT_SECONDS
+    # The SCHEMA bound is the background ceiling, because one field serves both
+    # modes; the lower foreground cap is enforced by the model validator, which
+    # is asserted by test_background_timeout_may_exceed_the_foreground_cap.
+    assert (
+        tool.parameters["properties"]["timeout"]["maximum"]
+        == eval_tool.EVAL_MAX_BACKGROUND_TIMEOUT_SECONDS
+    )
+    assert eval_tool.EVAL_MAX_TIMEOUT_SECONDS < eval_tool.EVAL_MAX_BACKGROUND_TIMEOUT_SECONDS
 
 
 def test_describe_approval_shows_code_first_line() -> None:
@@ -635,3 +642,85 @@ async def test_background_without_a_job_manager_is_refused(context) -> None:
     )
     assert result.is_error is True
     assert "job manager" in result.text
+
+
+@pytest.mark.asyncio
+async def test_background_cancelled_before_start_kills_the_kernel(tmp_path) -> None:
+    """Cancel with ZERO intervening awaits must still kill the worker.
+
+    The kernel is spawned before ``register``, and ``register`` only schedules
+    the runner — so a cancel in the same event-loop turn never enters it and
+    never reaches its ``finally``. Without a pre-start teardown the interpreter
+    survives, reparented to init, owned by nothing.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg-leak", jobs=manager)
+    tool = eval_tool.build_eval_tool()
+    result = await tool.execute(  # type: ignore[operator]
+        "c1",
+        {"code": "import time\ntime.sleep(300)", "background": True, "timeout": 600},
+        None,
+        None,
+        context,
+    )
+    job_id = str((result.details or {})["job_id"])
+    process = eval_tool._BACKGROUND_KERNELS.get(job_id)
+    assert process is not None, "the background kernel should be tracked while unstarted"
+    assert process.returncode is None, "precondition: the kernel is alive"
+
+    await manager.cancel(job_id)  # no awaits in between
+    await asyncio.sleep(1.0)
+    assert process.returncode is not None, "kernel survived a cancel before the runner started"
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_background_timeout_may_exceed_the_foreground_cap(tmp_path) -> None:
+    """The mode advertises training runs and polling loops, so its ceiling has
+    to allow them; the foreground cap still applies to blocking calls."""
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg-cap", jobs=manager)
+    tool = eval_tool.build_eval_tool()
+    long_bg = await tool.execute(  # type: ignore[operator]
+        "c1", {"code": "1", "background": True, "timeout": 1800}, None, None, context
+    )
+    assert long_bg.is_error is False
+
+    too_long_fg = await tool.execute(  # type: ignore[operator]
+        "c2", {"code": "1", "timeout": 1800}, None, None, context
+    )
+    assert too_long_fg.is_error is True
+    assert "background=true" in too_long_fg.text
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_background_job_is_scoped_to_its_owner(tmp_path) -> None:
+    """A subagent's background work stays inside that subagent's scope, so an
+    owner-scoped cancel from elsewhere cannot reach it."""
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(
+        cwd=str(tmp_path), session_id="bg-own", jobs=manager, job_id="child-job-1"
+    )
+    tool = eval_tool.build_eval_tool()
+    result = await tool.execute(  # type: ignore[operator]
+        "c1",
+        {"code": "import time\ntime.sleep(30)", "background": True, "timeout": 60},
+        None,
+        None,
+        context,
+    )
+    job_id = str((result.details or {})["job_id"])
+    row = manager.get(job_id)
+    assert row is not None and row.owner_id == "child-job-1"
+    # A different owner cannot see or cancel it.
+    assert manager.get(job_id, owner_id="someone-else") is None
+    assert await manager.cancel(job_id, owner_id="someone-else") is False
+    assert await manager.cancel(job_id, owner_id="child-job-1") is True
+    await manager.dispose()

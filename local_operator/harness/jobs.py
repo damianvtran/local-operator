@@ -193,6 +193,11 @@ class AsyncJobManager:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._sinks: dict[str, DeliverySink] = {}
         self._queued_runners: dict[str, JobRunFn] = {}
+        # Teardown for a job whose runner has NOT been entered yet. See
+        # ``register(on_cancel=...)``: a runner's own ``finally`` cannot clean
+        # up a coroutine that never ran, so ownership of an already-spawned
+        # resource lives here until the runner takes it over.
+        self._pending_cleanups: dict[str, Callable[[], None]] = {}
         # One event per job, set exactly once when the job settles. This is
         # what lets ``wait`` sleep until there is news instead of re-checking
         # a status field on a timer: a 50 ms poll loop wakes 6000 times over a
@@ -235,6 +240,7 @@ class AsyncJobManager:
         owner_id: str | None = None,
         agent_id: str | None = None,
         queued: bool = False,
+        on_cancel: Callable[[], None] | None = None,
     ) -> str:
         """Register and start a background job. Returns the job id.
 
@@ -242,6 +248,17 @@ class AsyncJobManager:
         execution slot and are not started here — the run coroutine must call
         the job (the manager merely tracks it) via ``start_queued`` once its
         gate opens.
+
+        ``on_cancel`` is teardown for a resource the CALLER already created
+        before registering — a spawned process, an open kernel. It exists
+        because ``register`` only ``ensure_future``s the runner: the coroutine
+        is scheduled, not entered, so a ``cancel``/``dispose`` landing in the
+        same event-loop turn never executes the runner body and never reaches
+        its ``finally``. The resource would then outlive the job row that was
+        supposed to own it, reparented to init with nothing holding a
+        reference. It fires ONLY while the runner has not started; the first
+        statement of ``_run_job`` hands ownership over, after which the
+        runner's own cleanup is authoritative and this is dropped.
         """
         # Capacity is checked BEFORE any row is inserted: a rejected register
         # must never leave a phantom job occupying or shadowing a slot.
@@ -260,6 +277,8 @@ class AsyncJobManager:
         signal = AbortSignal()
         self._jobs[job_id] = job
         self._signals[job_id] = signal
+        if on_cancel is not None:
+            self._pending_cleanups[job_id] = on_cancel
 
         if not queued:
             progress = self._progress_fn(job_id)
@@ -378,6 +397,19 @@ class AsyncJobManager:
                     raise
             except Exception:
                 logger.warning("job %s task raised on cancel", job_id, exc_info=True)
+        # Teardown for a runner that was never entered. Awaiting the cancelled
+        # task above does NOT run the coroutine body, so a resource the caller
+        # spawned before registering (a process group, a kernel) still has no
+        # owner at this point; without this it survives the job row that was
+        # meant to own it. Popped first so it can only ever fire once, and
+        # AFTER the task await so a runner that did start has already claimed
+        # ownership and removed it — the two paths cannot both kill.
+        cleanup = self._pending_cleanups.pop(job_id, None)
+        if cleanup is not None:
+            try:
+                cleanup()
+            except Exception:  # noqa: BLE001 — teardown must not fail a cancel
+                logger.warning("job %s pre-start cleanup raised", job_id, exc_info=True)
         self._settle(job)
         self._sweep_due()
         return True
@@ -398,6 +430,16 @@ class AsyncJobManager:
         self._tasks.clear()
         self._sinks.clear()
         self._queued_runners.clear()
+        # Any cleanup still pending belongs to a job that was not ``running``
+        # (so ``cancel`` above skipped it) yet never entered its runner. Firing
+        # them here is what makes dispose a complete teardown rather than one
+        # that leaks whatever those jobs had already spawned.
+        for job_id, cleanup in list(self._pending_cleanups.items()):
+            del self._pending_cleanups[job_id]
+            try:
+                cleanup()
+            except Exception:  # noqa: BLE001 — teardown must not fail a dispose
+                logger.warning("job %s pre-start cleanup raised", job_id, exc_info=True)
         # Wake anything still parked on a job before dropping the events: a
         # waiter that outlives dispose must observe "settled" (cancel() set
         # each event on its way through) rather than sleeping to its deadline
@@ -467,6 +509,11 @@ class AsyncJobManager:
         # reads it. Stamping it later would leave a window where the coroutine
         # is running and the row still says it never started.
         job.started_at = time.time()
+        # The runner is now entered, so its own teardown (its ``finally``, its
+        # CancelledError handler) is authoritative for the resources it owns.
+        # Dropping the pre-start cleanup here is what keeps a cancel from
+        # killing the same process twice through two different owners.
+        self._pending_cleanups.pop(job.id, None)
         try:
             result = await coro
             if job.status == "cancelled":
