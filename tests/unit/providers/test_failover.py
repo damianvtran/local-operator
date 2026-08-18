@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from collections.abc import AsyncIterator
 from http import HTTPStatus
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from local_operator.harness.types import (
 )
 from local_operator.model.configure import build_model_spec
 from local_operator.providers import failover as failover_module
+from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.failover import (
     AUTH_RETRY_MAX_ATTEMPTS,
     CHAIN_EFFORT_LADDER,
@@ -1584,9 +1586,11 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
 
     Auto-naming stopped waiting for the turn to settle, so a title call is now a
     SECOND in-flight request on the same session. Each test here pins one route
-    by which that call's failure used to be able to reach the turn — and each
-    fails if ``stream_with_failover``'s ``isolated`` branch is removed, because
-    every one of these behaviours is on by default for an ordinary request.
+    by which that call's failure used to be able to reach the turn, and each
+    fails if its denial is removed, because every one of these behaviours is on
+    by default for an ordinary request: the first five come from
+    ``stream_with_failover``'s ``isolated`` branch, the sixth from the read-only
+    credential resolve it asks for.
     """
 
     @staticmethod
@@ -1663,8 +1667,9 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
         assert state.active == pinned, "an isolated call cleared the turn's sticky route"
 
     async def test_it_never_sleeps_on_a_backoff(self) -> None:
-        """A retry budget would hold the naming worker (and its 8-second overall
-        ceiling) open across sleeps for a result nobody is waiting on."""
+        """A retry budget would hold the naming worker (and the 15-second
+        ceiling ``TITLE_TIMEOUT_S`` puts on it) open across sleeps for a result
+        nobody is waiting on."""
         slept: list[float] = []
 
         async def spy_sleep(delay_ms: float, signal: Any = None) -> None:
@@ -1711,6 +1716,86 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
                 )
             ]
         assert client.calls == 1
+
+    async def test_its_credential_read_neither_blocks_nor_repoints_the_turn(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sixth route, and the only one the two switches above do not reach:
+        the cascade takes routing decisions on what looks like a READ.
+
+        ``AuthStore._resolve`` passes an OAuth row whose refresh RAISED to
+        ``block_credential`` — which hides it from ``_usable_key_rows`` on every
+        later resolve, and the turn re-resolves on each tool-loop request — and
+        writes session stickiness to whichever row wins instead. So a transient
+        token-endpoint failure inside a decorative title call could take the
+        credential the turn is transacting on out of service and move the turn
+        onto a sibling account mid-conversation. Both switches are downstream of
+        this: it happens inside the resolver, before any error reaches the retry
+        or route logic.
+
+        A real ``AuthStore`` on a temp DB, because the mutation being denied is
+        the real cascade's, not a fake's.
+        """
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-with-a-live-turn"
+        # Row A is the account the turn is on and its refresh is due; row B is a
+        # healthy sibling, so the cascade has somewhere to move to.
+        turn_row = store.upsert_credential(
+            "openai",
+            {"refresh": "r-a", "access": "stale-a", "expires": 0, "account_id": "acct-a"},
+        )
+        sibling_row = store.upsert_credential(
+            "openai",
+            {
+                "refresh": "r-b",
+                "access": "good-b",
+                "expires": int(time.time() * 1000) + 3_600_000,
+                "account_id": "acct-b",
+            },
+        )
+
+        async def refresh_always_fails(creds: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("token endpoint 503")
+
+        monkeypatch.setattr(store, "_refresh_fn", lambda provider: refresh_always_fails)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+        def the_turn_is_on_row_a() -> None:
+            store._sticky[("openai", session_id)] = turn_row.id
+
+        try:
+            the_turn_is_on_row_a()
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert not store.is_blocked(
+                turn_row.id, "openai"
+            ), "an isolated call blocked the credential the turn is transacting on"
+            assert (
+                store._sticky[("openai", session_id)] == turn_row.id
+            ), "an isolated call repointed the session's sticky credential"
+
+            # CONTROL, on the same store and the same failing refresh: an
+            # ordinary request DOES both, so neither assertion above can be
+            # passing because this fixture never reaches the path.
+            the_turn_is_on_row_a()
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    _request(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert store.is_blocked(turn_row.id, "openai"), "the refresh failure blocked nothing"
+            assert (
+                store._sticky[("openai", session_id)] == sibling_row.id
+            ), "stickiness did not move on an ordinary request"
+        finally:
+            store.close()
 
     async def test_the_same_failure_on_an_ORDINARY_request_does_all_four(self) -> None:
         """The control. Without this, every assertion above could be passing

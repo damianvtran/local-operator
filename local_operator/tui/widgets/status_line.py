@@ -89,28 +89,43 @@ ICON_DURATION = "◷"
 #: was checked rather than assumed, because the band's arithmetic is exact and
 #: a two-cell glyph would drift the right group's edge by one column.
 ICON_MCP = "⊙"
-#: Auto-approve indicator. Deliberately NOT one of the geometric segment icons
+#: Disarmed-gate alarm. Deliberately NOT one of the geometric segment icons
 #: above: this one is an ALARM, not a reading, and it reuses the app-wide
 #: warning glyph so it reads the same as a warning notice in the transcript.
 ICON_APPROVALS = "!"
 
-#: Cells the session name may occupy in the band's trailing segment, at full
-#: width and after the ladder's shorten step. The name has no natural bound — a
-#: model writes it, or it is an excerpt of whatever the user typed first — and
-#: the band is a fixed two-row box, so an uncapped segment does not wrap, it
-#: evicts the left group. 40 fits every title the naming caps allow
-#: (``MAX_TITLE_CHARS`` is 80, but a 3-7 word answer lands well inside 40) and
-#: leaves the identity group its ordinary width at 120 cells.
+#: The name's cell BUDGET: the widest box the trailing segment may take, and
+#: the narrowest it is worth showing at. Everything between is available — the
+#: segment is elastic, and which width it gets is decided by :meth:`_walk` from
+#: the row's geometry ALONE, never from the length of the string in it.
 #:
-#: 18 for the stub is a MEASURED choice, not a round number: it sets the width
+#: That last clause is the whole design of this segment, and it is worth stating
+#: plainly because the obvious implementation gets it wrong. The name is
+#: model-authored and it CHANGES UNDER THE READER: an opener excerpt lands on
+#: submit, the generated title replaces it ~1.5 s later, and a re-title can
+#: land at any time after that (see ``local_operator.session.naming``). Size the
+#: box to the string and every one of those arrivals re-flows the row —
+#: measured at a fixed 150 columns, the alarm glyph sat at column 144, then 101,
+#: 102, 110 across four consecutive frames, two of those moves with no user
+#: input at all, and a ONE-cell difference in title length flipped the whole
+#: 13-cell `◍ 2 agents` segment in and out. Size the box to the geometry and the
+#: name is the only thing on the band that a title can change: the box is
+#: reserved, the name is left-aligned in it, and the leftover cells sit at the
+#: band's own edge where nothing else lives.
+#:
+#: 40 for the cap: it fits every title the naming caps allow (``MAX_TITLE_CHARS``
+#: is 80, but a 3-7 word answer lands well inside 40) and leaves the identity
+#: group its ordinary width at 120 cells.
+#:
+#: 18 for the floor is a MEASURED choice, not a round number: it sets the width
 #: below which the name cannot appear at all. Swept on a fully populated band
 #: (model, effort, cwd, healthy MCP, context, cost, the alarm) the floor runs
 #: 14 → 90 cells, 18 → 94, 22 → 98, 26 → 101. Anything above 22 loses the name
 #: on a 100-column terminal, which is the width this feature is mostly read at,
 #: and 14 leaves too little of a title to tell two sessions apart. 18 is the
-#: widest stub that still survives 100 columns with everything else on screen.
+#: widest floor that still survives 100 columns with everything else on screen.
 NAME_CELLS = 40
-NAME_CELLS_SHORT = 18
+NAME_CELLS_FLOOR = 18
 
 #: Separators point INWARD: the left group's chevrons aim right and the right
 #: group's aim left, so both runs converge on the centre gap and frame it. A
@@ -133,27 +148,37 @@ _MIN_GROUP_GAP = 4
 #: Reduction order, cheapest loss first. Each entry is applied in turn until
 #: the row fits the available width.
 #:
+#: The ladder DROPS, SHORTENS, and — for the name only — FLEXES. The name is
+#: still on it twice, but the first entry is no longer a step from one fixed
+#: width to another: ``flex-name`` is where the segment stops being a rigid box
+#: of :data:`NAME_CELLS` and becomes elastic down to its floor, taking back
+#: whatever the row needs and giving back whatever it does not. What remains
+#: below is its DROP — the point where even the floor has stopped fitting.
+#:
 #: The ordering principle: shed what the user already knows or can re-derive,
 #: and protect what predicts their next decision. In order —
 #:
-#: * ``shorten-name`` is the cheapest useful move in the band: the session name
-#:   is the widest rung, and a stub of it still tells two tiled sessions apart.
 #: * ``duration`` is re-derivable from the transcript.
 #: * ``subagents`` is a counter, but NOT re-derivable without scrolling, which
-#:   is why it outlasts the two above rather than going first.
-#: * the other two SHORTEN steps outrank every remaining drop, because they
-#:   recover width while keeping the segment: a basename still answers "where am
-#:   I" and a bare model id still answers "who is replying". Together they free
-#:   ~35 cells on a realistic label, more than cost and context cost combined,
-#:   so dropping numbers to preserve a fully-qualified path would be a bad trade.
-#: * ``name`` drops once shortening it has stopped paying, ahead of the numbers:
-#:   even a stub is the widest thing left, and a title predicts no action. The
-#:   terminal tab still carries it, which is where it earns its keep anyway.
+#:   is why it outlasts the one above rather than going first.
+#: * ``flex-name`` comes next, and it comes AFTER those three drops for the
+#:   reason its predecessor did: they cost the user nothing they cannot
+#:   re-derive, and narrowing the one field that says which conversation this is
+#:   in order to keep a counter would be the wrong way round.
+#: * the two SHORTEN steps outrank every remaining drop, because they recover
+#:   width while keeping the segment: a basename still answers "where am I" and
+#:   a bare model id still answers "who is replying". Together they free ~35
+#:   cells on a realistic label, more than cost and context cost combined, so
+#:   dropping numbers to preserve a fully-qualified path would be a bad trade.
 #: * ``effort`` is a static setting the user chose. It does not change while
 #:   they watch, so it goes before either live number — an earlier version had
 #:   it OUTLIVING context usage, which meant a band could show `high` but not
 #:   `49.6%/1M`: it kept the field nobody re-reads and dropped the one that
 #:   says compaction is coming.
+#: * ``name`` drops once the floor has stopped fitting, ahead of the numbers: it
+#:   is still the widest thing left, and a title predicts no action. The terminal
+#:   tab still carries it, which is where it earns its keep anyway. Dropping it
+#:   RE-WALKS the ladder from the top — see :meth:`StatusLine._fit`.
 #: * ``cost``, then ``cwd``, then ``context``, then ``mcp``: context usage is the
 #:   one an operator acts on, and the MCP indicator outlives even that WHEN IT IS
 #:   AN ALARM — a healthy count is only a courtesy, so it sheds like one; see
@@ -174,15 +199,20 @@ _DROP_LADDER: tuple[str, ...] = (
     # visible in the transcript as a tool card, while a subagent is not.
     "jobs",
     "subagents",
-    # The name shortens next, and it is the most productive single step in the
-    # ladder: it is the widest rung, so cutting it to a stub recovers more cells
-    # than dropping any number below, and a stub still does the segment's one
-    # job. `Fix the login redi…` and `Bulk export columns` are as
-    # distinguishable at 18 cells as at 40, which is what a user tiling four
-    # sessions reads it for. It comes AFTER the three drops above rather than
-    # first because those cost the user nothing they cannot re-derive, and
-    # mutilating a label to keep a counter would be the wrong way round.
-    "shorten-name",
+    # The name stops being a rigid box here and becomes elastic: from this rung
+    # down it is measured at its FLOOR and handed back whatever the fitting row
+    # left over, so its width runs continuously from 18 cells to 40 instead of
+    # jumping between two values. This rung replaced a `shorten-name` that halved
+    # it outright, and the halving is what made the segment idle: across 30-180
+    # columns the name rendered at only 0, 18 or 40 cells, so a 130-column
+    # terminal showed an 18-cell stub beside an 18-cell hole with 32 cells
+    # available, and the excerpt-to-title moment this feature exists for read as
+    # `The /resume picke…` → `Fix unnamed sessi…` at every width under 138.
+    #
+    # The flex is measured from the geometry, never from the string: a title is
+    # model-authored and lands while the user is reading, so a box sized to it
+    # would re-flow the row on its own. See :data:`NAME_CELLS`.
+    "flex-name",
     # Shorten before dropping: a basename still answers "where am I" and a bare
     # model id still answers "who is replying".
     "shorten-cwd",
@@ -190,14 +220,19 @@ _DROP_LADDER: tuple[str, ...] = (
     # A static session setting the user chose — it does not change while they
     # watch, so it goes before either live number.
     "effort",
-    # The name's own drop, and it lands HERE by measurement rather than by
-    # argument. Sat two rungs earlier (ahead of `effort`) the walk shed the name
-    # at 100 cells on a fully populated band and then fitted with 19 cells to
-    # spare — the walk is monotone, so it never discovers that keeping an
-    # 18-cell stub and dropping a 7-cell static setting was the better trade.
-    # One rung later the same band keeps `▦ 49.6%/1M ‹ ◈ $73.92 ‹ ! ‹ Add todo
-    # guardrai…` at 100. Below it are only figures an operator acts on, which is
-    # where a title stops competing.
+    # The name's own drop, and the one rung that is not simply a step down. By
+    # here the segment has already given back every cell between its cap and its
+    # floor, and the three drops above were made to keep that floor on screen; if
+    # the floor still does not fit, those concessions bought nothing. So this
+    # rung is a RESTART rather than a step: ``_fit`` re-walks the whole ladder
+    # with the name off the table, which hands `▴ high`, `◍ 2 agents` and the
+    # duration back. Without the restart the walk was monotone and could not roll
+    # a concession back, and a named session at 83-94 columns rendered strictly
+    # worse than the same session unnamed — no effort segment, no name either,
+    # and 9 more cells of hole in exchange.
+    #
+    # Its place in the order is unchanged: below it are only figures an operator
+    # acts on, which is where a title stops competing.
     "name",
     # The one figure that is not a live reading of this turn.
     "cost",
@@ -225,22 +260,25 @@ _DROP_LADDER: tuple[str, ...] = (
     # same one: the segment then spelled out `! auto-approve always` at up to 20
     # cells, making it the WIDEST rung, and this ladder sheds by what a drop
     # buys. Shrinking it to the glyph moved it from one end of that argument to
-    # the other. What has not changed is the reason it is here at all: nothing
-    # else in the UI says the gate is disarmed for longer than a scroll — a
-    # saved `tool_approval_mode: auto` is adopted at boot with no notice at all
-    # (see ``_adopt_saved_approvals``), so this is the only standing indication
-    # that no tool will ask before it runs.
+    # the other, and took its ink with it — one cell of `warning` amber was the
+    # same ink as `◈ $73.92` three cells away, so `danger` carries it now (see
+    # :data:`ICON_APPROVALS`). What has not changed is the reason it is here at
+    # all: nothing else in the UI says the gate is disarmed for longer than a
+    # scroll — a saved `tool_approval_mode: auto` is adopted at boot with no
+    # notice at all (see ``_adopt_saved_approvals``), so this is the only
+    # standing indication that no tool will ask before it runs.
     "approvals",
 )
 
 
 #: Rungs whose painted width is not knowable from the ladder. ``cwd`` is as wide
 #: as the user's path — a basename alone runs from 3 cells to 30 — so it can
-#: never be relied on as the thing that still fits at the narrowest width. The
-#: render walk is monotone (it sheds until the row fits and can never add a
-#: segment back), so a ladder ending on one of these sheds a bounded segment to
-#: make room for a path that then does not fit either, and paints neither. No
-#: ladder may end on one; ``test_status_line`` holds every variant to it.
+#: never be relied on as the thing that still fits at the narrowest width. A
+#: render walk only ever sheds (``_walk`` cannot add a segment back, and the one
+#: restart ``_fit`` makes starts a fresh walk rather than un-shedding one), so a
+#: ladder ending on one of these sheds a bounded segment to make room for a path
+#: that then does not fit either, and paints neither. No ladder may end on one;
+#: ``test_status_line`` holds every variant to it.
 _UNBOUNDED_RUNGS = frozenset({"cwd"})
 
 
@@ -577,6 +615,37 @@ def format_model_label(label: str, *, short: bool, name: str = "") -> str:
     return forms.compact if short else forms.full
 
 
+def truncate_name(name: str, cells: int) -> str:
+    """The session name cut to ``cells``, on a word boundary where one is close.
+
+    ``truncate_cells`` alone is width-aware and word-blind, and the string it is
+    handed here was cut on a word boundary ON PURPOSE one call earlier:
+    ``provisional_title`` stops on a word "so it reads as a quotation rather than
+    as a string that ran out of buffer", and re-cutting it mid-word throws that
+    away — `The /resume picker shows (unnamed session) for…` came back as `The
+    /resume picker shows (unnamed sessi…`.
+
+    A word cut is only taken when it costs less than a third of the box, which is
+    the same trade ``resume._condense`` makes for the picker's row labels (there
+    stated as a fixed 12 characters against a fixed cap; here proportional,
+    because this box is elastic and runs from 18 cells to 40). Past that the
+    segment has stopped doing its one job: `Add todo…` in an 18-cell box tells two
+    tiled sessions apart less well than `Add todo guardrai…` does, and half a box
+    of blank is not a tidier cut, it is a smaller one.
+
+    Trailing punctuation goes with the cut word for the same reason ``_condense``
+    strips it: `(unnamed session),…` reads as a rendering fault.
+    """
+    if cells <= 0 or cell_len(name) <= cells:
+        return name[:cells] if cells <= 0 else name
+    cut = truncate_cells(name, cells)
+    stem = cut[:-1] if cut.endswith("…") else cut
+    spaced = stem.rsplit(" ", 1)[0].rstrip(" ,.;:") if " " in stem else ""
+    if spaced and cell_len(spaced) * 3 >= cells * 2:
+        return spaced + "…"
+    return cut
+
+
 @dataclass(frozen=True)
 class SubagentBand:
     """The CHILD's readings, shown in place of the session's own.
@@ -773,11 +842,17 @@ class StatusLine:
         # beneath it: everything on screen is the child's, and a title naming
         # the parent would be the one contradicting label in the frame.
         label = self._subagent.label if self._subagent is not None else self._conversation_name
-        # Unnamed conversations fall back to the working directory, which is
-        # every session for its first minute or two: naming is a detached call
-        # made off the first substantive prompt. A sidebar row reading `lo ›`
-        # five times over is the exact failure this feature exists to fix, and
-        # the directory is what the user opened the session for.
+        # No name in that slot falls back to the working directory. That used to
+        # be every session for its first minute or two, when the only name came
+        # from a detached model call made off the first substantive prompt. It
+        # no longer is: `OperatorApp._show_provisional_name` paints an excerpt of
+        # the opener in the SAME frame as the submit, with no provider call at
+        # all. What still reaches the directory is a conversation nobody has
+        # prompted yet — boot, `/new`, or a resume, since `ConversationName` is
+        # never journalled — and one whose opener had no topic to quote ("hi",
+        # "thanks"), which `naming.is_low_signal` refuses to label. A sidebar row
+        # reading `lo ›` five times over is the exact failure this feature exists
+        # to fix, and the directory is what the user opened the session for.
         title.set_label(label or cwd_label(self._cwd))
         title.set_state(self._title_state())
         title.set_frame(self._spinner_index)
@@ -1039,43 +1114,18 @@ class StatusLine:
         seam = Style(color=theme_mod.semantic_color("faint"))
         accent = Style(color=theme_mod.semantic_color("accent"))
 
-        dropped: set[str] = set()
-        short: set[str] = set()
-        # Walk the ladder until the row fits. Building the row is a handful of
-        # string joins and the ladder is nine steps, so the worst case is ten
-        # cheap rebuilds on a resize — far cheaper than measuring segments
-        # independently and getting the separator arithmetic subtly wrong.
-        for step in (
-            None,
-            *drop_ladder(self._mcp, context_estimated=self._shown_context_is_estimate()),
-        ):
-            if step is not None:
-                target = step.partition("shorten-")[2]
-                (short if target else dropped).add(target or step)
-            left = self._left_text(dropped, short, dim, muted, seam, accent)
-            right = self._right_text(dropped, short, dim, seam)
-            # The fit test reserves the group gap rather than asking whether the
-            # composed row happens to fit. `_compose` pads with `max(1, …)`, so a
-            # row could "fit" with the two groups ONE cell apart — tighter than
-            # the 3-cell ` · ` separator used inside each group, which makes the
-            # whole left/right architecture read as one undifferentiated run and
-            # abuts a filesystem path against a percentage. Reachable by dragging
-            # a window one cell at ordinary widths like 98 or 116 (D3).
-            #
-            # Reserved only when there IS a right group. Charged unconditionally,
-            # the gap bought separation from nothing: the two-group layout was
-            # abandoned four columns early and the spinner hopped across the model
-            # label at a width where the row it reflowed to was no narrower.
-            gap = _MIN_GROUP_GAP if right.plain else 0
-            if cell_len(left.plain) + cell_len(right.plain) + gap <= width:
-                # Recorded so a caller can ask whether the band actually SAID
-                # what it was asked to show. The effort segment needs it: it is
-                # the one segment a keystroke changes, so when the ladder has
-                # shed it the app owes the user a receipt somewhere else (see
-                # ``OperatorApp.action_cycle_effort``). Set on the fitting pass
-                # only — the intermediate rungs are attempts, not what shipped.
-                self._dropped = frozenset(dropped)
-                return self._compose(left, right, width, dim)
+        fitted = self._fit(width, dim, muted, seam, accent)
+        if fitted is not None:
+            dropped, left, right = fitted
+            # Recorded so a caller can ask whether the band actually SAID
+            # what it was asked to show. The effort segment needs it: it is
+            # the one segment a keystroke changes, so when the ladder has
+            # shed it the app owes the user a receipt somewhere else (see
+            # ``OperatorApp.action_cycle_effort``). Set from the row that
+            # SHIPPED — the rungs the walk tried on the way are attempts, and
+            # so is a whole walk the restart threw away.
+            self._dropped = dropped
+            return self._compose(left, right, width, dim)
 
         # Even the irreducible row overflows. Truncate the model label rather
         # than shedding it (D7): `deepse…` still answers which model is
@@ -1126,6 +1176,118 @@ class StatusLine:
             )
         tail.truncate(width, overflow="ellipsis")
         return tail
+
+    def _fit(
+        self, width: int, dim: Style, muted: Style, seam: Style, accent: Style
+    ) -> tuple[frozenset[str], Text, Text] | None:
+        """The row this width gets: ``(dropped, left, right)``, or ``None``.
+
+        ``None`` means not even the last rung fitted, and :meth:`_render` falls
+        back to the irreducible tail.
+
+        Two walks at most, and the second one is the point of this method. A walk
+        is monotone — it sheds down the ladder and can never take a concession
+        back — so every rung it spends BEFORE the name's own drop was spent to
+        keep the name on screen, and when the name then goes those cells are
+        already gone. Measured on a fully populated band at 83-94 columns (all
+        four ladder variants; 79-90 with the alarm disarmed): a NAMED session lost
+        `▴ high` **and** its name and gained 9 cells of hole, so naming a session
+        made its band strictly worse than leaving it unnamed. So dropping the name
+        restarts: the same ladder is re-walked with the name off the table
+        entirely, and the wider-surviving of the two rows wins.
+
+        The comparison is by segments SURVIVING rather than by cells painted,
+        because the padded name box makes "cells" the wrong measure — a row can
+        paint more cells and say less. The restart wins nearly always (a walk with
+        21 fewer cells to place fits no later than one with them), and it is
+        compared rather than assumed so the rule stays true if a future rung
+        changes what a concession costs.
+        """
+        ladder = drop_ladder(self._mcp, context_estimated=self._shown_context_is_estimate())
+        fitted = self._walk(ladder, width, dim, muted, seam, accent)
+        if fitted is None or "name" not in fitted[0]:
+            return fitted
+        restart = self._walk(
+            tuple(rung for rung in ladder if rung not in ("name", "flex-name")),
+            width,
+            dim,
+            muted,
+            seam,
+            accent,
+            forgo_name=True,
+        )
+        if restart is None:
+            return fitted
+        return restart if len(restart[0]) <= len(fitted[0]) else fitted
+
+    def _walk(
+        self,
+        ladder: tuple[str, ...],
+        width: int,
+        dim: Style,
+        muted: Style,
+        seam: Style,
+        accent: Style,
+        *,
+        forgo_name: bool = False,
+    ) -> tuple[frozenset[str], Text, Text] | None:
+        """One monotone pass down ``ladder``, stopping at the first row that fits.
+
+        Building a row is a handful of string joins and the ladder is ten steps,
+        so the worst case is eleven cheap rebuilds on a resize — far cheaper than
+        measuring segments independently and getting the separator arithmetic
+        subtly wrong.
+
+        The name is measured at its RESERVE — the full :data:`NAME_CELLS` until
+        the ``flex-name`` rung fires, its floor after — and then grown into
+        whatever the fitting rung left over, capped. Three properties come out of
+        that, and all three are the point:
+
+        * The reserve is a function of the row's geometry and never of the name's
+          text, so a title arriving or being rewritten cannot move a sibling.
+        * A long title never sheds a neighbour that a short one would have kept,
+          because the fit test measured the box either way.
+        * The leftover goes to the one segment that can use it rather than into
+          the hole between the groups.
+        """
+        dropped: set[str] = {"name"} if forgo_name else set()
+        short: set[str] = set()
+        flexed = False
+        for step in (None, *ladder):
+            if step == "flex-name":
+                flexed = True
+            elif step is not None:
+                target = step.partition("shorten-")[2]
+                (short if target else dropped).add(target or step)
+            reserve = (
+                0
+                if "name" in dropped or not self._conversation_name
+                else NAME_CELLS_FLOOR if flexed else NAME_CELLS
+            )
+            left = self._left_text(dropped, short, dim, muted, seam, accent)
+            right = self._right_text(dropped, short, reserve, dim, seam)
+            # The fit test reserves the group gap rather than asking whether the
+            # composed row happens to fit. `_compose` pads with `max(1, …)`, so a
+            # row could "fit" with the two groups ONE cell apart — tighter than
+            # the 3-cell ` · ` separator used inside each group, which makes the
+            # whole left/right architecture read as one undifferentiated run and
+            # abuts a filesystem path against a percentage. Reachable by dragging
+            # a window one cell at ordinary widths like 98 or 116 (D3).
+            #
+            # Reserved only when there IS a right group. Charged unconditionally,
+            # the gap bought separation from nothing: the two-group layout was
+            # abandoned four columns early and the spinner hopped across the model
+            # label at a width where the row it reflowed to was no narrower.
+            gap = _MIN_GROUP_GAP if right.plain else 0
+            slack = width - cell_len(left.plain) - cell_len(right.plain) - gap
+            if slack < 0:
+                continue
+            if reserve and slack and reserve < NAME_CELLS:
+                right = self._right_text(
+                    dropped, short, min(NAME_CELLS, reserve + slack), dim, seam
+                )
+            return frozenset(dropped), left, right
+        return None
 
     def _left_text(
         self,
@@ -1215,8 +1377,15 @@ class StatusLine:
                 left.append(" working", style=dim)
         return left
 
-    def _right_text(self, dropped: set[str], short: set[str], dim: Style, seam: Style) -> Text:
+    def _right_text(
+        self, dropped: set[str], short: set[str], name_cells: int, dim: Style, seam: Style
+    ) -> Text:
         """agents ‹ jobs ‹ context ‹ cost ‹ duration ‹ [!] ‹ name.
+
+        ``name_cells`` is the box :meth:`_walk` reserved for the trailing name —
+        zero when the ladder dropped it. The name is PADDED to that box rather
+        than measured, which is what pins every other segment's column; see
+        :data:`NAME_CELLS`.
 
         Colour groups by KIND rather than giving every field its own hue, which
         would be a rainbow: counters share `label`, the two numbers an operator
@@ -1265,18 +1434,30 @@ class StatusLine:
             # is now spoken for: the session NAME is what an operator reads this
             # corner for, and 20 cells of prose about a mode that has not changed
             # since boot was crowding out the one field that says which
-            # conversation this is.
+            # conversation this is. The argument is answered rather than ignored —
+            # the name's box is RESERVED (:data:`NAME_CELLS`), so this glyph has
+            # one column per terminal width and a title landing under it cannot
+            # move it.
             #
             # What survives is the alarm itself, because nothing else in the UI
             # carries it for longer than a scroll: `/approvals` answers on
             # demand, the notice that latched the mode scrolls away (and `/clear`
             # deletes it), and a saved `tool_approval_mode: auto` is adopted at
             # boot with NO notice at all — see ``OperatorApp._adopt_saved_approvals``.
-            # So `!` alone stays, in the same warning ink and bold, and it still
-            # means exactly what it has always meant here: no tool will ask
-            # before it runs. It no longer distinguishes `auto` from `always`;
-            # that was the answer to "until when", which is a question worth a
-            # command rather than worth the band's last segment.
+            # So `!` alone stays, bold, and it still means exactly what it has
+            # always meant here: no tool will ask before it runs. It no longer
+            # distinguishes `auto` from `always`; that was the answer to "until
+            # when", which is a question worth a command rather than worth the
+            # band's last segment.
+            #
+            # `danger`, not `warning`, and that is the D4 fix rather than a
+            # preference: at one cell the ink is ALL the segment has, and in
+            # `warning` it was the identical hue to `◈ $73.92` three cells away
+            # (both `#e0b04b`, both 8.64:1 on the band's ground), so the band's
+            # only alarm read as another figure. `danger` reads as an alarm and
+            # measures 6.62:1 dark / 4.94:1 on the paper ramp, and it is the same
+            # ink the `⊙` lamp takes when MCP discovery fails — in this band red
+            # is the ALARM category, which is why two of them do not conflict.
             #
             # The glyph rides INSIDE the styled text rather than in the icon slot,
             # because the loop below paints icons `dim` — which made the one alarm
@@ -1286,12 +1467,13 @@ class StatusLine:
                 (
                     "",
                     ICON_APPROVALS,
-                    Style(color=theme_mod.semantic_color("warning"), bold=True),
+                    Style(color=theme_mod.semantic_color("danger"), bold=True),
                 )
             )
-        if self._conversation_name and "name" not in dropped:
-            # LAST, so its right edge is the band's right edge — the position the
-            # approval mode used to hold, and the one the user asked for it in.
+        if self._conversation_name and name_cells:
+            # LAST, so the corner is the name's — the position the approval mode
+            # used to hold, and the one the user asked for it in.
+            #
             # `muted` and not the accent: the accent budget is spent on "what the
             # turn is on" (``local_operator.tcss`` enumerates every site), and a
             # session's name is metadata, so it takes the same secondary ink as
@@ -1299,15 +1481,19 @@ class StatusLine:
             #
             # Truncated, never wrapped: the name is model-generated or an excerpt
             # of the user's opener, so it has no natural bound, and the band is a
-            # fixed two-row box. The ladder shortens it before it drops anything
-            # (see ``_DROP_LADDER``), which is why there are two widths here.
+            # fixed two-row box.
+            #
+            # PADDED to its box, and left-aligned in it. The box is the reserved
+            # width, so the padding is what holds every sibling's column still
+            # while a model rewrites the string in it; left-aligned because the
+            # eye reads a title from its first cell, and a fixed first cell is
+            # exactly what a string that changes on its own needs. The leftover
+            # lands at the band's right edge, which is the one place on this row
+            # where nothing else was ever going to be.
             parts.append(
                 (
                     "",
-                    truncate_cells(
-                        self._conversation_name,
-                        NAME_CELLS_SHORT if "name" in short else NAME_CELLS,
-                    ),
+                    truncate_name(self._conversation_name, name_cells).ljust(name_cells),
                     Style(color=theme_mod.semantic_color("muted")),
                 )
             )
@@ -1328,6 +1514,11 @@ class StatusLine:
         the filler is not emitted at all. Padding unconditionally pushed a row
         that exactly fitted its frame `_MIN_GROUP_GAP` cells past it, on trailing
         blanks that aligned nothing.
+
+        The right group is aligned by its BOX, not by its ink: the name arrives
+        padded to the cells :meth:`_walk` reserved (:data:`NAME_CELLS`), so this
+        arithmetic is the same at every title length and a short title leaves its
+        leftover at the band's edge rather than shunting the group right.
         """
         if not right.plain:
             return left

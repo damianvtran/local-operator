@@ -1030,7 +1030,12 @@ class FailoverAuthStore(Protocol):
     """
 
     async def get_api_key(
-        self, provider: str, session_id: str | None = None, *, force_refresh: bool = False
+        self,
+        provider: str,
+        session_id: str | None = None,
+        *,
+        force_refresh: bool = False,
+        read_only: bool = False,
     ) -> str | None: ...  # pragma: no cover
 
     def rotate_sibling(
@@ -1053,7 +1058,12 @@ class OAuthAccessSource(Protocol):
     """
 
     async def get_oauth_access(
-        self, provider: str, session_id: str | None = None, *, force_refresh: bool = False
+        self,
+        provider: str,
+        session_id: str | None = None,
+        *,
+        force_refresh: bool = False,
+        read_only: bool = False,
     ) -> "OAuthAccess | None": ...  # pragma: no cover
 
 
@@ -1157,7 +1167,10 @@ async def stream_with_failover(
         # no transport-retry budget, and no credential rotation (every rotation
         # `continue` sits behind a `retry.enabled` raise). Dropping the route
         # state removes the fourth: a decorative call neither pins the session
-        # to a fallback nor clears a pin the turn is relying on.
+        # to a fallback nor clears a pin the turn is relying on. The fifth is
+        # not expressible here — the credential cascade takes routing decisions
+        # of its own on a read — so the resolve below is asked for read-only
+        # (`read_only=request.isolated`).
         retry = dataclasses.replace(retry, enabled=False)
         route_state = None
 
@@ -1239,7 +1252,12 @@ async def stream_with_failover(
                 )
             if not retry_same_key:
                 access = await _resolve_access_for_provider(
-                    auth, provider, session_id, state, error
+                    auth,
+                    provider,
+                    session_id,
+                    state,
+                    error,
+                    read_only=request.isolated,
                 )
                 token = access.access_token if access is not None else None
                 if token != current_token:
@@ -1346,39 +1364,58 @@ async def _resolve_access_for_provider(
     session_id: str | None,
     state: AuthRetryKeyState,
     error: BaseException | None,
+    *,
+    read_only: bool = False,
 ) -> "OAuthAccess | None":
     """Bridge AuthStore into the a/b/c resolver shape, returning the
     :class:`~local_operator.providers.auth_store.OAuthAccess` record (or
-    ``None``) so wire clients get identity headers alongside the bearer."""
+    ``None``) so wire clients get identity headers alongside the bearer.
+
+    ``read_only`` is the isolated request's sixth denial: the cascade itself
+    mutates session-shared routing state on a READ — it blocks an OAuth row
+    whose refresh raises and it writes (or clears) the session's sticky
+    credential — and neither ``retry.enabled=False`` nor a dropped
+    ``route_state`` is upstream of that. A decorative call resolves the account
+    the turn is already on and decides nothing.
+    """
     # Presence test, not a nominal one: stores exposing only get_api_key take
     # the bare-bearer path and get wrapped at the bottom of this function.
     oauth_store = auth if isinstance(auth, OAuthAccessSource) else None
     records: dict[str, "OAuthAccess"] = {}
 
+    def _flags(force_refresh: bool) -> dict[str, bool]:
+        """Each flag is passed only when set, so stores declaring the bare
+        ``(provider, session_id)`` signature keep working."""
+        flags: dict[str, bool] = {}
+        if force_refresh:
+            flags["force_refresh"] = True
+        if read_only:
+            flags["read_only"] = True
+        return flags
+
     async def _access(*, force_refresh: bool = False) -> "OAuthAccess | None":
         if oauth_store is None:
             return None
-        # force_refresh is only passed when set so stores declaring the bare
-        # (provider, session_id) signature keep working.
-        if force_refresh:
-            return await oauth_store.get_oauth_access(provider, session_id, force_refresh=True)
-        return await oauth_store.get_oauth_access(provider, session_id)
+        return await oauth_store.get_oauth_access(provider, session_id, **_flags(force_refresh))
+
+    async def _key(*, force_refresh: bool = False) -> str | None:
+        return await auth.get_api_key(provider, session_id, **_flags(force_refresh))
 
     async def resolver(ctx: ApiKeyResolveContext) -> str | None:
         try:
             if ctx.error is None:
                 record = await _access()
                 if record is None:
-                    return await auth.get_api_key(provider, session_id)
+                    return await _key()
             elif ctx.last_chance:
                 auth.rotate_sibling(provider, session_id, ctx.error, api_key=ctx.previous_key)
                 record = await _access()
                 if record is None:
-                    return await auth.get_api_key(provider, session_id)
+                    return await _key()
             else:
                 record = await _access(force_refresh=True)
                 if record is None:
-                    return await auth.get_api_key(provider, session_id, force_refresh=True)
+                    return await _key(force_refresh=True)
         except Exception:
             return None
         if record is None:

@@ -56,11 +56,16 @@ MAX_TITLE_WORDS = 12
 #: so this is the WHOLE budget — there is no retry behind it, which is what
 #: makes the number worth measuring rather than guessing: seven naming and
 #: re-titling calls against anthropic/claude-opus-5 at its lowest effort came
-#: back in 5.4–5.8 s each, so the 8 s this was first set to was clipping the
-#: tail of a healthy provider. Generous instead, because a late title costs
-#: nothing here: the call is detached, the failure is swallowed, and the
-#: provisional excerpt is already on the band. The bound exists so a wedged
-#: connection cannot leave a task alive for the life of the session.
+#: back in 5.4–5.8 s each. This was 20.0 while the call still waited for the
+#: turn to settle, which is three and a half times that tail — room only a
+#: wedged connection could ever use. Tightened to 15 s by the same change that
+#: put the call ALONGSIDE the turn: the ceiling now bounds a task running
+#: beside the user's work, and a title that has not arrived in two and a half
+#: times the measured latency has nothing left to win — the failure is
+#: swallowed and the provisional excerpt is already on the band. Not tighter
+#: than that, because 2.5x the slowest call measured is the headroom that keeps
+#: a call which was going to answer from being cut off. The bound exists at all
+#: so a wedged connection cannot leave a task alive for the life of the session.
 TITLE_TIMEOUT_S = 15.0
 
 #: Caps on a PROVISIONAL title — the opener-derived label worn until the
@@ -285,22 +290,29 @@ def provisional_title(text: str) -> str:
     Returns ``""`` for anything :func:`is_low_signal` rejects, so the caller
     gets the same "no title" answer from both halves of this module.
 
-    Why this exists at all. The generated title cannot be asked for until the
-    turn settles: it shares the turn's provider lane, and a second simultaneous
-    request at minute zero 429s both (see the TUI's naming worker). On this
-    product a first turn routinely runs for minutes, so that wait meant the
-    band and the terminal tab wore the `lo › <cwd>` fallback for the entire
-    time the user was looking at them, and became a title only once the work
-    was already on screen. Measured on a real provider before this existed: a
-    29.7-second opening turn, a title stored 31.5 seconds after the prompt was
-    submitted. A name that arrives after the answer is a name nobody needed.
+    Why this exists at all. A model call cannot be instant. The generated title
+    goes out WITH the turn now — it carries ``ChatRequest.isolated``, so it is
+    not in the turn's way and nothing has to wait for it — but it is still a
+    round trip, and the seven calls measured for :data:`TITLE_TIMEOUT_S` came
+    back in 5.4–5.8 s. Without a stand-in the band and the terminal tab wear
+    the `lo › <cwd>` fallback for those seconds, on the exact frame the user is
+    looking at: the one right after they pressed Enter.
 
-    The opener fixes that for free. It is in hand the moment it is submitted,
-    it costs no network and no lane, and it is the SAME text ``/resume``'s
-    picker derives its row labels from — so the tab, the band and the picker
-    agree on what a conversation is called by construction rather than by
-    coincidence. The model's title, being an answer rather than a quote, is
-    still better, and replaces this one when the lane frees up.
+    The wait used to be minutes rather than seconds, which is what made a
+    stand-in worth writing: the title waited for the turn to settle, and
+    a first turn on this product routinely runs for minutes, so the fallback
+    was worn for the whole turn and became a title only once the work was
+    already on screen. Measured on a real provider on that version: a
+    29.7-second opening turn, the title stored 31.5 seconds after the prompt
+    was submitted. Concurrency took the minutes out; this takes the seconds.
+
+    The opener fixes those seconds for free. It is in hand the moment it is
+    submitted, it costs no provider call at all, and it is the SAME text
+    ``/resume``'s picker derives its row labels from (``resume.session_name``)
+    — so the tab, the band and the picker agree on what a conversation is
+    called by construction rather than by coincidence. The model's title, being
+    an answer rather than a quote, is still better, and displaces this one the
+    moment it lands (``OperatorApp._store_title``).
 
     Truncation, not rejection, and that is the one deliberate disagreement
     with :func:`parse_title`. An over-long answer from the model is evidence

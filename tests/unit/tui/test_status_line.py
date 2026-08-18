@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, cast
+from typing import Any, NotRequired, TypedDict, cast
 
 from rich.cells import cell_len
 from textual.widgets import Static
@@ -29,10 +29,12 @@ from local_operator.tui.widgets.status_line import (
     _MIN_GROUP_GAP,
     _SPINNER_FRAMES,
     _UNBOUNDED_RUNGS,
+    ICON_APPROVALS,
     ICON_CWD,
     ICON_MCP,
     ICON_MODEL,
     NAME_CELLS,
+    NAME_CELLS_FLOOR,
     McpStatus,
     StatusLine,
     drop_ladder,
@@ -45,6 +47,7 @@ from local_operator.tui.widgets.status_line import (
     format_model_label,
     format_window,
     mcp_semantic,
+    truncate_name,
 )
 
 
@@ -1106,6 +1109,220 @@ def test_the_name_never_takes_the_accent() -> None:
         assert colour is not None
         assert colour.name != accent, "the session name took the accent"
         assert colour.name == muted
+
+
+class _LadderState(TypedDict):
+    """One ladder variant's inputs. Typed because ``mcp`` is the only key whose
+    value is not a bool, and a bare ``dict`` widens both to ``object``.
+    """
+
+    mcp: McpStatus
+    estimated: NotRequired[bool]
+
+
+#: Every ladder variant, by the state that selects it. The eviction defect below
+#: existed in all four, so a sweep that only drove the default one would have
+#: missed three quarters of it.
+_LADDER_STATES: dict[str, _LadderState] = {
+    "healthy-mcp/exact": {"mcp": McpStatus(configured=3, connected=3)},
+    "failed-mcp/exact": {"mcp": McpStatus(configured=3, connected=1, failed=True)},
+    "healthy-mcp/estimated": {"mcp": McpStatus(configured=3, connected=3), "estimated": True},
+    "failed-mcp/estimated": {
+        "mcp": McpStatus(configured=3, connected=1, failed=True),
+        "estimated": True,
+    },
+}
+
+#: Names of the three lengths a real session wears in one conversation: the
+#: opener excerpt (40+ cells), the generated title, and a re-title. Two of the
+#: three arrive with no user input at all.
+_NAMES = (
+    "The /resume picker shows (unnamed session) for image openers",
+    "Fix unnamed sessions from image openers",
+    "Bulk export the invoice columns",
+    "Fix boot",
+)
+
+
+def _swept_band(state: _LadderState, *, alarm: bool) -> StatusLine:
+    """A fully populated band in one ladder variant, ready to render at width."""
+    status, _clock = _full_band()
+    status.update(
+        jobs=1,
+        mcp=state["mcp"],
+        approvals_auto=alarm,
+        context_tokens=496_000,
+        context_window=1_000_000,
+    )
+    status._context_is_estimate = bool(state.get("estimated"))
+    return status
+
+
+def _name_box(row: str, name: str) -> int:
+    """Cells the trailing name segment RESERVED, its padding included.
+
+    The box is what the layout is built on, and it is not the same number as the
+    ink in it: a word-boundary cut can leave `Bulk export the…` in an 18-cell box.
+    Located from the name's own opening characters, which land on the box's first
+    cell because the name is left-aligned in it.
+    """
+    return len(row) - row.rindex(name[:4])
+
+
+def test_naming_a_session_never_costs_a_segment_for_nothing(monkeypatch) -> None:
+    """Every concession the band makes for a name buys a name. All widths.
+
+    The defect this pins was the opposite: between 83 and 94 columns (79-90 with
+    the alarm disarmed, and in all four ladder variants) naming a session removed
+    `▴ high` AND showed no name in exchange, so the band got strictly worse the
+    moment the session earned a title — 7 cells of a setting the user chose by
+    keystroke spent, 9 cells of hole added, nothing bought.
+
+    The cause was the walk, not the rung order: it sheds monotonically, so the
+    duration, the counters and the effort segment it gave up on the way to
+    keeping the name stayed given up when the name was dropped two rungs later.
+    ``_fit`` re-walks with the name off the table instead.
+
+    So the contract has two halves, and both are asserted at every width in every
+    variant. Where the name is DROPPED the band is exactly the band it would have
+    been unnamed — no segment is missing. Where the name is SHOWN a segment may
+    have been traded for it (that trade is the ladder's, and its order is
+    asserted by ``test_segments_disappear_in_the_declared_ladder_order``), but at
+    least a floor's worth of name has to be on the row in return.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    for label, state in _LADDER_STATES.items():
+        for alarm in (True, False):
+            status = _swept_band(state, alarm=alarm)
+            for width in range(30, 181):
+                status.update(conversation_name="")
+                status.render_text(width)
+                bare = set(status._dropped)
+                for name in _NAMES:
+                    status.update(conversation_name=name)
+                    row = status.render_text(width).plain
+                    where = f"{label} alarm={alarm} width={width}"
+                    lost = set(status._dropped) - bare - {"name"}
+                    if status.is_showing("name"):
+                        box = _name_box(row, name)
+                        assert (
+                            box >= NAME_CELLS_FLOOR
+                        ), f"{where}: {sorted(lost)} spent for a {box}-cell name"
+                    else:
+                        assert (
+                            not lost
+                        ), f"{where}: the name was dropped and {sorted(lost)} went with it"
+
+
+def test_the_alarms_column_does_not_move_when_the_title_changes(monkeypatch) -> None:
+    """One column per width, whatever the name says — the D2 contract.
+
+    The alarm is one cell and it is the band's only standing word that no tool
+    will ask before it runs, so where it sits has to be learnable. Before the
+    name's box was reserved, its column was a function of the model's word count:
+    at a fixed 150 columns the glyph sat at 144, then 101, 102, 110 across four
+    consecutive frames as the excerpt, the title and a re-title landed — two of
+    those moves with no user input at all.
+
+    Asserted over the whole row rather than just the glyph: everything up to the
+    name's own box has to be identical, or something else moved instead.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    for label, state in _LADDER_STATES.items():
+        status = _swept_band(state, alarm=True)
+        for width in range(30, 181):
+            rows = []
+            for name in _NAMES:
+                status.update(conversation_name=name)
+                rows.append(status.render_text(width).plain)
+            first = rows[0]
+            assert len({row.index("!") for row in rows}) == 1, (
+                f"{label} width={width}: the alarm moved with the title "
+                f"({[row.index('!') for row in rows]})"
+            )
+            head = first[: first.index("!") + 1]
+            for row in rows[1:]:
+                assert row.startswith(head), f"{label} width={width}: the row reflowed"
+                assert len(row) == len(first), f"{label} width={width}: the row changed width"
+
+
+def test_the_name_takes_every_cell_the_row_can_spare(monkeypatch) -> None:
+    """The segment is elastic between its floor and its cap, not one or the other.
+
+    Two fixed widths meant up to 20 cells sat idle beside an 18-cell stub — a
+    130-column terminal showed `Add todo guardrai…` next to an 18-cell hole with
+    32 cells available, and the excerpt-to-title upgrade this feature exists for
+    was invisible below 138 columns because both strings were cut to the same
+    stub. So the test is not "the name is 18 or 40": it is that the gap closes to
+    the seam and the box grows with the terminal.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    status = _swept_band(_LADDER_STATES["healthy-mcp/exact"], alarm=True)
+    status.update(conversation_name="Add todo guardrails to the operator loop")
+    boxes = []
+    for width in range(100, 181):
+        row = status.render_text(width).plain
+        box = len(row) - row.index("! ‹ ") - len("! ‹ ")
+        boxes.append(box)
+        # Whatever is spare is IN the name's box, so the hole between the groups
+        # is the seam's own width until the box is full.
+        longest_gap = max((len(run) for run in re.findall(r" {2,}", row.rstrip())), default=0)
+        assert (
+            box >= NAME_CELLS or longest_gap <= _MIN_GROUP_GAP
+        ), f"width={width}: {longest_gap} cells idle beside a {box}-cell name"
+    assert min(boxes) >= NAME_CELLS_FLOOR
+    assert max(boxes) == NAME_CELLS
+    # More than the two widths the old constant pair allowed, and monotone in the
+    # terminal's width over the range where the row is otherwise unchanged.
+    assert len(set(boxes)) > 5, f"the name still has only {sorted(set(boxes))} widths"
+
+
+def test_the_bands_cut_lands_on_a_word_like_the_excerpt_it_was_handed() -> None:
+    """``provisional_title`` cuts on a word boundary on purpose — "so it reads as
+    a quotation rather than as a string that ran out of buffer" — and the band
+    used to re-cut the same string mid-word one call later, throwing that away.
+
+    The floor case is the exception the rule needs: at 18 cells a word cut would
+    leave `Add todo…` and nine blank cells, which distinguishes two tiled
+    sessions less well than the mid-word cut does. So the boundary is taken only
+    while it costs less than a third of the box.
+    """
+    excerpt = "The /resume picker shows (unnamed session) for image openers"
+    assert truncate_name(excerpt, 40) == "The /resume picker shows (unnamed…"
+    assert truncate_name(excerpt, 24) == "The /resume picker…"
+    assert truncate_name("Add todo guardrails to the operator loop", 22) == "Add todo guardrails…"
+    # Below the tolerance the cut stays where the cells are.
+    assert truncate_name("Add todo guardrails to the operator loop", 18) == "Add todo guardrai…"
+    # A name that fits is untouched, and a single unbroken token cannot be
+    # word-cut at all.
+    assert truncate_name("Fix boot", 40) == "Fix boot"
+    assert truncate_name("x" * 60, 40) == "x" * 39 + "…"
+
+
+def test_the_alarm_is_not_the_same_ink_as_the_cost_figure() -> None:
+    """One cell of glyph means the INK is the whole signal, and in `warning` it
+    was the identical hue to `◈ $73.92` three cells away (both `#e0b04b`), so the
+    band's only alarm read as another figure. `danger` is the band's alarm ink —
+    the `⊙` lamp already takes it when MCP discovery fails — and it stays legible
+    on both ramps: 6.62:1 dark, 4.94:1 on the paper ramp.
+    """
+    status, _clock = _full_band()
+    status.update(conversation_name="Add todo guardrails", approvals_auto=True)
+    for ramp in ("dark", "light"):
+        theme_mod.set_theme(ramp)
+        try:
+            rendered = status.render_text(200)
+            inks = {
+                rendered.plain[span.start : span.end].strip(): getattr(span.style, "color", None)
+                for span in rendered.spans
+            }
+            alarm, cost = inks[ICON_APPROVALS], inks["$12.40"]
+            assert alarm is not None and cost is not None
+            assert alarm.name == theme_mod.semantic_color("danger"), ramp
+            assert cost.name == theme_mod.semantic_color("warning"), ramp
+            assert alarm.name != cost.name, f"{ramp}: the alarm and the cost are one ink"
+        finally:
+            theme_mod.set_theme("dark")
 
 
 # -- repaint vs reflow -------------------------------------------------------

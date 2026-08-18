@@ -27,6 +27,7 @@ keyword rule — judges whether a new message moved the subject.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 import pytest
@@ -34,6 +35,8 @@ import pytest
 from local_operator.session import naming
 from local_operator.tui.app import RETITLE_MIN_GAP_S, OperatorApp
 from local_operator.tui.terminal_title import TerminalTitle
+from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -45,12 +48,19 @@ class _GatedSession(FakeSession):
         self.gate = asyncio.Event()
         self.title = ""
         self.name_gate: asyncio.Event | None = None
+        # The two "this worker got here" barriers. `_settle` yields for a fixed
+        # number of ticks, which is a guess about the scheduler rather than a
+        # fact about it, so a test asserting something a WORKER produces waits
+        # for the worker to say it got there instead of counting ticks. (The
+        # flake that started this was not the scheduler at all — see `_ready`.)
         self.name_started = asyncio.Event()
+        self.prompt_started = asyncio.Event()
         self.timeline: list[str] = []
 
     async def prompt(self, text: str, images: Any = None) -> None:  # noqa: ANN401
         self.prompts.append(text)
         self.timeline.append(f"prompt:{text}")
+        self.prompt_started.set()
         await self.gate.wait()
 
     async def complete_once(self, system: str, prompt: str) -> str:
@@ -67,15 +77,41 @@ class _GatedSession(FakeSession):
 
 
 async def _settle() -> None:
-    """Let app-thread workers run to a standstill.
+    """Let the app's workers run to a standstill.
 
     Twelve short yields rather than four: a turn worker, a naming worker and a
-    re-title worker can now be scheduled in one submit, and on a loaded machine
-    four ticks was enough to make the ORDER of those observable — this suite
-    started failing only when run alongside its neighbours.
+    re-title worker can be scheduled by one submit, and each of them has to get
+    from `run_worker` to its first await. Bounded ticks are only sound AFTER a
+    submit that actually dispatched something — see :func:`_ready` for the race
+    that no number of ticks here could ever have fixed.
     """
     for _ in range(12):
         await asyncio.sleep(0.02)
+
+
+async def _ready(pilot: Any, app: OperatorApp) -> None:  # noqa: ANN401
+    """Pump the app until the session has been adopted.
+
+    THE flake this file kept hitting, and it was never about naming.
+    ``_submit_prompt`` early-returns a "session is still starting…" notice while
+    ``app._session`` is None: no turn, no naming call, no ``session.prompts`` —
+    which is the bare `+ []` / `- ['fix the login redirect loop']` diff the suite
+    failed with beside its neighbours. Instrumented under 16 CPU hogs, 3 of 3
+    failures reported ``prompts=[] workers=[]`` with that notice in the
+    transcript, so the submit had beaten adoption rather than the workers being
+    slow afterwards.
+
+    One ``pilot.pause()`` is enough on an idle machine and a coin flip on a
+    loaded one, because adoption takes an unknown NUMBER of pumps, not an
+    interval. So this waits on boot progress and is bounded by pumps rather than
+    by the clock — a starved machine takes longer instead of failing, while a
+    session that genuinely never arrives still fails instead of hanging.
+    """
+    for _ in range(200):
+        if app._session is not None:
+            return
+        await pilot.pause()
+    raise AssertionError("the session was never adopted")
 
 
 async def _boot(title: str = "") -> tuple[OperatorApp, _GatedSession]:
@@ -98,8 +134,18 @@ async def test_the_title_is_generated_DURING_the_live_turn() -> None:
     """
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         app._submit_prompt("fix the login redirect loop")
+        # `_ready` above is what fixed this test's flake (the submit was beating
+        # session adoption); these two barriers are what make the ASSERTIONS
+        # below independent of tick counts, since both facts they check are
+        # produced by workers rather than by the submit. The naming one is
+        # suppressed rather than awaited outright so a real regression — no title
+        # call at all — still fails on the assertion that names it instead of on
+        # a timeout that does not.
+        await asyncio.wait_for(session.prompt_started.wait(), timeout=5)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(session.name_started.wait(), timeout=2)
         await _settle()
 
         # The turn has not finished and never will until the gate opens.
@@ -125,7 +171,7 @@ async def test_a_follow_up_turn_leaves_an_inflight_naming_call_alone() -> None:
     app, session = await _boot(title="<title>Fix the login flow</title>")
     session.name_gate = asyncio.Event()  # hold the title call open
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         app._submit_prompt("fix the login redirect loop")
         await asyncio.wait_for(session.name_started.wait(), timeout=1)
 
@@ -172,7 +218,7 @@ async def test_reload_cancels_and_drains_naming_before_adoption() -> None:
 
     app = OperatorApp(factory)
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         app._maybe_name_conversation("name the old session")
         await asyncio.wait_for(first.name_started.wait(), timeout=1)
 
@@ -190,7 +236,7 @@ async def test_failed_attempt_releases_the_latch_for_a_retry() -> None:
     """A dead naming call costs a delayed title, not a nameless session."""
     app, session = await _boot(title="")  # complete_once answers nothing usable
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         app._maybe_name_conversation("please review the export columns")
         await _settle()
         assert session.completions, "attempt never ran"
@@ -208,7 +254,7 @@ async def test_landed_title_paints_the_band_and_keeps_the_latch() -> None:
     """A successful attempt stores the name, paints the band, and stays spent."""
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         app._maybe_name_conversation("fix the login flow")
         await _settle()
         assert session.conversation_name == "Fix the login flow"
@@ -238,7 +284,7 @@ async def test_the_band_is_named_from_the_opener_before_any_provider_call() -> N
     """
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         app._submit_prompt("summarise how compaction picks a cut point in this repo")
 
         # No await between the submit and here: nothing asynchronous has run.
@@ -270,7 +316,7 @@ async def test_a_dead_naming_call_leaves_the_opener_on_the_band() -> None:
     """
     app, session = await _boot(title="")  # a reply with no <title> at all
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         app._submit_prompt("fix the login redirect loop")
         session.gate.set()
         await _settle()
@@ -301,7 +347,7 @@ async def test_a_low_signal_opener_names_nothing_at_all() -> None:
     """
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         app._submit_prompt("hi")
         session.gate.set()
         await _settle()
@@ -344,6 +390,13 @@ async def _named(app: OperatorApp, session: _GatedSession, opener: str) -> list[
     now = _fake_clock(app)
     app._submit_prompt(opener)
     session.gate.set()
+    # The naming barrier, because this helper is a PRECONDITION for seven tests:
+    # its own `assert` below is what a slipped tick surfaces as, and "the first
+    # title never landed" describes the scheduler rather than anything about
+    # re-titling. (The boot race that made it fail in the first place is handled
+    # by `_ready` in each test, before this runs.)
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(session.name_started.wait(), timeout=5)
     await _settle()
     assert session.conversation_name, "the first title never landed"
     # A fresh gate, already open, so the follow-up turns below run through
@@ -369,7 +422,7 @@ async def test_a_material_change_of_subject_retitles_both_surfaces() -> None:
     """
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         assert app._status is not None
         # A real title writer over a capture sink: the terminal tab is the
         # surface the whole feature is named after, and asserting the band
@@ -400,7 +453,7 @@ async def test_the_sentinel_answer_leaves_the_title_and_the_band_alone() -> None
     mid-turn with the same words is a flicker the user reads as a glitch."""
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         await _named_a_while_ago(app, session, "fix the login redirect loop")
         assert app._status is not None
         painted: list[str] = []
@@ -427,7 +480,7 @@ async def test_a_human_rename_is_never_overwritten_by_a_retitle() -> None:
     """``user_set`` wins permanently, and costs no call to defend."""
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         await _named_a_while_ago(app, session, "fix the login redirect loop")
         session.set_conversation_name("Ledger reconciliation", user_set=True)
 
@@ -439,12 +492,148 @@ async def test_a_human_rename_is_never_overwritten_by_a_retitle() -> None:
         assert len(session.completions) == 1, "a renamed conversation spent a re-title call"
 
 
+# -- `/rename`: the human's title ---------------------------------------------
+
+
+async def _type_command(pilot: Any, app: OperatorApp, text: str) -> None:  # noqa: ANN401
+    """Type a slash command into the real editor and press Enter.
+
+    The reported path rather than ``_run_slash_command``: the submit handler is
+    what decides a line beginning with `/` is a command at all, and a rename
+    that only works when its handler is called by hand is not one a user has.
+
+    Esc first when the picker is open — Enter on an open command picker
+    COMPLETES the highlighted row and submits THAT, so a bare ``/rename`` would
+    never reach the branch under test.
+    """
+    editor = app.query_one(Editor)
+    editor.text = text
+    await pilot.pause()
+    if editor._picker.is_open():
+        await pilot.press("escape")
+        await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+def _notices(app: OperatorApp) -> list[str]:
+    """Notice bodies, unwrapped — the receipt a rename leaves behind."""
+    return [
+        block._text
+        for block in app.query_one(TranscriptView).blocks()
+        if isinstance(block, NoticeBlock)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_typed_rename_names_both_surfaces_and_asks_no_provider() -> None:
+    """``/rename <title>`` is the entry point ``user_set`` exists for.
+
+    Both surfaces, in the frame it was typed: the band and the terminal tab are
+    what a name IS to the user, and a rename that needed a turn to take effect
+    would read as a command that did nothing. No provider call either — the
+    words are already the user's, so there is nothing to ask anyone.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        assert app._status is not None
+        written: list[str] = []
+        title = TerminalTitle(written.append)
+        title.start()
+        app._status.set_terminal_title(title)
+
+        await _type_command(pilot, app, "/rename Ledger reconciliation")
+
+        assert session.conversation_name == "Ledger reconciliation"
+        assert session.conversation_name_state.user_set is True
+        assert app._status._conversation_name == "Ledger reconciliation"
+        assert "Ledger reconciliation" in title.current
+        assert any("Ledger reconciliation" in chunk for chunk in written)
+        assert session.completions == [], "the rename asked a provider for a title"
+        assert session.prompts == [], "the rename was sent to the model as a turn"
+
+
+@pytest.mark.asyncio
+async def test_a_typed_rename_outranks_a_later_material_change() -> None:
+    """The precedence gate, reached the way the product reaches it.
+
+    ``test_a_human_rename_is_never_overwritten_by_a_retitle`` sets ``user_set``
+    by hand; this drives the only writer of it the shipped TUI has, so the gate
+    is exercised end to end — a genuine change of subject arrives afterwards and
+    must neither repaint the name nor spend a call to be refused.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named_a_while_ago(app, session, "fix the login redirect loop")
+        await _type_command(pilot, app, "/rename Ledger reconciliation")
+        assert session.conversation_name == "Ledger reconciliation"
+
+        session.title = "<title>Billing importer rewrite</title>"
+        app._submit_prompt("forget that, rewrite the billing importer instead")
+        await _settle()
+
+        assert session.conversation_name == "Ledger reconciliation"
+        assert app._status is not None
+        assert app._status._conversation_name == "Ledger reconciliation"
+        assert len(session.completions) == 1, "a renamed conversation spent a re-title call"
+
+
+@pytest.mark.asyncio
+async def test_a_rename_before_the_first_prompt_spends_no_naming_call() -> None:
+    """A conversation the user has already named has nothing left to name.
+
+    ``_maybe_name_conversation`` reads the stored name, so the opener takes the
+    re-title path and is refused there by ``user_set`` — and the excerpt never
+    goes up, because a stand-in for a name that exists would be a downgrade.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _type_command(pilot, app, "/rename Ledger reconciliation")
+
+        app._submit_prompt("fix the login redirect loop")
+        await asyncio.wait_for(session.prompt_started.wait(), timeout=5)
+        await _settle()
+
+        assert session.completions == [], "a named conversation asked for a title"
+        assert session.conversation_name == "Ledger reconciliation"
+        assert app._status is not None
+        assert app._status._conversation_name == "Ledger reconciliation"
+        assert app._provisional_name == "", "an opener excerpt displaced the user's name"
+        session.gate.set()
+
+
+@pytest.mark.asyncio
+async def test_a_bare_rename_reports_the_title_and_changes_nothing() -> None:
+    """The empty-argument form answers; it does not clear the name.
+
+    ``ConversationName.set("")`` would store an empty string as a USER-SET
+    title, permanently un-naming the conversation and locking out every
+    generated one — so the bare form has to be a report and nothing else.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _type_command(pilot, app, "/rename")
+        assert session.conversation_name == ""
+        assert session.conversation_name_state.user_set is False
+        assert any("unnamed" in text for text in _notices(app)), _notices(app)
+
+        await _type_command(pilot, app, "/rename Ledger reconciliation")
+        await _type_command(pilot, app, "/rename")
+
+        assert session.conversation_name == "Ledger reconciliation"
+        assert any("Ledger reconciliation" in text for text in _notices(app))
+
+
 @pytest.mark.asyncio
 async def test_a_chatty_follow_up_makes_no_call_at_all() -> None:
     """ "thanks" cannot have moved a subject, and the filter is free."""
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         await _named_a_while_ago(app, session, "fix the login redirect loop")
 
         for chatter in ("thanks", "looks good", "ok"):
@@ -460,7 +649,7 @@ async def test_a_burst_of_substantive_follow_ups_costs_exactly_one_check() -> No
     """The throttle. Unthrottled this is one provider call per message."""
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         await _named_a_while_ago(app, session, "fix the login redirect loop")
 
         session.title = "<title/>"
@@ -487,7 +676,7 @@ async def test_a_landed_title_starts_the_re_title_window() -> None:
     """
     app, session = await _boot(title="<title>Fix the login flow</title>")
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _ready(pilot, app)
         now = await _named(app, session, "fix the login redirect loop")
 
         session.title = "<title>Billing importer rewrite</title>"

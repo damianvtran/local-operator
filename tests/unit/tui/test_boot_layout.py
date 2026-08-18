@@ -35,6 +35,7 @@ from typing import Any
 
 import pytest
 from rich.cells import cell_len
+from rich.text import Text
 from textual.css.query import NoMatches
 from textual.screen import Screen
 
@@ -46,6 +47,7 @@ from local_operator.tui.app import (
     BOOT_CARD_CLASS,
     BOOT_CARD_MIN_INSET,
     BOOT_LAYOUT_CLASS,
+    Band,
     OperatorApp,
 )
 from local_operator.tui.widgets.editor import Editor
@@ -774,6 +776,47 @@ async def test_the_conversation_layout_reserves_nothing_and_clear_puts_it_back()
         await _settle(pilot)
         assert app.screen.has_class(BOOT_LAYOUT_CLASS)
         assert _reserve(app) != (False, 0), "and the centring comes back"
+
+
+@pytest.mark.asyncio
+async def test_the_band_is_refitted_when_the_card_hands_back_the_width() -> None:
+    """The band's row belongs to the box it is painted in, across the handover.
+
+    The status band is the input panel's last row, so the boot card's clamp is its
+    clamp too: while the splash is up it is fitted to ~97 cells of a 150-column
+    terminal, and the first substantive prompt hands it the full 145 back. That
+    hand-back is a class change on the Screen, not a terminal resize, so nothing
+    told the band — and the frames straight after the opening submit, which are
+    exactly the frames a user is watching when they press Enter, kept the card's
+    row: a basename cwd, no effort segment, and a stub of the name the prompt had
+    just earned.
+
+    The band answers to its OWN ``Resize`` now (``Band.BoxChanged``), so this
+    holds for any cause rather than for this one; the assertion is the general
+    one, that what is painted is what the current box fits.
+    """
+    app = _make_app()
+    async with app.run_test(size=(150, 24)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        band = app.query_one("#status-band", Band)
+        status = app._status
+        assert status is not None
+        clamped = band.content_size.width
+        assert clamped < 145, "premise: the boot card has the band clamped"
+
+        app.query_one(Editor).text = "add todo guardrails to the operator loop"
+        await pilot.press("enter")
+        await _settle(pilot)
+
+        assert band.content_size.width > clamped, "premise: the card gave the width back"
+        painted = band.content
+        assert isinstance(painted, Text), "the band is painted as a rich Text"
+        assert (
+            painted.plain == status._render(band.content_size.width).plain
+        ), "the band is still painting the row it fitted to the boot card's box"
+        # And the name the prompt just earned is on the row it is painted on.
+        assert "Add todo guardrails" in painted.plain
 
 
 #: Sizes where the composition has rows to spare, so the reserve is non-zero and

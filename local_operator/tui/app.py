@@ -38,8 +38,11 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.css.query import NoMatches
-from textual.events import DescendantBlur, DescendantFocus, TextSelected
+from textual.events import DescendantBlur, DescendantFocus, Resize, TextSelected
 from textual.geometry import Size
+
+# Aliased: `Message` in this module is the harness's conversation message.
+from textual.message import Message as TextualMessage
 from textual.screen import Screen
 from textual.widgets import Static
 
@@ -213,6 +216,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "Pick a past conversation to resume, or resume one (id)",
         aliases=("recall",),
     ),
+    # Beside `/resume` because it names the thing the picker lists. NOT an echo:
+    # the argument is the conversation's own label — it goes on the band and the
+    # terminal tab, never into anything the model is told — and the receipt
+    # quotes the title that ended up in force, which is strictly more than the
+    # typed words (the store trims and caps them).
+    SlashCommand("rename", "Rename this conversation; auto-naming never overrides it"),
     # The switch receipt names the old AND new label — strictly more than the
     # typed selector, which may have been elided to `default`.
     SlashCommand(
@@ -527,6 +536,34 @@ class Chrome(Static):
     """
 
     ALLOW_SELECT = False
+
+
+class Band(Chrome):
+    """The status band's own widget: it reports when its BOX changes.
+
+    The band's content is fitted to its width by an overflow ladder, so the row
+    is only correct for the box it was measured against — and the box changes for
+    reasons that are not terminal resizes. The boot card is the one that shows:
+    while the splash is up, `Screen.boot.boot-card #input-shell` clamps the shell
+    to the card's width, and the first substantive prompt dismisses the splash and
+    hands the shell the full width back. No resize event happens, so the band kept
+    painting the card's narrower row — measured at a 150-column terminal, the two
+    frames straight after the opening submit carried a basename cwd, no effort
+    segment and an 18-cell name, fitted to a 97-cell box in a 145-cell band, on
+    exactly the frames a user is watching when they press Enter.
+
+    A ``Resize`` on the band itself is the authoritative trigger, so this asks the
+    app to repaint on that rather than on each thing that might have caused it.
+    ``Resize`` does not bubble, hence the message: the app owns the
+    :class:`StatusLine`, the widget owns its geometry, and neither has to know the
+    other's reasons.
+    """
+
+    class BoxChanged(TextualMessage):
+        """The band's content box is a different size than it was."""
+
+    def on_resize(self, event: Resize) -> None:
+        self.post_message(self.BoxChanged())
 
 
 class TranscriptScreen(Screen[None]):
@@ -903,7 +940,7 @@ class OperatorApp(App[None]):
                 yield self._subagent_panel
                 yield self._todo_panel
             with Container(id="input-shell"):
-                yield Chrome(id="status-band")
+                yield Band(id="status-band")
                 editor = Editor(commands=SLASH_COMMANDS)
                 with Horizontal(id="input-row"):
                     yield Chrome("❯", id="prompt-chevron")
@@ -1952,9 +1989,13 @@ class OperatorApp(App[None]):
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-fit size-sensitive chrome after a terminal resize."""
-        if self._status is not None:
-            self.call_after_refresh(self._status.refresh)
+        """Re-fit size-sensitive chrome after a terminal resize.
+
+        The status band is NOT re-fitted here: it answers to its own ``Resize``
+        instead (see :class:`Band` and :meth:`on_band_box_changed`), which covers
+        this case and the boot-card handover, where the band's box changes and the
+        terminal's does not.
+        """
         # The EVENT's size, not the app's: during a resize `self.size` is still the
         # previous frame's, and one stale cell is enough to put the card threshold on
         # the wrong side of itself — at 85 columns it decided "bar" for a box that was
@@ -1985,6 +2026,16 @@ class OperatorApp(App[None]):
         # can currently hold keeps the ~50 ms before the timer from showing a
         # card overhanging the frame with its prose clipped mid-word.
         self.call_after_refresh(self._sync_overlay_layout, force=True)
+
+    def on_band_box_changed(self, event: Band.BoxChanged) -> None:
+        """Repaint the band for the box it now has.
+
+        Its content is fitted to a width by the overflow ladder, so a row measured
+        against the old box is wrong for the new one — and the band cannot notice
+        that for itself: ``StatusLine`` is not a widget and has no events.
+        """
+        if self._status is not None:
+            self._status.refresh()
 
     def on_welcome_view_block_resized(self, message: WelcomeView.BlockResized) -> None:
         """The splash changed height, so the composition around it has moved.
@@ -3408,6 +3459,60 @@ class OperatorApp(App[None]):
             self._status.update(conversation_name=stored)
         return stored
 
+    def _cmd_rename(self, arg: str, notice: NoticeFn) -> None:
+        """``/rename`` — report the title; ``/rename <text>`` — set it by hand.
+
+        The ONE production writer of ``user_set=True``, which is what the
+        precedence flag on :class:`ConversationName` is for: a title a human
+        typed outranks every generated one, including a naming call already in
+        flight (the flag is read at STORE time, not at request time — see
+        ``ConversationName.set``) and every later re-title, which
+        :meth:`_maybe_retitle_conversation` declines to even spend a call on.
+
+        No provider call on either branch. The words are the user's, so the only
+        work is putting them on the two surfaces that show a conversation's name.
+        """
+        session = self._session
+        if session is None:
+            # A rejected command changed nothing, so the conversation has not
+            # started: `_system_notice` keeps the boot composition intact where
+            # `notice` would collapse it. The rule `_cmd_goal` follows.
+            self._system_notice("session is still starting…", "warning")
+            return
+        if not arg:
+            current = session.conversation_name
+            if current:
+                notice(f"conversation: {current} — /rename <title> to change it")
+            elif self._provisional_name:
+                # The band is wearing a stand-in, not a name (see
+                # `_show_provisional_name`). Answering a bare "unnamed" with an
+                # excerpt visible one row up would read as a bug, so this names
+                # what the label actually is.
+                notice(
+                    f"unnamed — the band is quoting the opener ({self._provisional_name}); "
+                    "/rename <title> names it"
+                )
+            else:
+                notice("unnamed — /rename <title> names this conversation")
+            return
+        stored = session.set_conversation_name(arg, user_set=True)
+        # Superseded, and by the best possible answer: cleared for the reason
+        # `_store_title` clears it, so nothing downstream still believes the
+        # band is showing a stand-in.
+        self._provisional_name = ""
+        if self._status is not None:
+            # One call paints the band AND pushes the terminal title (see
+            # `StatusLine._sync_terminal_title`), so neither surface can lag the
+            # other by a frame.
+            self._status.update(conversation_name=stored)
+        # `stored`, not `arg`: the store collapses whitespace and caps the length
+        # (`MAX_TITLE_CHARS`), and the receipt's whole job is to show the title
+        # that is actually in force. Truncated rather than REJECTED, unlike a
+        # model's over-long answer — an over-long answer is evidence the model
+        # ignored the format, while this is just a long name the user chose, and
+        # refusing it outright would lose a title they typed.
+        notice(f"renamed: {stored} — auto-naming will not override it")
+
     # -- background jobs ------------------------------------------------------
     def _poll_subagents(self) -> None:
         """Repaint the counter segments only when a running count changes."""
@@ -3883,6 +3988,8 @@ class OperatorApp(App[None]):
             self._cmd_new(notice)
         elif command == "/resume":
             self._cmd_resume(arg, notice)
+        elif command == "/rename":
+            self._cmd_rename(arg, notice)
         elif command == "/model":
             self._cmd_model(arg, notice)
         elif command == "/effort":

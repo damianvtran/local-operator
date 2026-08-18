@@ -2350,17 +2350,18 @@ class Session:
 
         * ``isolated`` — one attempt, no fallback chain, no credential
           rotation, no sticky-route read or write, no quota preflight, no
-          effort-boundary classification and not the session's prompt cache
-          key. See the field's docstring for the five pieces of session-wide
-          state that protects, and why each one mattered.
+          effort-boundary classification, a read-only credential resolve and
+          not the session's prompt cache key. See the field's docstring for the
+          six pieces of session-wide state that protects, and why each one
+          mattered.
         * ``replayable=False`` — deliberately the opposite of the compaction
           errand below. Replay exists so a stalled read does not permanently
           lose an EXPENSIVE result; a title is worth one attempt and no more.
         * ``max_tokens`` — bounds a model that ignores the output format.
         * cheapest route available: the ``lo`` subagent tier when the operator
-          has configured one, otherwise this session's model clamped to the
-          lowest reasoning effort it accepts. Naming is a formatting job, not a
-          thinking job, and thinking tokens are most of what it would bill.
+          has configured one, otherwise this session's model — either way
+          clamped to the lowest reasoning effort the spec accepts, because that
+          128-token cap counts thinking tokens as well as the title.
         """
         model = self._errand_model()
         request = ChatRequest(
@@ -2380,23 +2381,38 @@ class Session:
         return "".join(parts)
 
     def _errand_model(self) -> ModelSpec:
-        """The cheapest spec this session can reach for a decorative errand.
+        """The cheapest spec this session can reach for a decorative errand,
+        always on the bottom rung of whatever reasoning ladder it has.
 
         Prefers the operator's ``lo`` tier (``values.subagents.models.lo``),
         which is the same ladder a scout subagent runs on — an operator who has
         already said "this is my cheap model" should not have to say it twice.
-        With no tier configured this falls back to the session's own model with
-        its reasoning effort clamped to the bottom rung, which is a real saving
-        on a reasoning model (thinking tokens dominate a 10-token answer) and a
-        no-op on a model that exposes no knob.
+        With no tier configured it falls back to the session's own model.
+
+        The clamp is applied to WHICHEVER of the two this returns, and it is not
+        only a cost argument. ``ERRAND_MAX_TOKENS`` becomes
+        ``max_output_tokens``, which counts reasoning tokens too, so a spec left
+        on its provider's default effort can spend the whole 128-token budget
+        thinking, emit no ``<title>`` at all and make ``parse_title`` return
+        ``None`` — auto-naming would silently never produce a title for that
+        operator while still billing the thinking. ``build_model_spec`` seeds
+        ``reasoning_effort`` from ``default_effort``, which is ``None`` for
+        several reasoning families (no ``reasoning.effort`` goes on the wire, so
+        the provider applies its own default), and that is exactly how a
+        configured ``lo`` tier used to reach the wire unclamped. Naming is a
+        formatting job, not a thinking job. A model with no effort knob is
+        unaffected.
         """
         tier = self._resolve_subagent_model("task", "lo")
-        if tier is not None:
-            return tier
-        efforts = self._model.reasoning_efforts
-        if not efforts or self._model.reasoning_effort == efforts[0]:
-            return self._model
-        return self._model.model_copy(update={"reasoning_effort": efforts[0]})
+        return self._lowest_effort(tier if tier is not None else self._model)
+
+    @staticmethod
+    def _lowest_effort(spec: ModelSpec) -> ModelSpec:
+        """``spec`` on the bottom rung of its own effort ladder, if it has one."""
+        efforts = spec.reasoning_efforts
+        if not efforts or spec.reasoning_effort == efforts[0]:
+            return spec
+        return spec.model_copy(update={"reasoning_effort": efforts[0]})
 
     async def _one_shot_complete(self, system: str, prompt: str) -> str:
         """One non-tool provider call used to produce the compaction summary.

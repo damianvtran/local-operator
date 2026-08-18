@@ -1130,38 +1130,75 @@ class ChatRequest(BaseModel):
     #: auto-naming stopped waiting for the turn to finish. A title that arrives
     #: after the work is done is a title nobody needed, so the naming call now
     #: runs CONCURRENTLY with the turn — and a second in-flight request shares
-    #: more than bandwidth with it. FIVE pieces of session-wide state sit in
-    #: the path of an ordinary request, and each was a live route by which a
-    #: decorative 429 could have degraded the user's turn:
+    #: more than bandwidth with it. SIX pieces of session-wide state sit in the
+    #: path of an ordinary request, and each is a live route by which a
+    #: decorative failure could degrade the user's turn. Each line names where
+    #: the denial is enforced, because an enumeration with an unlisted member is
+    #: worse than no enumeration:
     #:
     #: 1. ``FailoverRouteState`` is session-sticky. A naming failure that walked
     #:    to a fallback target would ``activate`` it with a 60-second cooldown,
     #:    moving the TURN onto the fallback model — and a naming SUCCESS on the
     #:    primary would ``clear`` a pin the turn is relying on.
+    #:    *Denied in* ``stream_with_failover``: ``route_state = None``, which
+    #:    kills the target narrowing, the ``activate`` and the ``clear``.
     #: 2. ``AuthStore.rotate_sibling`` mutates the session's sticky credential,
     #:    so an auth failure on a title would re-point the turn's account.
+    #:    *Denied in* ``stream_with_failover``: ``retry.enabled = False``, which
+    #:    also removes the fallback chain and the backoff budget — every
+    #:    rotation path sits behind it.
     #: 3. ``SessionStreamFn`` consumes a pending message boundary to classify
     #:    auto-effort. Whoever arrives first spends it, so a naming call would
     #:    freeze the turn's effort from ITS prompt and emit an "auto effort"
     #:    notice for a request the user never made.
+    #:    *Denied in* ``SessionStreamFn.__call__``: the isolated branch returns
+    #:    before the classification.
     #: 4. The quota preflight can block a credential and activate a fallback
     #:    route for the whole session.
+    #:    *Denied in* ``SessionStreamFn.__call__``: same early return, which is
+    #:    also what leaves ``_message_boundary_pending`` unspent (the preflight
+    #:    is what clears it).
     #: 5. The session's prompt cache key identifies a request PREFIX. A naming
     #:    call's prefix is a different system block, so sharing the key buys no
     #:    hit and writes a competing entry under the turn's name.
+    #:    *Denied in* ``SessionStreamFn.__call__``: same early return, so the
+    #:    key is never copied onto the request.
+    #: 6. The credential CASCADE mutates routing state on what looks like a
+    #:    read: ``AuthStore._resolve`` blocks an OAuth row whose refresh raises
+    #:    (so ``_usable_key_rows`` hides it from every later resolve, and the
+    #:    turn re-resolves on each tool-loop request) and writes or clears the
+    #:    session's sticky credential on the way through its tiers. A transient
+    #:    failure on the token endpoint during a title call could therefore
+    #:    block the credential the turn is transacting on and repoint stickiness
+    #:    to a sibling — the "cold cache prefix, alternating identity headers"
+    #:    failure ``create_stream_fn`` warns about. This one is upstream of both
+    #:    switches above, so neither reaches it.
+    #:    *Denied in* ``_resolve_access_for_provider``, which passes
+    #:    ``read_only=request.isolated`` into ``get_oauth_access`` /
+    #:    ``get_api_key`` → ``AuthStore._resolve``: no ``block_credential``, no
+    #:    ``_set_sticky`` write and none cleared.
     #:
     #: So an isolated request gets exactly ONE attempt on the model it names:
     #: no fallback chain, no sticky route read or written, no credential
-    #: rotation, no backoff sleep, no preflight, no boundary classification and
-    #: not the session's cache key. It still resolves credentials under the
-    #: session id — that READ picks the same account the turn is on, which is
-    #: the point; what it cannot do is move off it. It fails fast and alone,
-    #: which is what lets the caller swallow the failure (see
-    #: ``session.naming.generate_title``) without the turn ever knowing a
-    #: second call happened.
+    #: rotation, no backoff sleep, no preflight, no boundary classification, no
+    #: routing decision taken by its credential resolve, and not the session's
+    #: cache key. It still resolves credentials under the session id, so that
+    #: READ lands on the same account the turn is on whenever that account is
+    #: usable, which is the point. What it cannot do is take the turn anywhere:
+    #: if its own resolve finds the sticky credential's refresh broken it may
+    #: serve ITSELF from a sibling, but the sticky pointer and the block list
+    #: come out of the call exactly as they went in, so the turn's next resolve
+    #: still lands where it did before. A successful OAuth refresh does persist
+    #: the rotated token, which is that account's own bookkeeping rather than a
+    #: decision about where requests go. It fails fast and alone, which is what
+    #: lets the caller swallow the failure (see
+    #: ``session.naming.generate_title``) without the turn ever knowing a second
+    #: call happened.
     #:
-    #: Enforced in two places, tested in two: ``stream_with_failover`` (1, 2,
-    #: and the retry budget) and ``SessionStreamFn.__call__`` (3, 4, 5).
+    #: Enforced in three places, tested in three: ``stream_with_failover``
+    #: (1, 2, and the retry budget), ``SessionStreamFn.__call__`` (3, 4, 5) and
+    #: the read-only resolve (6). That the naming call actually SETS this flag
+    #: is tested separately, over a real ``Session`` and a capturing stream fn.
     isolated: bool = False
 
 

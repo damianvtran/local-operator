@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from rich.cells import cell_len
+from rich.style import Style
 from textual import events
 from textual.app import App, ComposeResult
 
@@ -543,6 +544,35 @@ async def test_the_cursor_is_always_on_a_row_the_card_actually_draws() -> None:
 
 
 # --- selection legibility ---------------------------------------------------
+
+
+@pytest.mark.parametrize("theme_name", ["dark", "light"])
+def test_the_caret_is_muted_like_both_sibling_pickers(theme_name: str) -> None:
+    """The caret is `muted`, never the violet meta ink.
+
+    It was `label` — the ramp's violet for tips and skill labels — held in a
+    local named `accent`, which put the one cool mark on a warm card and said
+    "meta" where the frame meant "position". Asserted per ramp and against the
+    TOKEN rather than a hex, because the defect was a token choice: violet is
+    `#b48cd6` on dark and `#7c5a9e` on paper, and pinning one hex would let the
+    other ramp keep the bug.
+    """
+    original = theme_mod.current_theme()
+    theme_mod.set_theme(theme_name)
+    try:
+        rows = [_row("aaa111", "a named session"), _row("bbb222", "")]
+        for selected in (0, 1):  # named and unnamed: one caret, one ink
+            span = render_rows(rows, selected, 74, NOW)[selected].spans[0]
+            # Rich types ``Span.style`` as ``str | Style``; a span this file
+            # built carries the object, and parsing narrows it either way.
+            style = span.style if isinstance(span.style, Style) else Style.parse(span.style)
+            colour = style.color
+            assert colour is not None and colour.triplet is not None
+            assert colour.triplet.hex == theme_mod.semantic_color("muted")
+            assert colour.triplet.hex != theme_mod.semantic_color("label")
+            assert colour.triplet.hex != theme_mod.semantic_color("accent")
+    finally:
+        theme_mod.set_theme(original)
 
 
 def test_selecting_an_unnamed_row_brightens_it_like_any_other() -> None:
