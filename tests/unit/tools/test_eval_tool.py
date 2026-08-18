@@ -212,6 +212,89 @@ async def test_timeout_reports_lost_state_and_next_call_is_fresh(context) -> Non
 
 
 @pytest.mark.asyncio
+async def test_fast_call_returns_immediately_despite_a_long_timeout(context) -> None:
+    """``timeout`` is a MAX, not a fixed wall clock the call is held against.
+
+    Regression for the ALL_COMPLETED default in ``asyncio.wait``: with a live
+    (never-aborted) signal attached, the tool waited on the abort task too, so
+    a call that had already answered was still held for the entire timeout.
+    Raising ``timeout`` must never make a fast call slower, so this asserts on
+    elapsed time an order of magnitude under the timeout it allows.
+    """
+    signal = AbortSignal()
+    await _call(context, "warm = 1", signal=signal)  # pay the spawn cost first
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    result = await _call(context, "1 + 1", timeout=30, signal=signal)
+    elapsed = loop.time() - started
+    assert result.is_error is False
+    assert "result: 2" in result.text
+    assert elapsed < 5.0, f"fast call held for {elapsed:.1f}s of its 30s timeout"
+
+
+@pytest.mark.asyncio
+async def test_failing_code_returns_immediately_despite_a_long_timeout(context) -> None:
+    """The reported symptom: code that raises returns its traceback at once.
+
+    A ``NameError`` is raised in microseconds, but the hang was in the parent's
+    wait rather than in the worker, so an erroring call burned the full timeout
+    before showing a traceback that had been ready the whole time.
+    """
+    signal = AbortSignal()
+    await _call(context, "warm = 1", signal=signal)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    result = await _call(context, "undefined_name_here()", timeout=30, signal=signal)
+    elapsed = loop.time() - started
+    assert result.is_error is True
+    assert "NameError" in result.text
+    assert elapsed < 5.0, f"failing call held for {elapsed:.1f}s of its 30s timeout"
+
+
+@pytest.mark.asyncio
+async def test_timeout_still_fires_with_a_live_signal_attached(context) -> None:
+    """The fix must not cost the timeout itself: genuinely slow code is killed.
+
+    Pairs with the two tests above — together they pin ``timeout`` as an upper
+    bound that is enforced but never waited out.
+    """
+    signal = AbortSignal()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    result = await _call(context, "while True:\n    pass", timeout=0.5, signal=signal)
+    elapsed = loop.time() - started
+    assert result.is_error is True
+    assert "TIMEOUT" in result.text
+    assert elapsed < 10.0, f"timeout kill took {elapsed:.1f}s"
+
+
+@pytest.mark.asyncio
+async def test_abort_mid_run_still_interrupts_with_a_long_timeout(context) -> None:
+    """Abort must still win the race it shares with the exchange.
+
+    ``FIRST_COMPLETED`` is what makes whichever of the two finishes first the
+    outcome; this asserts the abort branch is still reachable and prompt, so
+    the fix cannot be mistaken for "just drop the abort waiter".
+    """
+    signal = AbortSignal()
+    await _call(context, "warm = 1", signal=signal)
+    loop = asyncio.get_running_loop()
+
+    async def abort_soon() -> None:
+        await asyncio.sleep(0.2)
+        signal.abort("user steering")
+
+    started = loop.time()
+    aborter = asyncio.create_task(abort_soon())
+    result = await _call(context, "import time\ntime.sleep(60)", timeout=120, signal=signal)
+    elapsed = loop.time() - started
+    await aborter
+    assert result.is_error is True
+    assert "aborted" in result.text
+    assert elapsed < 10.0, f"abort took {elapsed:.1f}s to interrupt"
+
+
+@pytest.mark.asyncio
 async def test_worker_crash_reports_stderr_tail_and_restarts(context) -> None:
     await _call(context, "x = 1")
     crashed = await _call(context, "import os\nos._exit(3)")
@@ -317,7 +400,14 @@ def test_tool_shape() -> None:
     # The `i` intent field is the registry's injection, not ours.
     assert "i" not in properties
     assert "timeout" in properties
-    assert tool.parameters["properties"]["timeout"]["maximum"] == eval_tool.EVAL_MAX_TIMEOUT_SECONDS
+    # The SCHEMA bound is the background ceiling, because one field serves both
+    # modes; the lower foreground cap is enforced by the model validator, which
+    # is asserted by test_background_timeout_may_exceed_the_foreground_cap.
+    assert (
+        tool.parameters["properties"]["timeout"]["maximum"]
+        == eval_tool.EVAL_MAX_BACKGROUND_TIMEOUT_SECONDS
+    )
+    assert eval_tool.EVAL_MAX_TIMEOUT_SECONDS < eval_tool.EVAL_MAX_BACKGROUND_TIMEOUT_SECONDS
 
 
 def test_describe_approval_shows_code_first_line() -> None:
@@ -437,3 +527,212 @@ async def test_windows_spawn_assigns_kill_on_close_job_before_use(tmp_path, monk
     assert closed == [77]
     assert kernel.windows_job is None
     assert process._transport.closed is True
+
+
+# ---------------------------------------------------------------------------
+# background mode: long work observed through the job, not by blocking a turn
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_background_returns_a_job_id_without_waiting(tmp_path) -> None:
+    """The point of the mode: a long run costs the caller no wall clock.
+
+    The code below sleeps far longer than this call is allowed to take, so a
+    fast return is only possible if the work really was handed to a job.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg", jobs=manager)
+    tool = eval_tool.build_eval_tool()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    result = await tool.execute(  # type: ignore[operator]
+        "call-bg",
+        {"code": "import time\ntime.sleep(30)", "background": True, "timeout": 60},
+        None,
+        None,
+        context,
+    )
+    elapsed = loop.time() - started
+    assert result.is_error is False
+    assert elapsed < 5.0, f"background eval blocked for {elapsed:.1f}s"
+    job_id = str((result.details or {})["job_id"])
+    assert manager.get(job_id) is not None
+    await manager.cancel(job_id)
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_background_streams_output_while_it_runs(tmp_path) -> None:
+    """Output is observable BEFORE the job settles.
+
+    A run whose output only appeared at the end would leave the caller blind
+    for exactly as long as the work is interesting, which is the failure this
+    mode exists to fix.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg-stream", jobs=manager)
+    tool = eval_tool.build_eval_tool()
+    code = "import time\nfor i in range(20):\n    print('tick', i, flush=True)\n    time.sleep(0.3)"
+    result = await tool.execute(  # type: ignore[operator]
+        "call-bg2", {"code": code, "background": True, "timeout": 60}, None, None, context
+    )
+    job_id = str((result.details or {})["job_id"])
+
+    # Poll until output appears while the job is still running.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 10
+    seen = ""
+    while loop.time() < deadline:
+        window = manager.read_output(job_id)
+        assert window is not None
+        seen = window[0]
+        live = manager.get(job_id)
+        if "tick 0" in seen and live is not None and live.status == "running":
+            break
+        await asyncio.sleep(0.1)
+    assert "tick 0" in seen, "no streamed output observed while the job ran"
+    live = manager.get(job_id)
+    assert live is not None and live.status == "running"
+
+    await manager.cancel(job_id)
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_background_uses_its_own_kernel_and_leaves_the_session_alone(tmp_path) -> None:
+    """Isolation is the documented trade for not blocking the turn.
+
+    A background run sharing the session namespace would mutate it under every
+    foreground call the model makes meanwhile — the exact interleaving the
+    tool's ``exclusive`` concurrency exists to prevent.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg-iso", jobs=manager)
+    tool = eval_tool.build_eval_tool()
+    execute = tool.execute  # type: ignore[operator]
+    await execute("s1", {"code": "session_only = 'here'"}, None, None, context)
+    bg = await execute(
+        "s2",
+        {"code": "import time\ntime.sleep(20)", "background": True, "timeout": 60},
+        None,
+        None,
+        context,
+    )
+    # The session kernel is untouched by the background run.
+    kept = await execute("s3", {"code": "session_only"}, None, None, context)
+    assert kept.is_error is False
+    assert "result: 'here'" in kept.text
+    await manager.cancel(str((bg.details or {})["job_id"]))
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_background_without_a_job_manager_is_refused(context) -> None:
+    """Refusing beats silently running in the foreground for 5 minutes."""
+    tool = eval_tool.build_eval_tool()
+    result = await tool.execute(  # type: ignore[operator]
+        "call-nojobs", {"code": "1", "background": True}, None, None, context
+    )
+    assert result.is_error is True
+    assert "job manager" in result.text
+
+
+@pytest.mark.asyncio
+async def test_background_cancelled_before_start_kills_the_kernel(tmp_path) -> None:
+    """Cancel with ZERO intervening awaits must still kill the worker.
+
+    The kernel is spawned before ``register``, and ``register`` only schedules
+    the runner — so a cancel in the same event-loop turn never enters it and
+    never reaches its ``finally``. Without a pre-start teardown the interpreter
+    survives, reparented to init, owned by nothing.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg-leak", jobs=manager)
+    tool = eval_tool.build_eval_tool()
+    result = await tool.execute(  # type: ignore[operator]
+        "c1",
+        {"code": "import time\ntime.sleep(300)", "background": True, "timeout": 600},
+        None,
+        None,
+        context,
+    )
+    job_id = str((result.details or {})["job_id"])
+    process = eval_tool._BACKGROUND_KERNELS.get(job_id)
+    assert process is not None, "the background kernel should be tracked while unstarted"
+    assert process.returncode is None, "precondition: the kernel is alive"
+
+    await manager.cancel(job_id)  # no awaits in between
+    await asyncio.sleep(1.0)
+    assert process.returncode is not None, "kernel survived a cancel before the runner started"
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_background_timeout_may_exceed_the_foreground_cap(tmp_path) -> None:
+    """The mode advertises training runs and polling loops, so its ceiling has
+    to allow them; the foreground cap still applies to blocking calls."""
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="bg-cap", jobs=manager)
+    tool = eval_tool.build_eval_tool()
+    long_bg = await tool.execute(  # type: ignore[operator]
+        "c1", {"code": "1", "background": True, "timeout": 1800}, None, None, context
+    )
+    assert long_bg.is_error is False
+
+    too_long_fg = await tool.execute(  # type: ignore[operator]
+        "c2", {"code": "1", "timeout": 1800}, None, None, context
+    )
+    assert too_long_fg.is_error is True
+    assert "background=true" in too_long_fg.text
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_background_job_stays_deliverable_inside_a_subagent(tmp_path) -> None:
+    """A background job must be registered UNOWNED, even in a child session.
+
+    Setting ``owner_id`` looks like scoping and is not: the manager routes an
+    owned completion exclusively through that owner's registered delivery sink,
+    nothing in this codebase registers one, so the completion is dead-lettered
+    and the caller is never told its job finished. That silently defeats the
+    entire mode, so the ownership is pinned here rather than left to look like
+    an oversight.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+
+    delivered: list[str] = []
+
+    async def fallback(job_id: str, text: str, job: object) -> None:
+        delivered.append(job_id)
+
+    manager = AsyncJobManager(on_job_complete=fallback)
+    context = ToolContext(
+        cwd=str(tmp_path), session_id="bg-own", jobs=manager, job_id="child-job-1"
+    )
+    tool = eval_tool.build_eval_tool()
+    result = await tool.execute(  # type: ignore[operator]
+        "c1", {"code": "'done'", "background": True, "timeout": 60}, None, None, context
+    )
+    job_id = str((result.details or {})["job_id"])
+    row = manager.get(job_id)
+    assert row is not None and row.owner_id is None
+
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        settled = manager.get(job_id)
+        if settled is not None and settled.status != "running":
+            break
+    await asyncio.sleep(0.2)
+    assert delivered == [job_id], "the child was never told its background job finished"
+    await manager.dispose()

@@ -13,9 +13,20 @@ Protocol
 --------
 One JSON object per line, both directions, request then response, forever:
 
-    request:  {"id": "<hex>", "code": "<python source>"}
+    request:  {"id": "<hex>", "code": "<python source>", "stream": bool}
     response: {"id": "<hex>", "ok": true|false, "stdout": str, "stderr": str,
                "error": str|null, "result": str|null, "display": [str, ...]}
+
+When the request sets ``stream``, the worker ALSO writes zero or more frames
+before the response, one per write to stdout/stderr:
+
+    stream:   {"id": "<hex>", "stream": "stdout"|"stderr", "text": str}
+
+A stream frame carries the same ``id`` and is distinguished by the ``stream``
+key. They are advisory progress only — the response still carries the complete
+captured streams — so a reader may ignore them entirely without losing data.
+That redundancy is deliberate: it keeps a dropped or malformed frame from
+costing output the caller would otherwise never see.
 
 The ``id`` is echoed verbatim so the tool can discard lines that are not its
 own response — user code writing to file descriptor 1 directly (``os.write``)
@@ -54,6 +65,13 @@ from typing import Any
 STREAM_CHAR_LIMIT = 1_000_000
 DISPLAY_CHAR_LIMIT = 256_000
 TRUNCATED_MARKER = "\n[…worker output truncated before protocol serialization]"
+
+#: The protocol's own stdout, captured at import BEFORE any request can
+#: redirect ``sys.stdout``. Streaming frames are written through this handle so
+#: they reach the parent even though user code's ``print`` is being captured at
+#: the same moment — writing to ``sys.stdout`` there would land in the capture
+#: buffer and never be seen.
+_PROTOCOL_OUT = sys.stdout
 
 _REPR = reprlib.Repr()
 _REPR.maxstring = 4096
@@ -214,14 +232,63 @@ def _execute(namespace: dict[str, Any], code: str) -> str | None:
     return _safe_repr(value)
 
 
+class _StreamingTextIO(_CappedTextIO):
+    """A capped sink that also forwards each write to the parent immediately.
+
+    Plain ``_CappedTextIO`` only surrenders its contents in the final response,
+    which is correct for a short call and useless for a long one: a training
+    loop printing an epoch a minute would show nothing for an hour and then
+    everything at once. When a request asks to stream, each write is ALSO
+    emitted as its own protocol frame so the parent can publish it to the
+    job's peek buffer while the code is still running.
+
+    It still caps and still accumulates: the final response stays byte-for-byte
+    what a non-streaming run would produce, so streaming changes only WHEN the
+    parent learns something, never WHAT it ends up with.
+    """
+
+    def __init__(self, limit: int, emit: Callable[[str], None]) -> None:
+        super().__init__(limit)
+        self._emit = emit
+
+    def write(self, value: str) -> int:
+        written = super().write(value)
+        if value:
+            # A failure to emit must never break the user's code, which is what
+            # an exception raised inside ``print`` would do. The frame is
+            # advisory; the authoritative copy rides the final response.
+            with contextlib.suppress(Exception):
+                self._emit(value)
+        return written
+
+
 def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
     """Execute one request and build its response mapping."""
     display_sink = _DisplaySink(DISPLAY_CHAR_LIMIT)
     # Rebound per request (see _make_display).
     namespace["display"] = _make_display(display_sink)
 
-    stdout = _CappedTextIO(STREAM_CHAR_LIMIT)
-    stderr = _CappedTextIO(STREAM_CHAR_LIMIT)
+    request_id = request.get("id", "")
+    if request.get("stream"):
+
+        def _emit(channel: str, text: str) -> None:
+            # Written straight to the real stdout while the redirect is active:
+            # ``sys.stdout`` is the captured object during the run, so the
+            # protocol keeps its own handle (``_PROTOCOL_OUT``) captured at
+            # import, before any redirect could reach it.
+            frame = {"id": request_id, "stream": channel, "text": text}
+            _PROTOCOL_OUT.write(json.dumps(frame) + "\n")
+            _PROTOCOL_OUT.flush()
+
+        stdout: _CappedTextIO = _StreamingTextIO(
+            STREAM_CHAR_LIMIT, lambda text: _emit("stdout", text)
+        )
+        stderr: _CappedTextIO = _StreamingTextIO(
+            STREAM_CHAR_LIMIT, lambda text: _emit("stderr", text)
+        )
+    else:
+        stdout = _CappedTextIO(STREAM_CHAR_LIMIT)
+        stderr = _CappedTextIO(STREAM_CHAR_LIMIT)
     ok = True
     error: str | None = None
     result: str | None = None
@@ -266,8 +333,8 @@ def main() -> None:
             # means the pipe is not worth trusting further.
             continue
         response = _handle(namespace, request)
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
+        _PROTOCOL_OUT.write(json.dumps(response) + "\n")
+        _PROTOCOL_OUT.flush()
 
 
 if __name__ == "__main__":

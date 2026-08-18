@@ -10,6 +10,7 @@ import pytest
 from local_operator.harness.jobs import (
     CANCELLED_BEFORE_START,
     DEFAULT_MAX_RUNNING_JOBS,
+    OUTPUT_TAIL_CHARS,
     AsyncJob,
     AsyncJobManager,
 )
@@ -30,6 +31,13 @@ def require_job(manager: AsyncJobManager, job_id: str) -> AsyncJob:
     job = manager.get(job_id)
     assert job is not None
     return job
+
+
+def require_output(manager: AsyncJobManager, job_id: str, since: int = 0) -> tuple[str, int, bool]:
+    """``manager.read_output`` narrowed to non-None for assertions."""
+    window = manager.read_output(job_id, since)
+    assert window is not None
+    return window
 
 
 async def quick_runner(job_id, signal, report_progress):
@@ -417,4 +425,198 @@ async def test_a_completion_promotes_the_longest_queued_job():
     # b is still running; free it so dispose is clean.
     gate[1].set()
     await wait_for(lambda: require_job(manager, b).status == "completed")
+    await manager.dispose()
+
+
+# ---------------------------------------------------------------------------
+# live output tail: the data behind `jobs(op="peek")`
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_output_returns_only_what_is_new() -> None:
+    """The incremental contract: a cursor read never re-sends what it saw.
+
+    This is what makes polling a long job affordable — re-sending the whole
+    tail on every peek would grow the caller's context by the same bytes over
+    and over.
+    """
+    manager = AsyncJobManager()
+    job_id = manager.register("bash", "long", quick_runner)
+    manager.append_output(job_id, "first\n")
+    text, seq, gap = require_output(manager, job_id, 0)
+    assert (text, gap) == ("first\n", False)
+
+    # Nothing appended since: the same cursor yields nothing, not a repeat.
+    assert require_output(manager, job_id, seq) == ("", seq, False)
+
+    manager.append_output(job_id, "second\n")
+    text, seq2, gap = require_output(manager, job_id, seq)
+    assert (text, gap) == ("second\n", False)
+    assert seq2 > seq
+    # A cursor from the very start still replays everything retained.
+    assert require_output(manager, job_id, 0)[0] == "first\nsecond\n"
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_output_tail_is_bounded_and_reports_the_gap() -> None:
+    """Past the cap the oldest bytes go, and a stale cursor is TOLD they went.
+
+    Silently returning the surviving tail would hand the caller an excerpt that
+    looks contiguous with its last peek but has a hole in it — the caller would
+    conclude a step never happened.
+    """
+    manager = AsyncJobManager()
+    job_id = manager.register("bash", "chatty", quick_runner)
+    manager.append_output(job_id, "A" * 10)
+    cursor = require_job(manager, job_id).output_seq
+    manager.append_output(job_id, "B" * (OUTPUT_TAIL_CHARS + 100))
+
+    job = require_job(manager, job_id)
+    assert len(job.output_tail) == OUTPUT_TAIL_CHARS  # bounded
+    assert job.output_seq == 10 + OUTPUT_TAIL_CHARS + 100  # counts everything
+
+    text, _seq, gap = require_output(manager, job_id, cursor)
+    assert gap is True, "a cursor whose bytes were evicted must be told"
+    assert "A" not in text  # the evicted prefix is genuinely gone
+
+    # A fresh cursor at the head is contiguous again: no false gap.
+    assert require_output(manager, job_id, job.output_seq)[2] is False
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_output_helpers_tolerate_unknown_and_empty() -> None:
+    """An unknown id reads as None (not an exception): a runner draining a pipe
+    must not die because retention already swept its row."""
+    manager = AsyncJobManager()
+    assert manager.read_output("nope") is None
+    manager.append_output("nope", "ignored")  # must not raise
+    job_id = manager.register("bash", "quiet", quick_runner)
+    manager.append_output(job_id, "")  # empty write is a no-op, not a bump
+    assert require_job(manager, job_id).output_seq == 0
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_the_runner_starts_still_runs_cleanup() -> None:
+    """A resource spawned before ``register`` is torn down even if the runner
+    is never entered.
+
+    ``register`` only ``ensure_future``s the runner, so a cancel landing in the
+    SAME event-loop turn settles the row without the coroutine body — and
+    therefore without its ``finally`` — ever running. Anything the caller had
+    already spawned would outlive the job that was supposed to own it. Note the
+    zero intervening awaits: that is the whole window.
+    """
+    manager = AsyncJobManager()
+    torn_down: list[str] = []
+    entered: list[str] = []
+
+    async def runner(job_id, signal, report_progress):
+        entered.append(job_id)
+        await asyncio.sleep(30)
+        return "never"
+
+    job_id = manager.register(
+        "bash", "spawned-already", runner, on_cancel=lambda: torn_down.append("cleaned")
+    )
+    await manager.cancel(job_id)  # no awaits in between: runner never stepped
+
+    assert entered == [], "precondition: the runner must not have started"
+    assert torn_down == ["cleaned"], "pre-start cleanup did not run"
+    assert require_job(manager, job_id).status == "cancelled"
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_does_not_fire_once_the_runner_owns_the_resource() -> None:
+    """Exactly one owner. Once the runner starts, its own teardown is
+    authoritative and the pre-start hook must be dropped — firing both would
+    kill the same process twice (or kill one a retry had just replaced)."""
+    manager = AsyncJobManager()
+    torn_down: list[str] = []
+    started = asyncio.Event()
+
+    async def runner(job_id, signal, report_progress):
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    job_id = manager.register(
+        "bash", "running", runner, on_cancel=lambda: torn_down.append("cleaned")
+    )
+    await started.wait()  # the runner is now entered and owns its resources
+    await manager.cancel(job_id)
+    assert torn_down == [], "pre-start cleanup ran for a job whose runner owned it"
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dispose_leaves_no_job_uncleaned() -> None:
+    """Session teardown is the realistic trigger, and it must clean EVERY job.
+
+    Each job is torn down by exactly one of the two owners, and which one is a
+    scheduling detail rather than a guarantee: ``dispose`` awaits ``cancel``
+    per job, and that await lets a later job's runner start, after which the
+    runner's own ``finally`` is what cleans it. So this asserts the property
+    that actually matters — every job cleaned, none cleaned twice — rather than
+    pinning which path did it.
+    """
+    manager = AsyncJobManager()
+    cleaned: list[str] = []
+
+    def runner_for(name: str):
+        async def runner(job_id, signal, report_progress):
+            try:
+                await asyncio.sleep(30)
+            finally:
+                cleaned.append(name)  # the runner-owned path
+            return "never"
+
+        return runner
+
+    for name in ("a", "b", "c"):
+        manager.register(
+            "bash",
+            name,
+            runner_for(name),
+            on_cancel=lambda name=name: cleaned.append(name),  # the pre-start path
+        )
+    await manager.dispose()
+    # Let any runner that had started finish unwinding its `finally`.
+    await asyncio.sleep(0.05)
+    assert sorted(cleaned) == ["a", "b", "c"], "every job must be cleaned exactly once"
+
+
+@pytest.mark.asyncio
+async def test_a_raising_cleanup_does_not_break_the_cancel() -> None:
+    """Teardown is best-effort: a hook that throws must not leave the job row
+    un-settled or propagate out of ``cancel``."""
+    manager = AsyncJobManager()
+
+    async def runner(job_id, signal, report_progress):
+        await asyncio.sleep(30)
+        return "never"
+
+    def _boom() -> None:
+        raise RuntimeError("cleanup failed")
+
+    job_id = manager.register("bash", "bad-cleanup", runner, on_cancel=_boom)
+    assert await manager.cancel(job_id) is True
+    assert require_job(manager, job_id).status == "cancelled"
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_read_output_handles_a_cursor_from_another_job() -> None:
+    """A ``since`` past the head (e.g. a cursor copied from a busier job) reads
+    as 'nothing new' rather than slicing backwards into old output."""
+    manager = AsyncJobManager()
+    job_id = manager.register("bash", "quiet", quick_runner)
+    manager.append_output(job_id, "hello")
+    text, seq, gap = require_output(manager, job_id, 10_000)
+    assert (text, gap) == ("", False)
+    assert seq == 5
     await manager.dispose()
