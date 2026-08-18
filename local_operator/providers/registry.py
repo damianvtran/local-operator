@@ -353,9 +353,11 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         ),
         name="Z.AI (GLM)",
         env_keys="ZAI_API_KEY",
-        login=create_api_key_login(
-            "Z.AI", "https://z.ai/manage-apikey/apikey-list", "Paste your Z.AI API key"
-        ),
+        # No instruction line: the prompt row below it already reads "Paste your
+        # Z.AI API key", and Z.AI's dashboard calls it exactly that, so there is
+        # no vendor-specific term worth a second line. Matches the convention
+        # #139 established when it dropped four identical duplicates.
+        login=create_api_key_login("Z.AI", "https://z.ai/manage-apikey/apikey-list"),
         # The CODING-plan path, not the general `/api/paas/v4` endpoint. Requests
         # sent here consume GLM Coding Plan quota; the general endpoint bills the
         # account balance instead, which is the same key silently spending the
