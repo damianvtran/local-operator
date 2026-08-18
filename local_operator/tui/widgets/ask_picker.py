@@ -413,6 +413,10 @@ class AskPickerScreen(Container):
         #: What held focus when the card appeared, so answering hands it back
         #: rather than leaving the user out of the composer.
         self._restore_target: object | None = None
+        #: The footer inputs as of the last paint, for :meth:`repaint_if_stale`.
+        #: ``None`` until the first paint, which is never equal to a real
+        #: fingerprint, so the first check always repaints.
+        self._painted_fingerprint: tuple[object, ...] | None = None
         #: Whether the last paint produced any line at all. Starts True so the
         #: first undrawable paint is an EDGE and is announced: starting False
         #: would make "nothing to draw" the unremarkable case and leave the host
@@ -1342,10 +1346,45 @@ class AskPickerScreen(Container):
         """
         self._repaint()
 
+    def footer_fingerprint(self) -> tuple[object, ...]:
+        """Everything the FOOTER's content depends on, as one comparable value.
+
+        The card's key hints are derived from state the card does not own:
+        whether it holds focus, and whether the composer holds a draft. Neither
+        emits anything this widget hears, so the same defect — model correct,
+        screen stale — arrived three rounds running on three different inputs
+        (D13 focus, F7/D14 the buffer, and D15's row set before it).
+
+        Each was fixed by adding one more repaint trigger, which is a fix per
+        input and leaves the next input to be discovered by a reviewer. This
+        exists so the card can instead be ASKED whether what it is showing is
+        still what it would draw — see :meth:`repaint_if_stale`, which the app
+        calls on its 1 Hz tick. That makes a missed trigger a frame late rather
+        than permanently wrong.
+        """
+        return (
+            self.has_focus,
+            self._composer_has_draft(),
+            tuple(self._window()),
+            self.question_index,
+        )
+
+    def repaint_if_stale(self) -> None:
+        """Repaint when the footer's inputs have moved since the last paint.
+
+        The backstop for the class of defect described in
+        :meth:`footer_fingerprint`. Cheap: it compares a small tuple and does
+        nothing in the overwhelming majority of ticks.
+        """
+        fingerprint = self.footer_fingerprint()
+        if fingerprint != self._painted_fingerprint:
+            self._repaint()
+
     def _repaint(self) -> None:
         body = getattr(self, "_body", None)
         if body is None or not body.is_mounted:
             return
+        self._painted_fingerprint = self.footer_fingerprint()
         text = self._card_text()
         body.update(text)
         drawable = bool(text.plain)

@@ -1478,3 +1478,57 @@ async def test_clearing_a_draft_does_not_steal_the_caret_from_a_routable_card() 
         # And it is answerable from there, which is why the caret can stay.
         await pilot.press("1")
         assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_the_card_repaints_itself_when_its_inputs_move_untriggered() -> None:
+    """The backstop for "correct in the model, stale on screen".
+
+    The footer is derived from state the card does not own — whether it holds
+    focus, and whether the composer holds a draft — and neither emits anything
+    the card hears. That produced the same defect three review rounds running
+    on three different inputs (D13 focus, F7/D14 the buffer), each fixed by
+    adding one more explicit trigger: a fix per input, with the next input left
+    for a reviewer to find.
+
+    So the card can be ASKED whether what it is showing is still what it would
+    draw. What is pinned here is that mechanism working on its own, with the
+    explicit triggers taken out of the picture: move an input, confirm the card
+    now considers itself stale, tick, and confirm it agrees again — and that
+    the repainted footer is the correct one for the new state.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(16):
+            await pilot.pause()
+        card = app._ask_screen
+        assert card is not None
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+        assert "answer" in _painted_footer(app)
+
+        # Move the input WITHOUT any repaint: set the buffer directly on the
+        # document, which posts nothing, and forget the recorded fingerprint so
+        # the card is in the state a missed trigger leaves it in.
+        card._painted_fingerprint = (True, True, (), 99)
+        assert card.footer_fingerprint() != card._painted_fingerprint
+
+        # One tick of the app's own poll and the card notices by itself.
+        app._refresh_band()
+        for _ in range(6):
+            await pilot.pause(0.05)
+        assert (
+            card.footer_fingerprint() == card._painted_fingerprint
+        ), "the card did not repaint itself when its inputs had moved"
+        # And what it repainted is right for the state it is actually in.
+        assert "answer" in _painted_footer(app), _painted_footer(app)
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
