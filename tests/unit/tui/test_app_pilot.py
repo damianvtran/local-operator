@@ -3316,7 +3316,7 @@ async def test_quitting_during_boot_never_paints_into_the_dismantled_screen() ->
     pruned_then_released: list[str] = []
     original_close_all = App._close_all
 
-    async def close_all(self: App) -> None:
+    async def close_all(self: App[None]) -> None:
         await original_close_all(self)
         pruned_then_released.append("pruned")
         factory_gate.set()
