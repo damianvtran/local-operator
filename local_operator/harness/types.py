@@ -391,14 +391,21 @@ class JobManagerProtocol(Protocol):
 
     async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool: ...
 
-    # ``settled_event(job_id) -> asyncio.Event`` is deliberately NOT declared
-    # here. This Protocol is ``runtime_checkable`` and ``ToolContext.jobs``
-    # validates against it, so every method added becomes mandatory for every
-    # existing implementation — a host (or a test double) written against the
-    # older surface would stop validating the moment this shipped. ``wait``
-    # therefore probes for it with ``getattr`` and falls back to polling, which
-    # keeps the optimization opt-in for third-party managers rather than
-    # breaking them. See ``tools.builtin._await_any_settled``.
+    # Three methods are deliberately NOT declared here: ``settled_event``
+    # (event-driven ``wait``) and ``append_output``/``read_output`` (the live
+    # output channel behind ``jobs(op="peek")``).
+    #
+    # This Protocol is ``runtime_checkable`` and ``ToolContext.jobs`` validates
+    # against it, so every method added becomes mandatory for every existing
+    # implementation — a host, an embedder's manager, or a test double written
+    # against the older surface would stop validating the moment it shipped.
+    # Adding the output pair here really did break eight such doubles outright.
+    #
+    # Each caller therefore probes with ``getattr`` and degrades: ``wait`` falls
+    # back to polling (``tools.builtin._await_any_settled``), and peek reports
+    # "this manager records no live output" (``tools.builtin._peek_job``, and
+    # bash's output mirror). That costs one branch and keeps the capability
+    # opt-in for third-party managers rather than breaking them.
 
 
 @runtime_checkable

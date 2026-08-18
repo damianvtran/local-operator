@@ -36,6 +36,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RUNNING_JOBS = 15
 DEFAULT_RETENTION_MS = 5 * 60_000
 
+#: Cap on a job's retained live-output tail (``AsyncJob.output_tail``). Sized
+#: to hold a meaningful working window of a chatty job (a terraform plan, a
+#: training loop's recent epochs) while staying far below the per-call result
+#: budget, so even a full drain of the tail cannot dominate a peek's cost.
+#: Bytes past this drop from the FRONT; ``output_seq`` still counts them, which
+#: is what lets a peek report the loss instead of hiding it.
+OUTPUT_TAIL_CHARS = 64_000
+
 #: ``result_text`` stamped by :meth:`AsyncJobManager.cancel` on a job whose
 #: runner was never entered, so the one fact the cancellation destroys — that
 #: the job never ran — survives on the row every settled surface already reads.
@@ -85,6 +93,21 @@ class AsyncJob(BaseModel):
     result_text: str | None = None
     error_text: str | None = None
     latest_details: dict[str, Any] | None = None
+    # -- live output tail (``peek``) -----------------------------------------
+    # Rolling tail of what a RUNNING job has emitted so far, so a caller can
+    # observe progress without waiting for the job to settle. ``result_text``
+    # cannot serve this: it is written once, at settle, which is exactly the
+    # moment observation stops being useful for a job that runs for an hour.
+    #
+    # Two fields, because a peek must be able to report incrementally. The
+    # buffer is a BOUNDED tail (oldest bytes drop past ``OUTPUT_TAIL_CHARS``),
+    # while ``output_seq`` counts every char ever appended and never rewinds.
+    # A reader that remembers the ``output_seq`` it last saw can therefore ask
+    # "what is new since N?" and be told truthfully — including the case where
+    # output scrolled past the tail between two peeks, which a length-only
+    # cursor silently misreports as "nothing new".
+    output_tail: str = ""
+    output_seq: int = 0
     owner_id: str | None = None
     # Set when a caller (the `wait` tool) has already returned this job's
     # result to the model: auto-delivery must then stay quiet, or the same
@@ -170,6 +193,11 @@ class AsyncJobManager:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._sinks: dict[str, DeliverySink] = {}
         self._queued_runners: dict[str, JobRunFn] = {}
+        # Teardown for a job whose runner has NOT been entered yet. See
+        # ``register(on_cancel=...)``: a runner's own ``finally`` cannot clean
+        # up a coroutine that never ran, so ownership of an already-spawned
+        # resource lives here until the runner takes it over.
+        self._pending_cleanups: dict[str, Callable[[], None]] = {}
         # One event per job, set exactly once when the job settles. This is
         # what lets ``wait`` sleep until there is news instead of re-checking
         # a status field on a timer: a 50 ms poll loop wakes 6000 times over a
@@ -212,6 +240,7 @@ class AsyncJobManager:
         owner_id: str | None = None,
         agent_id: str | None = None,
         queued: bool = False,
+        on_cancel: Callable[[], None] | None = None,
     ) -> str:
         """Register and start a background job. Returns the job id.
 
@@ -219,6 +248,17 @@ class AsyncJobManager:
         execution slot and are not started here — the run coroutine must call
         the job (the manager merely tracks it) via ``start_queued`` once its
         gate opens.
+
+        ``on_cancel`` is teardown for a resource the CALLER already created
+        before registering — a spawned process, an open kernel. It exists
+        because ``register`` only ``ensure_future``s the runner: the coroutine
+        is scheduled, not entered, so a ``cancel``/``dispose`` landing in the
+        same event-loop turn never executes the runner body and never reaches
+        its ``finally``. The resource would then outlive the job row that was
+        supposed to own it, reparented to init with nothing holding a
+        reference. It fires ONLY while the runner has not started; the first
+        statement of ``_run_job`` hands ownership over, after which the
+        runner's own cleanup is authoritative and this is dropped.
         """
         # Capacity is checked BEFORE any row is inserted: a rejected register
         # must never leave a phantom job occupying or shadowing a slot.
@@ -237,6 +277,8 @@ class AsyncJobManager:
         signal = AbortSignal()
         self._jobs[job_id] = job
         self._signals[job_id] = signal
+        if on_cancel is not None:
+            self._pending_cleanups[job_id] = on_cancel
 
         if not queued:
             progress = self._progress_fn(job_id)
@@ -355,6 +397,19 @@ class AsyncJobManager:
                     raise
             except Exception:
                 logger.warning("job %s task raised on cancel", job_id, exc_info=True)
+        # Teardown for a runner that was never entered. Awaiting the cancelled
+        # task above does NOT run the coroutine body, so a resource the caller
+        # spawned before registering (a process group, a kernel) still has no
+        # owner at this point; without this it survives the job row that was
+        # meant to own it. Popped first so it can only ever fire once, and
+        # AFTER the task await so a runner that did start has already claimed
+        # ownership and removed it — the two paths cannot both kill.
+        cleanup = self._pending_cleanups.pop(job_id, None)
+        if cleanup is not None:
+            try:
+                cleanup()
+            except Exception:  # noqa: BLE001 — teardown must not fail a cancel
+                logger.warning("job %s pre-start cleanup raised", job_id, exc_info=True)
         self._settle(job)
         self._sweep_due()
         return True
@@ -375,12 +430,68 @@ class AsyncJobManager:
         self._tasks.clear()
         self._sinks.clear()
         self._queued_runners.clear()
+        # Any cleanup still pending belongs to a job that was not ``running``
+        # (so ``cancel`` above skipped it) yet never entered its runner. Firing
+        # them here is what makes dispose a complete teardown rather than one
+        # that leaks whatever those jobs had already spawned.
+        for job_id, cleanup in list(self._pending_cleanups.items()):
+            del self._pending_cleanups[job_id]
+            try:
+                cleanup()
+            except Exception:  # noqa: BLE001 — teardown must not fail a dispose
+                logger.warning("job %s pre-start cleanup raised", job_id, exc_info=True)
         # Wake anything still parked on a job before dropping the events: a
         # waiter that outlives dispose must observe "settled" (cancel() set
         # each event on its way through) rather than sleeping to its deadline
         # against a manager that will never run again.
         for event in self._settled_events.values():
             event.set()
+
+    # -- live output ---------------------------------------------------------
+
+    def append_output(self, job_id: str, text: str) -> None:
+        """Append live output to a job's rolling tail.
+
+        Called from a job's own runner as bytes arrive. Unknown ids are
+        ignored rather than raising: a runner draining a pipe must not be able
+        to kill the job it is reporting for because the row was already swept
+        by retention.
+        """
+        job = self._jobs.get(job_id)
+        if job is None or not text:
+            return
+        job.output_seq += len(text)
+        combined = job.output_tail + text
+        # Drop from the FRONT past the cap: for a job that is still running the
+        # recent end is the informative one (the current step, the error that
+        # just landed), while the opening lines have usually already been read.
+        job.output_tail = combined[-OUTPUT_TAIL_CHARS:]
+
+    def read_output(self, job_id: str, since: int = 0) -> tuple[str, int, bool] | None:
+        """``(text, seq, gap)`` for a peek, or ``None`` when the job is unknown.
+
+        ``since`` is an ``output_seq`` value from a previous peek. The return
+        is only what was appended after it, so polling a quiet job costs
+        almost nothing and a caller's context grows by what is genuinely new
+        rather than re-receiving the whole tail every time.
+
+        ``gap`` reports that output between ``since`` and the returned text
+        was evicted from the bounded tail before this peek read it — the
+        caller has an incomplete record and is told so rather than being
+        handed a contiguous-looking excerpt that silently skips a step.
+        """
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        seq = job.output_seq
+        if since >= seq:
+            return "", seq, False
+        available = len(job.output_tail)
+        # How many chars back from the head the caller asked to resume.
+        wanted = seq - max(since, 0)
+        if wanted <= available:
+            return job.output_tail[-wanted:], seq, False
+        return job.output_tail, seq, True
 
     # -- internals ----------------------------------------------------------
 
@@ -398,6 +509,11 @@ class AsyncJobManager:
         # reads it. Stamping it later would leave a window where the coroutine
         # is running and the row still says it never started.
         job.started_at = time.time()
+        # The runner is now entered, so its own teardown (its ``finally``, its
+        # CancelledError handler) is authoritative for the resources it owns.
+        # Dropping the pre-start cleanup here is what keeps a cancel from
+        # killing the same process twice through two different owners.
+        self._pending_cleanups.pop(job.id, None)
         try:
             result = await coro
             if job.status == "cancelled":

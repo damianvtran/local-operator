@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.jobs import AsyncJobManager
+from local_operator.harness.jobs import OUTPUT_TAIL_CHARS, AsyncJobManager
 from local_operator.harness.types import AgentTool, ToolContext, ToolResult
 from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
@@ -27,6 +27,12 @@ async def wait_for(predicate, timeout: float = 2.0) -> None:
         if loop.time() > deadline:
             raise AssertionError("timed out waiting for condition")
         await asyncio.sleep(0.005)
+
+
+def _status(manager: AsyncJobManager, job_id: str) -> str | None:
+    """A job's status, narrowed for predicates that poll for a transition."""
+    job = manager.get(job_id)
+    return job.status if job is not None else None
 
 
 async def _quick_runner(job_id: str, signal: Any, report_progress) -> str:
@@ -536,3 +542,138 @@ async def test_task_partial_batch_failure_reports_survivors(tmp_path):
     assert result.is_error is False  # 1 of 2 launched: not a total failure
     assert "1 subagent(s)" in result.text
     assert "failed to launch: b" in result.text
+
+
+# ---------------------------------------------------------------------------
+# jobs(op="peek") / jobs(op="cancel") — observing and stopping live work
+# ---------------------------------------------------------------------------
+
+
+async def _emitting_runner(job_id: str, signal: Any, report_progress) -> str:
+    """A job that prints, then blocks — the shape peek exists to observe."""
+    await asyncio.sleep(30)
+    return "never"
+
+
+@pytest.mark.asyncio
+async def test_peek_returns_only_new_output_and_advances_the_cursor(tmp_path):
+    """Polling stays cheap: each peek costs what the job newly produced.
+
+    The second peek is the assertion that matters — a peek that re-sent the
+    whole tail would make watching a long job cost the same bytes repeatedly.
+    """
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    tools = _tools(context)
+    job_id = manager.register("bash", "watched", _emitting_runner)
+
+    manager.append_output(job_id, "line one\n")
+    first = await _call(tools, "jobs", {"op": "peek", "job_id": job_id}, context)
+    assert first.is_error is False
+    assert "line one" in first.text
+    cursor = int((first.details or {})["seq"])
+
+    # Nothing new: the reply carries no output at all, only status.
+    quiet = await _call(tools, "jobs", {"op": "peek", "job_id": job_id, "since": cursor}, context)
+    assert (quiet.details or {})["new_chars"] == 0
+    assert "line one" not in quiet.text, "a peek must not re-send what was already read"
+    assert "no new output" in quiet.text
+
+    manager.append_output(job_id, "line two\n")
+    second = await _call(tools, "jobs", {"op": "peek", "job_id": job_id, "since": cursor}, context)
+    assert "line two" in second.text
+    assert "line one" not in second.text
+    assert int((second.details or {})["seq"]) > cursor
+
+    await manager.cancel(job_id)
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_peek_reports_a_settled_job_and_flags_dropped_output(tmp_path):
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    tools = _tools(context)
+    job_id = manager.register("bash", "done-soon", _quick_runner)
+    await wait_for(lambda: _status(manager, job_id) != "running")
+
+    settled = await _call(tools, "jobs", {"op": "peek", "job_id": job_id}, context)
+    # Peek does not duplicate the result body; it says where to get it.
+    assert "finished" in settled.text
+    assert "wait" in settled.text
+
+    # A cursor whose bytes were evicted is warned, never quietly patched over.
+    gap_job = manager.register("bash", "chatty", _emitting_runner)
+    manager.append_output(gap_job, "X")
+    gap_row = manager.get(gap_job)
+    assert gap_row is not None
+    stale = gap_row.output_seq
+    manager.append_output(gap_job, "Y" * (OUTPUT_TAIL_CHARS + 50))
+    gapped = await _call(tools, "jobs", {"op": "peek", "job_id": gap_job, "since": stale}, context)
+    assert (gapped.details or {})["gap"] is True
+    assert "not contiguous" in gapped.text
+    await manager.cancel(gap_job)
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_a_running_job_and_is_honest_about_settled_ones(tmp_path):
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    tools = _tools(context)
+    job_id = manager.register("bash", "long", _slow_runner)
+
+    cancelled = await _call(tools, "jobs", {"op": "cancel", "job_id": job_id}, context)
+    assert cancelled.is_error is False
+    assert (cancelled.details or {})["cancelled"] is True
+    await wait_for(lambda: _status(manager, job_id) == "cancelled")
+
+    # Cancelling again is not an error: the caller's intent is already true.
+    again = await _call(tools, "jobs", {"op": "cancel", "job_id": job_id}, context)
+    assert again.is_error is False
+    assert (again.details or {})["cancelled"] is False
+    assert "cancelled" in again.text
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_peek_and_cancel_reject_missing_or_unknown_ids(tmp_path):
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="s", jobs=manager)
+    tools = _tools(context)
+    missing = await _call(tools, "jobs", {"op": "peek"}, context)
+    assert missing.is_error is True
+    assert "requires job_id" in missing.text
+    unknown = await _call(tools, "jobs", {"op": "cancel", "job_id": "nope"}, context)
+    assert unknown.is_error is True
+    assert "unknown job" in unknown.text
+    # The default op is still a plain listing, so existing callers are unaffected.
+    listed = await _call(tools, "jobs", {}, context)
+    assert listed.is_error is False
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_peek_and_cancel_reach_jobs_the_listing_shows(tmp_path):
+    """Whatever `op="list"` shows, `peek` and `cancel` must be able to address.
+
+    Regression: scoping these two ops by `context.job_id` (and leaving `list`
+    unscoped) made the tool contradict itself inside a child session — it
+    listed a grandchild `task` job and then called that same id "unknown job",
+    because `run_subagent` registers those with `owner_id=None`.
+    """
+    manager = AsyncJobManager()
+    grandchild = manager.register("task", "grandchild", _slow_runner)
+    # A CHILD session's context: it carries a job_id of its own.
+    context = ToolContext(cwd=str(tmp_path), session_id="child", jobs=manager, job_id="child-job-1")
+    tools = _tools(context)
+
+    listed = await _call(tools, "jobs", {}, context)
+    assert grandchild in listed.text, "precondition: the listing shows the job"
+
+    peeked = await _call(tools, "jobs", {"op": "peek", "job_id": grandchild}, context)
+    assert peeked.is_error is False, "peek could not address a job the listing showed"
+
+    cancelled = await _call(tools, "jobs", {"op": "cancel", "job_id": grandchild}, context)
+    assert cancelled.is_error is False, "cancel could not address a job the listing showed"
+    await manager.dispose()
