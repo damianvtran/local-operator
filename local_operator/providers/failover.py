@@ -1410,9 +1410,7 @@ async def stream_with_failover(
                     # the same storm), so a value computed once goes stale in the
                     # direction that hurts: it keeps claiming a pool after the
                     # pool is gone, and caps the last healthy credential.
-                    rotates_across_pool=_has_rotatable_sibling(
-                        auth, provider, access.kind if access else None
-                    ),
+                    rotates_across_pool=_has_rotatable_sibling(auth, provider, access),
                 ):
                     # 5xx/network-style failures use the configured budget.
                     # Rate limits retry once only when the advertised delay is
@@ -1457,9 +1455,7 @@ async def stream_with_failover(
                     wrapped,
                     transport_retries,
                     retry,
-                    rotates_across_pool=_has_rotatable_sibling(
-                        auth, provider, access.kind if access else None
-                    ),
+                    rotates_across_pool=_has_rotatable_sibling(auth, provider, access),
                 ):
                     transport_retries += 1
                     await _abortable_sleep(
@@ -1581,7 +1577,7 @@ def _clear_demotion(auth: FailoverAuthStore, provider: str, access: "OAuthAccess
 
 
 def _has_rotatable_sibling(
-    auth: FailoverAuthStore, provider: str, current_type: str | None
+    auth: FailoverAuthStore, provider: str, access: "OAuthAccess | None"
 ) -> bool:
     """Is there another credential this turn could ACTUALLY rotate onto?
 
@@ -1601,11 +1597,23 @@ def _has_rotatable_sibling(
       SAME ``credential_type``, so an OAuth sign-in plus a pasted API key is two
       rows and zero rotation.
 
+    - **A bearer that is not a stored row at all.** The cascade's runtime
+      override (``--api-key``), config override and env-var tiers return no row,
+      and the resolver wraps them as ``credential_id=0``. Rotation cannot move
+      off such a bearer -- there is nothing to move to, and the same override
+      wins the cascade again every time -- so counting the stored rows beside it
+      claimed a pool that is unreachable BY CONSTRUCTION. ``credential_id`` is
+      already the sentinel for "not a row", so it is what this asks.
+
     A store that cannot enumerate (the structural protocol promises only
     ``get_api_key``) answers ``False``: without evidence of a reachable sibling
     the honest default is the UNCAPPED budget the user configured.
     """
     if not isinstance(auth, CredentialLister):
+        return False
+    # No row behind this bearer (override/env tier, or a bare-key test double):
+    # nothing to rotate onto, whatever the table happens to contain.
+    if access is not None and not access.credential_id:
         return False
     try:
         usable = [
@@ -1615,9 +1623,9 @@ def _has_rotatable_sibling(
         ]
     except Exception:  # noqa: BLE001 - a retry decision must never raise
         return False
-    if current_type is None:
+    if access is None:
         return len(usable) > 1
-    return sum(1 for row in usable if row.credential_type == current_type) > 1
+    return sum(1 for row in usable if row.credential_type == access.kind) > 1
 
 
 def _is_blocked(auth: FailoverAuthStore, row: "StoredCredential", provider: str) -> bool:

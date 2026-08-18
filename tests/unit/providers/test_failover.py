@@ -32,6 +32,7 @@ from local_operator.providers.failover import (
     FallbackTarget,
     ProviderError,
     RetrySettings,
+    _has_rotatable_sibling,
     backoff_delay_ms,
     classify_provider_error,
     expand_fallback_candidates,
@@ -2197,3 +2198,146 @@ class TestTheRetryCapAsksWhatRotationWouldAnswer:
         store.upsert_credential("openai", {"type": "api_key", "key": "sk-1", "source": "login"})
 
         assert await self._recovers(store) == 4
+
+
+class TestRotatableSiblingDirectly:
+    """Direct coverage for `_has_rotatable_sibling`.
+
+    Round 4 (R20) noted that this predicate had NO direct test and that no
+    failover test resolved through the cascade's override/env tiers, which is
+    why four consecutive rounds each narrowed "what counts as a pool" by one
+    step and each stopped one step short:
+
+    R11 counted rows, R16 counted blocked rows, R20 counted rows the cascade
+    can never select. Enumerating the shapes here, rather than only asserting
+    request counts end to end, is what stops a fifth.
+    """
+
+    @staticmethod
+    def _store(tmp_path: Any) -> Any:
+        from local_operator.providers.auth_store import AuthStore
+
+        return AuthStore(db_path=tmp_path / "auth.db")
+
+    @staticmethod
+    def _access(kind: str, credential_id: int) -> Any:
+        from local_operator.providers.auth_store import OAuthAccess
+
+        return OAuthAccess(access_token="t", credential_id=credential_id, kind=kind)
+
+    def _oauth(self, store: Any, n: int, provider: str = "openai") -> list[Any]:
+        return [
+            store.upsert_credential(
+                provider,
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+            for i in range(n)
+        ]
+
+    def test_a_lone_credential_is_not_a_pool(self, tmp_path: Any) -> None:
+        store = self._store(tmp_path)
+        rows = self._oauth(store, 1)
+        assert not _has_rotatable_sibling(store, "openai", self._access("oauth", rows[0].id))
+
+    def test_two_healthy_siblings_are_a_pool(self, tmp_path: Any) -> None:
+        store = self._store(tmp_path)
+        rows = self._oauth(store, 2)
+        assert _has_rotatable_sibling(store, "openai", self._access("oauth", rows[0].id))
+
+    def test_blocked_siblings_do_not_count(self, tmp_path: Any) -> None:
+        """R16: a quota-blocked row is skipped by rotation and by the cascade."""
+        store = self._store(tmp_path)
+        rows = self._oauth(store, 4)
+        for row in rows[1:]:
+            store.block_credential(row.id, "openai", block_ms=600_000)
+        assert not _has_rotatable_sibling(store, "openai", self._access("oauth", rows[0].id))
+
+    def test_a_row_of_another_type_is_not_a_sibling(self, tmp_path: Any) -> None:
+        """R16: `rotate_sibling` only walks rows of the same credential_type."""
+        store = self._store(tmp_path)
+        oauth_row = self._oauth(store, 1)[0]
+        store.upsert_credential("openai", {"type": "api_key", "key": "sk", "source": "login"})
+        assert not _has_rotatable_sibling(store, "openai", self._access("oauth", oauth_row.id))
+
+    def test_a_bearer_with_no_row_behind_it_can_rotate_nowhere(self, tmp_path: Any) -> None:
+        """R20: the override/env tiers resolve to `credential_id=0`.
+
+        Rotation cannot move off such a bearer -- the same override wins the
+        cascade every time -- so stored rows beside it are unreachable by
+        construction, however many there are.
+        """
+        store = self._store(tmp_path)
+        self._oauth(store, 3)
+        # SEVERAL api_key rows, so a check that only matched on `kind` would
+        # find a "pool" here and cap the override's budget.
+        for i in range(2):
+            store.upsert_credential(
+                "openai", {"type": "api_key", "key": f"sk-{i}", "source": "login"}
+            )
+
+        assert not _has_rotatable_sibling(store, "openai", self._access("api_key", 0))
+
+    def test_a_store_that_cannot_enumerate_defaults_to_uncapped(self) -> None:
+        """No evidence of a pool means the user's configured budget stands."""
+        auth = FakeAuth({"openai": ["k1", "k2"]})
+        assert not _has_rotatable_sibling(auth, "openai", self._access("api_key", 1))
+
+
+class TestAnOverrideBearerKeepsItsBudget:
+    """End to end through the cascade tier no failover test previously used.
+
+    R20 was invisible because every failover test resolves through the stored
+    credential tiers. A user who pasted API keys and then pointed at a gateway
+    (`--api-key`) or exported `ANTHROPIC_API_KEY` got 3 requests where `main`
+    gave 11 -- the cap firing on a bearer with nothing to rotate to.
+    """
+
+    async def test_a_runtime_override_is_not_capped_by_the_rows_beside_it(
+        self, tmp_path: Any
+    ) -> None:
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        for i in range(2):
+            store.upsert_credential(
+                "openai", {"type": "api_key", "key": f"sk-{i}", "source": "login"}
+            )
+        store.set_runtime_api_key("openai", "gateway-key")
+
+        sent: list[str | None] = []
+
+        def overloaded(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            sent.append(api_key)
+            raise ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(overloaded)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                async for _ in stream_with_failover(
+                    _request(),
+                    store,
+                    {"retry": {"enabled": True, "maxRetries": 10, "baseDelayMs": 0}},
+                    client_for,
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        # The override served every attempt, and kept the configured budget.
+        assert set(sent) == {"gateway-key"}, sent
+        assert len(sent) == 11, len(sent)
