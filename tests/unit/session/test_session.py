@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Sequence
 
 import pytest
 
+from local_operator.compaction.api import CompactionSettings
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -1606,3 +1607,97 @@ async def test_the_errand_model_is_effort_clamped_on_both_routes(tmp_path, monke
     assert fallback.model_id == reasoning_model.model_id
     assert reasoning_model.reasoning_effort != reasoning_model.reasoning_efforts[0]
     assert fallback.reasoning_effort == reasoning_model.reasoning_efforts[0]
+
+
+@pytest.mark.asyncio
+async def test_the_mid_turn_flush_never_persists_a_compaction_marker(tmp_path):
+    """F1: the mid-turn flush must not write the compaction summary marker.
+
+    The mid-turn gate persists the run's messages before it cuts, because the
+    cut target has to be a replayable transcript entry. It flushes from the
+    LIVE loop context — and after a pass that context is ``[marker, *kept]``.
+    The marker is not a todo reminder and its id is in no transcript, so a
+    flush excluding only reminders wrote it as a MESSAGE entry, while the pass
+    had already stored it as its own ``compaction`` entry. Replay then
+    reconstructs a superseded summary beside the live one.
+
+    Driven through the real tool loop rather than ``compact_now``, because the
+    flush lives in ``_on_turn_end`` and a manual pass never reaches it — an
+    earlier version of this test used ``compact_now`` and passed with the fix
+    reverted, pinning nothing.
+
+    Asserted on transcript ENTRIES, not on a duplicate-id count: every marker
+    carries a fresh uuid, so a resurrected marker is a new entry and never a
+    duplicate. A duplicate check is structurally blind to this.
+    """
+    big = "lorem ipsum dolor sit amet consectetur " * 1200
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text=big)]
+        )
+
+    tool = AgentTool(name="echo", parameters={"type": "object", "properties": {}}, execute=execute)
+
+    class ToolRunStream:
+        """Many tool batches, each reporting the prompt size it was really sent."""
+
+        def __init__(self, batches: int) -> None:
+            self.batches = batches
+            self.calls = 0
+
+        def __call__(self, request, signal):
+            index = self.calls
+            self.calls += 1
+            from local_operator.compaction.api import estimate_messages_tokens
+
+            size = estimate_messages_tokens(list(request.messages))
+            usage = Usage(input_tokens=size, context_tokens=size)
+
+            async def gen():
+                if index < self.batches:
+                    yield StreamTextDelta(delta=f"step {index} ")
+                    yield StreamToolCallDelta(
+                        index=0, id=f"c{index}", name="echo", argument_delta="{}"
+                    )
+                    yield StreamEndEvent(stop_reason="toolUse", usage=usage)
+                else:
+                    yield StreamTextDelta(delta="done")
+                    yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+            return gen()
+
+    stream = ToolRunStream(batches=40)
+    session = make_session(
+        tmp_path,
+        stream,
+        tools=[tool],
+        compaction_settings=CompactionSettings(keep_recent_tokens=20_000),
+    )
+
+    # Long enough to force several mid-run passes, so a marker is in the live
+    # context at a later boundary — which is the state that reproduces this.
+    await session.prompt("do the long thing " + "detail " * 200)
+
+    entries = session._transcript.entries()
+    assert [e for e in entries if e.type == "compaction"], "no pass ran; the test proves nothing"
+
+    markers_as_messages = [
+        entry
+        for entry in entries
+        if entry.type == "message" and entry.payload.get("custom_type") == "compaction_summary"
+    ]
+    assert markers_as_messages == [], (
+        f"{len(markers_as_messages)} compaction marker(s) were persisted as message "
+        "entries; on replay they resurrect superseded summaries beside the live one"
+    )
+
+    replayed = Transcript(session._transcript.directory).build_llm_history()
+    markers = [
+        m
+        for m in replayed
+        if isinstance(m, CustomMessage) and m.custom_type == "compaction_summary"
+    ]
+    assert len(markers) == 1, "replay must carry exactly one compaction summary"
+
+    await session.dispose()

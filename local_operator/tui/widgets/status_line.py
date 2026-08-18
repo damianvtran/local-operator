@@ -422,37 +422,85 @@ def format_context_usage(tokens: int, window: int) -> str:
 
 
 #: Context sizes at which the reading changes colour, largest first. ABSOLUTE
-#: token counts, not fractions of the window, because the cost they warn about
-#: is absolute: 300k tokens is slow and expensive to re-send on every request
-#: whether the window is 1M or 200k, and a percentage ramp would leave a big
-#: window looking calm at exactly the size that hurts most. This mirrors the
-#: ladder omp shows for the same reading.
+#: token counts, because the cost they warn about is absolute: 300k tokens is
+#: slow and expensive to re-send on every request whether the window is 1M or
+#: 200k, and a purely proportional ramp would leave a big window looking calm
+#: at exactly the size that hurts most. This mirrors the ladder omp shows for
+#: the same reading.
+#:
+#: These are only half the rule — see :data:`CONTEXT_COLOR_WINDOW_BANDS` for
+#: the proportional half, which is what makes the ramp reachable at all on the
+#: 200k-and-under models that are most of the registry.
 #:
 #: The hues are the palette's existing semantics rather than new tokens, so
 #: both themes get a legible ramp for free: `signal` (blue) is the neutral
 #: reading, `label` (purple) marks a context worth noticing, and `danger`
-#: (red) marks one near the point where compaction is imminent.
+#: (red) marks one at or past the point where compaction is due.
 CONTEXT_COLOR_BANDS: tuple[tuple[int, str], ...] = (
     (500_000, "danger"),
     (200_000, "label"),
 )
 
+#: Fractions of the context window that warm the reading to the same rungs,
+#: applied as a UNION with the absolute bands above (whichever is warmer wins).
+#:
+#: The absolute bands alone cannot do the segment's job, because 70% of the
+#: registry's windowed models are 200k or smaller: on those the reading could
+#: never leave the base colour, so it stayed calm blue at 100% full with
+#: compaction already overdue (the trigger for a 200k window is 160k). Once
+#: colour means "how full am I", a calm blue at 100% is not neutral, it is
+#: wrong. The fractions are set just under and at the compaction trigger's own
+#: default (``threshold_percent`` 0.80) so the warm rung appears while there is
+#: still headroom and the top rung coincides with the pass becoming due.
+CONTEXT_COLOR_WINDOW_BANDS: tuple[tuple[float, str], ...] = (
+    (0.80, "danger"),
+    (0.55, "label"),
+)
+
 #: Colour of a context reading below every band in :data:`CONTEXT_COLOR_BANDS`.
 CONTEXT_COLOR_BASE = "signal"
 
+#: Rungs warmest-first, so a union of two ladders can be resolved by rank.
+_CONTEXT_COLOR_RANK: tuple[str, ...] = ("danger", "label", CONTEXT_COLOR_BASE)
 
-def context_semantic_color(tokens: int) -> str:
+
+def context_semantic_color(tokens: int, window: int = 0) -> str:
     """Semantic colour name for a context reading of ``tokens``.
 
-    Banded on the token count alone: the window is deliberately not consulted,
-    see :data:`CONTEXT_COLOR_BANDS`. Strictly greater-than, so a reading
-    sitting exactly on a boundary keeps the calmer colour and a number
-    hovering there does not flicker between two hues.
+    The warmer of two ladders wins: an ABSOLUTE token count
+    (:data:`CONTEXT_COLOR_BANDS`) and a FRACTION of ``window``
+    (:data:`CONTEXT_COLOR_WINDOW_BANDS`). Each guards a failure the other
+    cannot see, which is why this is a union rather than a choice:
+
+    - The absolute ladder is what makes a very large window legible. Re-sending
+      300k tokens on every request is slow and expensive whether the window is
+      1M or 200k, and a purely proportional ramp would leave a 1M session
+      looking calm at exactly the size that costs the most per turn.
+    - The proportional ladder is what makes a SMALL window legible, and without
+      it the segment was inert on most models: at 200k and below the absolute
+      rungs are unreachable, so the reading stayed blue through 100% full while
+      compaction was already due.
+
+    ``window <= 0`` (unknown) falls back to the absolute ladder alone, since a
+    percentage needs a denominator — the same rule the reading's text follows.
+
+    Strictly greater-than on both ladders, so a value sitting exactly on a
+    boundary keeps the calmer colour and a number hovering there does not
+    flicker between two hues.
     """
-    for threshold, color in CONTEXT_COLOR_BANDS:
+    color = CONTEXT_COLOR_BASE
+    for threshold, candidate in CONTEXT_COLOR_BANDS:
         if tokens > threshold:
-            return color
-    return CONTEXT_COLOR_BASE
+            color = candidate
+            break
+    if window > 0:
+        for fraction, candidate in CONTEXT_COLOR_WINDOW_BANDS:
+            if tokens > window * fraction:
+                # Warmest wins: rank is warmest-first, so a lower index is warmer.
+                if _CONTEXT_COLOR_RANK.index(candidate) < _CONTEXT_COLOR_RANK.index(color):
+                    color = candidate
+                break
+    return color
 
 
 #: The forms a context reading may be written in, widest first. Named rather
@@ -1476,12 +1524,28 @@ class StatusLine:
                 # The one segment whose colour carries information: it warms
                 # from blue through purple to red as the context fills, so a
                 # session heading for compaction is visible at a glance
-                # instead of having to be read.
+                # instead of having to be read. The window is passed because
+                # the ramp is a union of an absolute and a proportional
+                # ladder; on a 200k model the absolute rungs are unreachable
+                # and the proportional half is the only thing that fires.
+                #
+                # BOLD on the warm rungs, because hue alone cannot carry this.
+                # `signal` and `label` are 35 dE apart in normal vision and
+                # 1.7 under deuteranopia (the commonest deficiency, ~6% of
+                # men) — indistinguishable, so for those readers the 200k step
+                # would simply not exist. Weight is orthogonal to hue, costs no
+                # cells, and moves nothing in the drop ladder's arithmetic
+                # since the text is unchanged. The base rung stays regular so
+                # "warm" remains the marked state rather than the default.
+                semantic = context_semantic_color(tokens, window)
                 parts.append(
                     (
                         ICON_CONTEXT,
                         usage,
-                        Style(color=theme_mod.semantic_color(context_semantic_color(tokens))),
+                        Style(
+                            color=theme_mod.semantic_color(semantic),
+                            bold=semantic != CONTEXT_COLOR_BASE,
+                        ),
                     )
                 )
         cost = self._shown_cost()
@@ -1523,8 +1587,18 @@ class StatusLine:
             # (both `#e0b04b`, both 8.64:1 on the band's ground), so the band's
             # only alarm read as another figure. `danger` reads as an alarm and
             # measures 6.62:1 dark / 4.94:1 on the paper ramp, and it is the same
-            # ink the `⊙` lamp takes when MCP discovery fails — in this band red
-            # is the ALARM category, which is why two of them do not conflict.
+            # ink the `⊙` lamp takes when MCP discovery fails.
+            #
+            # Red in this band means NEEDS-ATTENTION, and three segments may take
+            # it: this one, the `⊙` MCP lamp, and the context reading's top rung.
+            # They do not conflict because each is the warmest state of a
+            # DIFFERENT segment, read off the glyph that precedes it, and none is
+            # a routine value — `!` means no tool will ask before it runs, `⊙`
+            # means configured tools are missing, and `▦` in red means the
+            # context is at or past its compaction trigger. That last one is the
+            # weakest of the three (compaction resolves it without the user
+            # acting), which is why it is the only one gated behind a threshold
+            # rather than being a state the segment can simply be in.
             #
             # The glyph rides INSIDE the styled text rather than in the icon slot,
             # because the loop below paints icons `dim` — which made the one alarm

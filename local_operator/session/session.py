@@ -353,6 +353,38 @@ def _is_todo_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
     return isinstance(message, CustomMessage) and message.custom_type == TODO_REMINDER_MESSAGE_TYPE
 
 
+#: ``CustomMessage`` types that belong in the transcript as message entries.
+#:
+#: An ALLOW-LIST, because the cost of the two mistakes is asymmetric. Omitting a
+#: type that should persist loses one replayed message; persisting one that
+#: should not corrupts the session's history for good, and the compaction
+#: summary marker is the proof: it is minted by ``_run_compaction`` and stored
+#: through ``append_compaction`` as its OWN entry type, so writing it a second
+#: time as a message replays a superseded summary back into context beside the
+#: live one. A deny-list enumerating the ephemeral types cannot see a type that
+#: does not exist yet; this one excludes it by default.
+_PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset({SESSION_INCIDENT_MESSAGE_TYPE})
+
+
+def _is_persistable_message(message: AgentMessage) -> bool:
+    """Whether ``message`` may be written to the transcript as a message entry.
+
+    Plain ``Message``s always may. A ``CustomMessage`` may only when its type is
+    in :data:`_PERSISTABLE_CUSTOM_TYPES` — todo reminders are ephemeral by
+    design (a stored reminder replays as a user message the user never sent and
+    goes on asserting that finished items are open), and a compaction summary
+    marker is already persisted as a compaction entry.
+
+    This matters because the mid-turn gate flushes from the LIVE loop context,
+    which is exactly where both of those live: after a pass the context is
+    ``[marker, *kept]``, so the very next boundary would otherwise persist the
+    marker.
+    """
+    if isinstance(message, CustomMessage):
+        return message.custom_type in _PERSISTABLE_CUSTOM_TYPES
+    return True
+
+
 def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
     """The todo fingerprint a reminder was built from, normalized for compare.
 
@@ -1856,13 +1888,7 @@ class Session:
         """
         stored = {entry.id for entry in self._transcript.entries()}
         for message in messages:
-            # Todo reminders are EPHEMERAL by design: nothing persists them,
-            # because a stored reminder replays as a user message the user
-            # never sent and goes on asserting that finished items are open
-            # (see :meth:`_render_for_compaction`). The mid-turn gate flushes
-            # from the live loop context, which is where reminders live, so
-            # the exclusion has to happen here rather than at the call site.
-            if _is_todo_reminder(message):
+            if not _is_persistable_message(message):
                 continue
             if getattr(message, "id", None) in stored:
                 continue

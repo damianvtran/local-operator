@@ -179,19 +179,48 @@ def test_history_ending_mid_tool_run_still_compacts():
     assert_partition_pair_integrity(to_summarize, kept)
 
 
-def test_none_when_no_message_is_a_legal_cut():
-    """A history with no legal cut anywhere still answers ``None``.
+def test_a_cut_never_keeps_an_assistant_whose_call_is_unanswered():
+    """The SAFETY half of the loosened rule, pinned against a live mutant.
 
-    The backwards fallback widens where a cut may land; it must not invent one
-    where the pairing rule forbids every index. Here the only non-tool message
-    issues a call whose result never arrives, so keeping it would hand the
-    provider a dangling call.
+    `_is_valid_cut` admits an assistant whose own calls are answered at or
+    after the cut. The inverse must stay refused: an assistant holding a call
+    with NO result anywhere would, if kept, hand the provider a dangling tool
+    call, which is the same class of corruption as orphaning a result.
+
+    This is deliberately shaped so the *pairing* rule is what decides. An
+    earlier version of this test used a two-message history, which returns
+    ``None`` from the triviality rule (`index <= 1`) before the predicate is
+    ever consulted — it passed whatever `_is_valid_cut` did, so it pinned
+    nothing. Here there is ample summarizable history and a legal cut exists
+    (the trailing user message), so a cut IS returned and the only question is
+    where it may land.
+
+    Mutating the predicate's default from `-1` to a large value (treating an
+    unanswered call as answered) makes this fail, which is what a regression
+    would do.
     """
+    unanswered = _assistant_with_call("never-answered")
     messages = [
-        _assistant_with_call("missing"),
-        _tool_result("other"),
+        _big_user(),
+        _big_user(),
+        _big_user(),
+        unanswered,
+        Message.user("after " + "word " * 200),
     ]
-    assert find_cut_point(messages, 10) is None
+    cut = find_cut_point(messages, estimate_tokens(messages[4]) + 10)
+    assert cut is not None, "this history has a legal cut and must produce one"
+    candidate = messages[cut]
+    assert candidate is not unanswered, (
+        "the cut kept an assistant whose tool call has no result anywhere, "
+        "which hands the provider a dangling call"
+    )
+    # Stated as the general property too, so the assertion is about the class
+    # rather than about this one message object.
+    if candidate.role == "assistant":
+        answered = {
+            m.tool_call_id for m in messages[cut:] if isinstance(m, Message) and m.role == "tool"
+        }
+        assert all(c.id in answered for c in candidate.tool_calls)
 
 
 def test_empty_and_zero_budget():
