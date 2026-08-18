@@ -1119,6 +1119,13 @@ class ApprovalPrompt(AskPickerScreen):
             return frozenset()
         return frozenset(self._ANSWER_KEYS)
 
+    def routed_hint(self) -> tuple[str, str] | None:
+        """The letters, spelled out: they are the keys, not a range over rows."""
+        keys = [key for _label, key, _why in APPROVAL_CHOICES if key in self.answer_keys()]
+        if not keys:
+            return None
+        return ("/".join(keys), "answer")
+
     def answer_from_key(self, character: str) -> None:
         """Take ``character`` as an answer routed from the composer."""
         self._answer_with(character)

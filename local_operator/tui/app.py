@@ -2564,6 +2564,24 @@ class OperatorApp(App[None]):
             return
         if self._close_subagent_view():
             return
+        # A live `ask` picker takes Escape as "leave this question unanswered",
+        # which is what its own footer advertises (`esc skip`) and what its
+        # binding does when the card holds focus.
+        #
+        # It has to be handled HERE as well, because the card no longer keeps
+        # the caret: the composer does (see `route_key_to_live_prompt`), so the
+        # card's binding never sees the key and its advertised exit did nothing
+        # at all — measured on three consecutive presses, question still up,
+        # tool still waiting (D11, design round 3). Whatever was answered so
+        # far is kept, which is the rule `action_cancel` already follows.
+        #
+        # Before the streaming check, and returning: `skip` is a real answer to
+        # a question the agent asked, not an abort of the turn, and the turn
+        # continues with whatever the user did say.
+        picker = self._ask_screen
+        if picker is not None and not picker.settled and picker.is_attached:
+            self._settle_ask_picker()
+            return
         pending = self._approval is not None and not self._approval.answered
         if pending or (self._session is not None and self._session.is_streaming):
             self._interrupt()
