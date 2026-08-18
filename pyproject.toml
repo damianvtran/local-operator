@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.17.4"
+version = "0.18.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Damian Tran", email = "damian@radienthq.com" }]
@@ -134,7 +134,15 @@ dev = [
 include = ["local_operator*"]
 
 [tool.setuptools.package-data]
-local_operator = ["prompts_md/*.md", "guides/*/*.md", "tui/*.tcss"]
+local_operator = [
+    "prompts_md/*.md",
+    "guides/*/*.md",
+    "tui/*.tcss",
+    # Packaged starter role profiles. Without this they are absent from a
+    # wheel, and ``task(agent="reviewer")`` silently degrades to an unguided
+    # child on every non-source install.
+    "agent_seeds/*.md",
+]
 
 [project.urls]
 Homepage = "https://github.com/damianvtran/local-operator"
@@ -164,6 +172,23 @@ profile = "black"
 reportMissingTypeArgument = true
 strictListInference = true
 reportPrivateImportUsage = false
+# NOTE: venvPath/venv are deliberately NOT set here, even though a bare local
+# `pyright` run resolves whatever interpreter it finds and reports spurious
+# "import could not be resolved" errors that bury the real ones.
+#
+# Pinning them would fix the local run but couples this file to a layout CI
+# does not have: `.github/workflows/ci.yml` installs with
+# `pip install -e ".[dev]"` into the runner's own interpreter and never creates
+# a `.venv`. Simulating that shape (no `.venv`, dependencies on the PATH
+# interpreter) shows pyright warn ".venv subdirectory not found" and then fall
+# back to that interpreter, finding the dependencies and exiting 0 — so it
+# would not break the gate today. It is left unset because it buys nothing on
+# CI while making the config silently dependent on a directory that only
+# exists locally: with no `.venv` AND no dependencies on the resolved
+# interpreter, the same fallback reports every third-party import as missing.
+#
+# Use the documented invocation instead (see AGENTS.md):
+#   .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 [tool.pytest.ini_options]
 addopts = "-vv -s"

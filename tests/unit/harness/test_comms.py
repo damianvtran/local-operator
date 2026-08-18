@@ -288,6 +288,145 @@ async def test_a_starting_child_is_not_reported_as_parked_behind_the_gate():
     assert "designer" not in (parked.error or "")
 
 
+@pytest.mark.asyncio
+async def test_ask_waits_for_a_child_the_loop_has_not_entered_yet():
+    """The reported bug: checking in on a just-launched subagent is refused.
+
+    ``register`` calls ``ensure_future``, which SCHEDULES the runner without
+    entering it, so a parent that launches a child and asks it something in
+    its very next tool call finds no live child — not because anything is
+    wrong, but because the loop has not reached the runner. Refusing with
+    "it starts when this session next yields; retry in a moment" is an answer
+    the model cannot act on: it cannot yield except by making another call, so
+    it either polls or stops checking in. Both were observed live.
+
+    Awaiting the attach is self-fulfilling — the wait IS the yield that lets
+    the runner start — so the question must survive a late attach rather than
+    being rejected the instant it finds ``child is None``.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1")
+    comms.record_launch("job-1", "designer")
+
+    question = asyncio.create_task(comms.ask("job-1", "status?", 30_000))
+    await asyncio.sleep(0)  # the ask is now parked on the attach, not refused
+    assert not question.done(), "the question was refused instead of waiting"
+
+    # The runner finally gets its turn on the loop and attaches its session.
+    child = FakeChild()
+    comms.attach("job-1", child, tmp_dir())
+    await wait_for(lambda: bool(child.asides))
+    child.materialize()
+    comms.reply_to_parent("job-1", "two findings so far")
+
+    reply = await question
+    assert reply.text == "two findings so far"
+    assert reply.error is None
+
+
+@pytest.mark.asyncio
+async def test_ask_does_not_burn_its_timeout_on_a_parked_child():
+    """A parked job holds no slot and may not start for minutes, so waiting on
+    it is waiting on nothing. It must be reported at once — the opposite call
+    from the scheduled-but-not-entered child above, which one yield starts."""
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-parked").queued = True
+    comms.record_launch("job-parked", "designer")
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    reply = await comms.ask("job-parked", "status?", 30_000)
+    elapsed = loop.time() - started
+
+    assert "capacity gate" in (reply.error or "")
+    assert elapsed < 1.0, f"waited {elapsed:.1f}s on a job that cannot start"
+
+
+@pytest.mark.asyncio
+async def test_ask_gives_up_when_the_child_never_starts():
+    """The wait is bounded. A child that never attaches must produce the honest
+    not-started reason rather than consuming the caller's whole timeout: the
+    grace is a FRACTION of it, so the caller still gets an answer in time to
+    do something else."""
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1")
+    comms.record_launch("job-1", "designer")
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    reply = await comms.ask("job-1", "status?", 400)
+    elapsed = loop.time() - started
+
+    assert "scheduled" in (reply.error or "")
+    # Half of 400 ms, and comfortably less than the full timeout.
+    assert elapsed < 0.4, f"consumed the whole timeout ({elapsed:.2f}s)"
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_settles_before_starting_fails_the_wait_at_once():
+    """``detach`` must wake a waiter: the attach it is parked on is never
+    coming, and burning the full grace on a child that already died is the
+    same stall this wait exists to remove."""
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1")
+    comms.record_launch("job-1", "designer")
+
+    question = asyncio.create_task(comms.ask("job-1", "status?", 30_000))
+    await asyncio.sleep(0)
+    assert not question.done()
+
+    jobs.jobs["job-1"].status = "failed"
+    comms.detach("job-1")
+
+    reply = await asyncio.wait_for(question, timeout=2.0)
+    assert reply.text is None
+    # The REASON matters, not merely that there is one: a child that died must
+    # not be reported as "not started yet ... retry in a moment", which invites
+    # exactly the polling loop this wait exists to remove.
+    assert "failed" in (reply.error or "")
+    assert "retry in a moment" not in (reply.error or "")
+
+
+@pytest.mark.asyncio
+async def test_ask_never_exceeds_the_timeout_it_was_given():
+    """The attach grace is deducted from the caller's budget, not added to it.
+
+    ``timeout_ms`` is the whole budget a caller planned around. Spending the
+    grace first and then granting the full timeout for the answer let a
+    1000 ms request block for ~1450 ms while reporting it had waited 1000 ms,
+    and it scales with the timeout — the 600 s schema maximum could block for
+    900 s.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1")
+    comms.record_launch("job-1", "designer")
+
+    # Attach late enough to consume part of the grace, then never answer, so
+    # the call spends grace AND answer wait: the sum must still fit the budget.
+    async def attach_soon() -> None:
+        # Late enough to burn most of the 300 ms grace (half of 600 ms).
+        await asyncio.sleep(0.28)
+        comms.attach("job-1", FakeChild(), tmp_dir())
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    attacher = asyncio.create_task(attach_soon())
+    reply = await comms.ask("job-1", "status?", 600)
+    elapsed = loop.time() - started
+    await attacher
+
+    assert reply.timed_out
+    # Measured: 601 ms with the deadline honoured, 884 ms without it. The bound
+    # sits between the two, with enough slack above the correct figure that a
+    # loaded CI box does not flake it.
+    assert elapsed < 0.75, f"overshot a 600 ms budget: took {elapsed * 1000:.0f} ms"
+
+
 def test_send_to_an_unknown_job_fails_without_raising():
     comms, _jobs, _child, _parent = wire()
     delivery = comms.send("nope", "hello")

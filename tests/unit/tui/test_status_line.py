@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, cast
+from typing import Any, NotRequired, TypedDict, cast
 
 from rich.cells import cell_len
 from textual.widgets import Static
@@ -29,9 +29,17 @@ from local_operator.tui.widgets.status_line import (
     _MIN_GROUP_GAP,
     _SPINNER_FRAMES,
     _UNBOUNDED_RUNGS,
+    ICON_AGENTS,
+    ICON_APPROVALS,
+    ICON_CONTEXT,
+    ICON_COST,
     ICON_CWD,
+    ICON_DURATION,
+    ICON_JOBS,
     ICON_MCP,
     ICON_MODEL,
+    NAME_CELLS,
+    NAME_CELLS_FLOOR,
     McpStatus,
     StatusLine,
     drop_ladder,
@@ -44,6 +52,7 @@ from local_operator.tui.widgets.status_line import (
     format_model_label,
     format_window,
     mcp_semantic,
+    truncate_name,
 )
 
 
@@ -336,13 +345,16 @@ def test_the_model_segment_survives_a_terminal_far_too_narrow() -> None:
 # -- overflow priority -------------------------------------------------------
 
 
-def test_the_label_the_user_typed_is_the_first_segment_to_go(monkeypatch) -> None:
-    """The conversation name goes first, and every NUMBER outlives it.
+def test_the_session_name_outlives_the_counters_it_used_to_precede(monkeypatch) -> None:
+    """The name is now the band's TRAILING segment, and it earns its place.
 
-    The name is a label the user typed and already knows; the counters and live
-    figures beside it are not re-derivable at a glance. An earlier order shed the
-    subagent count first, which meant a three-agent fan-out went invisible while
-    a title the user had chosen was still on screen.
+    It used to be the first rung on the ladder, on the reasoning that "the name
+    is a label the user typed and already knows". Both halves of that stopped
+    being true: the name is generated (or excerpted from the opening prompt),
+    and it is the field an operator reads this corner for when four sessions are
+    tiled — which is exactly when the terminal is narrow. So it now outlives the
+    re-derivable duration and the two counters, and sheds only once nothing but
+    live figures is left.
     """
     monkeypatch.setenv("HOME", "/Users/tester")
     status, _clock = _full_band()
@@ -351,19 +363,34 @@ def test_the_label_the_user_typed_is_the_first_segment_to_go(monkeypatch) -> Non
     # Walk down to the first width that sheds it rather than computing it from
     # the 200-cell row. That row is PADDED to the full width (the right group is
     # edge-aligned), so its length is 200 whatever the content measures and
-    # `len(row) - 1` says nothing about when the band overflows.
+    # `len(row) - 1` says nothing about when the band overflows. The stub is
+    # what is probed for: the ladder shortens the name before it drops it.
     for width in range(200, 4, -1):
         tight = status.render_text(width).plain
-        if "Status band enrichment" not in tight:
+        if "Status band enric" not in tight:
             break
     else:  # pragma: no cover - the band always sheds something by width 5
         raise AssertionError("no width shed the conversation name")
 
-    # At the very width that drops the name, everything numeric survives.
-    assert "3 agents" in tight
-    assert "41m1s" in tight
+    # The counters and the duration are already gone by the time the name is:
+    # they are cheap to lose, and this band has stopped shedding the one field
+    # that says which conversation it belongs to in order to keep them.
+    assert "3 agents" not in tight
+    assert "41m1s" not in tight
+    # The live figures an operator acts on do outlive it, which is the half of
+    # the old contract that was right.
     assert "49.6%/1M" in tight
     assert "$12.40" in tight
+
+    # And there is a real band of widths where the name survives and the
+    # counters do not — the whole point of the reorder, not just its rung order.
+    kept = [
+        width
+        for width in range(60, 201)
+        if "Status band enric" in status.render_text(width).plain
+        and "3 agents" not in status.render_text(width).plain
+    ]
+    assert kept, "the name never outlived the subagent counter"
 
 
 def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
@@ -383,7 +410,8 @@ def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
     probes = {
         "subagents": "3 agents",
         "duration": "41m1s",
-        "name": "Status band enrichment",
+        "name-full": "Status band enrichment",
+        "name-short": "Status band enric",
         "cost": "$12.40",
         "context": "49.6%/1M",
         "effort": "high",
@@ -407,12 +435,17 @@ def test_segments_disappear_in_the_declared_ladder_order(monkeypatch) -> None:
                 order.append(key)
 
     assert order == [
-        "name",  # a label the user typed and already knows
         "duration",  # re-derivable from the transcript
         "subagents",  # a counter, but not re-derivable without scrolling
+        # Shortened to a stub, not dropped: the widest rung, so the cut recovers
+        # more than any drop below it, and a stub still names the session.
+        "name-full",
         "cwd-full",  # shortened to its basename, not dropped
         "model-full",  # shortened to the bare model id, not dropped
         "effort",  # a static setting: it does not change while they watch
+        # Only now does the name go — one rung later than it used to sit in
+        # ENTIRETY, and after everything above it has already been spent.
+        "name-short",
         "cost",
         # The shortened cwd goes BEFORE the context number. By this rung it is a
         # basename — ~7 cells of "where am I" against ~9 cells of "how close is
@@ -818,26 +851,25 @@ def test_a_healthy_mcp_count_sheds_before_the_cwd_and_the_model_label() -> None:
     assert alarm_alone, "a danger count must survive a width the cwd cannot"
 
 
-def test_the_quiet_ladder_moves_mcp_and_leaves_the_alarm_last() -> None:
+def test_the_quiet_ladder_moves_mcp_and_the_alarm_is_last_either_way() -> None:
     """One ordering, two positions for one rung — not two hand-maintained
     ladders that can drift apart on the next reordering.
 
-    Lifting `mcp` out of last place leaves whatever followed it at the end, and
-    that is `approvals`. An earlier pass treated that as damage and re-seated it
-    behind the context number, on the rule "the narrowest bounded rung goes
-    last". That rule was written against `mcp` — 7 cells, and an alarm — and
-    handing last place to a READING instead is not the same trade: with a
-    healthy MCP the band stopped saying `! auto-approve` at 48 cells in order to
-    keep `▦ 49.6%/1M`. An alarm outranks a reading, so the widest alarm stays
-    last in every ladder where `mcp` is not there to take it.
+    Last place goes to the narrowest BOUNDED rung, and an alarm outranks a
+    reading. `approvals` is now both: a bare `!` at one cell against `⊙ 3 MCP`'s
+    seven. So it is authored last and every promotion leaves it there, which is
+    what deleted the repair helper this test used to be about — that helper
+    existed only because the segment then spelled out `! auto-approve always`
+    and was the WIDEST rung in the band.
     """
     assert drop_ladder(McpStatus(configured=2, connected=1, failed=True)) is _DROP_LADDER
     assert drop_ladder(McpStatus(configured=2, connected=2)) is _DROP_LADDER_QUIET
     assert drop_ladder(McpStatus()) is _DROP_LADDER_QUIET
-    assert _DROP_LADDER[-1] == "mcp"
+    assert _DROP_LADDER[-1] == "approvals"
+    assert _DROP_LADDER[-2] == "mcp", "the danger count still outlives every reading"
     assert _DROP_LADDER_QUIET.index("mcp") == _DROP_LADDER_QUIET.index("cwd") - 1
-    # With mcp promoted there is no narrower ALARM to take last place, so the
-    # gate's own alarm keeps it — and outlives the context number.
+    # Promoting mcp cannot dislodge the alarm, because the alarm was never
+    # sitting behind it.
     assert _DROP_LADDER_QUIET[-1] == "approvals"
     assert _DROP_LADDER_QUIET.index("context") < _DROP_LADDER_QUIET.index("approvals")
     # Same rungs in both ladders: the reorder moves things, it never drops one.
@@ -916,11 +948,11 @@ def test_the_last_surviving_rung_is_always_bounded() -> None:
     ladder with a 24-character basename, that cost the alarm across 34-46 cells
     and paid for it with up to 29 blank ones.
 
-    ``approvals`` is kept off the end only where ``mcp`` can take it. At 14
-    cells it is the widest rung, which is why the authored order sheds it first
-    — but "widest" outranks "is an alarm" only when the rung taking last place
-    is an alarm too, and ``mcp`` is the only one that is. In both quiet ladders
-    it has been promoted away, so the gate's alarm goes last there.
+    ``approvals`` takes last place in every variant now: it is a bare ``!``, so
+    it is both the narrowest bounded rung and an alarm, which is the whole rule.
+    It used to be the WIDEST rung (``! auto-approve always``, up to 20 cells) and
+    was authored first for that reason, which is what made a repair helper
+    necessary to keep promotions from stranding it at the end.
     """
     variants = {
         "full": _DROP_LADDER,
@@ -933,11 +965,10 @@ def test_the_last_surviving_rung_is_always_bounded() -> None:
         # A promotion reorders; it never adds or loses a rung.
         assert sorted(ladder) == sorted(_DROP_LADDER), f"{name} changed the rung set"
 
-    # The widest alarm is kept off the end only where the narrower ALARM exists
-    # to take it; a reading never displaces it.
-    assert _DROP_LADDER[-1] == "mcp"
+    # One position, all four variants: nothing needs repairing any more.
+    assert _DROP_LADDER[-1] == "approvals"
     assert _DROP_LADDER_QUIET[-1] == "approvals"
-    assert _DROP_LADDER_ESTIMATE[-1] == "mcp"
+    assert _DROP_LADDER_ESTIMATE[-1] == "approvals"
     assert _DROP_LADDER_QUIET_ESTIMATE[-1] == "approvals"
     assert _DROP_LADDER_QUIET_ESTIMATE.index("context") < _DROP_LADDER_QUIET_ESTIMATE.index(
         "cwd"
@@ -951,6 +982,12 @@ def test_an_armed_alarm_outlives_a_path_that_would_not_have_fitted() -> None:
     failed to fit, so a session with the approval gate DISARMED painted no
     indication of it — a regression against main, where the same terminal keeps
     the alarm because a band with no estimate uses the quiet ladder.
+
+    The alarm is a bare ``!`` now rather than ``! auto-approve``, which is why
+    this probes the glyph as the band's last cell: the word is gone, the warning
+    is not, and it is the ONE thing in the UI that says the gate is disarmed for
+    longer than a scroll (a saved ``tool_approval_mode: auto`` is adopted at boot
+    with no notice at all).
     """
     status, _clock = _full_band()
     status.update(
@@ -959,7 +996,7 @@ def test_an_armed_alarm_outlives_a_path_that_would_not_have_fitted() -> None:
         approvals_auto=True,
         mcp=McpStatus(configured=2, connected=2),
     )
-    armed = [w for w in range(36, 52) if "auto-approve" in status.render_text(w).plain]
+    armed = [w for w in range(36, 52) if status.render_text(w).plain.rstrip().endswith("!")]
     assert armed, "the disarmed-gate alarm vanished at every narrow width"
     for width in armed:
         assert ICON_CWD not in status.render_text(width).plain
@@ -968,6 +1005,416 @@ def test_an_armed_alarm_outlives_a_path_that_would_not_have_fitted() -> None:
     # paints nothing, so the path still gets the width.
     status.update(approvals_auto=False)
     assert ICON_CWD in status.render_text(50).plain
+
+
+# -- the trailing segment: the session name ----------------------------------
+
+
+def test_the_session_name_is_the_bands_last_segment() -> None:
+    """The slot the approval mode used to own.
+
+    Asked for directly: "instead of auto approve indicator at the bottom right,
+    let's change that to show the session name which is more valuable than
+    showing the approval status". The right group is edge-aligned, so "last
+    segment" means the last non-blank run in the row.
+    """
+    status, _clock = _full_band()
+    status.update(conversation_name="Add todo guardrails", approvals_auto=False)
+    assert status.render_text(200).plain.rstrip().endswith("Add todo guardrails")
+
+
+def test_the_alarm_sits_beside_the_name_rather_than_replacing_it() -> None:
+    """Both, in a fixed order — the name last, the one-cell alarm before it.
+
+    The alarm is not removed, because nothing else in the UI says the gate is
+    disarmed for longer than a scroll: `/approvals` answers on demand, the
+    notice that latched the mode scrolls away, and a saved
+    ``tool_approval_mode: auto`` is adopted at boot with no notice at all. What
+    it loses is the prose — `auto` and `always` are one glyph now.
+    """
+    status, _clock = _full_band()
+    status.update(
+        conversation_name="Add todo guardrails", approvals_auto=True, approvals_always=True
+    )
+    row = status.render_text(200).plain.rstrip()
+    assert row.endswith("Add todo guardrails")
+    assert "auto-approve" not in row, "the alarm's prose was crowding out the name"
+    assert "always" not in row
+    # The glyph, immediately before the name and after its seam.
+    assert row.endswith("! ‹ Add todo guardrails")
+
+
+def test_an_unnamed_session_leaves_the_trailing_slot_to_whatever_is_left() -> None:
+    """What the segment shows BEFORE a name exists — the decision, pinned.
+
+    The band never invents a label here. It carries no name until the first
+    substantive message, at which point the opener names it (see
+    ``local_operator.session.naming.provisional_title``), so this state lasts
+    seconds rather than the minutes it used to. Meanwhile the trailing slot is
+    simply the next segment along, and NO segment changes meaning: `!` always
+    means the gate is disarmed, and the duration is always the duration. The
+    working directory is not substituted, because the band already carries it in
+    the identity group on the left — the terminal TITLE is the surface with
+    nothing else to fall back on, and that one does substitute the cwd.
+    """
+    status, _clock = _full_band()
+    status.update(conversation_name="", approvals_auto=True)
+    assert status.render_text(200).plain.rstrip().endswith("!")
+    status.update(approvals_auto=False)
+    assert status.render_text(200).plain.rstrip().endswith("41m1s")
+
+
+def test_a_long_name_is_truncated_rather_than_crowding_the_left_group() -> None:
+    """The name is model-generated: it has no natural bound, and the band is a
+    fixed two-row box, so an uncapped segment would evict the identity group
+    instead of wrapping."""
+    status, _clock = _full_band()
+    status.update(conversation_name="x" * 200, approvals_auto=False)
+    row = status.render_text(200).plain
+    # `truncate_cells` spends one of the cells on the ellipsis, so the segment
+    # measures NAME_CELLS in total rather than NAME_CELLS plus a marker.
+    assert "x" * (NAME_CELLS - 1) + "…" in row
+    assert "x" * NAME_CELLS not in row
+    # The left group is intact at a width where an uncapped name would have
+    # pushed the model label off the row entirely.
+    assert ICON_MODEL in row
+
+
+def test_a_late_arriving_name_repaints_the_segment() -> None:
+    """Auto-naming lands asynchronously and a rename can land at any time; both
+    reach the band through the same ``update`` call, so neither needs a
+    restart."""
+    status, _clock = _full_band()
+    status.update(conversation_name="", approvals_auto=False)
+    assert "Fix the login flow" not in status.render_text(200).plain
+    status.update(conversation_name="Fix the login flow")
+    assert status.render_text(200).plain.rstrip().endswith("Fix the login flow")
+    status.update(conversation_name="Something the user typed")
+    assert status.render_text(200).plain.rstrip().endswith("Something the user typed")
+
+
+def test_the_name_never_takes_the_accent() -> None:
+    """The accent budget is spent on "what the turn is on" (``local_operator.tcss``
+    enumerates every site). A session's name is metadata, so it takes the same
+    secondary ink as the numbers beside it."""
+    status, _clock = _full_band()
+    status.update(conversation_name="Add todo guardrails", approvals_auto=False)
+    rendered = status.render_text(200)
+    accent = theme_mod.semantic_color("accent")
+    muted = theme_mod.semantic_color("muted")
+    spans = [
+        span
+        for span in rendered.spans
+        if "Add todo guardrails" in rendered.plain[span.start : span.end]
+    ]
+    assert spans, "the name was not painted as its own span"
+    for span in spans:
+        style = span.style
+        colour = getattr(style, "color", None)
+        assert colour is not None
+        assert colour.name != accent, "the session name took the accent"
+        assert colour.name == muted
+
+
+class _LadderState(TypedDict):
+    """One ladder variant's inputs. Typed because ``mcp`` is the only key whose
+    value is not a bool, and a bare ``dict`` widens both to ``object``.
+    """
+
+    mcp: McpStatus
+    estimated: NotRequired[bool]
+
+
+#: Every ladder variant, by the state that selects it. The eviction defect below
+#: existed in all four, so a sweep that only drove the default one would have
+#: missed three quarters of it.
+_LADDER_STATES: dict[str, _LadderState] = {
+    "healthy-mcp/exact": {"mcp": McpStatus(configured=3, connected=3)},
+    "failed-mcp/exact": {"mcp": McpStatus(configured=3, connected=1, failed=True)},
+    "healthy-mcp/estimated": {"mcp": McpStatus(configured=3, connected=3), "estimated": True},
+    "failed-mcp/estimated": {
+        "mcp": McpStatus(configured=3, connected=1, failed=True),
+        "estimated": True,
+    },
+}
+
+#: Names of the three lengths a real session wears in one conversation: the
+#: opener excerpt (40+ cells), the generated title, and a re-title. Two of the
+#: three arrive with no user input at all.
+_NAMES = (
+    "The /resume picker shows (unnamed session) for image openers",
+    "Fix unnamed sessions from image openers",
+    "Bulk export the invoice columns",
+    "Fix boot",
+)
+
+
+def _swept_band(state: _LadderState, *, alarm: bool) -> StatusLine:
+    """A fully populated band in one ladder variant, ready to render at width."""
+    status, _clock = _full_band()
+    status.update(
+        jobs=1,
+        mcp=state["mcp"],
+        approvals_auto=alarm,
+        context_tokens=496_000,
+        context_window=1_000_000,
+    )
+    status._context_is_estimate = bool(state.get("estimated"))
+    return status
+
+
+def _name_box(row: str, name: str, width: int) -> int:
+    """Cells the trailing name segment RESERVED, its unpainted tail included.
+
+    The box is what the layout is built on, and it is not the same number as the
+    ink in it: a word-boundary cut can leave `Bulk export the…` in an 18-cell box.
+    Located from the name's own opening characters, which land on the box's first
+    cell because the name is left-aligned in it.
+
+    Measured to ``width`` rather than to ``len(row)``, and that is the difference
+    between the box and the ink now that ``_compose`` stops painting the box's
+    trailing blanks. The reserve still runs to the band's right edge — the row is
+    laid out to exactly ``width`` and only then trimmed — so the edge, not the
+    last inked cell, is where the box ends. Reading ``len(row)`` here would make
+    this helper return the INK and quietly turn every caller into a test of the
+    string's length instead of the layout's reserve.
+    """
+    return width - row.rindex(name[:4])
+
+
+def test_naming_a_session_never_costs_a_segment_for_nothing(monkeypatch) -> None:
+    """Every concession the band makes for a name buys a name. All widths.
+
+    The defect this pins was the opposite: between 83 and 94 columns (79-90 with
+    the alarm disarmed, and in all four ladder variants) naming a session removed
+    `▴ high` AND showed no name in exchange, so the band got strictly worse the
+    moment the session earned a title — 7 cells of a setting the user chose by
+    keystroke spent, 9 cells of hole added, nothing bought.
+
+    The cause was the walk, not the rung order: it sheds monotonically, so the
+    duration, the counters and the effort segment it gave up on the way to
+    keeping the name stayed given up when the name was dropped two rungs later.
+    ``_fit`` re-walks with the name off the table instead.
+
+    So the contract has two halves, and both are asserted at every width in every
+    variant. Where the name is DROPPED the band is exactly the band it would have
+    been unnamed — no segment is missing. Where the name is SHOWN a segment may
+    have been traded for it (that trade is the ladder's, and its order is
+    asserted by ``test_segments_disappear_in_the_declared_ladder_order``), but at
+    least a floor's worth of name has to be on the row in return.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    for label, state in _LADDER_STATES.items():
+        for alarm in (True, False):
+            status = _swept_band(state, alarm=alarm)
+            for width in range(30, 181):
+                status.update(conversation_name="")
+                status.render_text(width)
+                bare = set(status._dropped)
+                for name in _NAMES:
+                    status.update(conversation_name=name)
+                    row = status.render_text(width).plain
+                    where = f"{label} alarm={alarm} width={width}"
+                    lost = set(status._dropped) - bare - {"name"}
+                    if status.is_showing("name"):
+                        box = _name_box(row, name, width)
+                        assert (
+                            box >= NAME_CELLS_FLOOR
+                        ), f"{where}: {sorted(lost)} spent for a {box}-cell name"
+                    else:
+                        assert (
+                            not lost
+                        ), f"{where}: the name was dropped and {sorted(lost)} went with it"
+
+
+def test_the_alarms_column_does_not_move_when_the_title_changes(monkeypatch) -> None:
+    """One column per width, whatever the name says — the D2 contract.
+
+    The alarm is one cell and it is the band's only standing word that no tool
+    will ask before it runs, so where it sits has to be learnable. Before the
+    name's box was reserved, its column was a function of the model's word count:
+    at a fixed 150 columns the glyph sat at 144, then 101, 102, 110 across four
+    consecutive frames as the excerpt, the title and a re-title landed — two of
+    those moves with no user input at all.
+
+    Asserted over the whole row rather than just the glyph: everything up to the
+    name's own box has to be identical, or something else moved instead.
+
+    The row's painted LENGTH is deliberately not the assertion. ``_compose`` no
+    longer paints the name box's trailing blanks, so a brief title ends earlier
+    than a long one by design and comparing lengths would pin the ink instead of
+    the layout. What has to hold is that the box each title was given is the same
+    size — asserted below through ``_name_box``, which measures to the band's
+    right edge — and that is the property the length comparison stood in for.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    for label, state in _LADDER_STATES.items():
+        status = _swept_band(state, alarm=True)
+        for width in range(30, 181):
+            rows = []
+            for name in _NAMES:
+                status.update(conversation_name=name)
+                rows.append(status.render_text(width).plain)
+            first = rows[0]
+            assert len({row.index("!") for row in rows}) == 1, (
+                f"{label} width={width}: the alarm moved with the title "
+                f"({[row.index('!') for row in rows]})"
+            )
+            head = first[: first.index("!") + 1]
+            for row in rows[1:]:
+                assert row.startswith(head), f"{label} width={width}: the row reflowed"
+            # The reserve itself, which is what the old length comparison meant:
+            # every title at this width was handed a box of the same size, so a
+            # title arriving or being rewritten cannot resize the segment under
+            # the reader. Measurable only where the name survived the ladder.
+            boxes = {
+                _name_box(row, name, width) for row, name in zip(rows, _NAMES) if name[:4] in row
+            }
+            assert len(boxes) <= 1, f"{label} width={width}: the name's box changed size {boxes}"
+
+
+def test_the_name_takes_every_cell_the_row_can_spare(monkeypatch) -> None:
+    """The segment is elastic between its floor and its cap, not one or the other.
+
+    Two fixed widths meant up to 20 cells sat idle beside an 18-cell stub — a
+    130-column terminal showed `Add todo guardrai…` next to an 18-cell hole with
+    32 cells available, and the excerpt-to-title upgrade this feature exists for
+    was invisible below 138 columns because both strings were cut to the same
+    stub. So the test is not "the name is 18 or 40": it is that the gap closes to
+    the seam and the box grows with the terminal.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    status = _swept_band(_LADDER_STATES["healthy-mcp/exact"], alarm=True)
+    status.update(conversation_name="Add todo guardrails to the operator loop")
+    boxes = []
+    for width in range(100, 181):
+        row = status.render_text(width).plain
+        box = len(row) - row.index("! ‹ ") - len("! ‹ ")
+        boxes.append(box)
+        # Whatever is spare is IN the name's box, so the hole between the groups
+        # is the seam's own width until the box is full.
+        longest_gap = max((len(run) for run in re.findall(r" {2,}", row.rstrip())), default=0)
+        assert (
+            box >= NAME_CELLS or longest_gap <= _MIN_GROUP_GAP
+        ), f"width={width}: {longest_gap} cells idle beside a {box}-cell name"
+    assert min(boxes) >= NAME_CELLS_FLOOR
+    assert max(boxes) == NAME_CELLS
+    # More than the two widths the old constant pair allowed, and monotone in the
+    # terminal's width over the range where the row is otherwise unchanged.
+    assert len(set(boxes)) > 5, f"the name still has only {sorted(set(boxes))} widths"
+
+
+def test_a_brief_title_leaves_no_dead_run_at_the_bands_right_edge(monkeypatch) -> None:
+    """The name's box is RESERVED, but its unused tail is not PAINTED.
+
+    The reserve is what holds every sibling's column still while a model rewrites
+    the title (D2), so it stays — but it used to be painted out to the band's
+    right edge as well, which left a brief title trailed by a long run of blank
+    cells that no segment would ever occupy.
+
+    The run's SIZE is not a constant. Two earlier versions of this docstring
+    implied otherwise, and the second was written to fix the first — which is
+    the more useful half of the story, because a correction carries more
+    authority than an original and nobody re-checks a sentence whose commit
+    message says it is the fix.
+
+    The first version said the run was "identical at every width". The second
+    retracted that and then quoted a second illustrative triple, which reproduces
+    only under a band shape it did not name: the width-100 figure moves with the
+    cwd's length and with whether the alarm is armed, so the same measurement
+    yields a different first entry on a shorter path or a disarmed gate. A
+    figure quoted without the conditions that produce it is the same unenforced
+    universal in a narrower costume.
+
+    So no illustrative numbers are quoted here at all. What identifies the
+    padding is the RELATIONSHIP, which needs none: the run is exactly the box
+    minus the ink, so it grows as the box grows and vanishes when the title
+    fills it — while a layout gap would not track the title's length. The box is
+    itself elastic and only reaches the full ``NAME_CELLS`` once the row can
+    spare it, which is why any single measurement of the run is a fact about one
+    band shape rather than about the defect.
+
+    That relationship is what this test pins, by asserting the row ends on the
+    title's last inked cell at every width rather than by asserting any
+    particular number of dead cells.
+
+    Those cells are ordinary styled cells, so everything that reads the row
+    rather than looking at it carried them — the app's own SVG export wrote 35
+    trailing spaces after `short` at a 160-column terminal.
+
+    The two halves are asserted together on purpose. Trimming the tail is only
+    correct while the reserve behind it is untouched, so this pins that the row
+    ends on the title's last inked character AND that the box measured to the
+    band's edge is unchanged by how long the title is.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    for label, state in _LADDER_STATES.items():
+        status = _swept_band(state, alarm=True)
+        for width in (100, 120, 160):
+            boxes = set()
+            for name in ("a", "short", "Bulk export the invoice columns"):
+                status.update(conversation_name=name)
+                row = status.render_text(width).plain
+                if not status.is_showing("name"):
+                    continue
+                where = f"{label} width={width} name={name!r}"
+                assert (
+                    row == row.rstrip()
+                ), f"{where}: {len(row) - len(row.rstrip())} dead cells at the band's edge"
+                # The ink really is the title's, not a coincidence of truncation.
+                assert row.endswith(truncate_name(name, _name_box(row, name, width))), where
+                boxes.add(_name_box(row, name, width))
+            # ...and the reserve behind that trimmed tail did not move with the
+            # title's length, which is the property the padding used to provide.
+            assert len(boxes) <= 1, f"{label} width={width}: the box moved with the title {boxes}"
+
+
+def test_the_bands_cut_lands_on_a_word_like_the_excerpt_it_was_handed() -> None:
+    """``provisional_title`` cuts on a word boundary on purpose — "so it reads as
+    a quotation rather than as a string that ran out of buffer" — and the band
+    used to re-cut the same string mid-word one call later, throwing that away.
+
+    The floor case is the exception the rule needs: at 18 cells a word cut would
+    leave `Add todo…` and nine blank cells, which distinguishes two tiled
+    sessions less well than the mid-word cut does. So the boundary is taken only
+    while it costs less than a third of the box.
+    """
+    excerpt = "The /resume picker shows (unnamed session) for image openers"
+    assert truncate_name(excerpt, 40) == "The /resume picker shows (unnamed…"
+    assert truncate_name(excerpt, 24) == "The /resume picker…"
+    assert truncate_name("Add todo guardrails to the operator loop", 22) == "Add todo guardrails…"
+    # Below the tolerance the cut stays where the cells are.
+    assert truncate_name("Add todo guardrails to the operator loop", 18) == "Add todo guardrai…"
+    # A name that fits is untouched, and a single unbroken token cannot be
+    # word-cut at all.
+    assert truncate_name("Fix boot", 40) == "Fix boot"
+    assert truncate_name("x" * 60, 40) == "x" * 39 + "…"
+
+
+def test_the_alarm_is_not_the_same_ink_as_the_cost_figure() -> None:
+    """One cell of glyph means the INK is the whole signal, and in `warning` it
+    was the identical hue to `◈ $73.92` three cells away (both `#e0b04b`), so the
+    band's only alarm read as another figure. `danger` is the band's alarm ink —
+    the `⊙` lamp already takes it when MCP discovery fails — and it stays legible
+    on both ramps: 6.62:1 dark, 4.94:1 on the paper ramp.
+    """
+    status, _clock = _full_band()
+    status.update(conversation_name="Add todo guardrails", approvals_auto=True)
+    for ramp in ("dark", "light"):
+        theme_mod.set_theme(ramp)
+        try:
+            rendered = status.render_text(200)
+            inks = {
+                rendered.plain[span.start : span.end].strip(): getattr(span.style, "color", None)
+                for span in rendered.spans
+            }
+            alarm, cost = inks[ICON_APPROVALS], inks["$12.40"]
+            assert alarm is not None and cost is not None
+            assert alarm.name == theme_mod.semantic_color("danger"), ramp
+            assert cost.name == theme_mod.semantic_color("warning"), ramp
+            assert alarm.name != cost.name, f"{ramp}: the alarm and the cost are one ink"
+        finally:
+            theme_mod.set_theme("dark")
 
 
 # -- repaint vs reflow -------------------------------------------------------
@@ -1007,3 +1454,53 @@ def test_the_band_still_paints_what_it_was_told() -> None:
 
     assert dock.painted is not None
     assert "$12.40" in dock.painted.plain
+
+
+def test_every_segment_icon_stays_in_the_block_the_terminal_font_covers() -> None:
+    """Segment icons live in Geometric Shapes (U+25xx), and that is a fix.
+
+    `ICON_JOBS` was `⊞` (U+229E SQUARED PLUS, Mathematical Operators) and
+    rendered as TOFU — an empty replacement box — in a real terminal, while
+    every U+25xx glyph on the same row painted correctly. That is what makes
+    this a property of the BLOCK rather than of one unlucky codepoint: fonts
+    that cover Geometric Shapes routinely stop short of Mathematical Operators.
+
+    This is asserted here because **no other check in the repo can see it**.
+    `cell_len` returns 1 for tofu exactly as it does for a real glyph, so the
+    band's width arithmetic stays correct and every layout test keeps passing
+    while the icon is invisible to the user. An SVG export embeds the character
+    rather than the rendered shape, so it cannot see it either. The only
+    instruments are a human looking at a terminal, and this rule.
+
+    `ICON_MCP` is deliberately EXCLUDED and left in U+22xx: it has not been
+    observed broken, so it is recorded as a known risk at its definition rather
+    than swapped on suspicion. If it is ever reported as an empty box, the fix
+    is to move it into U+25xx and add it to this test.
+
+    `ICON_APPROVALS` is excluded because it is plain ASCII `!`, and `ICON_CWD`
+    because `⌂` (U+2302) predates the band and has been on screen in every
+    release since without a report.
+    """
+    icons = {
+        "ICON_MODEL": ICON_MODEL,
+        "ICON_AGENTS": ICON_AGENTS,
+        "ICON_JOBS": ICON_JOBS,
+        "ICON_CONTEXT": ICON_CONTEXT,
+        "ICON_COST": ICON_COST,
+        "ICON_DURATION": ICON_DURATION,
+    }
+    for name, glyph in icons.items():
+        assert len(glyph) == 1, f"{name} is not a single codepoint: {glyph!r}"
+        point = ord(glyph)
+        assert 0x2500 <= point <= 0x25FF, (
+            f"{name} is U+{point:04X}, outside Geometric Shapes (U+25xx). "
+            "cell_len cannot detect tofu, so a glyph outside this block has to "
+            "be confirmed in a real terminal before it ships."
+        )
+        # The width rule the band's arithmetic depends on, checked on the same
+        # pass: a two-cell glyph would drift the right group's edge by a column.
+        assert cell_len(glyph) == 1, f"{name} is not one cell wide"
+
+    # The jobs and context icons sit side by side in the right group, so they
+    # have to be tellable apart at a glance and not merely unequal as strings.
+    assert ICON_JOBS != ICON_CONTEXT

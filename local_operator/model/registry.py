@@ -122,6 +122,17 @@ SupportedHostingProviders = [
         requiredCredentials=["XAI_API_KEY"],
         recommended=True,
     ),
+    ProviderDetail(
+        id="zai",
+        name="Z.AI (GLM)",
+        description=(
+            "Z.AI's GLM models for coding and reasoning, with large context windows "
+            "and a subscription coding plan that reports live quota"
+        ),
+        url="https://z.ai/",
+        requiredCredentials=["ZAI_API_KEY"],
+        recommended=True,
+    ),
 ]
 """List of supported model hosting providers.
 
@@ -297,6 +308,9 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     elif hosting == "xai":
         if model in xai_models:
             return xai_models[model]
+    elif hosting == "zai":
+        if model in glm_models:
+            return glm_models[model]
     else:
         raise ValueError(f"Unsupported hosting provider: {hosting}")
 
@@ -1908,6 +1922,158 @@ xai_models: Dict[str, ModelInfo] = {
     ),
 }
 
+#: Z.AI's GLM family.
+#:
+#: Prices are USD per MILLION tokens and are Z.AI's own DIRECT list rates,
+#: transcribed from the bundled catalogue omp ships for this provider.
+#:
+#: They deliberately do NOT match OpenRouter's `z-ai/*` listings, which quote
+#: less for most GLM ids (e.g. `glm-5.2` at $0.462/$1.452 against Z.AI's
+#: $1.40/$4.40). That is a real price difference, not a transcription error:
+#: OpenRouter resells through its own discounted arrangements, and a user
+#: billed by Z.AI directly is charged the direct rate. Quoting the aggregator's
+#: number on the direct route would under-report every session's cost, so the
+#: direct rate is the one carried here and `_AGGREGATOR_NAMESPACE`'s OpenRouter
+#: fallback only ever fills a model this table does not price at all.
+#:
+#: They are carried STATICALLY because Z.AI's `/models` endpoint
+#: returns bare `{id, object, created, owned_by}` rows with no pricing, context
+#: window, or capability data at all — discovery alone would report every GLM as
+#: free and unpriced, so a live listing is merged OVER these rows rather than
+#: replacing them.
+#:
+#: `cache_writes_price` equals `input_price` because Z.AI does not charge a
+#: separate cache-write premium; cache READS are discounted (~19% of input),
+#: which is the number that actually moves a long agent session's bill.
+glm_models: Dict[str, ModelInfo] = {
+    "glm-5.3": ModelInfo(
+        id="glm-5.3",
+        name="GLM-5.3",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=1.4,
+        output_price=4.4,
+        cache_writes_price=1.4,
+        cache_reads_price=0.26,
+        description="Z.AI's flagship GLM-5.3 coding model with a 1M context window",
+        recommended=True,
+    ),
+    "glm-5.2": ModelInfo(
+        id="glm-5.2",
+        name="GLM-5.2",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=1.4,
+        output_price=4.4,
+        cache_writes_price=1.4,
+        cache_reads_price=0.26,
+        description="GLM-5.2 reasoning and coding model with a 1M context window",
+        recommended=True,
+    ),
+    "glm-5.1": ModelInfo(
+        id="glm-5.1",
+        name="GLM-5.1",
+        max_tokens=131_072,
+        context_window=200_000,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=1.4,
+        output_price=4.4,
+        cache_writes_price=1.4,
+        cache_reads_price=0.26,
+        description="GLM-5.1 reasoning and coding model",
+        recommended=False,
+    ),
+    "glm-5-turbo": ModelInfo(
+        id="glm-5-turbo",
+        name="GLM-5 Turbo",
+        max_tokens=131_072,
+        context_window=200_000,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=1.2,
+        output_price=4.0,
+        cache_writes_price=1.2,
+        cache_reads_price=0.24,
+        description="Latency-optimised GLM-5 variant",
+        recommended=False,
+    ),
+    "glm-5": ModelInfo(
+        id="glm-5",
+        name="GLM-5",
+        max_tokens=131_072,
+        context_window=204_800,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=1.0,
+        output_price=3.2,
+        cache_writes_price=1.0,
+        cache_reads_price=0.2,
+        description="GLM-5 general reasoning and coding model",
+        recommended=False,
+    ),
+    "glm-4.7": ModelInfo(
+        id="glm-4.7",
+        name="GLM-4.7",
+        max_tokens=131_072,
+        context_window=204_800,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=0.6,
+        output_price=2.2,
+        cache_writes_price=0.6,
+        cache_reads_price=0.11,
+        description="GLM-4.7 coding model",
+        recommended=False,
+    ),
+    "glm-4.6": ModelInfo(
+        id="glm-4.6",
+        name="GLM-4.6",
+        max_tokens=131_072,
+        context_window=204_800,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=0.6,
+        output_price=2.2,
+        cache_writes_price=0.6,
+        cache_reads_price=0.11,
+        description="GLM-4.6 coding model",
+        recommended=False,
+    ),
+    "glm-4.5": ModelInfo(
+        id="glm-4.5",
+        name="GLM-4.5",
+        max_tokens=98_304,
+        context_window=131_072,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=0.6,
+        output_price=2.2,
+        cache_writes_price=0.6,
+        cache_reads_price=0.11,
+        description="GLM-4.5 general purpose model",
+        recommended=False,
+    ),
+    "glm-4.5-air": ModelInfo(
+        id="glm-4.5-air",
+        name="GLM-4.5 Air",
+        max_tokens=98_304,
+        context_window=131_072,
+        supports_images=False,
+        supports_prompt_cache=True,
+        input_price=0.2,
+        output_price=1.1,
+        cache_writes_price=0.2,
+        cache_reads_price=0.03,
+        description="Lightweight, cheaper GLM-4.5 variant",
+        recommended=False,
+    ),
+}
+
 #: Every hosting whose model rows this module SHIPS, keyed by hosting id.
 #:
 #: Hoisted out of :func:`static_models` because two questions need it and only
@@ -1924,6 +2090,7 @@ _STATIC_MODEL_MAPS: Dict[str, Dict[str, "ModelInfo"]] = {
     "mistral": mistral_models,
     "kimi": kimi_models,
     "xai": xai_models,
+    "zai": glm_models,
 }
 
 #: The hostings :func:`static_models` can answer for. Ordered as declared above

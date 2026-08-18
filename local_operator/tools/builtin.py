@@ -1091,6 +1091,32 @@ class BashParams(BaseModel):
         le=BASH_MAX_TIMEOUT_SECONDS,
         description="Max seconds before the command is killed.",
     )
+    background: bool = Field(
+        default=False,
+        description=(
+            "Start the command and return a job id immediately instead of "
+            "waiting. Use for long work (builds, training, terraform apply, "
+            "pipeline polling); follow it with jobs(op='peek') to read new "
+            "output as it arrives, and jobs(op='cancel') to stop it. 'timeout' "
+            "still bounds the run."
+        ),
+    )
+
+
+def _bash_progress_line(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) -> str:
+    """One short status line for a running background command.
+
+    Reports the LAST non-empty line the command printed, which for the work
+    that gets backgrounded (builds, training loops, terraform, pollers) is the
+    step it is currently on. Bounded hard: this is written on every poll tick
+    and read by a renderer, so an unbounded line from a command printing a
+    megabyte without newlines must not become a per-frame cost.
+    """
+    tail = b"".join(stdout_chunks[-4:] + stderr_chunks[-4:]).decode("utf-8", errors="replace")
+    for line in reversed(tail.splitlines()):
+        if line.strip():
+            return line.strip()[:200]
+    return "running"
 
 
 def _bash_output_summary(stdout: str, stderr: str) -> str:
@@ -1178,6 +1204,26 @@ async def execute_bash(
 
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
+    # Set once the command is owned by a background job, so the pipe readers
+    # know where to mirror output for `jobs(op="peek")`. Held in a mutable cell
+    # rather than captured by value because the readers start BEFORE the job id
+    # exists on the steering-detach path: the command is already running when
+    # the interrupt arrives, and re-creating the readers at that point would
+    # race the drain and lose whatever is in flight.
+    live_job: dict[str, Any] = {"id": None, "jobs": None}
+
+    def _mirror(chunk: bytes) -> None:
+        """Publish a freshly-read chunk to the job's peekable tail."""
+        job_id = live_job["id"]
+        manager = live_job["jobs"]
+        if job_id is None or manager is None:
+            return
+        appender = getattr(manager, "append_output", None)
+        if appender is None:
+            # Third-party embedders may supply a manager predating live output;
+            # peek degrades to "no output recorded" rather than breaking the run.
+            return
+        appender(job_id, chunk.decode("utf-8", errors="replace"))
 
     async def _pump(stream: asyncio.StreamReader | None, sink: list[bytes]) -> None:
         # Both pipes were requested at spawn, so neither is ever None here;
@@ -1190,6 +1236,7 @@ async def execute_bash(
                 if not chunk:
                     break
                 sink.append(chunk)
+                _mirror(chunk)
         except (ConnectionResetError, BrokenPipeError):
             pass
 
@@ -1224,47 +1271,17 @@ async def execute_bash(
     aborted = False
     next_update = loop.time() + 0.5
 
-    try:
-        while True:
-            waiters: list[asyncio.Task[object]] = [wait_task, stdout_task, stderr_task]
-            if abort_waiter is not None:
-                waiters.append(abort_waiter)
-            if wait_task.done():
-                break  # finished already — never misreport as timeout
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                timed_out = True
-                _kill()
-                break
-            done, _pending = await asyncio.wait(waiters, timeout=min(0.25, remaining))
-            if wait_task in done:
-                break
-            if abort_waiter is not None and abort_waiter in done:
-                aborted = True
-                _kill()
-                break
-            if loop.time() >= next_update:
-                _emit_update()
-                next_update = loop.time() + 0.5
-    except asyncio.CancelledError:
-        # Steering interrupted the tool task (the loop cancels interruptible
-        # tools at its 0.25s poll). Killing the process here used to (a)
-        # destroy minutes of a long build on a one-line user aside and (b)
-        # leak the child anyway when cancellation raced the kill. Instead the
-        # command DETACHES: it keeps running (it was spawned start_new_session
-        # so it survives its own process group), its readers keep draining so
-        # a full pipe cannot block it, and it is tracked as a background job
-        # whose completion auto-delivers when the session is idle. A REAL
-        # abort (Ctrl+C, jobs cancel) still kills: that is a stop, not a
-        # redirect.
-        if signal is not None and signal.aborted:
-            _kill()
-            raise
-        jobs = context.jobs if context is not None else None
-        if jobs is None:
-            # No job manager to own a detached child: kill rather than leak.
-            _kill()
-            raise
+    def _detach_to_job(jobs: Any, headline: str) -> ToolResult:
+        """Hand the running process to a background job and return its id.
+
+        Shared by the two ways a command stops being awaited: the caller asked
+        for ``background=True`` up front, and steering interrupted a foreground
+        call. Both want identical ownership semantics — the process keeps
+        running in its own session group, the pipe readers stay alive so a full
+        pipe cannot block it, output keeps flowing to the peek buffer, and the
+        original timeout budget still applies — so they share one
+        implementation rather than two that drift.
+        """
         partial = _bash_output_summary(
             b"".join(stdout_chunks).decode("utf-8", errors="replace"),
             b"".join(stderr_chunks).decode("utf-8", errors="replace"),
@@ -1279,7 +1296,7 @@ async def execute_bash(
             # Owns the process from here: waits with the ORIGINAL timeout
             # budget, keeps the readers alive to drain the pipes, and reports
             # the exit status + bounded output as the job result.
-            del job_id, report_progress
+            del job_id
             timed_out_bg = False
             cancelled_bg = False
             bg_deadline = asyncio.get_running_loop().time() + remaining_timeout
@@ -1330,6 +1347,12 @@ async def execute_bash(
                         timed_out_bg = True
                         break
                     await asyncio.wait({bg_wait}, timeout=0.25)
+                    # The status line a human reads in the TUI while the job
+                    # runs. Deliberately a heartbeat and not the output itself:
+                    # the OUTPUT has a dedicated bounded channel (the peek
+                    # tail), and mirroring it into a field every renderer
+                    # repaints per frame would pay for it many times over.
+                    report_progress(_bash_progress_line(stdout_chunks, stderr_chunks))
                 await cleanup(kill=cancelled_bg or timed_out_bg)
             except asyncio.CancelledError:
                 # Manager cancellation is deliberately immediate. Convert it
@@ -1353,20 +1376,138 @@ async def execute_bash(
             )
             return "\n".join(part for part in (head, f"exit code: {code}", summary) if part)
 
+        def _kill_unstarted() -> None:
+            """Teardown for a cancel that lands before the runner is entered.
+
+            The process is spawned before ``register``, and ``register`` only
+            SCHEDULES the runner — so a cancel (or a session ``dispose``) in
+            the same event-loop turn settles the row without ``_detached``
+            ever running, leaving the process group alive and reparented to
+            init with nothing tracking it. The manager drops this hook the
+            instant the runner starts, so the group is never killed twice.
+            """
+            _kill()
+            for reader in readers:
+                if not reader.done():
+                    reader.cancel()
+
         try:
             bg_job_id = cast(Any, jobs).register(
-                "bash", f"bash: {command[:60]}", _detached, owner_id=None
+                "bash",
+                f"bash: {command[:60]}",
+                _detached,
+                # Unowned ON PURPOSE, matching how ``run_subagent`` registers
+                # its ``task`` jobs. An owner is only useful with a registered
+                # delivery sink, and nothing in this codebase calls
+                # ``register_delivery_sink`` — so setting one guarantees the
+                # opposite of what it looks like: the completion is
+                # DEAD-LETTERED ("no live sink for owner ...") and the caller
+                # is never told its background job finished, which is the whole
+                # point of running it detached. Revisit together with a sink
+                # implementation, not before.
+                owner_id=None,
+                on_cancel=_kill_unstarted,
             )
         except Exception:  # noqa: BLE001 — no manager slot: kill, don't leak
             _kill()
             raise
+        # Point the pipe readers at the job BEFORE reporting it, and seed the
+        # tail with what the foreground phase already collected, so a peek
+        # covers the command's whole life rather than starting from whenever it
+        # happened to be backgrounded.
+        live_job["jobs"] = jobs
+        live_job["id"] = bg_job_id
+        appender = getattr(jobs, "append_output", None)
+        if appender is not None:
+            already = b"".join(stdout_chunks + stderr_chunks).decode("utf-8", errors="replace")
+            if already:
+                appender(bg_job_id, already)
         return _text(
             tool_call_id,
             "bash",
-            f"steering interrupted; command continues in the background as job "
-            f"{bg_job_id} (use 'jobs'/'wait'; its result auto-delivers when "
-            f"the session is idle)\ncommand: {command}\n{partial}",
+            f"job {bg_job_id}: {headline}\ncommand: {command}\n{partial}",
             details={"job_id": bg_job_id, "backgrounded": True},
+        )
+
+    if params.background:
+        # Deliberate backgrounding: hand the command straight to a job and give
+        # the model its id, so the very next call can peek at or cancel it.
+        # Without this the ONLY route to a background job was a steering
+        # interrupt — an accident the model cannot ask for — which left long
+        # work (training, terraform, pipeline polls) with no option but to
+        # block a turn for its whole duration.
+        background_jobs = context.jobs if context is not None else None
+        if background_jobs is None:
+            # Tear down everything this call created before refusing. The
+            # readers are not the only owners: ``wait_task`` and the abort
+            # waiter were created above and would outlive the refusal as
+            # pending tasks holding the process handle.
+            _kill()
+            wait_task.cancel()
+            if abort_waiter is not None and not abort_waiter.done():
+                abort_waiter.cancel()
+            for reader in readers:
+                reader.cancel()
+            return _error(
+                tool_call_id,
+                "bash",
+                "background=true needs a job manager, which this session has "
+                "not attached; re-run without background.",
+            )
+        return _detach_to_job(
+            background_jobs,
+            "started in the background. Use jobs(op='peek', job_id=..., "
+            "since=<seq>) for new output and jobs(op='cancel') to stop it; "
+            "its result auto-delivers when it finishes.",
+        )
+
+    try:
+        while True:
+            waiters: list[asyncio.Task[object]] = [wait_task, stdout_task, stderr_task]
+            if abort_waiter is not None:
+                waiters.append(abort_waiter)
+            if wait_task.done():
+                break  # finished already — never misreport as timeout
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                timed_out = True
+                _kill()
+                break
+            done, _pending = await asyncio.wait(waiters, timeout=min(0.25, remaining))
+            if wait_task in done:
+                break
+            if abort_waiter is not None and abort_waiter in done:
+                aborted = True
+                _kill()
+                break
+            if loop.time() >= next_update:
+                _emit_update()
+                next_update = loop.time() + 0.5
+    except asyncio.CancelledError:
+        # Steering interrupted the tool task (the loop cancels interruptible
+        # tools at its 0.25s poll). Killing the process here used to (a)
+        # destroy minutes of a long build on a one-line user aside and (b)
+        # leak the child anyway when cancellation raced the kill. Instead the
+        # command DETACHES: it keeps running (it was spawned start_new_session
+        # so it survives its own process group), its readers keep draining so
+        # a full pipe cannot block it, and it is tracked as a background job
+        # whose completion auto-delivers when the session is idle. A REAL
+        # abort (Ctrl+C, jobs cancel) still kills: that is a stop, not a
+        # redirect.
+        if signal is not None and signal.aborted:
+            _kill()
+            raise
+        jobs = context.jobs if context is not None else None
+        if jobs is None:
+            # No job manager to own a detached child: kill rather than leak.
+            _kill()
+            raise
+        return _detach_to_job(
+            jobs,
+            "steering interrupted; the command continues in the background. "
+            "Use jobs(op='peek', job_id=..., since=<seq>) for new output and "
+            "jobs(op='cancel') to stop it; its result auto-delivers when the "
+            "session is idle.",
         )
 
     # Bounded drain: the kill above EOFs both pipes; give the readers 250 ms
@@ -5307,18 +5448,29 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
 
 
 class TaskItem(BaseModel):
-    """One slice of a task batch. ``agent`` picks the tier: "task" is the
-    full child; "scout" is a read-only research child (lookups only) for
-    investigation that should not pay for — or risk — write tools. ``effort``
-    routes to a configured model tier (values.subagents.models lo/med/hi)."""
+    """One slice of a task batch. ``agent`` names the ROLE the child runs as —
+    a registered profile or a packaged starter (reviewer, coder, architect,
+    manager, designer, scout); the role supplies standing guidance and may
+    restrict the child's tools. ``effort`` routes to a configured model tier
+    (values.subagents.models lo/med/hi)."""
 
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(description="Short label for this subagent (shown in the jobs list).")
     prompt: str = Field(description="The full instructions this subagent runs.")
-    agent: Literal["task", "scout"] = Field(
+    # Free-form rather than a Literal: roles are user data, so the valid set is
+    # whatever the operator's registry holds plus the packaged starters, and
+    # baking today's names into the schema would make an operator-authored role
+    # unlaunchable. An unknown name degrades to a full child (see
+    # ``harness.subagent._resolve_role``) rather than failing the launch.
+    agent: str = Field(
         default="task",
-        description='"task" = full child; "scout" = read-only research child.',
+        description=(
+            "Role for this subagent: 'task' (full child, no role), 'scout' "
+            "(read-only research), or any role from the `agent` tool — e.g. "
+            "'reviewer', 'coder', 'architect', 'manager', 'designer'. A role "
+            "carries vetted guidance and may restrict tools."
+        ),
     )
     effort: Literal["lo", "med", "hi"] | None = Field(
         default=None,
@@ -5336,6 +5488,20 @@ class TaskParams(BaseModel):
     prompt: str | None = Field(
         default=None,
         description="Single-task form: the instructions the subagent runs.",
+    )
+    # Mirrors of the TaskItem fields for the SINGLE-task form. Without these,
+    # ``task(label=..., prompt=..., agent="reviewer")`` — the most natural way
+    # to ask for one reviewer — fails schema validation (extra="forbid"), and
+    # the caller has to discover that a role is only reachable through the
+    # batch form. Observed live: a model hit exactly that error, then retried
+    # with ``tasks=[...]``, paying a wasted round trip to learn it.
+    agent: str | None = Field(
+        default=None,
+        description="Single-task form: role for the subagent (see 'tasks[].agent').",
+    )
+    effort: Literal["lo", "med", "hi"] | None = Field(
+        default=None,
+        description="Single-task form: model tier for the subagent.",
     )
     context: str = Field(
         default="",
@@ -5363,6 +5529,11 @@ class TaskParams(BaseModel):
         single = self.label is not None
         if single and self.tasks:
             raise ValueError("pass either 'tasks' (batch) or label/prompt, not both")
+        if not single and (self.agent or self.effort):
+            # Silently ignoring these would be worse than refusing: the caller
+            # believes it asked for a role, and every child in the batch would
+            # run without one.
+            raise ValueError("in the batch form, set 'agent'/'effort' on each tasks[] item")
         if not single and not self.tasks:
             raise ValueError("nothing to launch: pass 'tasks' or label/prompt")
         if not single and not self.context.strip() and len(self.tasks) == 1:
@@ -5376,17 +5547,47 @@ class TaskParams(BaseModel):
 class WaitParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    job_id: str = Field(description="Job id returned by the 'task' tool (or listed by 'jobs').")
+    job_id: str | list[str] = Field(
+        description=(
+            "Job id from 'task' (or 'jobs'). Pass a LIST to wake on the first "
+            "of several to finish — the way to await a fan-out without polling "
+            "each child in turn."
+        )
+    )
     wait_ms: int = Field(
-        default=30_000,
+        default=300_000,
         gt=0,
         le=300_000,
-        description="Max ms to block for the job to settle (capped at 300000).",
+        description=(
+            "Max ms to block before reporting back (capped at 300000). The "
+            "call returns as soon as a job settles, so a generous budget costs "
+            "nothing when the work finishes early."
+        ),
     )
 
 
 class JobsParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    op: Literal["list", "peek", "cancel"] = Field(
+        default="list",
+        description=(
+            "list: all jobs with status and age. peek: NEW output from one "
+            "running job since your last peek. cancel: stop a running job."
+        ),
+    )
+    job_id: str | None = Field(
+        default=None,
+        description="Job to peek at or cancel (required for those ops).",
+    )
+    since: int | None = Field(
+        default=None,
+        description=(
+            "For peek: resume from this 'seq' value (returned by the previous "
+            "peek) so only new output comes back. Omit to read the tail from "
+            "the start; pass 0 explicitly for the same."
+        ),
+    )
 
 
 #: Formatted status text shared by ``wait``'s settled return and its detail
@@ -5433,7 +5634,17 @@ async def execute_task(
         )
     items: list[TaskItem] = list(params.tasks)
     if params.label is not None and params.prompt is not None:
-        items.append(TaskItem(label=params.label, prompt=params.prompt))
+        # ``agent`` falls back to TaskItem's own default rather than being
+        # passed as None, which the field does not accept; ``effort`` is
+        # already Optional there and passes through unchanged.
+        items.append(
+            TaskItem(
+                label=params.label,
+                prompt=params.prompt,
+                agent=params.agent or "task",
+                effort=params.effort,
+            )
+        )
 
     def _full_prompt(item: TaskItem) -> str:
         if not params.context.strip():
@@ -5477,8 +5688,10 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
         describe_approval=_describe_task_approval,
         description=(
             "Launch background subagents — one, or a whole concurrent batch "
-            "('tasks' + shared 'context') in a single call. agent='scout' is "
-            "a read-only research child; effort picks a configured model tier."
+            "('tasks' + shared 'context') in a single call. 'agent' names a "
+            "role carrying vetted guidance (reviewer, coder, architect, "
+            "manager, designer, scout — see the `agent` tool); effort picks a "
+            "configured model tier."
         ),
         parameters=TaskParams.model_json_schema(),
         # Spawns autonomous child work, so it rides the write gate just like
@@ -5511,36 +5724,78 @@ async def execute_wait(
             "wait",
             "job tracking is not available in this session (no job manager attached).",
         )
-    job = jobs.get(params.job_id)
-    if job is None:
-        return _error(tool_call_id, "wait", f"unknown job {params.job_id}")
+    job_ids = [params.job_id] if isinstance(params.job_id, str) else list(params.job_id)
+    job_ids = [job_id for job_id in dict.fromkeys(job_ids) if job_id]
+    if not job_ids:
+        return _error(tool_call_id, "wait", "no job id given")
+    missing = [job_id for job_id in job_ids if jobs.get(job_id) is None]
+    if missing:
+        return _error(tool_call_id, "wait", f"unknown job {', '.join(missing)}")
+
+    def _settled() -> Any:
+        """The first of the awaited jobs that is no longer running, or None."""
+
+        for job_id in job_ids:
+            job = jobs.get(job_id)
+            if job is not None and job.status != "running":
+                return job
+        return None
+
+    def _still_running() -> list[str]:
+        """The awaited ids that are still running, in the order given.
+
+        The unsettled branches report THIS rather than ``job_ids[0]``: on the
+        multi-id path the first id is simply the first the caller passed and
+        may itself have settled, so pinning it in ``details`` tells a caller
+        that reads the payload (rather than parsing the text) about the wrong
+        job.
+        """
+
+        return [
+            job_id
+            for job_id in job_ids
+            if (row := jobs.get(job_id)) is not None and row.status == "running"
+        ]
 
     deadline = time.monotonic() + params.wait_ms / 1000.0
-    while job.status == "running":
+    job = _settled()
+    while job is None:
         if signal is not None and signal.aborted:
+            running = _still_running()
             return _text(
                 tool_call_id,
                 "wait",
-                f"job {params.job_id} still running (wait aborted)",
-                details={"job_id": params.job_id, "status": "running"},
+                f"job {', '.join(running or job_ids)} still running (wait aborted)",
+                details={"job_id": (running or job_ids)[0], "status": "running"},
             )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            running = _still_running()
             return _text(
                 tool_call_id,
                 "wait",
-                f"job {params.job_id} still running after {params.wait_ms}ms",
-                details={"job_id": params.job_id, "status": "running"},
+                f"job {', '.join(running or job_ids)} still running after {params.wait_ms}ms",
+                details={"job_id": (running or job_ids)[0], "status": "running"},
             )
-        await asyncio.sleep(min(0.05, remaining))
-        job = jobs.get(params.job_id)
-        if job is None:
-            return _error(tool_call_id, "wait", f"job {params.job_id} disappeared")
+        await _await_any_settled(jobs, job_ids, remaining, signal)
+        job = _settled()
+        if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
+            return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
     # Handing the result to the model HERE means auto-delivery must not
     # repeat it when the session next goes idle (see Session._on_job_completed
     # and AsyncJob.consumed).
-    cast(Any, jobs).mark_consumed(params.job_id)
+    cast(Any, jobs).mark_consumed(job.id)
     text, spill_details = _job_summary(job, context)
+    if len(job_ids) > 1:
+        still = [
+            job_id
+            for job_id in job_ids
+            if job_id != job.id
+            and (other := jobs.get(job_id)) is not None
+            and other.status == "running"
+        ]
+        if still:
+            text += f"\n({len(still)} still running: {', '.join(still)})"
     details = {"job_id": job.id, "status": job.status}
     if spill_details:
         details.update(spill_details)
@@ -5552,6 +5807,72 @@ async def execute_wait(
     )
 
 
+async def _await_any_settled(
+    jobs: Any,
+    job_ids: list[str],
+    remaining: float,
+    signal: AbortSignal | None = None,
+) -> None:
+    """Sleep until one of ``job_ids`` settles, the wait is aborted, or
+    ``remaining`` seconds pass.
+
+    Event-driven where the host supports it. The measured problem this fixes:
+    across recorded sessions, 70% of ``wait`` calls hit their deadline, and the
+    old implementation spent those waits re-reading a status field every 50 ms
+    — 6000 wakeups per five-minute wait, all on the one event loop shared by
+    the parent turn, every sibling child, and the TUI repaint.
+
+    The ABORT is raced alongside the settle events, not checked between
+    sleeps. The old 50 ms poll re-read ``signal.aborted`` on every tick, so
+    parking on the settle events alone silently made the abort branch dead for
+    a job that never settles: an aborted wait sat for its whole budget (up to
+    five minutes) instead of returning. The TUI masks that through its own
+    interruptible-tool poll, but that is a different mechanism and does not
+    cover deadline-tripped signals or non-TUI embedders relying on the
+    documented ``AbortSignal`` contract.
+
+    Falls back to the poll loop when the manager predates ``settled_event``
+    (a third-party job manager satisfying the older protocol must keep
+    working), and the poll there is 100 ms rather than 50 ms because nothing
+    observes the difference: the caller is a model waiting on a job that runs
+    for minutes.
+    """
+
+    getter = getattr(jobs, "settled_event", None)
+    if getter is None:
+        await asyncio.sleep(min(0.1, remaining))
+        return
+    try:
+        # Only ids that STILL HAVE A ROW. An id whose row the retention sweep
+        # evicted mid-wait gets a pre-set event (nothing will ever settle it),
+        # which would return from `asyncio.wait` immediately and spin the
+        # caller's `while` loop at full speed until its deadline — burning the
+        # event loop this function exists to protect, and faster than the poll
+        # it replaced. Skipping those ids parks on the siblings that can still
+        # fire; when NONE can, there is nothing to wait for and the caller's
+        # own disappeared/timeout branches are the right answer, so sleep out
+        # the remainder rather than returning into a hot loop.
+        events = [getter(job_id) for job_id in job_ids if jobs.get(job_id) is not None]
+    except Exception:  # noqa: BLE001 - a manager that cannot make events polls
+        await asyncio.sleep(min(0.1, remaining))
+        return
+    if not events and signal is None:
+        await asyncio.sleep(remaining)
+        return
+    waiters = [asyncio.ensure_future(event.wait()) for event in events]
+    if signal is not None:
+        waiters.append(asyncio.ensure_future(signal.wait()))
+    try:
+        await asyncio.wait(waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        # Every waiter is cancelled, including the one that completed: leaving
+        # a pending future behind on the timeout path would leak one task per
+        # wait call for the life of the session.
+        for waiter in waiters:
+            waiter.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+
+
 def build_wait_tool(context: ToolContext) -> AgentTool | None:
     if context.jobs is None:
         return None
@@ -5559,8 +5880,10 @@ def build_wait_tool(context: ToolContext) -> AgentTool | None:
         name="wait",
         label="Wait for job",
         description=(
-            "Block up to wait_ms for a background job to settle, returning its "
-            "final output/status. Times out if still running."
+            "Block until a background job settles (or wait_ms elapses), returning "
+            "its final output/status. Pass a LIST of job ids to wake on the first "
+            "one to finish. Returns the moment work settles, so prefer one "
+            "generous wait over repeated short ones."
         ),
         parameters=WaitParams.model_json_schema(),
         # read-only observation of job state; blocks the turn but changes nothing.
@@ -5571,6 +5894,74 @@ def build_wait_tool(context: ToolContext) -> AgentTool | None:
     )
 
 
+def _peek_job(
+    tool_call_id: str,
+    jobs: Any,
+    job: Any,
+    since: int,
+    context: ToolContext | None,
+) -> ToolResult:
+    """Return only what a job has printed since ``since``.
+
+    The incremental contract is what makes polling affordable. A caller
+    watching a 40-minute training run peeks every so often; returning the whole
+    tail each time would re-send the same bytes on every poll, and because each
+    result is appended to the transcript verbatim it would also grow the
+    context by the same bytes repeatedly. Returning only the delta means a
+    quiet job costs one short line, and a busy one costs exactly what it
+    actually produced.
+
+    The ``seq`` in the reply is the cursor for the NEXT peek, so the caller
+    never has to reason about offsets — it echoes back what it was given.
+    """
+    reader = getattr(jobs, "read_output", None)
+    if reader is None:
+        return _error(
+            tool_call_id,
+            "jobs",
+            "this session's job manager does not record live output.",
+        )
+    window = reader(job.id, since)
+    if window is None:
+        return _error(tool_call_id, "jobs", f"unknown job {job.id}")
+    text, seq, gap = window
+
+    status = job.status
+    header = f"job {job.id} [{status}] seq={seq}"
+    if status != "running":
+        # A settled job's full result is already on its way to the caller (or
+        # readable through `wait`), so peek does not duplicate it; it says the
+        # watching is over, which is the fact that changes what to do next.
+        header += " — finished; use 'wait' for its result"
+    parts = [header]
+    if gap:
+        parts.append(
+            "[warning: output between your cursor and this window was dropped "
+            "from the buffer — this excerpt is not contiguous with your last peek]"
+        )
+    if text:
+        parts.append(text)
+    elif status == "running":
+        parts.append("(no new output since last peek)")
+    body = "\n".join(parts)
+    # Same bounded/spill path as every other verbose tool: a job that dumped
+    # more than the per-call budget between two peeks stays readable without
+    # letting one peek blow the result budget.
+    summary, spill_details = _capped_list_body(
+        body, body[:TOOL_OUTPUT_LIMIT_CHARS], "jobs", context
+    )
+    details: dict[str, Any] = {
+        "job_id": job.id,
+        "status": status,
+        "seq": seq,
+        "new_chars": len(text),
+        "gap": gap,
+    }
+    if spill_details:
+        details.update(spill_details)
+    return _text(tool_call_id, "jobs", summary, details=details)
+
+
 @_guard("jobs")
 async def execute_jobs(
     tool_call_id: str,
@@ -5579,9 +5970,9 @@ async def execute_jobs(
     on_update: Callable[[AgentToolUpdate], None] | None = None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    """List running and recently-settled background jobs."""
+    """List background jobs, peek at a running one's output, or cancel one."""
     try:
-        JobsParams(**args)
+        params = JobsParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "jobs", exc)
 
@@ -5592,6 +5983,44 @@ async def execute_jobs(
             "jobs",
             "job tracking is not available in this session (no job manager attached).",
         )
+
+    if params.op in ("peek", "cancel"):
+        if not params.job_id:
+            return _error(tool_call_id, "jobs", f"op='{params.op}' requires job_id")
+        # Deliberately NOT owner-scoped, and the same choice ``op="list"``
+        # already makes. Scoping these by ``context.job_id`` looked like
+        # defence in depth and was a regression: ``run_subagent`` registers
+        # every ``task`` job with ``owner_id=None``, so inside a child session
+        # a scoped lookup misses its own grandchildren — the tool listed a job
+        # and then called that same id "unknown job". The isolation it was
+        # meant to add is structural rather than per-call anyway: each
+        # ``Session`` builds its own ``AsyncJobManager`` and nothing reassigns
+        # a child's, so a child's manager never holds its parent's rows and
+        # there is no cross-session id to reach in the first place.
+        job = jobs.get(params.job_id)
+        if job is None:
+            return _error(tool_call_id, "jobs", f"unknown job {params.job_id}")
+        if params.op == "cancel":
+            cancelled = await jobs.cancel(params.job_id)
+            if not cancelled:
+                # cancel() refuses a job that already settled, which is not a
+                # failure worth erroring on: the caller wanted it stopped and
+                # it is stopped. Report the terminal status so the caller does
+                # not retry a cancel that can never succeed.
+                return _text(
+                    tool_call_id,
+                    "jobs",
+                    f"job {params.job_id} was not cancelled (status: {job.status})",
+                    details={"job_id": params.job_id, "status": job.status, "cancelled": False},
+                )
+            return _text(
+                tool_call_id,
+                "jobs",
+                f"cancelled job {params.job_id} ({job.label})",
+                details={"job_id": params.job_id, "cancelled": True},
+            )
+        return _peek_job(tool_call_id, jobs, job, params.since or 0, context)
+
     rows = jobs.list()
     if not rows:
         return _text(tool_call_id, "jobs", "no background jobs", details={"count": 0})
@@ -5666,11 +6095,17 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
         name="jobs",
         label="List jobs",
         description=(
-            "List running and recently-settled background jobs (task/bash) "
-            "with their id, status and age — 'up' is how long a running job "
-            "has been going, 'wait' is how long a parked one has been waiting "
-            "for a slot, 'ago' is how long since a settled one finished, and "
-            "'old' is a settled job whose finish time was not recorded."
+            "Inspect background jobs (task/bash). op='list' shows every "
+            "running and recently-settled job with its id, status and age — "
+            "'up' is how long a running job has been going, 'wait' is how long "
+            "a parked one has been waiting for a slot, 'ago' is how long since "
+            "a settled one finished, and 'old' is a settled job whose finish "
+            "time was not recorded. op='peek' (job_id, and since=<seq from the "
+            "last peek>) returns ONLY the output produced since that cursor, so "
+            "polling a long job stays cheap — use it to watch a build, a "
+            "training run, a terraform apply, or a pipeline poll without "
+            "blocking. op='cancel' (job_id) stops a running job and kills its "
+            "process tree."
         ),
         parameters=JobsParams.model_json_schema(),
         approval_tier="read",

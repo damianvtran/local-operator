@@ -79,9 +79,16 @@ or `drop` what is no longer needed.
 
 `task` delegates to subagents that run in the background — one, or a whole
 batch of independent slices in a single call (`tasks` + a shared `context`
-stating the goal and constraints once). `agent="scout"` is a read-only
-research child for investigation; `effort` picks a configured model tier.
-`jobs` lists what is running and `wait` blocks for a result. A
+stating the goal and constraints once). `agent` names the child's ROLE
+(`reviewer`, `coder`, `architect`, `manager`, `designer`, `scout`, or one from
+the `agent` tool): it carries vetted guidance and may restrict tools, so your
+prompt states the TASK and the role supplies how that work is done well. Use
+`agent="reviewer"` instead of hand-writing review instructions, and when a
+role's guidance proves wrong, fix it with the `agent` tool rather than
+patching one prompt. `effort` picks a configured model tier.
+`jobs` lists what is running and `wait` blocks for a result — it returns the
+moment work settles, so prefer one generous wait over repeated short ones, and
+pass a LIST of job ids to wake on the first of several to finish. A
 running subagent is not out of reach: `hub` sends it a note, asks it a
 question and waits for its answer (use that when one has gone quiet rather
 than guessing whether it is stuck), steers it onto a different course,
