@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Sequence
 from typing import Any, Callable
 
@@ -62,9 +63,21 @@ async def wait_for(predicate, timeout: float = 10.0) -> None:
 
 
 class FakeJob:
-    def __init__(self, job_id: str, status: str = "running", queued: bool = False) -> None:
+    def __init__(
+        self,
+        job_id: str,
+        status: str = "running",
+        queued: bool = False,
+        started_at: float | None = None,
+    ) -> None:
         self.id = job_id
         self.status = status
+        #: Mirrors ``AsyncJob.started_at``: stamped as ``_run_job``'s FIRST
+        #: statement, so it is the only field that answers "has the runner
+        #: actually begun". ``status`` reads ``running`` from registration.
+        #: This fixture not modelling it is why the suite agreed for so long
+        #: that a half-hour-old child had "not started yet".
+        self.started_at = started_at
         #: Mirrors ``AsyncJob.queued``: admitted to the ledger but holding no
         #: execution slot. Distinct from "running but still building its
         #: session", which is what a job carries between registration and
@@ -1702,3 +1715,90 @@ def test_the_roster_text_tells_the_two_ids_apart(tmp_path):
     # sitting above it is not read as the argument.
     assert "JOB id" in text
     assert "not a job id" in text
+# --- the running-but-unattached window ----------------------------------------
+#
+# ``_await_child`` already covers the child that is merely SCHEDULED: it yields
+# the loop, which is what lets the runner start, so a parent asking its brand
+# new child a question gets an answer instead of a refusal.
+#
+# It does not cover the child whose runner is well underway but whose session
+# has not attached (a slow child build, a resumed child replaying a large
+# transcript, or a parent monopolising the loop). The grace is capped at
+# ``ATTACH_WAIT_MAX_S``, so even a 300 s request waits 30 s and is then told
+# the subagent "has not started yet ... retry in a moment" — about an agent
+# half an hour into its work. Observed live, and acted on: a healthy reviewer
+# subagent was cancelled on the strength of that message.
+
+
+def test_the_not_started_reason_never_denies_a_running_child():
+    """``started_at`` is the authoritative "has the runner begun". A child that
+    has been working for half an hour must not be described as unstarted."""
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    reason = comms._not_started_reason(comms._records["job-1"])
+
+    assert "has not started" not in reason, reason
+    assert "1800s ago" in reason and "RUNNING" in reason
+    # And it must steer away from the action that destroyed the work.
+    assert "cancelling" in reason
+
+
+def test_the_not_started_reason_still_distinguishes_parked_from_scheduled():
+    """The two genuine not-started states keep their own advice: a parked child
+    may not run for minutes (do not wait), a scheduled one starts on the next
+    yield (retry)."""
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = None
+
+    scheduled = comms._not_started_reason(comms._records["job-1"])
+    jobs.jobs["job-1"].queued = True
+    parked = comms._not_started_reason(comms._records["job-1"])
+
+    assert "session next yields" in scheduled
+    assert "capacity gate" in parked and "do not wait on it" in parked
+
+
+@pytest.mark.asyncio
+async def test_ask_buffers_rather_than_refusing_a_started_but_unattached_child():
+    """The reported bug. Past the attach grace, with the runner underway, the
+    question is BUFFERED for the child instead of refused — and the caller
+    spends its own budget waiting, not 30 s waiting to be told no."""
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    reply = await comms.ask("job-1", "status?", 400)
+
+    assert reply.error is None, f"refused a working child: {reply.error!r}"
+    assert reply.timed_out is True  # nobody attached inside the budget
+    [buffered] = comms._records["job-1"].pending
+    assert buffered.details["expects_reply"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_question_buffered_past_the_grace_is_answered_once_it_attaches():
+    """End to end: ``attach`` must re-arm the buffered question with the
+    waiter's future. Flushed as a plain note it would be injected and answered
+    while the asker sat out its whole timeout on a reply already returned."""
+    comms, jobs, child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    asking = asyncio.create_task(comms.ask("job-1", "stuck?", 20_000))
+    await wait_for(lambda: bool(comms._records["job-1"].pending))
+
+    comms.attach("job-1", child, tmp_dir())  # the window finally closes
+    await wait_for(lambda: bool(child.asides))
+    child.materialize()
+
+    result = await execute_hub(
+        "call-1",
+        {"message": "no, just slow"},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms, job_id="job-1"),
+    )
+
+    assert "answered the parent's question" in body(result)
+    reply = await asking
+    assert reply.error is None and reply.timed_out is False, f"{reply.error!r}"
+    assert reply.text == "no, just slow"

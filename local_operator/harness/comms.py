@@ -259,7 +259,15 @@ class SubagentComms:
         record.settled = False
         record.unsubscribe = child.subscribe(self._make_reply_watcher(record))
         for message in record.pending:
-            child.queue_aside(self._thunk(record, message))
+            # A buffered QUESTION has a caller blocked on ``record.ask``, so it
+            # must be re-armed with that future. Flushed as a plain note it
+            # would be injected and answered while the asker sat out its whole
+            # timeout on a reply that had already come back. Notes carry no
+            # future and flush unchanged.
+            awaiting = record.ask if self._expects_reply(message) else None
+            if awaiting is not None and awaiting.done():
+                awaiting = None
+            child.queue_aside(self._thunk(record, message, awaiting=awaiting))
         record.pending.clear()
         # Last: everything a waiter in ``_await_child`` needs must be in place
         # before it is allowed to proceed, or it would queue its question onto
@@ -628,12 +636,43 @@ class SubagentComms:
                 # A child that DIED while we waited is gone, not "not started":
                 # telling a caller to retry in a moment is the polling loop this
                 # wait exists to remove.
-                reason = (
-                    self._gone_reason(record)
-                    if record.settled or not self._is_running(record)
-                    else self._not_started_reason(record)
-                )
-                return Reply(job_id, record.label, error=reason)
+                if record.settled or not self._is_running(record):
+                    return Reply(job_id, record.label, error=self._gone_reason(record))
+                if not parked and self._has_begun(record):
+                    # The grace expired but the RUNNER IS RUNNING — it simply
+                    # has not attached (a slow child build, a resumed child
+                    # replaying a large transcript, or an event loop the parent
+                    # is monopolising). Refusing here reports "has not started
+                    # yet ... retry in a moment" about a child that has been
+                    # working for half an hour, and that message is acted on:
+                    # one healthy reviewer subagent was cancelled on the
+                    # strength of it after a 30 s grace expired (the wait is
+                    # capped by ATTACH_WAIT_MAX_S, so a long timeout does not
+                    # make it more patient).
+                    #
+                    # Buffer instead. ``attach`` flushes pending messages and
+                    # re-arms a question with its waiter's future, so the
+                    # question lands at the child's first injection boundary
+                    # and the answer comes back to this caller.
+                    record.ask = None
+                    future = asyncio.get_running_loop().create_future()
+                    record.ask = future
+                    record.armed = False
+                    record.pending.append(self._to_child_message(text, expects_reply=True))
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        self._clear_ask(record, future)
+                        return Reply(job_id, record.label, timed_out=True)
+                    try:
+                        answer = await asyncio.wait_for(future, remaining)
+                    except asyncio.TimeoutError:
+                        return Reply(job_id, record.label, timed_out=True)
+                    except Exception as exc:
+                        return Reply(job_id, record.label, error=str(exc))
+                    finally:
+                        self._clear_ask(record, future)
+                    return Reply(job_id, record.label, text=answer)
+                return Reply(job_id, record.label, error=self._not_started_reason(record))
         if record.child is None:  # pragma: no cover - narrowing for the checker
             return Reply(job_id, record.label, error=self._not_started_reason(record))
         if record.ask is not None and not record.ask.done():
@@ -863,6 +902,30 @@ class SubagentComms:
         job = jobs.get(record.job_id)
         return job is not None and job.status == "running"
 
+    @staticmethod
+    def _expects_reply(message: CustomMessage) -> bool:
+        """Whether a buffered message is a QUESTION (someone is blocked on it).
+
+        Read off the message the sender built rather than tracked separately,
+        so :meth:`attach`'s flush cannot drift from what was queued.
+        """
+        details = getattr(message, "details", None) or {}
+        return bool(details.get("expects_reply"))
+
+    def _has_begun(self, record: _ChildRecord) -> bool:
+        """Whether the child's RUNNER has actually entered.
+
+        ``AsyncJob.started_at`` is stamped as ``_run_job``'s first statement,
+        before the child session is built, so it is true for the whole window
+        in which a child is working but not yet attached — exactly the window
+        ``ask`` must not describe as "not started". Neither ``status`` nor
+        ``queued`` can answer this: ``status`` reads ``running`` from
+        registration, before a line has run.
+        """
+        jobs = self._jobs()
+        job = jobs.get(record.job_id) if jobs is not None else None
+        return job is not None and getattr(job, "started_at", None) is not None
+
     def _not_started_reason(self, record: _ChildRecord) -> str:
         """Why a running job has no live child yet — and they are not the same.
 
@@ -897,6 +960,21 @@ class SubagentComms:
             return (
                 "subagent has not started yet (parked behind the job capacity gate); "
                 "it starts when a slot frees, so do not wait on it"
+            )
+        if job is not None and getattr(job, "started_at", None) is not None:
+            # A THIRD state, and the one that cost real work: the runner is
+            # well underway but its session is not attached to this record.
+            # ``_await_child``'s grace is capped at ATTACH_WAIT_MAX_S, so a
+            # patient caller still lands here after 30 s and used to be told
+            # the child "has not started yet ... retry in a moment" about an
+            # agent half an hour into its run. An operator acted on that and
+            # cancelled it. ``started_at`` is the authoritative answer (see
+            # :meth:`_has_begun`), so say what is actually true.
+            started = time.time() - float(job.started_at)
+            return (
+                f"subagent started {started:.0f}s ago but has not attached to this parent, "
+                "so it cannot be questioned yet; it is RUNNING — use 'jobs'/'wait' for its "
+                "result rather than cancelling it"
             )
         return (
             "subagent has not started yet (it is scheduled, and starts when this "
