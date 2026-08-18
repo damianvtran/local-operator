@@ -266,15 +266,23 @@ async def test_an_unusable_delivery_count_does_not_take_the_app_down() -> None:
         await _submit(pilot, app, "one")
         await _submit(pilot, app, "two")
 
-        message = SteeringDelivered(1)
-        message.count = "not a number"  # type: ignore[assignment]
-        app.post_message(message)
-        await pilot.pause()
+        # `float("inf")` specifically, alongside the obvious nonsense: the
+        # first version of this guard named `TypeError`/`ValueError` and this
+        # value raises `OverflowError`, which killed the app in the message
+        # loop — the one gap in a guard written because the producer is not
+        # ours. Enumerating failure modes is how such a gap reappears.
+        for bad in ("not a number", float("inf"), float("nan"), None, [1], -3, 0):
+            message = SteeringDelivered(1)
+            message.count = bad  # type: ignore[assignment]
+            app.post_message(message)
+            await pilot.pause()
+            assert app.is_running, f"the app died on count={bad!r}"
 
         texts = _notice_texts(app)
-        assert texts.count(SENT_STEER_NOTICE) == 1, "degraded to one delivery"
-        assert texts.count(QUEUED_STEER_NOTICE) == 1
-        assert app.is_running, "the app survived the unusable count"
+        # Each unusable value degraded to ONE delivery, so the two rows settled
+        # one at a time rather than all at once or not at all.
+        assert texts.count(SENT_STEER_NOTICE) == 2
+        assert QUEUED_STEER_NOTICE not in texts
 
 
 @pytest.mark.asyncio

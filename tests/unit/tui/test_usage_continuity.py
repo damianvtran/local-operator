@@ -107,9 +107,16 @@ async def _settled(app: OperatorApp, pilot: Any, ticks: int = 80) -> None:
         if app._session is not None:
             break
     assert app._session is not None, "the session never booted"
-    # The preload measurement runs in its own worker after adoption; give it a
-    # few frames so the estimate-vs-exact interaction is settled when read.
-    for _ in range(6):
+    # Then wait for the READING, not for a number of frames. Adoption is only
+    # the first half: `_measure_preloaded_context` starts its own worker
+    # afterwards and these tests assert on its result, so a fixed pause here is
+    # the same guess one worker later — it passes on an idle machine and fails
+    # when the measurement takes longer than the frames allowed for it.
+    status = app._status
+    assert status is not None
+    for _ in range(ticks):
+        if status.context_tokens:
+            break
         await pilot.pause()
         await asyncio.sleep(0.01)
 
@@ -295,6 +302,56 @@ async def test_turns_taken_after_a_compaction_are_still_restored(tmp_path: Path)
     assert restored is not None, "a turn taken after the pass is a valid reading"
     assert restored.context_tokens == 160_000
     assert restored.context_tokens != 900_000, "and it is not the pre-compaction one"
+
+
+@pytest.mark.asyncio
+async def test_a_pruned_reading_is_refused_like_a_compacted_one(tmp_path: Path) -> None:
+    """Pruning shrinks the context too, and leaves no marker to notice it by.
+
+    Blanking a tool result is the other pass that makes a reading describe a
+    context that no longer exists — and unlike compaction it writes no boundary:
+    the journal entry is folded away by ``compact_file`` and the message row
+    survives with its original ``usage`` attached. Measured on a real prune, a
+    restored reading of 640_000 against a true context of ~1_700, installed as
+    exact.
+
+    Wider than the compaction case it mirrors, too: it needs nothing more than
+    the agent reading the same large file twice. So the rule is not "after the
+    newest compaction" but "not describing a context something has since
+    shrunk", and both shrinking passes have to be covered.
+    """
+    transcript = Transcript(tmp_path / "sess")
+    pruned = _assistant(output=100, context=640_000)
+    await transcript.append_message(Message.user("read that file"))
+    await transcript.append_message(pruned)
+    await transcript.append_prune(pruned.id, "[pruned]")
+
+    async def _stream(request: Any, signal: Any = None):  # pragma: no cover - never called
+        if False:
+            yield None
+
+    def _session_over_dir() -> Session:
+        return Session(
+            model=_spec(),
+            stream_fn=_stream,
+            tools=[],
+            transcript=Transcript(tmp_path / "sess"),
+            system_blocks_provider=lambda: ["system"],
+        )
+
+    assert _session_over_dir().restored_usage() is None
+
+    # And after the journal has been FOLDED INTO the rows, where the prune entry
+    # no longer exists and only the flag on the message remains.
+    reclaimed = await transcript.compact_file(min_reclaim_bytes=1)
+    assert reclaimed >= 0
+    assert _session_over_dir().restored_usage() is None
+
+    # A healthy turn taken afterwards is still restored: the refusal is scoped
+    # to readings the pass invalidated, not to the conversation.
+    await Transcript(tmp_path / "sess").append_message(_assistant(output=20, context=15_000))
+    restored = _session_over_dir().restored_usage()
+    assert restored is not None and restored.context_tokens == 15_000
 
 
 @pytest.mark.asyncio

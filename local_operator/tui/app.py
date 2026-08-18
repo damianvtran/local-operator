@@ -6774,7 +6774,14 @@ class OperatorApp(App[None]):
         # message went.
         try:
             count = int(getattr(message, "count", 1) or 1)
-        except (TypeError, ValueError):
+        except Exception:
+            # `Exception`, not a list of the types that came to mind. The first
+            # attempt named `TypeError`/`ValueError` and still died on
+            # `float("inf")`, which raises `OverflowError` — a value from a
+            # producer this app does not own found the one gap in a guard
+            # written precisely because the producer is not ours. Enumerating
+            # failure modes is how that gap reappears; the surrounding handlers
+            # all take the broad posture for the same reason.
             # A receipt must never take the app down, and this handler is one
             # `int()` away from being the exception to that: the field crosses a
             # thread boundary from a producer this app does not own. One
