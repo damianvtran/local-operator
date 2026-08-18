@@ -29,6 +29,7 @@ import httpx
 from local_operator.harness.types import AbortSignal
 from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
+    LoginCancelledError,
     LoginError,
     maybe_await,
 )
@@ -99,11 +100,22 @@ async def login_qwencloud_token_plan(
     identity, and ``api_key`` (the ``sk-sp-…`` inference key).
     """
     if callbacks.on_manual_code_input is None:
-        raise ValueError("QwenCloud Token Plan login requires an interactive key prompt")
+        # A contract violation by the host, not a user-facing path: the registry
+        # marks this provider ``requires_paste_prompt`` (via ``_lazy_login``) and
+        # every shipped host attaches a prompt for such providers, so reaching
+        # this means an embedder wired callbacks that cannot complete the flow.
+        raise ValueError(
+            "QwenCloud Token Plan login reads an API key, but this interface "
+            "provided no on_manual_code_input callback to read it with."
+        )
     pasted = await maybe_await(callbacks.on_manual_code_input())
     if pasted is None:
-        raise ValueError("QwenCloud Token Plan login cancelled")
+        raise LoginCancelledError("QwenCloud Token Plan login cancelled")
     api_key = pasted.strip()
+    if not api_key:
+        # Empty paste is a cancel, matching ``create_api_key_login``: a blank
+        # key would be stored as a credential and shadow a working env key.
+        raise LoginCancelledError("QwenCloud Token Plan login cancelled")
     if not api_key.startswith("sk-"):
         raise LoginError(
             "That does not look like a QwenCloud Token Plan key (expected sk-sp-…); "

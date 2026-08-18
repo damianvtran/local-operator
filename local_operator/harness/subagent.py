@@ -91,6 +91,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from local_operator.agent_profiles import filter_tools
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
     ACTIVITY_THINKING,
@@ -115,6 +116,7 @@ from local_operator.harness.types import (
 from local_operator.paths import config_dir
 
 if TYPE_CHECKING:
+    from local_operator.agent_profiles import AgentProfile
     from local_operator.harness.jobs import AsyncJobManager
     from local_operator.mcp.manager import McpManager
     from local_operator.session.session import Session
@@ -133,16 +135,47 @@ TRAJECTORY_CAP = 500
 #: side effects at all (browser drives the user's browser; eval executes
 #: code; both are excluded by name for that reason even where a tier alone
 #: would admit them).
+#:
+#: Kept as the FALLBACK for ``agent="scout"`` when no profile resolves (a
+#: stripped install with no packaged seeds, a registry that cannot be read):
+#: the read-only promise is a safety property, so it must not depend on a file
+#: being present. Role guidance generally lives in
+#: :mod:`local_operator.agent_profiles`.
 SCOUT_TOOL_ALLOWLIST = frozenset({"read", "glob", "grep", "list_variables", "read_variable"})
 
-#: Preamble stamped onto every scout prompt. The tool filter enforces the
-#: letter; this states the intent, so the scout REPORTS rather than trying to
-#: route around its missing tools.
+#: Preamble stamped onto a scout prompt when no profile resolves. The tool
+#: filter enforces the letter; this states the intent, so the scout REPORTS
+#: rather than trying to route around its missing tools.
 SCOUT_PREAMBLE = (
     "[scout mode: you are a READ-ONLY research agent. Investigate, read, "
     "search, and report findings with file:line evidence; you cannot edit, "
     "write, or run anything. Your final message is the deliverable.]\n\n"
 )
+
+
+def _resolve_role(agent: str, parent_session: "Session") -> "AgentProfile | None":
+    """The profile for ``agent``, or None for a plain full child.
+
+    ``"task"`` is the no-role default and never resolves, so the common launch
+    pays no registry lookup at all. Anything else is looked up in the
+    operator's registry first and then in the packaged starters, which is what
+    lets ``task(agent="reviewer")`` work on a machine where nobody has authored
+    a reviewer while still preferring the operator's own once they have.
+
+    Never raises: an unresolvable role degrades to a full child, because the
+    parent already decided the work should happen and a typo in a role name is
+    not a reason to lose the delegation.
+    """
+
+    if not agent or agent == "task":
+        return None
+    try:
+        from local_operator.agent_profiles import resolve_profile
+
+        return resolve_profile(agent, registry=getattr(parent_session, "agent_registry", None))
+    except Exception:  # noqa: BLE001 - role guidance is enrichment, not a gate
+        logger.warning("could not resolve agent role %r; launching a full child", agent)
+        return None
 
 
 def run_subagent(
@@ -219,7 +252,15 @@ def _make_runner(
     # accessors. ``_emit`` gives the parent's isolated handler fan-out.
     emit = parent_session._emit
     comms = getattr(parent_session, "subagent_comms", None)
-    effective_prompt = SCOUT_PREAMBLE + prompt if agent == "scout" else prompt
+    # Resolved ONCE per launch, not per turn: the profile decides the child's
+    # preamble and tool surface, both of which are fixed for the run.
+    profile = _resolve_role(agent, parent_session)
+    if profile is not None:
+        effective_prompt = profile.preamble + prompt
+    elif agent == "scout":
+        effective_prompt = SCOUT_PREAMBLE + prompt
+    else:
+        effective_prompt = prompt
 
     async def runner(
         job_id: str, signal: Any, report_progress: Callable[[str], None]
@@ -242,6 +283,7 @@ def _make_runner(
                 job_id=job_id,
                 resume_dir=resume_dir,
                 agent=agent,
+                profile=profile,
             )
             if job is not None:
                 # Off the CHILD, not the parent: ``model_spec`` may have put
@@ -617,9 +659,16 @@ async def _build_child_session(
     job_id: str,
     resume_dir: "Path | None" = None,
     agent: str = "task",
+    profile: "AgentProfile | None" = None,
 ) -> "Session":
     """Compose the child Session directly (see module docstring for why the
-    factory is not reused, and for the full inherit/do-not-inherit list)."""
+    factory is not reused, and for the full inherit/do-not-inherit list).
+
+    ``profile`` is the resolved role (see :func:`_resolve_role`), passed in
+    rather than re-resolved here so one launch performs exactly one registry
+    lookup and the prompt the caller stamped cannot disagree with the tool
+    surface applied here.
+    """
     from datetime import datetime
 
     from local_operator.config import ConfigManager
@@ -693,15 +742,28 @@ async def _build_child_session(
         request_approval=request_approval,
         resolve_internal_url=resolve_internal_url,
         subagent_comms=getattr(parent_session, "subagent_comms", None),
+        # The child can work with roles too (look one up, or record what it
+        # learned about a bad one), and role resolution for its OWN launches
+        # needs the same registry the parent used.
+        agent_registry=getattr(parent_session, "agent_registry", None),
         web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
-    if agent == "scout":
-        # Scouts get lookups only — MCP tools execute arbitrary server calls,
-        # so they are excluded from the allowlist filter entirely rather than
-        # trusted per tool.
+    # A role's tool allowlist is a capability boundary, not advice: a reviewer
+    # that cannot call ``edit`` cannot "helpfully" fix what it was asked to
+    # review and thereby end up reviewing its own patch.
+    restricted = profile is not None and bool(profile.tools)
+    if restricted:
+        tools = filter_tools(tools, profile)
+    elif agent == "scout":
+        # Fallback for a scout with no resolvable profile — the read-only
+        # promise must not depend on a seed file being present.
         tools = [tool for tool in tools if tool.name in SCOUT_TOOL_ALLOWLIST]
-    if mcp is not None and agent != "scout":
+        restricted = True
+    # MCP tools execute arbitrary server calls, so a role filtered to an
+    # allowlist never receives them: they are excluded wholesale rather than
+    # trusted per tool, since the allowlist cannot name servers it has not met.
+    if mcp is not None and not restricted:
         tools = tools + mcp.tools
 
     def system_blocks_provider() -> list[str]:
@@ -762,6 +824,10 @@ async def _build_child_session(
         # The parent's variable store: same cwd, same config overrides, so a
         # child reading a variable must see exactly what its parent would.
         variables=parent_session._variables,
+        # The same registry the parent resolves roles against, so a child that
+        # delegates (a manager) or inspects a role sees the operator's profiles
+        # rather than falling back to the packaged starters.
+        agent_registry=getattr(parent_session, "agent_registry", None),
         skill_resolver=resolve_internal_url,
         # How the transcript renders into LLM messages. Today every host uses
         # the default, so this changes nothing; it is plumbed because a host
@@ -803,7 +869,12 @@ async def _build_child_session(
     # hook and it keeps the loop's ``context.tools`` in step.
     merged_in = {tool.name for tool in child._tools} - {tool.name for tool in tools}
     parent_is_child = parent_session._job_id is not None
-    if agent == "scout" or parent_is_child:
+    # A role that does not delegate loses the whole capability set, for the
+    # same reason a scout does: a reviewer or coder spawning its own children
+    # turns one delegated slice into a fan-out nobody is watching. Roles that
+    # coordinate (``delegate: yes``) keep it.
+    role_forbids_delegation = profile is not None and not profile.may_delegate
+    if agent == "scout" or parent_is_child or role_forbids_delegation:
         drop = merged_in
     else:
         drop = {name for name in merged_in if name == "wake"}
