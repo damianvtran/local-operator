@@ -474,12 +474,20 @@ class AsyncJobManager:
         happened. This is the race the poll loop hid by re-reading status.
         """
 
+        job = self._jobs.get(job_id)
+        if job is None:
+            # No row: nothing will ever settle this id, so hand back a pre-set
+            # event WITHOUT storing it. Storing one would strand an entry that
+            # no cleanup path can reach — ``_sweep_due`` only pops ids it finds
+            # in ``self._jobs``, and this id is by definition not one of them.
+            settled = asyncio.Event()
+            settled.set()
+            return settled
         event = self._settled_events.get(job_id)
         if event is None:
             event = asyncio.Event()
             self._settled_events[job_id] = event
-        job = self._jobs.get(job_id)
-        if job is None or job.status != "running":
+        if job.status != "running":
             event.set()
         return event
 

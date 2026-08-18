@@ -242,3 +242,79 @@ def test_both_delegate_spellings_are_accepted(spelling: str, tmp_path) -> None:
 
     text = f"---\nname: x\ndescription: d\n{spelling}: yes\n---\nbody"
     assert _profile_from_text("x", text).may_delegate is True
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review regressions on resolution itself.
+# ---------------------------------------------------------------------------
+
+
+def test_a_same_named_non_role_agent_does_not_become_the_role(tmp_path) -> None:
+    """C2: `get_agent_by_name` searches a flat namespace shared with ordinary
+    chat agents, so without the role tag an agent merely CALLED `reviewer` was
+    launched as one — with no allowlist, i.e. the full write inventory, while
+    the child was still told it was a reviewer."""
+    registry = AgentRegistry(tmp_path)
+    agent = registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    registry.set_agent_system_prompt(agent.id, "Be agreeable.")
+
+    profile = resolve_profile("reviewer", registry=registry)
+
+    assert profile is not None
+    assert profile.agent_id is None, "must fall through to the packaged seed"
+    assert profile.tools, "a role without an allowlist is the fail-open case"
+    assert "Be agreeable." not in profile.instructions
+
+
+def test_a_role_tagged_agent_is_still_honoured(tmp_path) -> None:
+    """The guard must not break the feature it protects."""
+    registry = AgentRegistry(tmp_path)
+    agent = registry.create_agent(
+        _edit_fields(name="reviewer", description="house", tags=["role", "tools:read"])
+    )
+    registry.set_agent_system_prompt(agent.id, "HOUSE RULES")
+
+    profile = resolve_profile("reviewer", registry=registry)
+
+    assert profile is not None and profile.agent_id == agent.id
+    assert profile.tools == ("read",)
+    assert profile.instructions == "HOUSE RULES"
+
+
+def test_installing_over_a_non_role_name_refuses_rather_than_lying(tmp_path) -> None:
+    """C4 at the source: it used to return the existing row, which reads as a
+    successful install to every caller."""
+    import pytest as _pytest
+
+    from local_operator.agent_profiles import NameTakenError
+
+    registry = AgentRegistry(tmp_path)
+    registry.create_agent(_edit_fields(name="reviewer", description="chat"))
+    with _pytest.raises(NameTakenError):
+        install_seed("reviewer", registry=registry)
+
+
+def test_role_lookup_folds_case_like_the_seed_lookup_does(tmp_path) -> None:
+    """C9: seeds fold case and the registry did not, so `agent="Reviewer"`
+    found the PACKAGED seed while ignoring the operator's own."""
+    registry = AgentRegistry(tmp_path)
+    agent = registry.create_agent(_edit_fields(name="Reviewer", description="house", tags=["role"]))
+    registry.set_agent_system_prompt(agent.id, "HOUSE RULES")
+
+    for spelling in ("Reviewer", "reviewer", "REVIEWER"):
+        profile = resolve_profile(spelling, registry=registry)
+        assert profile is not None, spelling
+        assert profile.instructions == "HOUSE RULES", spelling
+
+
+def test_an_exact_match_still_wins_over_a_case_folded_one(tmp_path) -> None:
+    """The fold is a fallback, not a replacement: it runs only when the exact
+    lookup found nothing."""
+    registry = AgentRegistry(tmp_path)
+    exact = registry.create_agent(_edit_fields(name="triage", description="d", tags=["role"]))
+    registry.set_agent_system_prompt(exact.id, "EXACT")
+    other = registry.create_agent(_edit_fields(name="TRIAGE", description="d", tags=["role"]))
+    registry.set_agent_system_prompt(other.id, "FOLDED")
+
+    profile = resolve_profile("triage", registry=registry)
+    assert profile is not None and profile.instructions == "EXACT"

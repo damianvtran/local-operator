@@ -37,6 +37,7 @@ relevant, and the body loads on demand.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -44,7 +45,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from local_operator.agent_profiles import (
     MAX_INSTRUCTIONS_CHARS,
     AgentProfile,
+    NameTakenError,
+    _profile_from_agent,
     install_seed,
+    is_role,
     list_seeds,
     load_seed,
     seed_tags,
@@ -135,8 +139,10 @@ def _registered_profiles(registry: Any) -> list[AgentProfile]:
         return []
     profiles: list[AgentProfile] = []
     for agent in agents:
-        tags = {str(tag).strip().lower() for tag in (agent.tags or [])}
-        if "role" not in tags:
+        # One shared predicate with role RESOLUTION: two readers that disagree
+        # about what a role is are how listing came to hide a row that
+        # ``task(agent=...)`` would still have run.
+        if not is_role(agent):
             continue
         try:
             profiles.append(_profile_from_agent(registry, agent))
@@ -216,8 +222,8 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
         Skill(
             name=profile.name,
             description=(profile.when_to_use or profile.description or profile.name)[:512],
-            file_path=__import__("pathlib").Path(f"{profile.name}.md"),
-            base_dir=__import__("pathlib").Path("."),
+            file_path=Path(f"{profile.name}.md"),
+            base_dir=Path("."),
             source="agent-profile",
             resource_type="agent_hint",
         )
@@ -262,7 +268,16 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
             "agent",
             f"no packaged starter named {name!r}; starters: {', '.join(list_seeds())}",
         )
-    profile = install_seed(name, registry=registry)
+    try:
+        profile = install_seed(name, registry=registry)
+    except NameTakenError:
+        return _error(
+            tool_call_id,
+            "agent",
+            f"an agent named {name!r} already exists and is not a role, so nothing was "
+            "installed. Rename that agent, or author the role under a different name "
+            "with op='create'.",
+        )
     if profile is None:
         return _error(tool_call_id, "agent", f"could not install starter {name!r}")
     return _text(
@@ -293,6 +308,17 @@ async def _op_write(
     except Exception:  # noqa: BLE001
         existing = None
 
+    # A name occupied by a NON-role is refused on both paths rather than being
+    # converted into one: an ordinary chat agent silently acquiring a role's
+    # tags and guidance is a surprising way to lose an agent, and on the update
+    # path it would be the same fail-open hijack the role tag exists to stop.
+    if existing is not None and not is_role(existing):
+        return _error(
+            tool_call_id,
+            "agent",
+            f"an agent named {name!r} exists and is not a role; rename it, or use a "
+            "different name for the role.",
+        )
     if creating and existing is not None:
         return _error(
             tool_call_id,
@@ -313,13 +339,40 @@ async def _op_write(
             "run of this role, so they must stay short.",
         )
 
+    # An UPDATE merges onto the stored profile; only a CREATE starts from
+    # nothing. Rebuilding the tags from this call's params alone silently
+    # stripped whatever it did not mention — so refining a reviewer's wording
+    # (the very operation this tool advertises) dropped its `tools:` allowlist
+    # and handed the role the full write inventory, failing OPEN and reporting
+    # success. An omitted field means "leave it alone", never "clear it";
+    # clearing is done by naming the field with an empty value.
+    current = _profile_from_agent(registry, existing) if existing is not None else None
+
+    if params.tools is not None:
+        tools = tuple(params.tools) or None
+    else:
+        tools = current.tools if current is not None else None
+
+    if params.effort is not None:
+        effort = params.effort.strip() or None
+    else:
+        effort = current.effort if current is not None else None
+
+    description = (params.description or "").strip()
+    if not description and current is not None:
+        description = current.description
+
     profile = AgentProfile(
         name=name,
-        description=(params.description or "").strip(),
-        when_to_use=(params.description or "").strip(),
+        description=description,
+        when_to_use=description,
         instructions=instructions,
-        tools=tuple(params.tools) if params.tools else None,
-        effort=(params.effort or "").strip() or None,
+        tools=tools,
+        effort=effort,
+        # Preserved for the same reason as the allowlist: a role that
+        # coordinates must not stop coordinating because someone fixed a typo
+        # in its guidance.
+        may_delegate=current.may_delegate if current is not None else False,
     )
     tags = list(seed_tags(profile))
 

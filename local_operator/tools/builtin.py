@@ -5580,26 +5580,43 @@ async def execute_wait(
                 return job
         return None
 
+    def _still_running() -> list[str]:
+        """The awaited ids that are still running, in the order given.
+
+        The unsettled branches report THIS rather than ``job_ids[0]``: on the
+        multi-id path the first id is simply the first the caller passed and
+        may itself have settled, so pinning it in ``details`` tells a caller
+        that reads the payload (rather than parsing the text) about the wrong
+        job.
+        """
+
+        return [
+            job_id
+            for job_id in job_ids
+            if (row := jobs.get(job_id)) is not None and row.status == "running"
+        ]
+
     deadline = time.monotonic() + params.wait_ms / 1000.0
     job = _settled()
     while job is None:
         if signal is not None and signal.aborted:
+            running = _still_running()
             return _text(
                 tool_call_id,
                 "wait",
-                f"job {', '.join(job_ids)} still running (wait aborted)",
-                details={"job_id": job_ids[0], "status": "running"},
+                f"job {', '.join(running or job_ids)} still running (wait aborted)",
+                details={"job_id": (running or job_ids)[0], "status": "running"},
             )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            running = [job_id for job_id in job_ids if jobs.get(job_id) is not None]
+            running = _still_running()
             return _text(
                 tool_call_id,
                 "wait",
-                f"job {', '.join(running)} still running after {params.wait_ms}ms",
-                details={"job_id": job_ids[0], "status": "running"},
+                f"job {', '.join(running or job_ids)} still running after {params.wait_ms}ms",
+                details={"job_id": (running or job_ids)[0], "status": "running"},
             )
-        await _await_any_settled(jobs, job_ids, remaining)
+        await _await_any_settled(jobs, job_ids, remaining, signal)
         job = _settled()
         if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
             return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
@@ -5629,14 +5646,29 @@ async def execute_wait(
     )
 
 
-async def _await_any_settled(jobs: Any, job_ids: list[str], remaining: float) -> None:
-    """Sleep until one of ``job_ids`` settles, or ``remaining`` seconds pass.
+async def _await_any_settled(
+    jobs: Any,
+    job_ids: list[str],
+    remaining: float,
+    signal: AbortSignal | None = None,
+) -> None:
+    """Sleep until one of ``job_ids`` settles, the wait is aborted, or
+    ``remaining`` seconds pass.
 
     Event-driven where the host supports it. The measured problem this fixes:
     across recorded sessions, 70% of ``wait`` calls hit their deadline, and the
     old implementation spent those waits re-reading a status field every 50 ms
     — 6000 wakeups per five-minute wait, all on the one event loop shared by
     the parent turn, every sibling child, and the TUI repaint.
+
+    The ABORT is raced alongside the settle events, not checked between
+    sleeps. The old 50 ms poll re-read ``signal.aborted`` on every tick, so
+    parking on the settle events alone silently made the abort branch dead for
+    a job that never settles: an aborted wait sat for its whole budget (up to
+    five minutes) instead of returning. The TUI masks that through its own
+    interruptible-tool poll, but that is a different mechanism and does not
+    cover deadline-tripped signals or non-TUI embedders relying on the
+    documented ``AbortSignal`` contract.
 
     Falls back to the poll loop when the manager predates ``settled_event``
     (a third-party job manager satisfying the older protocol must keep
@@ -5655,6 +5687,8 @@ async def _await_any_settled(jobs: Any, job_ids: list[str], remaining: float) ->
         await asyncio.sleep(min(0.1, remaining))
         return
     waiters = [asyncio.ensure_future(event.wait()) for event in events]
+    if signal is not None:
+        waiters.append(asyncio.ensure_future(signal.wait()))
     try:
         await asyncio.wait(waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
     finally:

@@ -173,3 +173,72 @@ async def test_dispose_wakes_a_waiter_instead_of_stranding_it() -> None:
 
     result = await asyncio.wait_for(waiter, timeout=5.0)
     assert "cancelled" in result.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review regressions.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_wait_returns_promptly() -> None:
+    """C3: the old 50ms poll re-read `signal.aborted` every tick. Parking on
+    the settle events alone made the abort branch dead for a job that never
+    settles — an aborted wait sat for its whole budget (up to five minutes).
+    The TUI masks this through its own interruptible-tool poll, but that is a
+    different mechanism and does not cover deadline signals or non-TUI hosts.
+    """
+    from local_operator.harness.types import AbortSignal
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=".", jobs=manager)
+    job_id = manager.register("task", "slow", _runner(30.0))
+    signal = AbortSignal()
+
+    async def abort_soon() -> None:
+        await asyncio.sleep(0.1)
+        signal.abort("user")
+
+    asyncio.ensure_future(abort_soon())
+    started = time.perf_counter()
+    result = await execute_wait("wc", {"job_id": job_id, "wait_ms": 10_000}, signal, None, context)
+    elapsed = time.perf_counter() - started
+
+    assert "aborted" in result.text
+    assert elapsed < 3.0, f"abort took {elapsed:.2f}s to be noticed"
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_event_is_not_stored_for_a_job_that_has_no_row() -> None:
+    """C5: the pre-set branch also STORED the event, and `_sweep_due` only pops
+    ids it finds in `_jobs`, so those entries were unreachable by every cleanup
+    path."""
+    manager = AsyncJobManager()
+    for index in range(50):
+        event = manager.settled_event(f"ghost-{index}")
+        assert event.is_set(), "an id with no row can never settle"
+    assert manager._settled_events == {}
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_timeout_names_a_job_that_is_actually_running() -> None:
+    """C6: `details` pinned `job_ids[0]`, which on the multi-id path is just
+    the first id the caller passed and may itself have settled."""
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=".", jobs=manager)
+    first = manager.register("task", "A", _runner(30.0))
+    second = manager.register("task", "B", _runner(30.0))
+
+    async def evict() -> None:
+        await asyncio.sleep(0.05)
+        del manager._jobs[first]
+
+    asyncio.ensure_future(evict())
+    result = await _wait(context, job_id=[first, second], wait_ms=250)
+
+    assert result.details is not None
+    assert result.details["job_id"] == second
+    assert first not in result.text
+    await manager.dispose()

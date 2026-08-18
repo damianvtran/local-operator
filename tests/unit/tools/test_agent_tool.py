@@ -187,3 +187,75 @@ async def test_search_needs_a_query(context) -> None:
 async def test_installing_an_unknown_starter_lists_the_real_ones(context) -> None:
     body = await call(context, op="install", name="nope")
     assert "no packaged starter" in body and "reviewer" in body
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review regressions. The originals all passed a green suite because
+# they only ever exercised a freshly INSTALLED seed; these exercise the state
+# after an edit, and the collision with a same-named non-role agent.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_keeps_the_allowlist_it_was_not_asked_to_change(context, registry) -> None:
+    """C1: refining a role's wording used to strip its `tools:` tag, handing a
+    reviewer `edit`/`write` — failing OPEN while reporting success."""
+    await call(context, op="install", name="reviewer")
+    before = resolve_profile("reviewer", registry=registry)
+    assert before is not None and before.tools
+
+    await call(context, op="update", name="reviewer", instructions="Read the diff first.")
+
+    after = resolve_profile("reviewer", registry=registry)
+    assert after is not None
+    assert after.tools == before.tools, "the allowlist is a capability boundary"
+    assert "Read the diff first." in after.instructions
+
+
+@pytest.mark.asyncio
+async def test_update_keeps_the_effort_tier_and_delegation_flag(context, registry) -> None:
+    """C1, the same bug on the other two role fields."""
+    await call(context, op="install", name="manager")
+    before = resolve_profile("manager", registry=registry)
+    assert before is not None and before.effort == "lo" and before.may_delegate
+
+    await call(context, op="update", name="manager", description="new routing text")
+
+    after = resolve_profile("manager", registry=registry)
+    assert after is not None
+    assert after.effort == before.effort
+    assert after.may_delegate == before.may_delegate
+    assert after.tools == before.tools
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_empty_tools_list_still_clears_the_allowlist(context, registry) -> None:
+    """Preserving an omitted field must not make the field unclearable:
+    NAMING it with an empty value is how you widen a role deliberately."""
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", tools=[])
+    profile = resolve_profile("reviewer", registry=registry)
+    assert profile is not None and profile.tools is None
+
+
+@pytest.mark.asyncio
+async def test_install_refuses_a_name_owned_by_a_non_role(context, registry) -> None:
+    """C4: it used to report a successful install while writing nothing, which
+    is the worst possible answer to someone recovering from a broken role."""
+    agent = registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    registry.set_agent_system_prompt(agent.id, "Be agreeable.")
+
+    body = await call(context, op="install", name="reviewer")
+
+    assert "not a role" in body and "nothing was installed" in body
+    assert registry.get_agent_system_prompt(agent.id) == "Be agreeable.", "must not overwrite"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["create", "update"])
+async def test_authoring_refuses_a_name_owned_by_a_non_role(context, registry, op: str) -> None:
+    """An ordinary agent must not silently become a role, and on the update
+    path converting one would be the same fail-open hijack."""
+    registry.create_agent(_edit_fields(name="reviewer", description="my chat agent"))
+    body = await call(context, op=op, name="reviewer", description="d", instructions="x")
+    assert "not a role" in body

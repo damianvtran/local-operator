@@ -74,12 +74,34 @@ SEEDS_DIR = Path(__file__).parent / "agent_seeds"
 #: bounded enough that a pasted log cannot become a permanent tax.
 MAX_INSTRUCTIONS_CHARS = 8_000
 
+#: The tag that marks a registry row as a delegation ROLE. A registry also
+#: holds ordinary conversational agents and autosave rows in the same flat
+#: namespace, keyed by user-visible name, so without this marker any agent that
+#: merely happened to be called ``reviewer`` would be launched AS the reviewer
+#: role — with no allowlist, and therefore the full write inventory, while the
+#: child was still told it was a reviewer. Written by seed installation and by
+#: the ``agent`` tool; required by :func:`resolve_profile`.
+ROLE_TAG = "role"
+
 #: Tool names a read-only role is filtered to. Allowlist, not a tier filter:
 #: approval tiers drift as tools are added, and these roles promise "no side
 #: effects at all", which is narrower than "nothing marked write". ``browser``
 #: drives the user's real browser and ``eval`` executes code, so both are
 #: excluded by NAME even where a tier check alone would admit them.
 READ_ONLY_TOOLS = ("read", "glob", "grep", "list_variables", "read_variable")
+
+
+class NameTakenError(RuntimeError):
+    """An agent of that name exists but is not a role.
+
+    Its own class rather than a bare ``RuntimeError`` so the caller can tell
+    "this name is occupied by something else" apart from a registry failure,
+    and say so instead of reporting a successful install that wrote nothing.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"an agent named {name!r} exists and is not a role")
+        self.name = name
 
 
 @dataclass(frozen=True)
@@ -260,6 +282,17 @@ def _agent_instructions(registry: "AgentRegistry", agent: "AgentData") -> str:
         return ""
 
 
+def is_role(agent: "AgentData") -> bool:
+    """Whether a registry row is marked as a delegation role.
+
+    One implementation, because two readers that disagree about what a role is
+    are how ``op='list'`` came to hide a row that ``task(agent=...)`` would
+    happily run.
+    """
+
+    return any(str(tag).strip().lower() == ROLE_TAG for tag in (agent.tags or []))
+
+
 def _profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentProfile:
     """Convert a registered agent into a role profile.
 
@@ -334,10 +367,31 @@ def resolve_profile(
     if registry is not None:
         try:
             agent = registry.get_agent_by_name(key)
+            if agent is None:
+                # Case-insensitive retry, because ``load_seed`` folds case and
+                # an exact-only registry lookup would invert this function's
+                # whole point: ``task(agent="Reviewer")`` would find the
+                # PACKAGED seed while silently ignoring the operator's own
+                # ``Reviewer``. Exact match still wins; this only runs when it
+                # found nothing.
+                folded = key.casefold()
+                agent = next(
+                    (
+                        row
+                        for row in registry.list_agents()
+                        if str(row.name).strip().casefold() == folded and is_role(row)
+                    ),
+                    None,
+                )
         except Exception:  # noqa: BLE001 - registry problems must not fail a launch
             agent = None
             logger.warning("agent registry lookup failed for %r", key)
-        if agent is not None:
+        # The row must be MARKED a role. An unmarked same-named agent falls
+        # through to the packaged seed rather than being run as the role: the
+        # registry is a flat namespace of user-visible names shared with
+        # ordinary chat agents, and honouring one of those would hand a child
+        # the full write inventory under a role's name.
+        if agent is not None and is_role(agent):
             return _profile_from_agent(registry, agent)
     return load_seed(key)
 
@@ -356,9 +410,14 @@ def install_seed(
     has never created materializes it here, once, as an ordinary editable
     registry row.
 
-    Idempotent: an existing agent of the same name is returned untouched
-    unless ``overwrite`` is set, so a concurrent second launch of the same role
-    cannot duplicate the profile or clobber edits the operator has made.
+    Idempotent: an existing ROLE of the same name is returned untouched unless
+    ``overwrite`` is set, so a concurrent second launch of the same role cannot
+    duplicate the profile or clobber edits the operator has made.
+
+    Raises :class:`NameTakenError` when the name belongs to an agent that is
+    NOT a role. Returning that row (which is what this used to do) reported a
+    successful install while writing nothing, so an operator recovering from a
+    misbehaving role was told the fix had landed when it had not.
     """
 
     seed = load_seed(name)
@@ -372,6 +431,8 @@ def install_seed(
         existing = registry.get_agent_by_name(seed.name)
     except Exception:  # noqa: BLE001
         existing = None
+    if existing is not None and not is_role(existing) and not overwrite:
+        raise NameTakenError(seed.name)
     if existing is not None and not overwrite:
         return _profile_from_agent(registry, existing)
 
