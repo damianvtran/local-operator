@@ -832,7 +832,7 @@ async def test_the_band_inset_survives_resizing_across_its_floor() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("height", "children"), [(15, 5), (16, 6), (18, 8), (20, 10), (22, 10)])
+@pytest.mark.parametrize(("height", "children"), [(15, 5), (16, 6), (17, 7), (18, 8), (20, 10)])
 async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
     height: int, children: int
 ) -> None:
@@ -846,10 +846,19 @@ async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
 
     Each case is A/B'd against the identical frame with the class forced off, in
     the same checkout, so the comparison isolates the inset rather than
-    comparing two builds. These five cells are the ones where a 112-cell sweep
-    (heights 13-40 x 1-10 children) found the inset causing an overflow that the
-    same frame without it did not have — all of the shape "children + chrome is
-    about the screen height".
+    comparing two builds.
+
+    The cells are exactly those where the PREVIOUS head granted the inset and
+    the inset then caused an overflow — found by sweeping heights 14-26 against
+    1-10 children on that head and keeping every cell where the A/B diverged.
+    Choosing them that way is what makes this a regression test rather than a
+    restatement: on the fixed head the gate WITHHOLDS the row in all five, which
+    is the fix, and the assertion below holds either by the row being refused or
+    by it being granted without cost.
+
+    An earlier version parameterized cells where the gate withheld the inset on
+    both heads. Those compare one build against itself and can only ever pass —
+    the test was green and vacuous.
     """
 
     async def _overflows(*, suppress_inset: bool) -> bool:
@@ -899,14 +908,16 @@ async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
                     await pilot.pause()
             return app.query_one("#band").has_class("has-slot")
 
+    # A cell where the gate withholds the row compares the same frame with
+    # itself; the assertion still holds, and holds trivially. Recorded rather
+    # than skipped so a reader can see which of the two ways each cell passes.
     granted = await _inset_granted()
-    if not granted:
-        return
 
     with_inset = await _overflows(suppress_inset=False)
     without_inset = await _overflows(suppress_inset=True)
 
     assert not (with_inset and not without_inset), (
         f"the inset caused an overflow at {height} rows with {children} children "
-        f"that the same frame without it does not have"
+        f"that the same frame without it does not have "
+        f"(inset granted here: {granted})"
     )

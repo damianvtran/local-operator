@@ -325,15 +325,23 @@ class Transcript:
                 #   the boundary lands where the prune actually was. This is the
                 #   accurate one and the only one written from now on.
                 # * The ``pruned`` flag on the target row is the FALLBACK, for
-                #   transcripts folded by a build that predates the mark — they
-                #   exist on disk already and would otherwise restore every
-                #   reading taken before the blanking. It is the weaker signal
-                #   (it says which row was blanked, not when, and the target can
-                #   be far older than the prune), so it draws the boundary too
-                #   EARLY: some genuinely current readings are refused and fall
-                #   through to the local estimate. That is the safe direction —
-                #   an estimate instead of an exact figure, rather than a figure
-                #   describing a context that no longer exists.
+                #   transcripts folded by a build that predates the mark. Those
+                #   exist on disk already — `main` folds journals writing only
+                #   this flag — and without it the scan would match nothing,
+                #   fall through to the start of the file, and restore every
+                #   reading in it.
+                #
+                #   It is the weaker signal: it marks WHICH row was blanked, not
+                #   when, and the target sits EARLIER than the prune that
+                #   blanked it. So the boundary lands too early and the window
+                #   is too WIDE — it can still admit readings taken between the
+                #   target and the prune, which is fewer stale figures than
+                #   admitting the whole file but not zero. Exact only where the
+                #   two coincide.
+                #
+                #   Kept anyway, because the alternative for those files is
+                #   restoring everything, and improved only by the mark, which
+                #   every fold from here writes.
                 start = index + 1
                 break
         return [
