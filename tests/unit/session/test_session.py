@@ -1958,25 +1958,43 @@ async def test_completed_work_survives_a_crash_mid_run(tmp_path):
 @pytest.mark.asyncio
 async def test_completed_work_survives_cancellation(tmp_path):
     """Ctrl+C / dispose cancels the turn task. Cancellation must still
-    propagate (the turn really is over) AND leave the work on disk."""
+    propagate (the turn really is over) AND leave the COMPLETED work on disk.
+
+    Completed is the operative word. An earlier version of this test cancelled
+    during the FIRST batch and asserted that batch's assistant message was
+    persisted — which is precisely the dangling ``tool_use`` that
+    :func:`_paired_prefix` now refuses to write (see
+    ``test_durability_flush_never_persists_a_dangling_tool_call``). The
+    assertion was wrong, not the trim: an assistant message whose calls never
+    reported is not work to preserve, it is a row that 400s every later
+    resume. So the cancel here lands in the SECOND batch, and what must
+    survive is the first batch, which really did finish.
+    """
     started = asyncio.Event()
 
     async def execute(tool_call_id, args, signal, on_update, context):
-        started.set()
-        await asyncio.sleep(30)  # cancelled here
-        return ToolResult(tool_call_id=tool_call_id, tool_name="slow", content=[])
+        if tool_call_id == "c2":
+            started.set()
+            await asyncio.sleep(30)  # cancelled here, one batch in
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="slow", content=[TextContent(text="FINISHED")]
+        )
 
     slow = AgentTool(name="slow", parameters={"type": "object", "properties": {}}, execute=execute)
-    stream = ScriptedStream(
-        [
-            [
-                StreamTextDelta(delta="BEFORE-CANCEL"),
-                StreamToolCallDelta(index=0, id="c1", name="slow", argument_delta="{}"),
-                StreamEndEvent(stop_reason="toolUse"),
-            ]
-        ]
-    )
-    session = make_session(tmp_path, stream, tools=[slow])
+
+    class Steps(ScriptedStream):
+        def __call__(self, request, signal):
+            self.requests.append(request)
+            index = len(self.requests)
+
+            async def gen():
+                yield StreamTextDelta(delta=f"BEFORE-CANCEL-{index}")
+                yield StreamToolCallDelta(index=0, id=f"c{index}", name="slow", argument_delta="{}")
+                yield StreamEndEvent(stop_reason="toolUse")
+
+            return gen()
+
+    session = make_session(tmp_path, Steps([]), tools=[slow])
 
     task = asyncio.create_task(session.prompt("go"))
     await started.wait()
@@ -1986,7 +2004,8 @@ async def test_completed_work_survives_cancellation(tmp_path):
 
     replayed = _persisted_texts(session)
     assert "go" in replayed
-    assert "BEFORE-CANCEL" in replayed
+    assert "BEFORE-CANCEL-1" in replayed  # the batch that completed
+    assert "FINISHED" in replayed  # and its tool result
     await session.dispose()
 
 
@@ -2075,4 +2094,79 @@ async def test_progress_survives_when_mid_turn_compaction_is_off(tmp_path):
     replayed = _persisted_texts(session)
     assert "STEP-1" in replayed, f"the first step was lost: {replayed}"
     assert "REAL-WORK" in replayed, f"completed tool work was lost: {replayed}"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_durability_flush_never_persists_a_dangling_tool_call(tmp_path):
+    """A crash or Ctrl+C MID-BATCH must not write an unanswered tool call.
+
+    The loop appends the assistant message when the model turn ends and the
+    tool results only when the batch finishes, so for the whole duration of a
+    tool batch the live context ends in an assistant message whose calls have
+    no answers. The ``finally`` flush persists that context — and a dangling
+    ``tool_use`` on disk is permanent: every later resume replays it into a
+    400 ("must be followed by tool messages responding to each
+    tool_call_id"). Caught on a real Ctrl+C, which left ``['c1a', 'c1b']``
+    unpaired before ``_paired_prefix`` trimmed the tail.
+
+    Completed batches must still survive, or the trim would have thrown away
+    the work the flush exists to save.
+    """
+    started = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        if tool_call_id.startswith("c2"):
+            started.set()
+            await asyncio.sleep(30)  # cancelled inside the SECOND batch
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="work",
+            content=[TextContent(text=f"DONE-{tool_call_id}")],
+        )
+
+    work = AgentTool(name="work", parameters={"type": "object", "properties": {}}, execute=execute)
+
+    class TwoCallBatches(ScriptedStream):
+        def __call__(self, request, signal):
+            self.requests.append(request)
+            index = len(self.requests)
+
+            async def gen():
+                yield StreamTextDelta(delta=f"STEP-{index}")
+                yield StreamToolCallDelta(
+                    index=0, id=f"c{index}a", name="work", argument_delta="{}"
+                )
+                yield StreamToolCallDelta(
+                    index=1, id=f"c{index}b", name="work", argument_delta="{}"
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+
+            return gen()
+
+    session = make_session(tmp_path, TwoCallBatches([]), tools=[work])
+    task = asyncio.create_task(session.prompt("go"))
+    await started.wait()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    replayed = Transcript(session._transcript.directory).build_llm_history()
+    calls = {
+        call.id
+        for message in replayed
+        if isinstance(message, Message) and message.role == "assistant"
+        for call in message.tool_calls
+    }
+    results = {
+        message.tool_call_id
+        for message in replayed
+        if isinstance(message, Message) and message.role == "tool"
+    }
+    assert calls, "the first batch should have been persisted"
+    assert not calls - results, f"dangling tool_use persisted: {sorted(calls - results)}"
+
+    texts = [m.text for m in replayed if isinstance(m, Message) and m.text]
+    assert "DONE-c1a" in texts and "DONE-c1b" in texts, f"completed work lost: {texts}"
     await session.dispose()

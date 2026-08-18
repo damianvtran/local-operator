@@ -367,6 +367,43 @@ def _is_todo_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
 _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset({SESSION_INCIDENT_MESSAGE_TYPE})
 
 
+def _paired_prefix(messages: Sequence[AgentMessage]) -> list[AgentMessage]:
+    """``messages`` truncated so it never ENDS in unanswered tool calls.
+
+    The durability flushes persist the live context, and that list is not
+    always legal to replay. ``AgentLoop`` appends the assistant message the
+    moment the model turn ends and appends the tool results only once
+    ``_execute_tool_calls`` returns, so for the whole duration of every tool
+    batch — the longest part of a turn, and exactly when a Ctrl+C or a crash
+    lands — the list ends in an assistant message whose ``tool_calls`` have no
+    answers. Persisting that verbatim writes a dangling ``tool_use`` into the
+    transcript PERMANENTLY, and the next resume replays it into a 400 on both
+    wires ("must be followed by tool messages responding to each
+    tool_call_id"). Measured: a Ctrl+C mid-batch left two unpaired calls on
+    disk and an unusable session.
+
+    :meth:`Session._history_snapshot` faces the same illegal tail for a
+    request it is about to send and pairs the calls with placeholders. This is
+    the persistence counterpart, and it DROPS rather than pairs: a placeholder
+    is the honest answer to "what are you doing right now", but on disk it
+    would be a permanent lie about a tool that never reported. The unanswered
+    assistant message is re-sent by the model on the next run anyway, so
+    dropping it loses nothing a resume needs — while everything completed
+    before it is kept, which is the whole point of the flush.
+
+    Only the TAIL is trimmed. An unanswered assistant message earlier in the
+    list already has its results appended after it.
+    """
+    out = list(messages)
+    while out:
+        tail = out[-1]
+        if isinstance(tail, Message) and tail.role == "assistant" and tail.tool_calls:
+            out.pop()
+            continue
+        break
+    return out
+
+
 def _is_persistable_message(message: AgentMessage) -> bool:
     """Whether ``message`` may be written to the transcript as a message entry.
 
@@ -2083,7 +2120,7 @@ class Session:
             # messages were persisted by the dispose path's awaited turn.
             return
         try:
-            await self._persist_new_messages(list(messages))
+            await self._persist_new_messages(_paired_prefix(messages))
         except asyncio.CancelledError:
             # Cancellation must propagate: swallowing it here would keep a
             # turn alive that the session is trying to tear down.
