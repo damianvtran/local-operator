@@ -1236,14 +1236,25 @@ async def test_mid_turn_compaction_at_continuing_boundary(tmp_path, monkeypatch)
     third = stream.requests[2]
     assert "SUMMARY(compressed)" in third.messages[0].text
 
-    # No resurrection: after the compaction entry the transcript holds only
-    # the run's three surviving messages (assistant, tool result, final
-    # assistant) — the primed history the pass summarized never re-lands
-    # after it, and nothing is persisted twice.
+    # No resurrection and no duplication. The mid-turn gate flushes the run's
+    # messages BEFORE it cuts (the cut target has to be a persisted entry), so
+    # surviving run messages legitimately sit on either side of the compaction
+    # entry and counting the tail is no longer the question. What must hold is
+    # the property that count stood in for: every message is stored exactly
+    # once, and replaying the transcript reproduces the live context — the
+    # summarized history does not come back, and the kept window is not lost.
     entries = session._transcript.entries()
-    c_index = next(i for i, e in enumerate(entries) if e.type == "compaction")
-    after = [e for e in entries[c_index + 1 :] if e.type == "message"]
-    assert len(after) == 3
+    message_ids = [e.id for e in entries if e.type == "message"]
+    assert len(message_ids) == len(set(message_ids)), "a message was persisted twice"
+
+    replayed = Transcript(session._transcript.directory).build_llm_history()
+    assert [
+        (getattr(m, "role", None) or getattr(m, "custom_type", None), getattr(m, "text", ""))
+        for m in replayed
+    ] == [
+        (getattr(m, "role", None) or getattr(m, "custom_type", None), getattr(m, "text", ""))
+        for m in session._context.messages
+    ]
 
     await session.dispose()
 

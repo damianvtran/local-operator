@@ -54,9 +54,16 @@ def test_cut_never_on_tool_result_or_pending_call_assistant():
     assert kept[0] is messages[cut]
 
 
-def test_snap_forward_walks_past_tool_cluster():
-    """When the walk stops ON the tool result, snapping must move forward to
-    the next legal message, never backwards into the cluster."""
+def test_snap_never_lands_on_a_tool_result():
+    """When the walk stops ON a tool result, the snap must leave it, and the
+    resulting partition must keep every call with its result.
+
+    The cut may land on the ISSUING assistant (index 2) rather than past the
+    whole cluster: that keeps the call and its result together on the kept
+    side, which is the actual pairing rule. Requiring the cut to clear the
+    cluster entirely was stricter than the invariant, and inside a long tool
+    run it left no legal cut at all — see ``_is_valid_cut``.
+    """
     messages = [
         _big_user(),
         _big_user(),
@@ -67,8 +74,11 @@ def test_snap_forward_walks_past_tool_cluster():
     keep = estimate_tokens(messages[4]) + estimate_tokens(messages[3])
     cut = find_cut_point(messages, keep)
     assert cut is not None
-    # Walk stops at index 3 (tool) or 2 (assistant w/ calls); snap lands on 4.
-    assert messages[cut] is messages[4]
+    assert messages[cut].role != "tool"
+    to_summarize, kept = prepare_partitions(messages, cut)
+    assert_partition_pair_integrity(to_summarize, kept)
+    # The pass has to be worth making: the summarized side is non-empty.
+    assert to_summarize
 
 
 def test_no_cut_when_everything_is_recent():
@@ -143,8 +153,17 @@ def test_one_summarizable_message_still_runs_when_it_is_the_reason_the_window_is
     assert find_cut_point([marker, _big_user(40), recent, tail], keep) is None
 
 
-def test_none_when_snap_runs_past_end():
-    """Trailing tool cluster with nothing valid after it -> None."""
+def test_history_ending_mid_tool_run_still_compacts():
+    """A history captured MID-RUN ends in a tool cluster with nothing after
+    it, and it must STILL yield a legal cut.
+
+    This is the mid-turn compaction bug in miniature. The old rule treated a
+    trailing cluster as uncuttable and answered ``None``, which the session
+    reports as "nothing to compact" — so a long tool run could not be
+    compacted at any size, sailed past the configured threshold, and got
+    relief only once the run ended. The cut lands on the issuing assistant,
+    which keeps the call/result pair intact.
+    """
     messages = [
         _big_user(),
         _big_user(),
@@ -152,7 +171,27 @@ def test_none_when_snap_runs_past_end():
         _tool_result("c1"),
     ]
     keep = estimate_tokens(messages[3]) + 10
-    assert find_cut_point(messages, keep) is None
+    cut = find_cut_point(messages, keep)
+    assert cut is not None
+    assert messages[cut].role != "tool"
+    to_summarize, kept = prepare_partitions(messages, cut)
+    assert to_summarize
+    assert_partition_pair_integrity(to_summarize, kept)
+
+
+def test_none_when_no_message_is_a_legal_cut():
+    """A history with no legal cut anywhere still answers ``None``.
+
+    The backwards fallback widens where a cut may land; it must not invent one
+    where the pairing rule forbids every index. Here the only non-tool message
+    issues a call whose result never arrives, so keeping it would hand the
+    provider a dangling call.
+    """
+    messages = [
+        _assistant_with_call("missing"),
+        _tool_result("other"),
+    ]
+    assert find_cut_point(messages, 10) is None
 
 
 def test_empty_and_zero_budget():
