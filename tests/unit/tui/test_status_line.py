@@ -42,6 +42,7 @@ from local_operator.tui.widgets.status_line import (
     NAME_CELLS_FLOOR,
     McpStatus,
     StatusLine,
+    context_semantic_color,
     drop_ladder,
     format_agents,
     format_context_usage,
@@ -1504,3 +1505,61 @@ def test_every_segment_icon_stays_in_the_block_the_terminal_font_covers() -> Non
     # The jobs and context icons sit side by side in the right group, so they
     # have to be tellable apart at a glance and not merely unequal as strings.
     assert ICON_JOBS != ICON_CONTEXT
+
+
+# ---------------------------------------------------------------------------
+# The context reading's colour ramp
+# ---------------------------------------------------------------------------
+
+
+def test_the_context_colour_warms_as_the_context_fills() -> None:
+    """Blue below 200k, purple above it, red above 500k.
+
+    The reading is the one number in the band whose colour carries
+    information: a session heading for compaction should be visible without
+    being read. Banded on ABSOLUTE tokens, so the boundaries do not move with
+    the model's window.
+    """
+    assert context_semantic_color(0) == "signal"
+    assert context_semantic_color(199_999) == "signal"
+    assert context_semantic_color(200_001) == "label"
+    assert context_semantic_color(499_999) == "label"
+    assert context_semantic_color(500_001) == "danger"
+
+
+def test_a_reading_exactly_on_a_boundary_keeps_the_calmer_colour() -> None:
+    """Strictly greater-than, so a context parked on 200k does not flicker
+    between blue and purple as the estimate wobbles by a token."""
+    assert context_semantic_color(200_000) == "signal"
+    assert context_semantic_color(500_000) == "label"
+
+
+def test_the_band_paints_the_context_segment_in_its_band_colour() -> None:
+    """The ramp reaches the rendered row, not just the helper.
+
+    Asserted on a 1M window at each band, because the window is exactly what
+    the colour must NOT depend on — 300k of 1M is only 30% full and still
+    warrants the warmer hue, since re-sending 300k tokens is expensive
+    whatever the window.
+    """
+    for tokens, semantic in ((120_000, "signal"), (300_000, "label"), (700_000, "danger")):
+        status = StatusLine(_dock(200))
+        status.update(model_label="test/model", context_tokens=tokens, context_window=1_000_000)
+        row = status.render_text(200)
+        reading = format_context_usage(tokens, 1_000_000)
+        assert reading in row.plain
+        fills = _fills(row)
+        painted = {text: fill for text, fill in fills.items() if reading in text}
+        assert painted, f"the context segment was not painted for {tokens}"
+        expected = theme_mod.semantic_color(semantic).lower()
+        assert set(painted.values()) == {
+            expected
+        }, f"{tokens} tokens should paint {semantic} ({expected}), got {painted}"
+
+
+def test_the_three_context_bands_are_visually_distinct() -> None:
+    """A ramp nobody can tell apart is not a ramp. The three hues must be
+    separated in both themes, since the palette differs between them."""
+    for theme in ("dark", "light"):
+        hexes = [theme_mod.semantic_color(name, theme) for name in ("signal", "label", "danger")]
+        assert len(set(hexes)) == 3, f"{theme} reuses a hue across the context bands"

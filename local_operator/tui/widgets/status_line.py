@@ -421,6 +421,40 @@ def format_context_usage(tokens: int, window: int) -> str:
     return context_spelling(tokens, window, form="full")
 
 
+#: Context sizes at which the reading changes colour, largest first. ABSOLUTE
+#: token counts, not fractions of the window, because the cost they warn about
+#: is absolute: 300k tokens is slow and expensive to re-send on every request
+#: whether the window is 1M or 200k, and a percentage ramp would leave a big
+#: window looking calm at exactly the size that hurts most. This mirrors the
+#: ladder omp shows for the same reading.
+#:
+#: The hues are the palette's existing semantics rather than new tokens, so
+#: both themes get a legible ramp for free: `signal` (blue) is the neutral
+#: reading, `label` (purple) marks a context worth noticing, and `danger`
+#: (red) marks one near the point where compaction is imminent.
+CONTEXT_COLOR_BANDS: tuple[tuple[int, str], ...] = (
+    (500_000, "danger"),
+    (200_000, "label"),
+)
+
+#: Colour of a context reading below every band in :data:`CONTEXT_COLOR_BANDS`.
+CONTEXT_COLOR_BASE = "signal"
+
+
+def context_semantic_color(tokens: int) -> str:
+    """Semantic colour name for a context reading of ``tokens``.
+
+    Banded on the token count alone: the window is deliberately not consulted,
+    see :data:`CONTEXT_COLOR_BANDS`. Strictly greater-than, so a reading
+    sitting exactly on a boundary keeps the calmer colour and a number
+    hovering there does not flicker between two hues.
+    """
+    for threshold, color in CONTEXT_COLOR_BANDS:
+        if tokens > threshold:
+            return color
+    return CONTEXT_COLOR_BASE
+
+
 #: The forms a context reading may be written in, widest first. Named rather
 #: than inlined at each site because the band and the subagent rows show the
 #: SAME child's reading four rows apart, and they were spelling it two ways —
@@ -1436,9 +1470,20 @@ class StatusLine:
             if jobs:
                 parts.append((ICON_JOBS, jobs, Style(color=theme_mod.semantic_color("label"))))
         if "context" not in dropped:
-            usage = format_context_usage(*self._shown_context())
+            tokens, window = self._shown_context()
+            usage = format_context_usage(tokens, window)
             if usage:
-                parts.append((ICON_CONTEXT, usage, Style(color=theme_mod.semantic_color("signal"))))
+                # The one segment whose colour carries information: it warms
+                # from blue through purple to red as the context fills, so a
+                # session heading for compaction is visible at a glance
+                # instead of having to be read.
+                parts.append(
+                    (
+                        ICON_CONTEXT,
+                        usage,
+                        Style(color=theme_mod.semantic_color(context_semantic_color(tokens))),
+                    )
+                )
         cost = self._shown_cost()
         if cost and "cost" not in dropped:
             parts.append((ICON_COST, cost, Style(color=theme_mod.semantic_color("warning"))))
