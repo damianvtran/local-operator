@@ -693,7 +693,14 @@ class Editor(TextArea):
         # fixed: the composer is empty exactly when a user is about to type, so
         # the first character of an intended steer landed on the card and `y`
         # AUTHORISED a pending `rm -rf` (F3, agent review round 2).
-        router = getattr(self.app, "route_key_to_live_prompt", None)
+        # ...but the pickers own their keys first. `_sync_picker` has not run
+        # yet at this point, so an OPEN picker is asked directly: while a slash
+        # or model list is up, Tab COMPLETES the row and belongs to it. Routed
+        # ahead of that, the prompt's Tab swallow silently broke completion for
+        # as long as any question was live — `/mod` + Tab left `/mod` (found by
+        # driving the combination rather than reasoning about it).
+        picker_open = self._model_picker.is_open() or self._picker.is_open()
+        router = None if picker_open else getattr(self.app, "route_key_to_live_prompt", None)
         if callable(router):
             try:
                 if router(event):

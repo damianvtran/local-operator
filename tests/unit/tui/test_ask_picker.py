@@ -1734,3 +1734,40 @@ async def test_a_collapsed_card_never_takes_the_keyboard() -> None:
             await asked
         except (asyncio.CancelledError, Exception):
             pass
+
+
+@pytest.mark.asyncio
+async def test_a_live_question_does_not_break_slash_completion() -> None:
+    """The pickers own their keys while they are open, question or no question.
+
+    A live prompt swallows Tab so that a stray one cannot make the buffer
+    non-empty and stand the routing down. Routed ahead of the composer's own
+    pickers, that swallow silently broke slash completion for as long as any
+    question was up: `/mod` then Tab left `/mod` instead of completing to
+    `/model `. Found by driving the combination rather than reasoning about it.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(16):
+            await pilot.pause()
+
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause(0.1)
+        for character in "/mod":
+            await pilot.press(character)
+        await pilot.pause(0.3)
+
+        await pilot.press("tab")
+        await pilot.pause(0.3)
+        assert app.query_one(Editor).text == "/model ", app.query_one(Editor).text
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
