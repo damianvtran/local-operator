@@ -391,6 +391,15 @@ class JobManagerProtocol(Protocol):
 
     async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool: ...
 
+    # ``settled_event(job_id) -> asyncio.Event`` is deliberately NOT declared
+    # here. This Protocol is ``runtime_checkable`` and ``ToolContext.jobs``
+    # validates against it, so every method added becomes mandatory for every
+    # existing implementation — a host (or a test double) written against the
+    # older surface would stop validating the moment this shipped. ``wait``
+    # therefore probes for it with ``getattr`` and falls back to polling, which
+    # keeps the optimization opt-in for third-party managers rather than
+    # breaking them. See ``tools.builtin._await_any_settled``.
+
 
 @runtime_checkable
 class SubagentLauncher(Protocol):
@@ -549,6 +558,14 @@ class ToolContext(BaseModel):
     # (createIf) rather than advertised and always failing — the same
     # convention ``wake_scheduler`` uses.
     subagent_launcher: "SubagentLauncher | None" = None
+    # The user's persistent agent registry (``local_operator.agents``), behind
+    # the ``agent`` tool and behind role resolution for ``task(agent=...)``.
+    # Typed ``Any`` because that module is heavy (dill, yaml, the whole agent
+    # state machine) and importing it here would pull it into every process
+    # that merely wants a tool type. ``None`` means the host keeps no registry:
+    # the ``agent`` tool is then not advertised (createIf) and delegation falls
+    # back to packaged starter profiles.
+    agent_registry: Any = None
     # The session's background job manager. Declared as a Protocol because
     # the concrete class lives in ``harness.jobs``, which imports this
     # module (import cycle). The ``wait``/``job`` tools read it; ``None``

@@ -60,6 +60,11 @@ SENTINELS: dict[str, Any] = {
     # the way to the executor the child's hub tool would answer into a private
     # object nobody is waiting on.
     "subagent_comms": object(),
+    # The agent registry backs the ``agent`` tool and role resolution for
+    # ``task(agent=...)``. Dropped on the way to the executor, the tool would
+    # silently see no registry: role lookups would fall back to the packaged
+    # starters and every profile the operator authored would be invisible.
+    "agent_registry": object(),
 }
 
 #: ToolContext fields the Session takes under a DIFFERENT name. Kept tiny and

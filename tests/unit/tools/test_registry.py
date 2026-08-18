@@ -56,14 +56,18 @@ async def _ask_user(questions: list[Any]) -> dict[str, list[str]] | None:
 def _engine_context(**kwargs) -> ToolContext:
     """A context carrying every capability the default surface reads, so the
     whole table can build: the wake scheduler, the subagent launcher, the job
-    manager, and the ask hook plus the ``has_ui`` flag ``ask`` needs (it is
-    gated on both — the hook is what a subagent lacks, the flag is what a
-    headless host declares)."""
+    manager, the agent registry, and the ask hook plus the ``has_ui`` flag
+    ``ask`` needs (it is gated on both — the hook is what a subagent lacks,
+    the flag is what a headless host declares)."""
     base: dict[str, Any] = dict(
         wake_scheduler=_FakeScheduler(),
         subagent_launcher=_launcher,
         jobs=_FakeJobs(),
         subagent_comms=_FakeComms(),
+        # Only its PRESENCE is read by the createIf gate for the ``agent``
+        # tool; the ops themselves are exercised in the agent-tool tests
+        # against a real registry.
+        agent_registry=object(),
         has_ui=True,
         ask_user=_ask_user,
     )
