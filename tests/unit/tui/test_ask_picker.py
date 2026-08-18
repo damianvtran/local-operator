@@ -1192,3 +1192,61 @@ async def test_the_footer_names_only_keys_that_work_where_the_caret_is() -> None
 
         await pilot.press("1")
         assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_a_held_key_never_answers_a_question_the_card_moved_on_from() -> None:
+    """A key aimed at one question must not answer the next one.
+
+    The `ask` picker walks several questions inside ONE widget, so guarding a
+    parked keystroke by widget identity is not enough: after the card advances,
+    the object is the same and the question is not. Measured before the fix,
+    with a two-question ask — press `2` in the composer meaning "Canary" for
+    question 1, then answer question 1 on the card inside the 180 ms hold
+    window, and the parked key committed `DROP IT` on a question that had never
+    been on screen (F4, agent review round 3).
+
+    Reachable by one ordinary mouse click, since a single-select click both
+    answers and advances.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    questions = [
+        _question(
+            "rollout", "Which rollout?", labels=("Blue-green", "Canary"), descriptions=("", "")
+        ),
+        _question(
+            "drop_table", "Drop the table?", labels=("Keep it", "DROP IT"), descriptions=("", "")
+        ),
+    ]
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice(questions))
+        for _ in range(14):
+            await pilot.pause()
+        card = app._ask_screen
+        assert card is not None
+
+        await pilot.click(Editor)
+        await pilot.pause(0.1)
+        await pilot.press("2")  # aimed at question 1: "Canary"
+        assert app._held_answer_key is not None, "the key was not held"
+
+        # The card advances to question 2 while the key is still parked.
+        card.focus()
+        await pilot.pause(0.02)
+        card.action_accept()
+        for _ in range(20):
+            await pilot.pause(0.03)
+
+        # The stale key answered nothing: question 2 is still being asked.
+        assert not asked.done(), "a parked key answered a question it was not aimed at"
+        assert app._held_answer_key is None
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass

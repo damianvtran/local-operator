@@ -434,13 +434,24 @@ ANSWER_KEY_HOLD_S = 0.18
 class _HeldAnswerKey:
     """An answer key routed from the composer, parked until it is disambiguated.
 
-    Holds the prompt it was routed to as well as the character, so a key held
-    across a question settling cannot answer whatever replaced it.
+    Records WHICH QUESTION it was aimed at, not just which widget. The widget
+    is not enough: `AskPickerScreen` walks several questions inside one card, so
+    a key held across an advance would still see the same object and answer
+    whatever question had moved into its place. Measured: pressing `2` in the
+    composer meaning "Canary" for question 1, then answering question 1 from the
+    card inside the hold window, recorded `DROP IT` on a question the user had
+    never seen (F4, agent review round 3).
     """
 
     prompt: "AskPickerScreen"
+    #: The question the key was aimed at, by index within this card.
+    question_index: int
     character: str
     timer: Timer
+
+    def still_aimed_at(self, live: "AskPickerScreen | None") -> bool:
+        """Whether the question this key was meant for is still the live one."""
+        return live is self.prompt and self.prompt.question_index == self.question_index
 
 
 RESIZE_REFIT_DELAY_S = 0.05
@@ -2328,6 +2339,12 @@ class OperatorApp(App[None]):
             self._cancel_held_answer_key()
             key = getattr(event, "key", None)
             if key == "enter":
+                # Guarded like the timer path: between the keystroke and this
+                # Enter the card may have advanced to another question, and
+                # this branch previously had no check at all — so one keystroke
+                # answered two questions, the second of them unseen (F4).
+                if not held.still_aimed_at(self._live_prompt()):
+                    return False
                 held.prompt.answer_from_key(held.character)
                 return True
             if key == "escape":
@@ -2347,7 +2364,12 @@ class OperatorApp(App[None]):
         by any further key, which proves the user was typing a word.
         """
         timer = self.set_timer(ANSWER_KEY_HOLD_S, self._commit_held_answer_key)
-        self._held_answer_key = _HeldAnswerKey(prompt=prompt, character=character, timer=timer)
+        self._held_answer_key = _HeldAnswerKey(
+            prompt=prompt,
+            question_index=prompt.question_index,
+            character=character,
+            timer=timer,
+        )
 
     def _cancel_held_answer_key(self) -> None:
         """Drop a parked key without answering."""
@@ -2362,8 +2384,11 @@ class OperatorApp(App[None]):
         self._held_answer_key = None
         if held is None:
             return
-        if self._live_prompt() is not held.prompt:
-            return  # the question settled or changed while the key was held
+        if not held.still_aimed_at(self._live_prompt()):
+            # The question settled, was replaced, or the card advanced to the
+            # NEXT question while the key was held. A key aimed at one question
+            # must never answer another.
+            return
         held.prompt.answer_from_key(held.character)
 
     def _live_prompt(self):  # type: ignore[no-untyped-def]
