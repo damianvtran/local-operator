@@ -1139,13 +1139,50 @@ class OperatorApp(App[None]):
 
     async def _boot_session(self) -> None:
         """Await the session factory; on failure surface + offer /reload."""
+        # Built as its own future and adopted from THIS frame: if the app quits
+        # while construction is in flight, the worker is cancelled at the await
+        # below and a session the factory had already finished building would
+        # otherwise be lost with it — a coroutine's locals die with the
+        # `CancelledError`, but the completed future's result does not. See
+        # `_park_unadopted_session`.
+        built = asyncio.ensure_future(self._construct_session())
         try:
-            session = await self._construct_session()
+            session = await built
+        except asyncio.CancelledError:
+            self._park_unadopted_session(built)
+            raise
         except Exception as error:  # TUI-012: construction error path
             self._on_boot_failed(error)
             return
         self._adopt_session(session)
         await self._preflight_usage(session)
+
+    def _park_unadopted_session(self, built: asyncio.Future[Any]) -> None:
+        """Hand a built-but-never-adopted session to teardown, if there is one.
+
+        Only reachable on the cancellation path above: the app is going away
+        (``_shutdown`` cancels its workers before the tree is pruned), and the
+        factory finished building a session this frame never got to adopt. Left
+        alone that session is unreachable — nothing holds it, so nothing disposes
+        it, and whatever it opened (MCP subprocesses among them) outlives the
+        process exit that caused it.
+
+        Published on ``self._session`` rather than disposed inline, because this
+        runs while the app is shutting down and ``on_unmount`` is the app's own
+        place for awaiting session teardown — it runs after ``_shutdown`` has
+        finished, on a DOM already gone, and looks no further than this
+        attribute. Adoption it is not: no controller, no handlers, no history
+        replay — none of which a session nobody will talk to again needs.
+        """
+        if self._session is not None or not built.done() or built.cancelled():
+            return
+        try:
+            session = built.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return  # construction failed as well; _on_boot_failed owns that
+        self._session = session
 
     def _measure_preloaded_context(self, session: Any) -> None:
         """Fill the context segment before the first turn, off the boot path.
@@ -1512,8 +1549,14 @@ class OperatorApp(App[None]):
         # gets a splash on any frame that manages to land in the gap.
         self._swapping_session = True
         try:
+            # Its own future, for the same reason as boot: a quit landing
+            # mid-swap must not orphan a replacement the factory finished.
+            built = asyncio.ensure_future(self._construct_session())
             try:
-                session = await self._construct_session()
+                session = await built
+            except asyncio.CancelledError:
+                self._park_unadopted_session(built)
+                raise
             except Exception as error:  # TUI-012: construction error path
                 # The clear happens on the failure path too, and this is the
                 # discipline it protects: the ledger is only ever as old as the
@@ -3094,6 +3137,53 @@ class OperatorApp(App[None]):
             self._status.set_terminal_title(None)
         self._terminal_title.stop()
         self._terminal_title = None
+
+    async def _shutdown(self) -> None:
+        """Cancel this app's workers BEFORE Textual dismantles the widget tree.
+
+        Textual's own order is the reverse: ``App._shutdown`` prunes every screen
+        and widget (``_close_all``, awaited by the ``super()`` call below) and the
+        workers are cancelled only afterwards, in ``_process_messages``'s
+        ``finally`` (verified against textual 8.2.8). Pruning awaits, so a worker
+        that wakes inside that window runs against a screen with no children
+        left — and the workers here are the ones that PAINT.
+
+        The boot worker is the case that shows: ``_construct_session`` is a
+        thread hop over ~700 ms of imports (see :meth:`_warm_session_imports`)
+        plus the factory itself, and it resumes straight into
+        ``_adopt_session`` → ``_render_resumed_history`` → ``_transcript_view()``,
+        whose ``#transcript`` re-lookup for a transcript that is no longer in the
+        tree raises ``NoMatches``. ``run_worker`` defaults to
+        ``exit_on_error=True``, so that arrived as ``WorkerFailed(NoMatches(…))``
+        through ``_handle_exception``: quitting while the session was still
+        starting printed a traceback instead of handing the terminal back. Under
+        the pilot it is the same crash, and that is where it was found — a
+        per-width app loop that tore one app down with adoption still in flight.
+        Measured by sweeping only the hop's duration across the app's lifetime:
+        6 crashes in 301 apps before this, 0 in 301 after. The turn, compaction,
+        usage, login and aside workers all share the same await-then-append
+        shape, so the window belongs to the app rather than to boot.
+
+        Cancelling here closes the crash rather than narrowing it: the loop is
+        single-threaded and every worker that paints is a coroutine worker, so at
+        this point each one is parked at an await, and a cancelled task cannot
+        resume its normal path — the ``CancelledError`` lands at that await
+        instead of the worker running on into the DOM. (The app's one thread
+        worker, ``SubagentPanel._read_stats``, reaches the tree only through
+        ``call_from_thread`` and carries ``exit_on_error=False``, so it is not in
+        this hazard.) What is NOT changed is where a worker's own ``finally``
+        unwinds: cancellation is delivered whenever the loop next schedules that
+        task, which can be mid-prune, exactly as stock Textual leaves it — so a
+        cleanup block must not paint, the same rule that already applied to every
+        other path here. Nothing is lost by the earlier cancel either — these
+        workers were going to be cancelled a moment later, and a worker has
+        nowhere to paint once the tree is going away. One thing IS gained by the
+        app rather than lost: a session the boot worker had finished building is
+        parked for ``on_unmount`` instead of dying with the frame
+        (``_park_unadopted_session``).
+        """
+        self.workers.cancel_all()
+        await super()._shutdown()
 
     async def on_unmount(self) -> None:
         # Before disposing the session: dispose awaits teardown, and a turn
@@ -6099,7 +6189,17 @@ class OperatorApp(App[None]):
         self._key_prompt = block
         self._append_block(block)
         try:
-            return await block.wait()
+            # SHIELDED, because the future is the app's to settle, not the
+            # scheduler's: a task cancelled while directly awaiting a future
+            # cancels that future too, and the login worker is now cancelled at
+            # teardown BEFORE the tree is pruned (see `_shutdown`). Without the
+            # shield that propagation beat `on_unmount`'s `_settle_key_prompt`
+            # to it, so the prompt died cancelled instead of resolved — and a
+            # cancelled future is indistinguishable, from the block's side, from
+            # one that was superseded by a successful paste (the Anthropic race
+            # below). The await itself still takes the CancelledError either
+            # way; only the future's fate changes.
+            return await asyncio.shield(block.wait())
         except asyncio.CancelledError:
             # The prompt task was cancelled. Two different situations arrive
             # here and the block cannot tell them apart from the cancellation
