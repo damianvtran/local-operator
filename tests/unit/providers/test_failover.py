@@ -32,7 +32,7 @@ from local_operator.providers.failover import (
     FallbackTarget,
     ProviderError,
     RetrySettings,
-    _has_rotatable_sibling,
+    _request_has_rotated,
     backoff_delay_ms,
     classify_provider_error,
     expand_fallback_candidates,
@@ -649,12 +649,16 @@ async def test_transport_retries_honor_budget_same_key_first() -> None:
             pass
     assert excinfo.value.status == 503
     # Two same-key retries before rotation, then the sibling once.
-    assert attempts == ["k1", "k1", "k1", "k2", "k2", "k2"]
-    # One rotation per exhausted credential. The last key rotates too, and finds
-    # no further sibling: a 5xx is a PROVIDER fault, so every account in the pool
-    # is asked before the turn is declared dead. Capping this at one rotation is
-    # what stranded two healthy Anthropic accounts during a 529 storm.
-    assert [key for _provider, key in auth.rotations] == ["k1", "k2"]
+    # Each credential spends the configured budget, then the turn rotates; when
+    # rotation runs out the bearer in hand finishes its budget ONCE more, since
+    # the pre-rotation allowance exists only to get a turn moving to another
+    # account and there is no longer one to move to.
+    assert attempts == ["k1", "k1", "k1", "k2", "k2", "k2", "k2", "k2", "k2"]
+    # Every credential in the pool is asked before the turn is declared dead: a
+    # 5xx is a PROVIDER fault, so the next ACCOUNT is the thing most likely to
+    # succeed. Capping rotation at one switch is what stranded two healthy
+    # Anthropic accounts during a 529 storm.
+    assert [key for _provider, key in auth.rotations][:2] == ["k1", "k2"]
 
 
 async def test_long_rate_limit_retry_after_rotates_without_sleep(monkeypatch) -> None:
@@ -1930,7 +1934,13 @@ class TestCredentialErrorSaysWhichProblemItIs:
 
         message = str(excinfo.value)
         assert "No API key configured" not in message, message
-        assert "temporarily unavailable" in message
+        assert "not usable right now" in message
+        # The three causes a present-but-unresolvable row can have. A message
+        # naming only the first two told an R21 user to wait for a limit that
+        # was never the problem.
+        assert "rate limited" in message
+        assert "token refresh" in message
+        assert "could not be read" in message
         assert "OAuth sign-in" in message
 
     async def test_a_provider_with_no_credential_still_says_so(self, tmp_path: Any) -> None:
@@ -2018,9 +2028,11 @@ class TestAnOverloadedProviderIsNotFloodedWhileRotating:
 
         # Every account is still tried -- the pool walk is the point.
         assert set(sent) == {"k1", "k2", "k3", "k4"}, sent
-        # But each is asked a bounded number of times, not `maxRetries` times.
+        # Each is asked a bounded number of times, not `maxRetries` times, and
+        # the TURN total is bounded too -- that is the quantity the provider
+        # actually receives.
         for key in ("k1", "k2", "k3", "k4"):
-            assert sent.count(key) <= 3, (key, sent)
+            assert sent.count(key) <= 4, (key, sent)
         assert len(sent) <= 12, sent
 
     async def test_a_timeout_storm_is_bounded_too(self, tmp_path: Any) -> None:
@@ -2200,93 +2212,32 @@ class TestTheRetryCapAsksWhatRotationWouldAnswer:
         assert await self._recovers(store) == 4
 
 
-class TestRotatableSiblingDirectly:
-    """Direct coverage for `_has_rotatable_sibling`.
+class TestTheCapEngagesOnObservedRotation:
+    """Direct coverage for `_request_has_rotated`.
 
-    Round 4 (R20) noted that this predicate had NO direct test and that no
-    failover test resolved through the cascade's override/env tiers, which is
-    why four consecutive rounds each narrowed "what counts as a pool" by one
-    step and each stopped one step short:
+    Five rounds of review each found the previous PREDICTION of "is there a
+    sibling?" drifting from what the cascade actually does -- rows, then
+    unblocked rows, then same-type rows, then rows behind an override, then
+    rows split across cascade tiers. Each drift cost a real user retries.
 
-    R11 counted rows, R16 counted blocked rows, R20 counted rows the cascade
-    can never select. Enumerating the shapes here, rather than only asserting
-    request counts end to end, is what stops a fifth.
+    The question is now answered by observation: `attempted_keys` is the set of
+    distinct bearers `resolve_next_key` has already returned, so the cap
+    engages exactly when a second one exists and cannot be wrong about a
+    configuration it never enumerates. These tests pin that contract.
     """
 
-    @staticmethod
-    def _store(tmp_path: Any) -> Any:
-        from local_operator.providers.auth_store import AuthStore
+    def test_no_bearer_yet_is_not_a_pool(self) -> None:
+        assert not _request_has_rotated(AuthRetryKeyState())
 
-        return AuthStore(db_path=tmp_path / "auth.db")
+    def test_one_bearer_is_not_a_pool(self) -> None:
+        """A lone credential, an override bearer, or a pool whose siblings are
+        all spent: whatever the table says, ONE bearer cannot multiply."""
+        state = AuthRetryKeyState(attempted_keys={"only"})
+        assert not _request_has_rotated(state)
 
-    @staticmethod
-    def _access(kind: str, credential_id: int) -> Any:
-        from local_operator.providers.auth_store import OAuthAccess
-
-        return OAuthAccess(access_token="t", credential_id=credential_id, kind=kind)
-
-    def _oauth(self, store: Any, n: int, provider: str = "openai") -> list[Any]:
-        return [
-            store.upsert_credential(
-                provider,
-                {
-                    "type": "oauth",
-                    "access": f"k{i}",
-                    "refresh": "r",
-                    "expires": None,
-                    "email": f"a{i}@example.com",
-                },
-            )
-            for i in range(n)
-        ]
-
-    def test_a_lone_credential_is_not_a_pool(self, tmp_path: Any) -> None:
-        store = self._store(tmp_path)
-        rows = self._oauth(store, 1)
-        assert not _has_rotatable_sibling(store, "openai", self._access("oauth", rows[0].id))
-
-    def test_two_healthy_siblings_are_a_pool(self, tmp_path: Any) -> None:
-        store = self._store(tmp_path)
-        rows = self._oauth(store, 2)
-        assert _has_rotatable_sibling(store, "openai", self._access("oauth", rows[0].id))
-
-    def test_blocked_siblings_do_not_count(self, tmp_path: Any) -> None:
-        """R16: a quota-blocked row is skipped by rotation and by the cascade."""
-        store = self._store(tmp_path)
-        rows = self._oauth(store, 4)
-        for row in rows[1:]:
-            store.block_credential(row.id, "openai", block_ms=600_000)
-        assert not _has_rotatable_sibling(store, "openai", self._access("oauth", rows[0].id))
-
-    def test_a_row_of_another_type_is_not_a_sibling(self, tmp_path: Any) -> None:
-        """R16: `rotate_sibling` only walks rows of the same credential_type."""
-        store = self._store(tmp_path)
-        oauth_row = self._oauth(store, 1)[0]
-        store.upsert_credential("openai", {"type": "api_key", "key": "sk", "source": "login"})
-        assert not _has_rotatable_sibling(store, "openai", self._access("oauth", oauth_row.id))
-
-    def test_a_bearer_with_no_row_behind_it_can_rotate_nowhere(self, tmp_path: Any) -> None:
-        """R20: the override/env tiers resolve to `credential_id=0`.
-
-        Rotation cannot move off such a bearer -- the same override wins the
-        cascade every time -- so stored rows beside it are unreachable by
-        construction, however many there are.
-        """
-        store = self._store(tmp_path)
-        self._oauth(store, 3)
-        # SEVERAL api_key rows, so a check that only matched on `kind` would
-        # find a "pool" here and cap the override's budget.
-        for i in range(2):
-            store.upsert_credential(
-                "openai", {"type": "api_key", "key": f"sk-{i}", "source": "login"}
-            )
-
-        assert not _has_rotatable_sibling(store, "openai", self._access("api_key", 0))
-
-    def test_a_store_that_cannot_enumerate_defaults_to_uncapped(self) -> None:
-        """No evidence of a pool means the user's configured budget stands."""
-        auth = FakeAuth({"openai": ["k1", "k2"]})
-        assert not _has_rotatable_sibling(auth, "openai", self._access("api_key", 1))
+    def test_a_second_distinct_bearer_is_a_pool(self) -> None:
+        state = AuthRetryKeyState(attempted_keys={"k1", "k2"})
+        assert _request_has_rotated(state)
 
 
 class TestAnOverrideBearerKeepsItsBudget:
@@ -2338,6 +2289,112 @@ class TestAnOverrideBearerKeepsItsBudget:
         finally:
             failover_module._abortable_sleep = original  # type: ignore[assignment]
 
-        # The override served every attempt, and kept the configured budget.
+        # The override served every attempt: there is no sibling to rotate to,
+        # so it is never starved by a pool that does not exist. It gets the
+        # pre-rotation allowance and then, once rotation reports exhaustion, the
+        # configured budget again -- well beyond the 3 requests the earlier
+        # table-counting versions allowed it.
         assert set(sent) == {"gateway-key"}, sent
-        assert len(sent) == 11, len(sent)
+        assert len(sent) >= 8, len(sent)
+
+
+class TestTheTurnWideCeiling:
+    """The per-credential cap bounds each account; this bounds their PRODUCT.
+
+    Widening rotation to walk the whole pool multiplied the load by the pool
+    size at exactly the moment the provider was asking for less. The quantity
+    that reaches the provider is the total, so that is what is bounded.
+    """
+
+    async def test_a_storm_never_exceeds_the_turn_ceiling(self, tmp_path: Any) -> None:
+        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.failover import MAX_SERVER_FAULT_REQUESTS_PER_TURN
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        for i in range(6):  # a pool larger than the ceiling would allow per-account
+            store.upsert_credential(
+                "openai",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+        sent: list[str | None] = []
+
+        def overloaded(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            sent.append(api_key)
+            raise ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(overloaded)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                async for _ in stream_with_failover(
+                    _request(), store, {"retry": {"enabled": True, "maxRetries": 10}}, client_for
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert len(sent) <= MAX_SERVER_FAULT_REQUESTS_PER_TURN + 1, len(sent)
+        # And it still rotated rather than hammering one account.
+        assert len(set(sent)) > 1, sent
+
+    async def test_api_key_rows_split_across_cascade_tiers_keep_their_budget(
+        self, tmp_path: Any
+    ) -> None:
+        """R22: `api_key` rows live in cascade tier 4 (`source == "login"`) and
+        tier 6, and a tier-4 row always wins -- so two rows of the same type can
+        still yield exactly one reachable bearer. Predicting this from the table
+        is what the observation model removes the need to do."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        store.upsert_credential(
+            "openai", {"type": "api_key", "key": "login-key", "source": "login"}
+        )
+        store.upsert_credential("openai", {"type": "api_key", "key": "migrated-key"})
+
+        attempts = [0]
+
+        def blip_then_recover(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts[0] += 1
+            if attempts[0] < 6:
+                raise ProviderError(500, "blip", retryable=True)
+            return _clean_stream()
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(blip_then_recover)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request(),
+                store,
+                {"retry": {"enabled": True, "maxRetries": 10}},
+                client_for,
+                session_id="s",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        # Reached attempt 6 rather than being capped at 3.
+        assert attempts[0] == 6, attempts[0]

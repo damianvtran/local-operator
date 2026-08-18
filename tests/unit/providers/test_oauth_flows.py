@@ -1178,3 +1178,52 @@ class TestZaiSignInMintsADurableKey:
         assert query["state"] == ["st-1"]
         assert query["response_type"] == ["code"]
         assert "code_challenge" not in query
+
+    async def test_the_stored_credential_is_readable_by_the_cascade(self, tmp_path: Any) -> None:
+        """R21: the join nothing tested -- sign in, then RESOLVE what was stored.
+
+        Two green tests used to sit either side of this gap: one asserted the
+        registry's `zai-oauth` fields, the other asserted the login flow's
+        return dict. Neither stored a real payload and asked the AuthStore for
+        it back, so a credential shape that no cascade tier could read shipped
+        as a working sign-in: the login reported success and every subsequent
+        request failed without one HTTP call being made.
+
+        This walks the real path end to end -- `ZaiOAuthFlow.exchange_token` ->
+        the exact `upsert_credential` call `ProviderController.login` makes ->
+        `get_api_key` / `get_oauth_access` -- because each of those three
+        components was individually correct while their composition was not.
+        """
+        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.registry import get_provider_definition
+        from local_operator.providers.oauth.zai import ZaiOAuthFlow
+
+        calls: list[str] = []
+        flow = ZaiOAuthFlow(
+            http_client=httpx.AsyncClient(transport=self._transport(calls, existing_key=False))
+        )
+        creds = await flow.exchange_token("c", "s", "http://localhost:54548/callback")
+
+        # `store_credentials_as` is what makes the sign-in and the pasted key
+        # share one row, so the test must store under the alias the controller
+        # resolves rather than under the provider id it was invoked with.
+        definition = get_provider_definition("zai-oauth")
+        assert definition is not None
+        storage = definition.store_credentials_as or "zai-oauth"
+        assert storage == "zai"
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        creds.setdefault("authorized_at", 1)
+        store.upsert_credential(storage, creds)
+
+        # The bearer the wire actually receives. `None` here is the R21 failure:
+        # a row present, typed `api_key`, secret under `access`, unreadable.
+        assert await store.get_api_key("zai") == "key-id.sec-ret"
+
+        access = await store.get_oauth_access("zai")
+        assert access is not None
+        assert access.access_token == "key-id.sec-ret"
+        # Typed `oauth` so tier 3 can see it, and so the row carries the signed-in
+        # identity that `_FETCHERS["zai-oauth"]` needs for quota reporting.
+        assert access.kind == "oauth"
+        assert access.email == "damian@example.com"

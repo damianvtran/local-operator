@@ -443,9 +443,20 @@ def is_direct_credential_rotation_error(error: BaseException) -> bool:
     and transport timeouts) are here too. A refresh cannot fix the PROVIDER
     being overloaded, so the refresh step is equally pointless, and the sticky
     credential is not at fault so it keeps its place — that is exactly the
-    contract this predicate expresses. See
-    :func:`allows_full_sibling_rotation` for why they must also be exempt from
-    the ordinary-401 switch cap.
+    contract this predicate expresses.
+
+    The same answer decides which errors may cycle EVERY sibling rather than
+    switching once and stopping. The ``legacy_auth_switch_used`` cap in
+    :class:`AuthRetryKeyState` exists for the ordinary-401 case, where a second,
+    third and fourth bearer are all equally likely to be rejected and cycling
+    them only delays a login prompt the user has to answer anyway. That is the
+    wrong rule for a pool of accounts that fail INDEPENDENTLY: with four
+    Anthropic accounts and a 529 storm the cap stopped after the second account
+    and reported the turn dead while two healthy accounts were never asked --
+    the reported failure. Quota is the same story, since one account's spent
+    weekly window says nothing about the other three. So exhaustion, payment,
+    permission and server-side faults may walk the whole pool; only an ordinary
+    401 keeps the single-switch cap.
     """
     if not isinstance(error, ProviderError):
         return False
@@ -468,26 +479,6 @@ def is_server_side_failure(error: BaseException) -> bool:
     if error.kind in ("timeout", "transient"):
         return True
     return error.status is not None and error.status >= 500
-
-
-def allows_full_sibling_rotation(error: BaseException) -> bool:
-    """May this error cycle EVERY sibling, rather than one switch and stop?
-
-    The ``legacy_auth_switch_used`` cap in :class:`AuthRetryKeyState` exists for
-    the ordinary-401 case, where a second, third and fourth bearer are all
-    equally likely to be rejected and cycling them only delays a login prompt
-    the user has to answer anyway.
-
-    It is the wrong rule for a pool of accounts that fail INDEPENDENTLY. With
-    four Anthropic accounts and a 529 storm, the cap stopped after the second
-    account and reported the turn dead while two healthy accounts were never
-    asked — the reported failure. Quota is the same story: one account's spent
-    weekly window says nothing about the other three.
-
-    So exhaustion, payment, permission and server-side faults may walk the whole
-    pool; only an ordinary 401 keeps the single-switch cap.
-    """
-    return is_direct_credential_rotation_error(error)
 
 
 def retry_after_ms_from_error(error: BaseException) -> int | None:
@@ -554,6 +545,17 @@ class AuthRetryKeyState:
     """
 
     attempted_keys: set[str] = dataclasses.field(default_factory=set)
+    #: What ``AuthStore.rotate_sibling`` last reported: whether ANOTHER usable
+    #: credential remained after the failing one was set aside. Recorded rather
+    #: than recomputed because the store is the only thing that knows its own
+    #: cascade -- tiers, blocks, credential types and aliases included. Starts
+    #: Set once rotation has been ATTEMPTED and the store has answered. ``None``
+    #: means "not yet asked", which the budget rule treats as "there may be one"
+    #: -- so the first bearer spends the small per-credential allowance and the
+    #: turn moves on to discover the truth, rather than burning ten attempts in
+    #: place while three healthy accounts wait (the reported bug) or being
+    #: capped on an assumption that never gets tested (its mirror image).
+    sibling_available: bool | None = None
     last_key: str | None = None
     refreshed_current: bool = False
     legacy_auth_switch_used: bool = False
@@ -782,15 +784,36 @@ BACKOFF_JITTER_FRACTION = 0.25
 MAX_USAGE_RETRY_AFTER_MS = 30_000
 MAX_SAME_CREDENTIAL_USAGE_RETRIES = 2
 
-# Same-credential retries for a SERVER-side fault (5xx/529/timeout). Small for
-# the same reason the usage cap is, and the reason grew stronger once rotation
-# was widened to walk the whole pool: this budget is spent once per ACCOUNT, so
-# the full `max_retries` (default 10) becomes 10 x pool size requests aimed at a
-# provider that has just said it is overloaded -- 44 requests over ~190s for a
-# four-account pool, measured. Two attempts per account still absorbs the brief
-# 529 blips these codes usually are, while the pool walk (which tries a
-# DIFFERENT account, the thing most likely to succeed) happens sooner.
+# Same-credential retries for a SERVER-side fault (5xx/529/timeout) ONCE this
+# request has rotated onto a second bearer. The first credential keeps the full
+# configured budget -- a lone credential, an override bearer or a pool whose
+# siblings are all spent must not lose retries it has nowhere else to spend --
+# and the cap engages only when the multiplication it exists to prevent has
+# actually begun. See `_rotation_has_produced_a_sibling` for why this is
+# observed rather than predicted.
 MAX_SAME_CREDENTIAL_SERVER_RETRIES = 2
+
+#: Hard ceiling on the requests ONE turn will aim at a provider for server-side
+#: faults, across every credential it rotates through. The per-credential cap
+#: above bounds each account; this bounds their PRODUCT, which is the quantity
+#: that actually reaches the provider. Without it, widening rotation to walk the
+#: whole pool multiplied the load by the pool size at exactly the moment the
+#: provider was asking for less: 44 requests over ~190s for four accounts,
+#: measured, against 22 before. Twelve keeps a four-account pool walkable (each
+#: account still gets more than one look) while never exceeding the pre-change
+#: behaviour, whatever the pool size.
+MAX_SERVER_FAULT_REQUESTS_PER_TURN = 12
+
+#: Attempts the FIRST bearer may spend on a server-side fault before the turn
+#: tries another credential. It is deliberately below ``max_retries``: until a
+#: rotation has happened nothing knows whether a sibling exists, and spending
+#: the full configured budget in place is how four healthy accounts got two
+#: attempts between them (the reported bug). Small enough to leave the turn
+#: ceiling room for a real pool walk, large enough to ride out the brief blips
+#: that make up most 5xx traffic. A bearer that turns out to be alone gets the
+#: rest of its configured budget back on the next pass, because rotation
+#: exhausting is what ends the walk.
+MAX_FIRST_CREDENTIAL_SERVER_RETRIES = 3
 
 
 def backoff_delay_ms(base_delay_ms: int, attempt: int, *, rng: random.Random | None = None) -> int:
@@ -805,7 +828,8 @@ def _same_credential_retry_allowed(
     transport_retries: int,
     retry: "RetrySettings",
     *,
-    rotates_across_pool: bool = True,
+    has_rotated: bool = False,
+    server_fault_requests: int = 0,
 ) -> bool:
     if not error.retryable:
         return False
@@ -813,18 +837,41 @@ def _same_credential_retry_allowed(
         if (error.retry_after_ms or 0) > MAX_USAGE_RETRY_AFTER_MS:
             return False
         return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_USAGE_RETRIES)
-    if is_server_side_failure(error) and rotates_across_pool:
-        # Capped ONLY when there is a pool to rotate through. The budget is spent
-        # once per ACCOUNT, so with several credentials the full `max_retries`
-        # multiplies by the pool size and aims the product at a provider that is
-        # already saying it is overloaded.
+    if is_server_side_failure(error):
+        # The turn-wide ceiling applies unconditionally: it is about what the
+        # PROVIDER receives, so it cannot depend on how the requests were
+        # distributed across credentials.
+        if server_fault_requests >= MAX_SERVER_FAULT_REQUESTS_PER_TURN:
+            return False
+        # Rotation comes FIRST while it still has somewhere to go.
         #
-        # `rotates_across_pool` is what keeps that reasoning honest: with a
-        # single credential there is no multiplication and nothing to rotate to,
-        # so capping there would only take away retries the user configured and
-        # fail a 500 blip that would have cleared -- a regression against the
-        # behaviour before any of this, for the users least able to absorb it.
-        return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_SERVER_RETRIES)
+        # A provider-side fault is not the credential's fault, but another
+        # ACCOUNT is nonetheless the thing most likely to succeed -- the pool
+        # walk is the fix this whole change exists to deliver. Spending a full
+        # `max_retries` on the first bearer before rotating starves that walk
+        # against the turn ceiling: four accounts, and only two were ever tried,
+        # which is the original reported bug arriving by a new route.
+        #
+        # So while a sibling remains reachable, each bearer gets the small
+        # per-credential allowance and the turn moves on. `has_untried_sibling`
+        # is the driver's OBSERVATION that rotation is still producing new
+        # bearers, not a prediction from the credential table.
+        if has_rotated:
+            return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_SERVER_RETRIES)
+        # Not yet rotated. The first bearer gets a SMALL allowance rather than
+        # the configured budget, because nothing yet knows whether a sibling
+        # exists and finding out is cheap: rotation either produces another
+        # credential (in which case the turn should be walking the pool, not
+        # burning ten attempts in place -- the reported bug) or is exhausted, and
+        # exhaustion ends the walk without costing anything. This deliberately
+        # does NOT consult the credential table: every version that did drifted
+        # from what the cascade actually selects (blocked rows, credential
+        # types, override bearers, rows split across tiers), and each drift took
+        # retries away from someone who had nowhere else to spend them.
+        return transport_retries < min(retry.max_retries, MAX_FIRST_CREDENTIAL_SERVER_RETRIES)
+        # Nothing left to rotate onto: the configured budget is the right answer
+        # again, because there is no multiplication left to prevent. This is the
+        # lone credential, the override bearer, and the last account standing.
     return transport_retries < retry.max_retries
 
 
@@ -1269,6 +1316,11 @@ async def stream_with_failover(
 
     reported: ProviderError | None = None
     reported_score = -1
+    # Requests this turn has aimed at a provider that answered with a
+    # server-side fault, counted across every credential AND every fallback
+    # target: the ceiling is about what the provider receives, not about how
+    # the attempts were distributed.
+    server_fault_requests = 0
     clients: dict[tuple[str, str | None], "WireClient"] = {}
     rng = random.Random()
 
@@ -1327,6 +1379,10 @@ async def stream_with_failover(
         current_token: str | None = None
         transport_retries = 0
         retry_same_key = False
+        # The last credential that actually produced a bearer, and whether its
+        # configured budget has already been handed back once rotation ran out.
+        last_access: "OAuthAccess | None" = None
+        exhausted_budget_restored = False
 
         while state.attempts <= AUTH_RETRY_MAX_ATTEMPTS:
             if signal is not None and signal.aborted:
@@ -1347,7 +1403,26 @@ async def stream_with_failover(
                     current_token = token
                     transport_retries = 0  # fresh credential ⇒ fresh budget
                 if access is None and error is not None:
-                    break  # rotation exhausted for this provider
+                    # Rotation is exhausted: no other credential exists. The
+                    # small pre-rotation allowance exists ONLY to get a turn
+                    # moving to another account, so with nowhere to go the
+                    # bearer already in hand finishes the budget the user
+                    # configured -- once. Without this a lone credential, and
+                    # the last account standing during an outage, lost every
+                    # retry past the allowance (the regression rounds 2 and 3
+                    # both filed).
+                    if (
+                        not exhausted_budget_restored
+                        and last_access is not None
+                        and is_server_side_failure(error)
+                        and server_fault_requests < MAX_SERVER_FAULT_REQUESTS_PER_TURN
+                    ):
+                        exhausted_budget_restored = True
+                        access = last_access
+                        transport_retries = 0
+                        error = None
+                    else:
+                        break  # rotation exhausted for this provider
                 if access is None and not _provider_allows_missing(provider):
                     # "No API key configured" is only true when the provider has
                     # NO credential at all. Said unconditionally it was actively
@@ -1363,6 +1438,8 @@ async def stream_with_failover(
                     break
                 error = None
             retry_same_key = False
+            if access is not None:
+                last_access = access
             key = access.access_token if access is not None else None
 
             forwarded_any = False
@@ -1399,18 +1476,19 @@ async def stream_with_failover(
                 if forwarded_any:
                     raise  # partial output already reached the caller
                 record(exc, primary=is_primary)
+                if is_server_side_failure(exc):
+                    server_fault_requests += 1
                 if not retry.enabled:
                     raise
                 if _same_credential_retry_allowed(
                     exc,
                     transport_retries,
                     retry,
-                    # Asked at the moment of the DECISION, not cached per target.
-                    # Blocking happens mid-turn (a sibling hits its quota during
-                    # the same storm), so a value computed once goes stale in the
-                    # direction that hurts: it keeps claiming a pool after the
-                    # pool is gone, and caps the last healthy credential.
-                    rotates_across_pool=_has_rotatable_sibling(auth, provider, access),
+                    # OBSERVED, not predicted: has rotation actually produced a
+                    # different bearer for this request? See
+                    # `_rotation_has_produced_a_sibling`.
+                    has_rotated=_request_has_rotated(state),
+                    server_fault_requests=server_fault_requests,
                 ):
                     # 5xx/network-style failures use the configured budget.
                     # Rate limits retry once only when the advertised delay is
@@ -1423,6 +1501,13 @@ async def stream_with_failover(
                     await _abortable_sleep(delay, signal)
                     retry_same_key = True
                     continue
+                if _server_fault_budget_spent(exc, server_fault_requests):
+                    # The turn has aimed its whole server-fault budget at this
+                    # provider. Rotating again would keep spending it on an
+                    # outage the credentials are not responsible for, so hand
+                    # over to the fallback chain (a DIFFERENT provider) instead,
+                    # which is the thing left that might actually succeed.
+                    break
                 if exc.retryable or exc.auth_error or exc.status in (401, 403):
                     # Delegate: (b) refresh same account, then (c) rotate —
                     # resolve_next_key owns the decision (PR-04/05).
@@ -1440,6 +1525,8 @@ async def stream_with_failover(
                     # into the log.
                     raise wrapped from exc
                 record(wrapped, primary=is_primary)
+                if is_server_side_failure(wrapped):
+                    server_fault_requests += 1
                 if not retry.enabled:
                     raise wrapped from exc
                 # Same budget rule as the ProviderError arm above, asked the same
@@ -1455,7 +1542,8 @@ async def stream_with_failover(
                     wrapped,
                     transport_retries,
                     retry,
-                    rotates_across_pool=_has_rotatable_sibling(auth, provider, access),
+                    has_rotated=_request_has_rotated(state),
+                    server_fault_requests=server_fault_requests,
                 ):
                     transport_retries += 1
                     await _abortable_sleep(
@@ -1463,6 +1551,8 @@ async def stream_with_failover(
                     )
                     retry_same_key = True
                     continue
+                if _server_fault_budget_spent(wrapped, server_fault_requests):
+                    break  # same ceiling, same reasoning as the arm above
                 error = wrapped
                 continue
             else:
@@ -1530,7 +1620,13 @@ async def _resolve_access_for_provider(
                 if record is None:
                     return await _key()
             elif ctx.last_chance:
-                auth.rotate_sibling(provider, session_id, ctx.error, api_key=ctx.previous_key)
+                # The store's OWN answer to "is another credential left?", kept
+                # for the retry-budget decision. Nothing else in this module
+                # knows the cascade's tiers, blocks and aliases well enough to
+                # work it out, and five review rounds of trying proved it.
+                state.sibling_available = bool(
+                    auth.rotate_sibling(provider, session_id, ctx.error, api_key=ctx.previous_key)
+                )
                 record = await _access()
                 if record is None:
                     return await _key()
@@ -1576,68 +1672,37 @@ def _clear_demotion(auth: FailoverAuthStore, provider: str, access: "OAuthAccess
         logger.debug("could not clear demotion for %s/%s", provider, access.credential_id)
 
 
-def _has_rotatable_sibling(
-    auth: FailoverAuthStore, provider: str, access: "OAuthAccess | None"
-) -> bool:
-    """Is there another credential this turn could ACTUALLY rotate onto?
+def _server_fault_budget_spent(error: ProviderError, server_fault_requests: int) -> bool:
+    """Has this turn spent its whole server-fault allowance on one provider?
 
-    The retry cap is justified by one thing only: the same budget being spent
-    again on a sibling, multiplying the requests aimed at a struggling provider.
-    So the question has to be asked exactly as rotation would answer it, not as
-    a count of rows that happen to exist. Counting raw rows claimed a pool in
-    two configurations where rotation reaches nothing, and the cap then took
-    away retries with nowhere to spend them:
-
-    - **Blocked siblings.** A quota-exhausted account is skipped by
-      ``rotate_sibling`` and by the cascade. Four accounts with three blocked is
-      this PR's own headline scenario -- several accounts spent mid-degradation,
-      one healthy -- where a raw count said "pool of 4" and the survivor lost 8
-      of its 10 retries.
-    - **Mixed credential types.** ``rotate_sibling`` only walks siblings of the
-      SAME ``credential_type``, so an OAuth sign-in plus a pasted API key is two
-      rows and zero rotation.
-
-    - **A bearer that is not a stored row at all.** The cascade's runtime
-      override (``--api-key``), config override and env-var tiers return no row,
-      and the resolver wraps them as ``credential_id=0``. Rotation cannot move
-      off such a bearer -- there is nothing to move to, and the same override
-      wins the cascade again every time -- so counting the stored rows beside it
-      claimed a pool that is unreachable BY CONSTRUCTION. ``credential_id`` is
-      already the sentinel for "not a row", so it is what this asks.
-
-    A store that cannot enumerate (the structural protocol promises only
-    ``get_api_key``) answers ``False``: without evidence of a reachable sibling
-    the honest default is the UNCAPPED budget the user configured.
+    Checked before ROTATING as well as before retrying, because rotation is the
+    other way the same turn sends the provider another request: bounding only
+    the same-credential path let a large pool walk straight past the ceiling.
     """
-    if not isinstance(auth, CredentialLister):
-        return False
-    # No row behind this bearer (override/env tier, or a bare-key test double):
-    # nothing to rotate onto, whatever the table happens to contain.
-    if access is not None and not access.credential_id:
-        return False
-    try:
-        usable = [
-            row
-            for row in auth.list_credentials(provider)
-            if row.disabled_cause is None and not _is_blocked(auth, row, provider)
-        ]
-    except Exception:  # noqa: BLE001 - a retry decision must never raise
-        return False
-    if access is None:
-        return len(usable) > 1
-    return sum(1 for row in usable if row.credential_type == access.kind) > 1
+    return (
+        is_server_side_failure(error)
+        and server_fault_requests >= MAX_SERVER_FAULT_REQUESTS_PER_TURN
+    )
 
 
-def _is_blocked(auth: FailoverAuthStore, row: "StoredCredential", provider: str) -> bool:
-    """Whether the store considers ``row`` blocked, tolerating stores without
-    the notion (test doubles, embedder-supplied credential sources)."""
-    is_blocked = getattr(auth, "is_blocked", None)
-    if not callable(is_blocked):
-        return False
-    try:
-        return bool(is_blocked(row.id, provider))
-    except Exception:  # noqa: BLE001
-        return False
+def _request_has_rotated(state: AuthRetryKeyState) -> bool:
+    """Is there a credential this request has not tried and could still reach?
+
+    This decides ONE thing: whether to keep the per-credential allowance small
+    so the turn moves on to another account, or to spend the configured budget
+    here because there is nowhere else to go.
+
+    It reads the store's OWN report (``AuthStore.rotate_sibling`` returns
+    whether another usable credential remained) rather than modelling the
+    credential table. Five review rounds each found a predictive version
+    drifting from what the cascade actually does -- raw row counts, then blocked
+    rows, then credential types, then override bearers with no row at all, then
+    ``api_key`` rows split across cascade tiers where one always wins -- and
+    every drift cost a real user retries they needed. The store is the only
+    thing that knows its own tiers, blocks, aliases and overrides; asking it is
+    the fix that does not have a sixth version.
+    """
+    return len(state.attempted_keys) > 1
 
 
 def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:
@@ -1673,12 +1738,21 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
     )
     # Retryable: the credential comes back on its own once the block expires,
     # which is materially different from a missing configuration.
+    #
+    # The wording hedges on WHY deliberately. A row can also be present and
+    # permanently unreadable -- a login flow storing a shape no cascade tier
+    # resolves, which is what R21 was -- and for that user "temporarily
+    # unavailable, retry once the limit resets" is advice that can never come
+    # true, and it hides the real fix (sign in again). Naming the third cause
+    # costs a clause and stops the message actively misdirecting; the rate-limit
+    # case, which is the common one, still reads first.
     return ProviderError(
         None,
         (
-            f"{subject} temporarily unavailable (rate limited, or a token refresh "
-            "failed). The credentials are still configured; retry once the limit "
-            "resets, or add another account."
+            f"{subject} not usable right now (rate limited, a token refresh "
+            "failed, or the stored credential could not be read). The "
+            "credentials are still configured; retry once the limit resets, or "
+            "sign in again to replace them."
         ),
         retryable=True,
         kind="quota",

@@ -773,3 +773,48 @@ class TestADemotionEndsOnItsOwn:
         assert store._active_demotions("anthropic") == set()
         order = store._selection_order(store.list_credentials("anthropic"), "anthropic", "s1")
         assert [r.id for r in order] == [r.id for r in store.list_credentials("anthropic")]
+
+
+class TestARefreshlessOAuthCredentialIsReadable:
+    """R21: a credential that is OAuth-issued but never expires.
+
+    `upsert_credential` guessed the type from "has both refresh and access",
+    which cannot see a credential with no refresh token because it does not
+    expire -- Z.AI's coding-plan sign-in mints exactly that. Such a row landed
+    as `api_key` with its secret under `data["access"]`, where NOTHING can read
+    it: tiers 4 and 6 read `data["key"]`, tier 3 only walks `oauth` rows. The
+    login reported success and every later request failed with no credential,
+    behind this PR's new "temporarily unavailable" message.
+    """
+
+    async def test_an_explicit_type_survives_the_structural_guess(self, tmp_path: Any) -> None:
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        row = store.upsert_credential(
+            "zai",
+            {
+                "type": "oauth",
+                "access": "key-id.sec-ret",
+                "expires": None,  # minted key: never expires, so no refresh exists
+                "email": "damian@example.com",
+                "account_id": "42",
+            },
+        )
+
+        assert row.credential_type == "oauth"
+        assert await store.get_api_key("zai") == "key-id.sec-ret"
+        access = await store.get_oauth_access("zai")
+        assert access is not None and access.kind == "oauth"
+        assert access.email == "damian@example.com"
+
+    async def test_an_undeclared_credential_still_gets_the_old_guess(self, tmp_path: Any) -> None:
+        """The structural fallback is unchanged for every existing caller."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        oauth = store.upsert_credential("openai", {"access": "a", "refresh": "r", "expires": 1})
+        pasted = store.upsert_credential("openai", {"key": "sk-1", "source": "login"})
+
+        assert oauth.credential_type == "oauth"
+        assert pasted.credential_type == "api_key"

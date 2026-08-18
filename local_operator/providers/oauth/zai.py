@@ -314,6 +314,12 @@ class ZaiOAuthFlow(OAuthCallbackFlow):
 
         user = data.get("user") if isinstance(data, dict) else None
         creds: dict[str, Any] = {
+            # Declared, not inferred. `upsert_credential` otherwise guesses the
+            # type from "has both refresh and access", and this credential has
+            # no refresh token (the minted key never expires), so it would be
+            # stored as an `api_key` row with its secret under `access` -- where
+            # no tier of the cascade can read it.
+            "type": "oauth",
             # The MINTED key, not the OAuth token: this is what the inference
             # endpoint accepts, and `_oauth_api_key` hands it straight to the wire.
             "access": minted,
