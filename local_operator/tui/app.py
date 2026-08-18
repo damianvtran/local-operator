@@ -2188,9 +2188,61 @@ class OperatorApp(App[None]):
         because the usage panel lit up".
         """
         self._sync_composer_focus()
+        self._keep_prompt_answerable()
 
     def on_descendant_blur(self, event: DescendantBlur) -> None:
         self._sync_composer_focus()
+
+    def _keep_prompt_answerable(self) -> None:
+        """Hand focus back to a live prompt when the composer has nothing typed.
+
+        The defect this closes: a prompt takes focus so its answer keys reach
+        it, the user clicks into the composer (or Tab lands there), and from
+        that moment every key the card still advertises is typed into the prompt
+        buffer as text while the tool goes on waiting. Reproduced with the most
+        likely gesture there is — click the composer, press `y`, watch a `y`
+        appear in the draft and the question stay up (D5, design round 1). It is
+        the exact defect this whole rework exists to remove, surviving in the
+        one path that does not go through the card's own key handling.
+
+        The rule is EMPTINESS, not "never leave the prompt". A user with a draft
+        in progress is doing something deliberate and must keep the caret: they
+        may be composing a steer, or looking something up to answer with. An
+        empty composer is not deliberate, though — it is a stray click or a Tab
+        — and it is the state in which the advertised keys are silently dead.
+        So focus bounces back only while the buffer holds nothing, which leaves
+        the drafting case untouched and makes `y` mean `y` in the common one.
+
+        The escape hatch stays open in both directions: typing anything at all
+        into the composer keeps focus there (the guard only fires on an empty
+        buffer, and the first character makes it non-empty), and clicking the
+        card takes focus back deliberately.
+        """
+        prompt = self._live_prompt()
+        if prompt is None:
+            return
+        try:
+            editor = self._editor()
+        except Exception:  # pragma: no cover - hosts with no composer
+            return
+        if not editor.has_focus or editor.text.strip():
+            return
+        prompt.focus()
+
+    def _live_prompt(self):  # type: ignore[no-untyped-def]
+        """The prompt currently awaiting an answer, or ``None``.
+
+        Either surface: an unanswered approval, or the ``ask`` picker. Both are
+        mounted in the prompt host and both are answered by keys that the
+        composer would otherwise swallow.
+        """
+        approval = self._approval
+        if approval is not None and not approval.answered and approval.is_attached:
+            return approval
+        picker = self._ask_screen
+        if picker is not None and not picker.settled and picker.is_attached:
+            return picker
+        return None
 
     def _sync_composer_focus(self) -> None:
         """Mark the input dock while the composer — and only it — has focus.
@@ -2460,6 +2512,15 @@ class OperatorApp(App[None]):
         try:
             return await prompt.wait()
         finally:
+            # Clear the registration BEFORE unmounting. `_unmount_prompt` hands
+            # focus back to the composer, and the focus guard
+            # (`_keep_prompt_answerable`) asks `_live_prompt()` whether anything
+            # is still owed an answer — so with `self._approval` still pointing
+            # at this card, the guard bounced focus straight back onto the
+            # prompt it was being taken off, leaving the composer unfocusable
+            # after every answered approval.
+            if self._approval is prompt:
+                self._approval = None
             self._unmount_prompt(prompt)
             # The decision belongs in the conversation: what was asked, and what
             # was answered. Appended after the fact so the transcript records a
@@ -2548,6 +2609,16 @@ class OperatorApp(App[None]):
             if self._ask_pending is future:
                 self._ask_pending = None
                 self._ask_screen = None
+            # Take the card down on the ORDINARY path too, not only when a stop
+            # or a teardown settles it. The card resolves its own future from
+            # `settle`, so answering the last question satisfied the `await`
+            # above and left the widget mounted: measured after a plain Enter,
+            # the card was still on screen, the host still held its row, and
+            # focus was still on a question nobody was waiting for — so the
+            # composer could not be typed into at all. Registration is cleared
+            # first (above) so the focus guard does not bounce focus back onto
+            # the card being removed.
+            self._unmount_prompt(card)
             self._refresh_working_activity()
 
     def _settle_ask_picker(self) -> None:
@@ -2643,6 +2714,11 @@ class OperatorApp(App[None]):
         nothing focused and every subsequent keystroke going nowhere — the user
         types their next instruction into a dead terminal.
         """
+        # Whether the card actually held focus, read BEFORE it is removed. A
+        # removed widget reports nothing useful, and the answer decides whether
+        # anything needs to move at all: a card that never had focus must not
+        # yank it from wherever the user put it.
+        held_focus = bool(getattr(card, "has_focus", False))
         restore = getattr(card, "restore_focus", None)
         if callable(restore):
             try:
@@ -2666,11 +2742,39 @@ class OperatorApp(App[None]):
         # prompt and this runs as that prompt leaves, so "empty" is what it is
         # about to be; a prompt raised after this re-shows it on mount.
         host.display = False
-        # Nothing focused is not a state this app can sit in: if the card's own
-        # restore target had gone away, the composer is where the caret belongs.
+        # The card's own restore target can be missing or stale, and then focus
+        # has nowhere to land: the widget is gone but the screen still names it
+        # as focused, so every later keystroke goes to a removed node and the
+        # composer cannot be typed into at all.
+        #
+        # It is missing more often than it looks. The target is captured at
+        # MOUNT, and a prompt raised early in a session mounts before anything
+        # has taken focus — so it records `None`, `restore_focus` is a no-op,
+        # and the card that had focus keeps it after being removed. Measured
+        # under pytest: prompt unmounted, `_approval` cleared, host hidden, and
+        # `screen.focused` still the detached `ApprovalPrompt`.
+        #
+        # So the composer is the fallback, and it is applied whenever the card
+        # HELD focus and nothing live has it now. Restricted to that case
+        # because the composer must not be stolen from a user who deliberately
+        # put the caret somewhere else while the question was up.
         try:
-            if self.screen is not None and self.screen.focused is None:
-                self._editor().focus()
+            screen = self.screen
+            if held_focus and screen is not None:
+                focused = screen.focused
+                # "Somewhere the user can type" is the test, not "somewhere".
+                #
+                # Removing a focused widget does not leave focus empty: Textual
+                # moves it to the next focusable node, which here is the
+                # TranscriptView — a scrollable region, not an input. So the
+                # app looked correctly focused while every keystroke went to a
+                # widget that does nothing with them, and the composer could
+                # not be typed into after answering. Checking only for
+                # `None`/detached missed it entirely, because the state was
+                # neither.
+                editor = self._editor()
+                if focused is not editor:
+                    editor.focus()
         except Exception:  # pragma: no cover - no composer in reduced hosts
             logger.debug("no composer to hand focus back to", exc_info=True)
 
