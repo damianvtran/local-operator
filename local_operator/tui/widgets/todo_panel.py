@@ -66,6 +66,14 @@ MAX_TODO_ROWS = 8
 #:   them, and one row of padding on each side.
 #: * 1 — this slot's own rhythm row (``.band-slot { padding: 0 0 1 0 }``).
 #:
+#: The band's top inset (``#band.has-slot { padding: 1 0 0 0 }``) is NOT in this
+#: constant, because unlike every row above it that row is conditional: the app
+#: drops it on screens too short to afford it (``MIN_BAND_INSET_SCREEN_ROWS``).
+#: It is measured off the band itself instead — see
+#: :meth:`TodoPanel._band_inset_rows` — so the budget and what is actually
+#: painted cannot disagree. Counting it here unconditionally would starve the
+#: shortest terminals of a row they are not being charged for.
+#:
 #: The header and the overflow marker are NOT in here: they are rows of the
 #: panel, allocated out of what is left (see :meth:`TodoPanel._build`), because
 #: the marker is the row the shortest terminals cannot afford.
@@ -142,10 +150,12 @@ class TodoPanel(Container):
     def __init__(self) -> None:
         super().__init__(id="todo-panel", classes="band-slot")
         self._body = Static(classes="band-body", id="todo-body")
-        #: Fingerprint of what is painted — ``(text, status, reason)`` per row —
-        #: so the 1 Hz poll repaints only when the list actually changed: an
-        #: equality guard, same discipline as the assistant flush.
-        self._shown: tuple[tuple[str, str, str], ...] | None = None
+        #: What is painted: the ``(text, status, reason)`` fingerprint per row
+        #: AND the row budget they were rendered against (see :meth:`sync`), so
+        #: the 1 Hz poll repaints only when something actually changed — an
+        #: equality guard, same discipline as the assistant flush. Both terms,
+        #: because the same list renders differently when its space changes.
+        self._shown: tuple[tuple[tuple[str, str, str], ...], int] | None = None
         # Hidden until the first todo exists: an empty panel is not content.
         self.display = False
 
@@ -175,9 +185,19 @@ class TodoPanel(Container):
                 )
                 for item in items
             )
-            if fingerprint == self._shown:
-                return  # equality guard — identical list = no work
-            self._shown = fingerprint
+            # The BUDGET rides in the guard beside the list, because what the
+            # panel paints is a function of both: the same items render a
+            # different number of rows (and a different `… N more` count) when
+            # the rows available change. A guard blind to it left the previous
+            # paint standing after a resize — or after the band's own top inset
+            # appeared, which takes a row from this budget — and a body one row
+            # taller than its budget is clipped, silently, by
+            # `Screen { overflow: hidden }`.
+            budget = self._body_rows()
+            state = (fingerprint, budget)
+            if state == self._shown:
+                return  # equality guard — identical list and budget = no work
+            self._shown = state
             if not fingerprint:
                 self.display = False
                 return
@@ -299,6 +319,28 @@ class TodoPanel(Container):
             return 0
         return max(1, width - _BODY_RAIL_CELLS)
 
+    def predicted_rows(self) -> int:
+        """Content rows this panel will paint, for a caller that cannot measure.
+
+        The dock's inset check runs at the moment a panel appears, when the slot
+        has not been arranged yet and measures zero (see ``app.slot_rows``).
+        Answering from the painted body — falling back to the budget before the
+        first paint — is what lets that check be right on the first frame rather
+        than correcting itself a tick later, which the user sees as the dock
+        jumping.
+
+        Never raises and never returns less than one: a displayed panel is at
+        least a row, and under-counting hands the transcript a row the dock is
+        about to take.
+        """
+        try:
+            content = str(self._body.content)
+        except Exception:  # body not built yet
+            content = ""
+        if content:
+            return max(1, len(content.split("\n")))
+        return max(1, self._body_rows())
+
     def _body_rows(self) -> int:
         """Rows this paint may fill — header, items and any overflow marker.
 
@@ -316,28 +358,67 @@ class TodoPanel(Container):
             return ceiling
         if screen_height <= 0:
             return ceiling
-        spare = screen_height - _DOCK_ROWS - self._band_sibling_rows()
+        spare = screen_height - _DOCK_ROWS - self._band_inset_rows() - self._band_sibling_rows()
         return max(_MIN_BODY_ROWS, min(ceiling, spare))
+
+    def _band_inset_rows(self) -> int:
+        """Rows the BAND's own top inset is spending, as it is right now.
+
+        Measured rather than assumed because the inset is conditional: the app
+        drops ``has-slot`` on screens too short to afford the row (see
+        ``OperatorApp._sync_band_inset``), and a budget that charged for it
+        unconditionally would take a row off the panel that nothing was
+        spending — on exactly the terminals with none to spare.
+
+        Read from the band's CLASS rather than its resolved padding, and the
+        difference is a visible reflow. The app toggles ``has-slot`` before the
+        panels paint, but Textual resolves the padding that class carries in a
+        LATER layout pass — so a padding read during this paint returns the
+        PREVIOUS frame's value, the list is sized against a budget that is about
+        to change, and the panel repaints one row shorter on the next tick. That
+        is motion the user sees: the todo list appears, then visibly loses a row.
+        The class is set synchronously and is therefore the honest answer to
+        "how much room will this paint actually have".
+
+        The row's SIZE is still the stylesheet's (``#band.has-slot`` declares
+        one row); this only asks whether it is being spent, which is true
+        whenever any slot is docked. Degrades to 0 for any host whose band is
+        missing, the same posture as :meth:`_band_sibling_rows`.
+        """
+        parent = self.parent
+        if parent is None:
+            return 0
+        try:
+            return 1 if parent.has_class("has-slot") else 0
+        except Exception:  # not a band (reduced test hosts); charge nothing
+            return 0
 
     def _band_sibling_rows(self) -> int:
         """Rows the band's OTHER visible slots occupy, outer size included
         because each slot owns a rhythm row below itself.
 
-        Read off the last layout, which is the honest source: the repaint that
-        calls this runs after the band settled, so a sibling's height is the one
-        already on screen. Zero before the first layout — that only makes the
-        very first paint as generous as it used to be, and the next one corrects
-        it.
+        Measured where the sibling has been laid out and PREDICTED where it has
+        not, through the same ``app.slot_rows`` the band's inset check uses —
+        one answer to "how tall is that slot", so the two cannot disagree about
+        the same frame.
+
+        A raw ``outer_size`` read was wrong here for the reason it was wrong
+        there: a sibling that has just been un-hidden measures zero until
+        Textual re-arranges, and this runs at exactly that moment (a subagent
+        starting while a todo list is up). Reading zero makes this panel budget
+        for a band that is about to be several rows taller, so it paints too
+        many rows and the dock overflows the screen until the next poll — the
+        both-panels-docked case, which the single-panel fix did not reach.
+
+        Imported lazily: the app imports this module, so a module-level import
+        would close the cycle.
         """
         parent = self.parent
         if parent is None:
             return 0
-        rows = 0
-        for slot in parent.children:
-            if slot is self or not slot.display:
-                continue
-            rows += slot.outer_size.height
-        return rows
+        from local_operator.tui.app import slot_rows
+
+        return sum(slot_rows(slot) for slot in parent.children if slot is not self and slot.display)
 
     def _item_row(self, text: str, status: str, reason: str = "") -> Text:
         """One ``- [ ]``/``- [x]``/``- [~]``/``- [-]`` row — the tool's own

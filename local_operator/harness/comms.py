@@ -76,7 +76,7 @@ HUB_MESSAGE_TYPE = "hub_message"
 #: cannot grow without bound; eviction is oldest-settled-first.
 MAX_RECORDS = 256
 
-DeliveryOutcome = Literal["injected", "queued", "cancelled", "failed"]
+DeliveryOutcome = Literal["injected", "queued", "cancelled", "paused", "failed"]
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,38 @@ class Reply:
     text: str | None = None
     error: str | None = None
     timed_out: bool = False
+
+
+@dataclass(frozen=True)
+class ChildInfo:
+    """One row of the parent's subagent roster (``hub op='list'``).
+
+    Exists because the two surfaces that could already answer "what children
+    do I have?" both answer a narrower question. ``resolve("all")`` returns
+    only RUNNING children, and the ``jobs`` tool lists job rows, which the
+    manager sweeps a few minutes after they settle. A child that failed or was
+    stopped therefore became invisible well before it stopped being
+    resumable \u2014 the parent held a record with a transcript directory and no
+    way to enumerate it, so the one case an operator most wants to act on (a
+    stuck or crashed subagent) was the case it could not see.
+    """
+
+    job_id: str
+    label: str
+    #: ``running`` | ``queued`` | ``starting`` | ``pausing`` | ``paused`` |
+    #: ``completed`` | ``failed`` | ``cancelled`` | ``gone``. Derived in
+    #: :meth:`SubagentComms.roster`; ``gone`` covers a record whose job row was
+    #: swept without a recorded outcome, and ``pausing`` a pause that has been
+    #: asked for but has not yet landed (defensive — see :meth:`_describe`).
+    status: str
+    #: Whether ``hub op='resume'`` can pick this child back up right now. The
+    #: single fact the caller acts on, computed once here rather than
+    #: re-derived by every reader from ``status`` plus transcript existence.
+    resumable: bool
+    #: Seconds since the child settled, or since launch while it is live.
+    age_s: float | None = None
+    #: Why ``resumable`` is False, when it is False for an interesting reason.
+    detail: str | None = None
 
 
 class ChildSession(Protocol):
@@ -158,6 +190,29 @@ class _ChildRecord:
     #: Created lazily on first use because it must be bound to the running
     #: loop, and ``record_launch`` can be reached from a synchronous caller.
     attached: "asyncio.Event | None" = None
+    #: Set by :meth:`SubagentComms.pause` and cleared by
+    #: :meth:`SubagentComms.resume`. A pause IS a cancel underneath (see
+    #: :meth:`SubagentComms.pause`), so this flag is the only thing that
+    #: distinguishes "stopped because the parent wants it back later" from
+    #: "stopped for good" — without it the roster would show a deliberately
+    #: parked child as plain ``cancelled`` and nothing would suggest resuming
+    #: it.
+    paused: bool = False
+    #: The child's terminal job status, captured by
+    #: :meth:`SubagentComms.record_outcome` at the moment the runner settles.
+    #:
+    #: Recorded here rather than read from the job row on demand because the
+    #: job manager SWEEPS settled rows after its retention window (5 minutes
+    #: by default) while this record deliberately outlives them — that is the
+    #: whole reason a child stays resumable for an hour. Without this field a
+    #: parent listing its children after the sweep could not tell a child that
+    #: finished cleanly from one that crashed, which is exactly the question
+    #: "which of my subagents failed?" needs answered.
+    outcome: str | None = None
+    #: The child's error text when ``outcome == "failed"``. Kept so the roster
+    #: can say WHY a child failed after its job row (which held ``error_text``)
+    #: has been swept.
+    error_text: str | None = None
 
 
 class SubagentComms:
@@ -275,6 +330,183 @@ class SubagentComms:
         if len(matches) == 1:
             return matches, None
         return [], f"unknown subagent {target!r}"
+
+    def record_outcome(self, job_id: str, status: str, error_text: str | None = None) -> None:
+        """Remember how a child settled, before its job row is swept.
+
+        Called from the subagent runner's settle paths. The job manager drops
+        settled rows after its retention window while records here outlive
+        them by design, so this is the only durable answer to "did that child
+        finish or crash?" once the row is gone.
+
+        It deliberately does NOT clear :attr:`_ChildRecord.paused`. A pause is
+        implemented as a cancel, so pausing a child makes its runner settle
+        ``cancelled`` and call straight into here; clearing the flag would
+        erase the parent's intent microseconds after it was recorded, and the
+        roster would show a deliberately parked child as an ordinary
+        cancellation. Only :meth:`resume` ends a pause.
+        """
+        record = self._records.get(job_id)
+        if record is None:
+            return
+        record.outcome = status
+        record.error_text = error_text
+
+    def roster(self) -> list[ChildInfo]:
+        """Every child this session launched, live or long settled.
+
+        Ordered newest-launch-last (insertion order), which is how the model
+        refers to them conversationally: "the last one I started".
+        """
+        now = time.time()
+        rows: list[ChildInfo] = []
+        for record in self._records.values():
+            rows.append(self._describe(record, now))
+        return rows
+
+    def _describe(self, record: _ChildRecord, now: float) -> ChildInfo:
+        """Collapse a record plus its (possibly swept) job row into one row.
+
+        Precedence is deliberate. ``paused`` outranks everything because a
+        pause is implemented AS a cancel, so the row would otherwise read
+        ``cancelled`` and hide the parent's own intent.
+
+        A RECORDED outcome then outranks the job row, which is not the obvious
+        ordering. The runner records its outcome from inside its own settle
+        path, while ``AsyncJobManager`` only stamps the row's status once that
+        coroutine has returned - so between the two there is a real window in
+        which the record knows the child finished and the row still says
+        ``running``. Reading the row first reports a finished child as running
+        for the width of that window, which is exactly when a parent polling
+        the roster is looking. Nothing reuses a job id (a resume gets a fresh
+        one, and ``attach`` only ever runs before a settle), so a record
+        carrying an outcome is settled for good and that outcome is always the
+        newer fact.
+        """
+        jobs = self._jobs()
+        job = jobs.get(record.job_id) if jobs is not None else None
+        age: float | None = None
+        detail: str | None = None
+
+        if record.paused:
+            # DEFENSIVE, not a window anyone can currently observe.
+            # ``pause`` sets this flag and then awaits ``jobs.cancel``, which
+            # stamps ``job.status = "cancelled"`` before its first suspension
+            # point — so no concurrent ``list`` gets to run in between, and a
+            # poll of a real parent/child session never saw this state. Do not
+            # read the branch as evidence that it can.
+            #
+            # It is kept because it costs one comparison and makes the
+            # roster/``resume`` invariant hold STRUCTURALLY rather than by luck
+            # about where an ``await`` happens to sit in another module. The
+            # settle-window guard below is the one that fires in practice; this
+            # is the same rule applied to the pause path so that adding an
+            # await inside ``cancel`` can never silently reopen the divergence.
+            if self._is_running(record):
+                return ChildInfo(
+                    job_id=record.job_id,
+                    label=record.label,
+                    status="pausing",
+                    resumable=False,
+                    age_s=None,
+                    detail="pause is still landing; it becomes resumable in a moment",
+                )
+            status = "paused"
+        elif record.outcome is not None:
+            status = record.outcome
+        elif job is not None and job.status == "running":
+            status = "queued" if getattr(job, "queued", False) else "running"
+            if record.child is None and status == "running":
+                # Registered and admitted, but the runner coroutine has not
+                # been entered yet. Reported distinctly because "starting" and
+                # "running" call for different advice: the first resolves on
+                # the next loop yield, the second may need a nudge.
+                status = "starting"
+        elif job is not None:
+            status = job.status
+        elif record.settled:
+            status = "cancelled" if record.session_dir is not None else "gone"
+        else:
+            status = "gone"
+
+        if status in ("running", "queued", "starting"):
+            started = getattr(job, "start_time", None) if job is not None else None
+            age = (now - started) if started else None
+        elif record.settled_at is not None:
+            age = now - record.settled_at
+
+        # Enumerated rather than defaulted to True: a status that reaches here
+        # without being listed is one nobody has reasoned about, and the safe
+        # answer for an unknown state is "not resumable" (the parent is told to
+        # wait) rather than an invitation to resume something unexamined. The
+        # old default meant any status added to the branch above was born
+        # silently resumable.
+        # ``gone`` belongs here: it means the job row was swept without a
+        # recorded outcome, which says nothing about the transcript. ``resume``
+        # asks only whether the record has a readable transcript and no live
+        # twin, so omitting ``gone`` made the roster refuse a resume that would
+        # in fact have succeeded — the same disagreement as F1, in the safe
+        # direction. The later branches still veto it when there is genuinely
+        # nothing to resume.
+        resumable = status in ("completed", "failed", "cancelled", "paused", "gone")
+        detail = detail if resumable else "not resumable in this state"
+        if status in ("running", "queued", "starting"):
+            resumable, detail = False, "still running; cancel or pause it first"
+        elif self._is_running(record):
+            # The status is settled but the JOB ROW still says running, which is
+            # the same window the precedence above exists for: the runner calls
+            # ``record_outcome`` from inside its settle path, then still awaits
+            # ``emit(SubagentEndEvent)`` — the parent's whole handler fan-out —
+            # before returning, and only then does the manager stamp the row.
+            #
+            # ``resumable`` has to ask the job row here because ``resume()``
+            # asks it (via ``_is_running``) and the two must never disagree:
+            # deriving this from the status alone advertised "failed —
+            # resumable", and the resume the parent then issued was refused with
+            # "still running". A row promising a resume that then refuses is
+            # worse than an honest refusal, and this window is measured in
+            # hundreds of milliseconds, not nanoseconds — exactly when a parent
+            # polling across the settle boundary looks.
+            resumable, detail = False, "still settling; it becomes resumable in a moment"
+        elif record.session_dir is None:
+            resumable, detail = False, "never started, so it has no transcript"
+        elif not (record.session_dir / TRANSCRIPT_FILENAME).exists():
+            resumable, detail = False, "transcript is gone from disk"
+        else:
+            live = self._live_twin(record)
+            if live is not None:
+                resumable, detail = False, f"already resumed as job {live.job_id}"
+            elif status == "failed" and record.error_text:
+                detail = f"failed: {record.error_text}"
+
+        return ChildInfo(
+            job_id=record.job_id,
+            label=record.label,
+            status=status,
+            resumable=resumable,
+            age_s=age,
+            detail=detail,
+        )
+
+    def _live_twin(self, record: _ChildRecord) -> _ChildRecord | None:
+        """Another running record already continuing this transcript, if any.
+
+        Two children on one session directory destroy each other's history
+        (see :meth:`resume`), so both ``resume`` and the roster's
+        ``resumable`` flag have to ask this question and must agree on the
+        answer.
+        """
+        return next(
+            (
+                other
+                for other in self._records.values()
+                if other.job_id != record.job_id
+                and other.session_dir is not None
+                and other.session_dir == record.session_dir
+                and self._is_running(other)
+            ),
+            None,
+        )
 
     def label_of(self, job_id: str) -> str:
         record = self._records.get(job_id)
@@ -434,12 +666,82 @@ class SubagentComms:
         if jobs is None:
             return Delivery(job_id, label, "failed", "no job manager attached to this session")
         job = jobs.get(job_id)
-        if job is None:
+        if job is None and (record is None or not record.paused):
             return Delivery(job_id, label, "failed", f"unknown job {job_id!r}")
-        if job.status != "running":
-            return Delivery(job_id, label, "failed", f"job is already {job.status}")
+        if job is None or job.status != "running":
+            # A PAUSED child is already stopped, so there is no job to abort —
+            # but "cancel" still has a meaning here that nothing else expresses:
+            # the parent has decided it will not be coming back for it. Without
+            # this, a pause was a one-way door (only ``resume`` cleared the
+            # flag), so a parent that paused a child and then changed its mind
+            # had no way to say so and the roster went on advertising a pause it
+            # had abandoned. Dropping the flag settles it as an ordinary
+            # cancellation; the transcript is untouched, so a later resume is
+            # still possible for anyone who kept the id.
+            if record is not None and record.paused:
+                record.paused = False
+                if record.outcome is None:
+                    record.outcome = "cancelled"
+                return Delivery(job_id, label, "cancelled")
+            state = job.status if job is not None else "gone"
+            return Delivery(job_id, label, "failed", f"job is already {state}")
         await jobs.cancel(job_id)
         return Delivery(job_id, label, "cancelled")
+
+    async def pause(self, job_id: str) -> Delivery:
+        """Stop a child now, keeping it explicitly resumable.
+
+        Mechanically a cancel: the job signal is aborted, the runner's
+        teardown runs ``_persist_inflight`` so the turn the abort pre-empted
+        is saved, and the transcript directory stays on disk. What ``pause``
+        adds is INTENT. ``cancel`` and ``pause`` leave a child in the same
+        physical state, and a parent coming back to a roster minutes later
+        cannot otherwise tell "I stopped this to free a slot, pick it up
+        again" from "I stopped this because it was wrong".
+
+        A true in-memory suspend was considered and rejected: freezing the
+        child at a tool-batch boundary would hold a job-capacity slot and the
+        session's memory for the whole pause, and a child inside a long tool
+        call would not reach a boundary for minutes \u2014 so the op would be
+        slowest exactly when it is most wanted, on a wedged child. Checkpoint
+        and replay costs a transcript rehydration on resume and frees
+        everything meanwhile.
+        """
+        record = self._records.get(job_id)
+        if record is None:
+            return Delivery(job_id, job_id, "failed", f"unknown subagent {job_id!r}")
+        if record.session_dir is None:
+            # Nothing has been written yet, so there would be no transcript to
+            # come back to; a "pause" that cannot resume is a cancel wearing
+            # the wrong name, and the caller should say what it means.
+            return Delivery(
+                job_id,
+                record.label,
+                "failed",
+                "subagent has not started yet, so there is no transcript to pause; "
+                "use op='cancel' to drop it",
+            )
+        jobs = self._jobs()
+        if jobs is None:
+            return Delivery(
+                job_id, record.label, "failed", "no job manager attached to this session"
+            )
+        job = jobs.get(job_id)
+        if job is None or job.status != "running":
+            state = job.status if job is not None else "gone"
+            return Delivery(
+                job_id,
+                record.label,
+                "failed",
+                f"job is already {state}; use hub op='resume' to pick it back up",
+            )
+        # Set BEFORE the cancel: cancelling settles the runner, whose teardown
+        # calls record_outcome synchronously on this loop. Setting the flag
+        # afterwards would let the roster observe a moment where a deliberate
+        # pause looked like a plain cancellation.
+        record.paused = True
+        await jobs.cancel(job_id)
+        return Delivery(job_id, record.label, "paused")
 
     def resume(self, job_id: str, message: str) -> tuple[str | None, str | None]:
         """Relaunch a stopped child against its own transcript: ``(new job id,
@@ -463,17 +765,8 @@ class SubagentComms:
                 "launch a new one with 'task'"
             )
         if self._is_running(record):
-            return None, f"subagent {record.label} is still running; cancel it first"
-        live = next(
-            (
-                other
-                for other in self._records.values()
-                if other.job_id != record.job_id
-                and other.session_dir == record.session_dir
-                and self._is_running(other)
-            ),
-            None,
-        )
+            return None, (f"subagent {record.label} is still running; cancel or pause it first")
+        live = self._live_twin(record)
         if live is not None:
             # Two children on one transcript directory is not merely confusing:
             # each holds its own in-memory ``Transcript._entries`` and
@@ -496,6 +789,11 @@ class SubagentComms:
             jobs_manager=jobs,
             resume_dir=record.session_dir,
         )
+        # The pause is over the moment its continuation exists. Left set, the
+        # old record would keep advertising ``paused`` in the roster forever
+        # beside the running child that replaced it, and a reader would be
+        # invited to "resume" a run that is already going.
+        record.paused = False
         return new_job_id, None
 
     # -- child -> parent ------------------------------------------------------

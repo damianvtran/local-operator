@@ -20,12 +20,16 @@ import pytest
 
 from local_operator.compaction import api as compaction_api
 from local_operator.compaction.api import CompactionSettings
+from local_operator.compaction.cutpoint import find_cut_point, prepare_partitions
 from local_operator.harness.types import (
     AgentEvent,
     CompactionEndEvent,
+    Message,
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
+    TextContent,
+    ToolCall,
     Usage,
 )
 from local_operator.session.session import Session, _CompactionPlan
@@ -204,3 +208,90 @@ async def test_config_knobs_move_the_session_gate(tmp_path, monkeypatch):
     pin_measured_context(monkeypatch, 200_001)
     assert refusal_reason(await session._plan_compaction(respect_threshold=True)) is None
     await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Mid-run starvation: the gate fires but the pass never lands
+# ---------------------------------------------------------------------------
+
+
+def _tool_call_assistant(index: int) -> Message:
+    """An assistant message that issues one tool call, as a real run does."""
+    message = Message.assistant(f"step {index}")
+    message.tool_calls = [ToolCall(id=f"c{index}", name="echo", arguments={})]
+    return message
+
+
+def _tool_result(index: int, text: str) -> Message:
+    return Message(
+        role="tool", tool_call_id=f"c{index}", tool_name="echo", content=[TextContent(text=text)]
+    )
+
+
+def _history_captured_mid_run(rounds: int) -> list[Message]:
+    """History as it looks at a mid-run tool-loop boundary.
+
+    The distinguishing feature is the TAIL: the newest messages are a tool
+    call and its result, with no terminal assistant turn, because the run has
+    not finished. That is the shape the mid-turn gate plans against.
+    """
+    big = "word " * 4000
+    messages: list[Message] = [
+        Message.user("older turn A " + big),
+        Message.assistant("older reply A " + big),
+        Message.user("go and do the long thing"),
+    ]
+    for index in range(rounds):
+        messages.append(_tool_call_assistant(index))
+        messages.append(_tool_result(index, big))
+    return messages
+
+
+def test_a_history_ending_mid_tool_run_is_compactable():
+    """THE bug, at the level of the decision that produced it.
+
+    A long tool run ends in a tool cluster, and every message in that cluster
+    was treated as an illegal cut point, so ``find_cut_point`` answered
+    ``None`` — "nothing to compact" — no matter how large the context grew.
+    The session reported a context far above its configured threshold while
+    every mid-turn gate refused, and relief arrived only when the run ended.
+
+    Pinned as a cut point plus a pairing check rather than an index, because
+    WHERE the cut lands is an implementation detail and "it lands somewhere
+    legal" is the property.
+    """
+    messages = _history_captured_mid_run(rounds=8)
+
+    cut = find_cut_point(messages, 20_000)
+
+    assert cut is not None, "a mid-run history must be compactable"
+    assert messages[cut].role != "tool", "a cut may never land on a tool result"
+    to_summarize, kept = prepare_partitions(messages, cut)
+    assert to_summarize, "the pass must actually reclaim something"
+    # Pairing: no result kept while the call that issued it is summarized.
+    # ``prepare_partitions`` hands back ``Message | CustomMessage``; only a
+    # ``Message`` carries calls or a role, so narrow rather than assume.
+    kept_calls = {c.id for m in kept if isinstance(m, Message) for c in m.tool_calls}
+    summarized_calls = {c.id for m in to_summarize if isinstance(m, Message) for c in m.tool_calls}
+    for message in kept:
+        if isinstance(message, Message) and message.role == "tool":
+            assert message.tool_call_id in kept_calls
+            assert message.tool_call_id not in summarized_calls
+
+
+def test_the_cut_keeps_working_as_the_run_grows():
+    """Not a one-off: every boundary of a lengthening run stays compactable.
+
+    The first fix attempt made the FIRST mid-run pass possible and the session
+    still starved afterwards, because the post-compaction history is itself a
+    marker followed by one long tool chain. Sweeping the run length is what
+    catches that.
+    """
+    # From 5 rounds up: below that the whole history (~24k) still fits inside
+    # the 20k keep-recent window, where "nothing to compact" is the correct
+    # answer rather than the starvation this pins.
+    for rounds in range(5, 20):
+        messages = _history_captured_mid_run(rounds)
+        cut = find_cut_point(messages, 20_000)
+        assert cut is not None, f"run of {rounds} tool rounds was uncompactable"
+        assert messages[cut].role != "tool"
