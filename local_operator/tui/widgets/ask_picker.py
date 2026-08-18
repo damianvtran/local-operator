@@ -1809,7 +1809,13 @@ class AskPickerScreen(Container):
         # round 3).
         if not self.has_focus:
             hints = []
-            routed = self.routed_hint()
+            # ...and not even those while the composer holds a DRAFT. The
+            # routing stands down whenever there is text in the buffer, so
+            # every character is the user's again — which is exactly the state
+            # the mount-time focus yield creates (D12), so the keys would be
+            # advertised precisely where they are dead (F6, agent review round
+            # 4). The exit survives, because Escape works from anywhere.
+            routed = None if self._composer_has_draft() else self.routed_hint()
             if routed is not None:
                 hints.append(routed)
             hints.append(self._exit_hint)

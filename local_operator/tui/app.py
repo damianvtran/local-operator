@@ -2603,8 +2603,26 @@ class OperatorApp(App[None]):
         # Before the streaming check, and returning: `skip` is a real answer to
         # a question the agent asked, not an abort of the turn, and the turn
         # continues with whatever the user did say.
+        # ...but only when the picker is the prompt the user is actually
+        # looking at. `_live_prompt` ranks an unanswered APPROVAL first, which
+        # is the right order: an approval is a permission gate the engine is
+        # blocked on, and it is the one raised most recently in an overlap.
+        #
+        # Without that check this branch matched on the picker merely EXISTING
+        # and returned before the approval was considered, so in the ask +
+        # approval overlap — the state F1 was filed for — Escape settled the
+        # scrolled-off question and left a focused `rm -rf` approval unanswered
+        # with the turn still running (F5, agent review round 4). That branch is
+        # also the ONLY implementation of the approval's advertised `esc deny`,
+        # because `ApprovalPrompt.action_cancel` raises `SkipAction` by design
+        # so the key reaches here.
         picker = self._ask_screen
-        if picker is not None and not picker.settled and picker.is_attached:
+        if (
+            picker is not None
+            and not picker.settled
+            and picker.is_attached
+            and self._live_prompt() is picker
+        ):
             self._settle_ask_picker()
             return
         pending = self._approval is not None and not self._approval.answered

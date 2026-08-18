@@ -24,6 +24,7 @@ from textual.widgets import Static
 
 from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.approval import ApprovalPrompt
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.editor import Editor
 
@@ -193,3 +194,53 @@ async def test_an_overlapping_ask_survives_an_answered_approval() -> None:
         # ...and is still answerable.
         await pilot.press("enter")
         assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_escape_answers_the_prompt_the_user_is_looking_at() -> None:
+    """With two prompts live, Escape must reach the one on screen.
+
+    The picker takes Escape as "skip this question", but that branch matched on
+    a picker merely EXISTING and returned before the approval was considered.
+    In the ask + approval overlap the approval is the card actually painted and
+    focused, and the picker is scrolled off — so one Escape settled the
+    invisible question and left a focused `rm -rf` approval unanswered with the
+    turn still running (F5, agent review round 4).
+
+    That branch is also the only implementation of the approval's advertised
+    `esc deny`: `ApprovalPrompt.action_cancel` raises `SkipAction` by design so
+    the key reaches the app.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            await pilot.pause(0.02)
+            if getattr(session, "approval_handler", None) is not None:
+                break
+        app._set_approve_all(False)
+        app._approvals_default_auto = False
+        # `FakeSession` reports `is_streaming` from this attribute; set via
+        # `setattr` because the fake declares it dynamically.
+        setattr(session, "streaming", True)
+
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(12):
+            await pilot.pause(0.02)
+        handler = getattr(session, "approval_handler", None)
+        assert handler is not None
+        approving = asyncio.ensure_future(handler("bash", "run: rm -rf /Users/x/data"))
+        for _ in range(20):
+            await pilot.pause(0.02)
+        assert isinstance(app.screen.focused, ApprovalPrompt), "the approval is not the live card"
+
+        await pilot.press("escape")
+        # The card the user was looking at is the one that answered.
+        assert await asyncio.wait_for(approving, 2) is False
+        assert session.aborts == ["interrupted"]
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
