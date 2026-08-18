@@ -254,7 +254,13 @@ async def test_approval_prompt_resolves_from_a_keystroke() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         ask = await _booted_gate(pilot, session)
         pending = asyncio.ensure_future(ask("bash", "run: rm -rf /tmp/x"))
-        await pilot.pause(0.3)
+        # Waited on the CONDITION, not a duration. The card takes focus on
+        # mount (the composer is empty here), but a fixed pause is a bet on how
+        # many frames that takes and CI lost it on the slower runner.
+        for _ in range(100):
+            if isinstance(app.screen.focused, ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
         prompt = app.query_one(ApprovalPrompt)
         assert app.screen.focused is prompt  # else the keys go to the composer
         # The three answers are offered as a LIST, not only as letters to aim
@@ -477,7 +483,10 @@ async def test_lowercase_a_does_not_disarm_the_gate() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         ask = await _booted_gate(pilot, session)
         pending = asyncio.ensure_future(ask("bash", "run: one"))
-        await pilot.pause(0.3)
+        for _ in range(100):
+            if isinstance(app.screen.focused, ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
 
         await pilot.press("a")
         await pilot.pause(0.2)
