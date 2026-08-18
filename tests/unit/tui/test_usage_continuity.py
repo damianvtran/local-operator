@@ -24,6 +24,7 @@ calling the accessors directly would pass while the band stayed wrong.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -585,3 +586,49 @@ async def test_a_turn_end_that_prices_more_than_was_accrued_adds_the_remainder()
             await pilot.pause()
 
             assert app._total_cost == pytest.approx(0.03 + 0.15)
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_folded_by_an_older_build_still_refuses_stale_readings(
+    tmp_path: Path,
+) -> None:
+    """Files folded before the boundary mark existed are already on disk.
+
+    ``compact_file`` records where the newest prune sat, but a transcript folded
+    by an earlier build carries no such mark — only the ``pruned`` flag on the
+    row that was blanked. Reading nothing from it would restore every figure
+    taken before the blanking, which is the defect, on files a user already has.
+
+    So the flag is kept as a FALLBACK, and it is deliberately the weaker one: it
+    says which row was blanked rather than when, so it draws the boundary too
+    early and refuses some readings that were genuinely current. That is the
+    safe direction — a local estimate instead of an exact figure, rather than an
+    exact figure describing a context that no longer exists.
+    """
+    transcript = Transcript(tmp_path / "sess")
+    call = ToolCall(name="read", arguments={"path": "big.py"})
+    await transcript.append_message(Message.user("read it"))
+    await transcript.append_message(_assistant(output=20, context=100_000))
+    tool_row = Message(
+        role="tool",
+        tool_call_id=call.id,
+        tool_name="read",
+        content=[TextContent(text="X" * 30_000)],
+        provider_payload={"details": {"path": "big.py"}},
+    )
+    await transcript.append_message(tool_row)
+    await transcript.append_message(Message.user("q"))
+    await transcript.append_message(_assistant(output=20, context=200_000))
+    await transcript.append_prune(tool_row.id, "[pruned]")
+    await transcript.compact_file(min_reclaim_bytes=1)
+
+    # Strip the mark, leaving exactly what an older build would have written.
+    path = tmp_path / "sess" / "transcript.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    for row in rows:
+        (row.get("payload") or {}).get("provider_payload", {}).pop("context_shrunk_here", None)
+    path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
+
+    usages = Transcript(tmp_path / "sess").usages_since_compaction()
+    reported = [usage.get("context_tokens") for usage in usages]
+    assert 100_000 not in reported, "the pre-prune reading must not survive a legacy fold"

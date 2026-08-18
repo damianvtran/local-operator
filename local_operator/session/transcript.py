@@ -313,18 +313,27 @@ class Transcript:
                 # target's position instead restored two stale readings.
                 start = index + 1
                 break
-            if (entry.payload.get("provider_payload") or {}).get(SHRUNK_KEY):
-                # The FOLDED form: `compact_file` drops the journal entry and
-                # leaves this mark on the last entry that sat at or before it
-                # (see `_shrink_marked`), so the boundary lands where the prune
-                # actually was.
+            if (entry.payload.get("provider_payload") or {}).get(SHRUNK_KEY) or (
+                entry.type == ENTRY_MESSAGE
+                and (entry.payload.get("provider_payload") or {}).get("pruned")
+            ):
+                # The FOLDED forms, newest-position-wins by virtue of the scan
+                # order. Two of them, because two kinds of file exist:
                 #
-                # Deliberately NOT the ``pruned`` flag on the target row. That
-                # says which row was blanked, not WHEN — and the target can be
-                # hundreds of entries older than the prune that blanked it, so
-                # every reading in between would be promoted back to "current".
-                # Measured on a folded transcript: three stale readings restored
-                # where the same file before the fold correctly reported none.
+                # * ``SHRUNK_KEY`` is the mark `compact_file` leaves at the
+                #   position the journal entry held (see `_shrink_marked`), so
+                #   the boundary lands where the prune actually was. This is the
+                #   accurate one and the only one written from now on.
+                # * The ``pruned`` flag on the target row is the FALLBACK, for
+                #   transcripts folded by a build that predates the mark — they
+                #   exist on disk already and would otherwise restore every
+                #   reading taken before the blanking. It is the weaker signal
+                #   (it says which row was blanked, not when, and the target can
+                #   be far older than the prune), so it draws the boundary too
+                #   EARLY: some genuinely current readings are refused and fall
+                #   through to the local estimate. That is the safe direction —
+                #   an estimate instead of an exact figure, rather than a figure
+                #   describing a context that no longer exists.
                 start = index + 1
                 break
         return [
