@@ -88,6 +88,20 @@ class SteerableSession(FakeSession):
         self.approval_handler = handler
 
 
+def _ask_question(qid: str, text: str):  # type: ignore[no-untyped-def]
+    """A minimal `ask` question, for tests that need one beside an approval."""
+    from local_operator.harness.types import AskOption, AskQuestion
+
+    return AskQuestion(
+        id=qid,
+        question=text,
+        options=[
+            AskOption(label="Drop", description=""),
+            AskOption(label="Backfill", description=""),
+        ],
+    )
+
+
 def _approval_gate(session: SteerableSession) -> Callable[[str, str], Awaitable[bool]]:
     """The handler the app installed, narrowed to non-optional.
 
@@ -1805,5 +1819,106 @@ async def test_a_prompt_arriving_mid_sentence_does_not_take_the_caret() -> None:
         pending.cancel()
         try:
             await pending
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_a_resize_while_typing_never_moves_the_keyboard() -> None:
+    """A resize is not an instruction to answer the question.
+
+    The re-focus that brings a prompt back after a shrink (D10) fired on EVERY
+    resize, with no check on where the caret was. So a one-column resize while
+    the user was typing took the keyboard, and the next character of their
+    sentence answered the question — on an approval, a `y` meant as text
+    AUTHORISED `rm -rf /data`. The composer's one-keystroke hold is a correct
+    defence and was simply bypassed, because it only guards keys that arrive at
+    the composer (F10, agent review round 7).
+
+    The two cases are cleanly distinguishable: hiding a widget leaves focus as
+    None, which is the state D10 repairs; a typing user leaves it as the
+    Editor.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        ask = await _booted_gate(pilot, session)
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "wait a":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.1)
+
+        pending = asyncio.ensure_future(ask("bash", "run: rm -rf /data"))
+        for _ in range(100):
+            if app.query(ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
+        await pilot.pause(0.2)
+        assert isinstance(app.screen.focused, Editor)
+
+        await pilot.resize_terminal(99, 30)
+        for _ in range(10):
+            await pilot.pause(0.05)
+        assert isinstance(app.screen.focused, Editor), "a resize took the keyboard"
+
+        await pilot.press("y")
+        await pilot.pause(0.3)
+        assert not pending.done(), "a resize let a typed character authorise the call"
+        assert app._approve_all is False
+        assert app.query_one(Editor).text == "wait ay"
+
+        pending.cancel()
+        try:
+            await pending
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_answering_one_prompt_does_not_move_the_caret_off_a_draft() -> None:
+    """A question settling elsewhere must not hand the keyboard to the other one.
+
+    With an ask and an approval both live, answering the approval hands the
+    keyboard to the surviving question — but only if the DEPARTING card had it.
+    If the user is typing, removing the answered card makes Textual focus the
+    next focusable node, which is the surviving prompt, and the rest of the
+    sentence becomes an answer (F11, agent review round 7 — F10's defect
+    through the overlap door).
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        ask = await _booted_gate(pilot, session)
+        asked = asyncio.create_task(
+            app.request_user_choice([_ask_question("stale", "Which rollout?")])
+        )
+        for _ in range(12):
+            await pilot.pause(0.02)
+        approving = asyncio.ensure_future(ask("bash", "run: make"))
+        for _ in range(20):
+            await pilot.pause(0.02)
+
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "hold on":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.2)
+        assert isinstance(app.screen.focused, Editor)
+
+        # The approval settles from somewhere else entirely.
+        assert app._approval is not None
+        app._approval.resolve(False, answer="n")
+        assert await asyncio.wait_for(approving, 2) is False
+        for _ in range(14):
+            await pilot.pause(0.05)
+
+        # The caret stayed put and the draft is intact.
+        assert isinstance(app.screen.focused, Editor), "the caret moved to the other question"
+        assert app.query_one(Editor).text == "hold on"
+
+        asked.cancel()
+        try:
+            await asked
         except (asyncio.CancelledError, Exception):
             pass
