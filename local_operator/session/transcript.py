@@ -264,21 +264,30 @@ class Transcript:
         refusing that would be the opposite error. Entries after the marker are
         exactly the readings that survived the pass.
 
-        PRUNED entries are excluded for the same reason, and pruning is the
-        case that makes this more than a compaction concern. Blanking a tool
-        result shrinks the live context exactly as a compaction pass does, but
-        it leaves no marker to draw a boundary on — the journal entry is folded
-        away by :meth:`compact_file` and the message row survives with its
-        original ``usage`` attached. Measured on a real prune: a reading of
-        640_000 against a true context of 12_666, which a host installs as
-        exact. So the rule is not "after the newest compaction" but "not
-        describing a context something has since shrunk", and both shrinking
-        passes are covered: the compaction boundary above, and the ``pruned``
-        flag here.
+        PRUNING moves the boundary too, and it is the case that makes this more
+        than a compaction concern. Blanking a tool result shrinks the live
+        context exactly as a compaction pass does, but leaves no marker: the
+        journal entry is folded away by :meth:`compact_file` and the message
+        rows survive untouched. Measured against the real pruner: a reading of
+        640_000 restored for a true context of 31_715, which a host installs as
+        exact and hands to the compaction gate.
 
-        The flag is read from ``provider_payload`` — where both the live pass
-        (``compaction.pruning``) and the replay (``_pruned_entry``) set it — so
-        an entry counts as pruned whether the file has been folded yet or not.
+        So the boundary is POSITIONAL for both passes — the newest compaction
+        marker or the newest pruned row, whichever is later — and that is not a
+        stylistic choice. A filter that merely skipped pruned rows would be dead
+        code: pruning only ever blanks ``role == "tool"`` messages
+        (``compaction.pruning``) and ``usage`` is only ever set on the
+        ASSISTANT message of a turn (``harness.loop``), so the two sets are
+        disjoint by construction and no usage-carrying row is ever flagged. That
+        version passed a test which pruned an assistant message — a state the
+        production pruner cannot produce — and fixed nothing. What is wrong with
+        a pre-prune reading is not the row it sits on, it is that it describes a
+        context measured before the shrink, so position is the only thing that
+        can express it.
+
+        Both spellings of "pruned" are consulted for the same reason
+        :meth:`compact_file` exists: the journal entry before a fold, the
+        ``provider_payload`` flag on the row afterwards.
 
         Returns the raw payload dicts rather than ``Usage`` objects: this module
         is the persistence layer and does not own the harness's models, and the
@@ -286,17 +295,32 @@ class Transcript:
         """
         start = 0
         for index in range(len(self._entries) - 1, -1, -1):
-            if self._entries[index].type == ENTRY_COMPACTION:
+            entry = self._entries[index]
+            if entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE):
+                # A journal entry sits at the moment the shrink HAPPENED, which
+                # is what the boundary must be drawn on — not at the row it
+                # targets. The targeted tool result may be hundreds of entries
+                # older, and the readings in between were all measured before
+                # the blanking and so describe the pre-shrink context. Seen in
+                # the wild: one real transcript on this machine has its newest
+                # prune at entry 88 with its newest usage at 82, and taking the
+                # target's position instead restored two stale readings.
                 start = index + 1
                 break
-        pruned = self.pending_prunes()
+            if entry.type == ENTRY_MESSAGE and (entry.payload.get("provider_payload") or {}).get(
+                "pruned"
+            ):
+                # The FOLDED form of the same thing: `compact_file` materializes
+                # the journal into the row and drops the entry, so after a fold
+                # the flag on the row is the only evidence left. The row is a
+                # tool result and carries no usage itself, so the boundary is
+                # after it.
+                start = index + 1
+                break
         return [
             dict(entry.payload["usage"])
             for entry in self._entries[start:]
-            if entry.type == ENTRY_MESSAGE
-            and isinstance(entry.payload.get("usage"), dict)
-            and entry.id not in pruned
-            and not (entry.payload.get("provider_payload") or {}).get("pruned")
+            if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict)
         ]
 
     def pending_prunes(self) -> dict[str, str]:

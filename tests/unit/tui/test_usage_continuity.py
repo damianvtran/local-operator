@@ -309,22 +309,36 @@ async def test_a_pruned_reading_is_refused_like_a_compacted_one(tmp_path: Path) 
     """Pruning shrinks the context too, and leaves no marker to notice it by.
 
     Blanking a tool result is the other pass that makes a reading describe a
-    context that no longer exists — and unlike compaction it writes no boundary:
-    the journal entry is folded away by ``compact_file`` and the message row
-    survives with its original ``usage`` attached. Measured on a real prune, a
-    restored reading of 640_000 against a true context of ~1_700, installed as
-    exact.
+    context that no longer exists. Measured against the REAL pruner: a restored
+    reading of 640_000 for a true context of 31_715, installed as exact and
+    handed to the compaction gate. Wider than the compaction case it mirrors,
+    too — it needs nothing more than the agent reading the same file twice.
 
-    Wider than the compaction case it mirrors, too: it needs nothing more than
-    the agent reading the same large file twice. So the rule is not "after the
-    newest compaction" but "not describing a context something has since
-    shrunk", and both shrinking passes have to be covered.
+    Driven through ``append_prune`` rather than by hand-flagging a message, and
+    that detail is the whole test. An earlier version of this fix filtered out
+    rows carrying the ``pruned`` flag, which is DEAD CODE: pruning only blanks
+    ``role == "tool"`` messages and ``usage`` only ever lands on the assistant
+    message of a turn, so the two sets are disjoint and no usage-carrying row is
+    ever flagged. It passed a test that pruned an assistant message — a state
+    the production pruner cannot produce — and fixed nothing. The boundary has
+    to be POSITIONAL, and it has to be drawn at the journal entry (where the
+    shrink happened) rather than at the row it targets, which may be hundreds of
+    entries older.
     """
     transcript = Transcript(tmp_path / "sess")
-    pruned = _assistant(output=100, context=640_000)
+    stale = _assistant(output=100, context=640_000)
     await transcript.append_message(Message.user("read that file"))
-    await transcript.append_message(pruned)
-    await transcript.append_prune(pruned.id, "[pruned]")
+    await transcript.append_message(stale)
+    # A tool result, which is what pruning actually blanks, and then the prune
+    # journal entry that records the blanking.
+    tool_row = Message(
+        role="tool",
+        tool_call_id="call-1",
+        tool_name="read",
+        content=[TextContent(text="X" * 20_000)],
+    )
+    await transcript.append_message(tool_row)
+    await transcript.append_prune(tool_row.id, "[pruned]")
 
     async def _stream(request: Any, signal: Any = None):  # pragma: no cover - never called
         if False:
@@ -339,17 +353,18 @@ async def test_a_pruned_reading_is_refused_like_a_compacted_one(tmp_path: Path) 
             system_blocks_provider=lambda: ["system"],
         )
 
-    assert _session_over_dir().restored_usage() is None
+    assert _session_over_dir().restored_usage() is None, "the pre-prune reading must be refused"
 
     # And after the journal has been FOLDED INTO the rows, where the prune entry
-    # no longer exists and only the flag on the message remains.
-    reclaimed = await transcript.compact_file(min_reclaim_bytes=1)
-    assert reclaimed >= 0
-    assert _session_over_dir().restored_usage() is None
+    # no longer exists and only the flag on the tool row remains.
+    await transcript.compact_file(min_reclaim_bytes=1)
+    folded = Transcript(tmp_path / "sess")
+    assert not any(entry.type == "prune" for entry in folded.entries()), "the fold did not happen"
+    assert _session_over_dir().restored_usage() is None, "the folded form must be refused too"
 
-    # A healthy turn taken afterwards is still restored: the refusal is scoped
-    # to readings the pass invalidated, not to the conversation.
-    await Transcript(tmp_path / "sess").append_message(_assistant(output=20, context=15_000))
+    # A turn taken AFTER the prune is still restored: the refusal is scoped to
+    # readings the pass invalidated, not to the conversation.
+    await folded.append_message(_assistant(output=20, context=15_000))
     restored = _session_over_dir().restored_usage()
     assert restored is not None and restored.context_tokens == 15_000
 
