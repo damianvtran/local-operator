@@ -36,6 +36,7 @@ import os
 import sqlite3
 import time
 import zlib
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -181,8 +182,20 @@ class AuthStore:
         # Credentials that just failed on a PROVIDER-side fault, which is not
         # their fault and so must not block them (see ``rotate_sibling``). They
         # are merely sorted last, so an attempt moves to a sibling while the
-        # deprioritised row stays available as a last resort. Process-local and
-        # deliberately unpersisted: the condition it describes lasts seconds.
+        # deprioritised row stays available as a last resort.
+        #
+        # Deliberately unpersisted: the condition it describes lasts seconds,
+        # and a mark surviving a restart would misroute a session for a fault
+        # that had long cleared.
+        #
+        # Deliberately keyed by PROVIDER rather than by session, and so shared
+        # by every session in the process — like ``_round_robin`` above. That is
+        # the correct scope for what it records: "this account was failing at
+        # this provider a moment ago" is a fact about the provider and the
+        # account, not about who observed it, so a sibling session benefits from
+        # the discovery instead of paying to repeat it. Nothing here can make a
+        # credential unusable, so the worst a stale mark can do is reorder a
+        # pool whose members are all equally valid.
         self._deprioritized: dict[str, set[int]] = {}
         self._refresh_locks: dict[int, asyncio.Lock] = {}
         self._conn = self._connect()
@@ -514,32 +527,62 @@ class AuthStore:
         """
         self._deprioritized.setdefault(provider, set()).add(credential_id)
 
-    def clear_deprioritized(self, provider: str, credential_id: int | None = None) -> None:
-        """Restore full priority once a credential succeeds again."""
+    def clear_deprioritized(
+        self, provider: str, credential_id: int | Iterable[int] | None = None
+    ) -> None:
+        """Restore full priority for a credential, several, or all of them.
+
+        Takes an explicit id set rather than always clearing the provider,
+        because ``_selection_order`` runs once per cascade TIER with a different
+        subset of rows: a one-row tier finding its only row demoted must not
+        drop the marks belonging to rows in another tier that it never saw.
+        """
+        marks = self._deprioritized.get(provider)
+        if marks is None:
+            return
         if credential_id is None:
             self._deprioritized.pop(provider, None)
             return
-        self._deprioritized.get(provider, set()).discard(credential_id)
+        ids = {credential_id} if isinstance(credential_id, int) else {int(i) for i in credential_id}
+        marks -= ids
+        if not marks:
+            self._deprioritized.pop(provider, None)
 
     def _selection_order(
         self, rows: list[StoredCredential], provider: str, session_id: str | None
     ) -> list[StoredCredential]:
         if not rows:
             return []
-        # Deprioritised rows go last while staying selectable. Applied before
-        # stickiness so a credential that just hit a provider fault does not
-        # keep winning on its sticky claim, and applied as a STABLE partition so
-        # the round-robin and hash orders below are otherwise untouched.
+        ordered = self._base_selection_order(rows, provider, session_id)
+        # Demotion is applied LAST, to the finished order.
+        #
+        # It used to run first, which did not work: both orderings below rotate
+        # the list (`rows[i:] + rows[:i]`), so a row moved to the back was
+        # rotated straight back towards the front. With three credentials and a
+        # session whose hash landed on index 1, the account that had just failed
+        # was tried SECOND -- the pool was never fully walked, which is the bug
+        # the demotion exists to fix. Applying it here cannot be undone by a
+        # later step, and because the partition is stable the relative order the
+        # sticky/hash/round-robin choice produced is otherwise preserved.
         demoted = self._deprioritized.get(provider)
-        if demoted:
-            preferred = [r for r in rows if r.id not in demoted]
-            # Never return an empty preferred set: if every credential is
-            # deprioritised the pool has simply been through one full cycle, so
-            # the marks are stale and the rows are all equally good again.
-            if preferred:
-                rows = preferred + [r for r in rows if r.id in demoted]
-            else:
-                self._deprioritized.pop(provider, None)
+        if not demoted:
+            return ordered
+        preferred = [r for r in ordered if r.id not in demoted]
+        # Every row demoted means the pool has been walked once, so the marks
+        # describe an outage rather than any one account: they are stale and the
+        # rows are equally good again. Only THIS tier's rows are cleared -- the
+        # cascade calls this once per credential tier with a different subset,
+        # so popping the whole provider would let a one-row tier wipe the marks
+        # belonging to rows it never saw.
+        if not preferred:
+            self.clear_deprioritized(provider, [r.id for r in ordered])
+            return ordered
+        return preferred + [r for r in ordered if r.id in demoted]
+
+    def _base_selection_order(
+        self, rows: list[StoredCredential], provider: str, session_id: str | None
+    ) -> list[StoredCredential]:
+        """Stickiness, then a per-session hash, then round-robin."""
         if session_id:
             sticky_id = self._sticky.get((provider, session_id))
             sticky = next((r for r in rows if r.id == sticky_id), None)

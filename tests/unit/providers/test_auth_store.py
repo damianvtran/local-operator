@@ -595,3 +595,71 @@ class TestAggregatorKeysNeverSatisfyANamedProvider:
         # The set exists and is exactly the resellers -- a direct provider
         # appearing here would make it reachable as an implicit substitute.
         assert AGGREGATOR_PROVIDERS == {"openrouter", "radient"}
+
+
+class TestDeprioritizationSurvivesTheOrderingItIsAppliedTo:
+    """Demotion must not be undone by the ordering that follows it.
+
+    Round 1 review (R1) caught this shipping green: the mark was applied BEFORE
+    the sticky/hash/round-robin step, and both of those rotate the list
+    (``rows[i:] + rows[:i]``), so a row moved to the back was rotated forward
+    again. The tests then in place only asserted ``session_id=None`` on a
+    four-row pool -- the one shape whose rotation happened to be a no-op.
+    """
+
+    @staticmethod
+    def _store(tmp_path: Any, count: int) -> tuple[Any, list[Any]]:
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        rows = [
+            store.upsert_credential(
+                "anthropic",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+            for i in range(count)
+        ]
+        return store, rows
+
+    @pytest.mark.parametrize("pool_size", [2, 3, 4, 5])
+    @pytest.mark.parametrize("session_id", [None, "s1", "s2", "s3", "session-abc"])
+    def test_a_demoted_row_is_last_for_every_pool_size_and_session(
+        self, tmp_path: Any, pool_size: int, session_id: str | None
+    ) -> None:
+        """Swept, because the bug hid in the arithmetic of ONE size/session pair."""
+        store, rows = self._store(tmp_path, pool_size)
+        store.deprioritize_credential("anthropic", rows[0].id)
+
+        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", session_id)
+
+        assert order[-1].id == rows[0].id, [r.data["access"] for r in order]
+        assert len(order) == pool_size  # still selectable, never dropped
+
+    def test_a_demoted_row_outranked_by_nothing_is_still_offered(self, tmp_path: Any) -> None:
+        """A single-credential pool must still return that credential."""
+        store, rows = self._store(tmp_path, 1)
+        store.deprioritize_credential("anthropic", rows[0].id)
+
+        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", "s1")
+        assert [r.id for r in order] == [rows[0].id]
+
+    def test_clearing_one_tiers_marks_leaves_another_tiers_alone(self, tmp_path: Any) -> None:
+        """R3: the cascade calls `_selection_order` once per credential TIER with
+        a different subset, so a one-row tier finding its only row demoted must
+        not wipe marks belonging to rows it never saw."""
+        store, rows = self._store(tmp_path, 3)
+        store.deprioritize_credential("anthropic", rows[0].id)
+        store.deprioritize_credential("anthropic", rows[1].id)
+
+        # A "tier" containing only the first row: every row in it is demoted, so
+        # its marks are treated as stale and cleared.
+        store._selection_order([rows[0]], "anthropic", "s1")
+
+        assert rows[0].id not in store._deprioritized.get("anthropic", set())
+        assert rows[1].id in store._deprioritized.get("anthropic", set())

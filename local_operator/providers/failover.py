@@ -782,6 +782,16 @@ BACKOFF_JITTER_FRACTION = 0.25
 MAX_USAGE_RETRY_AFTER_MS = 30_000
 MAX_SAME_CREDENTIAL_USAGE_RETRIES = 2
 
+# Same-credential retries for a SERVER-side fault (5xx/529/timeout). Small for
+# the same reason the usage cap is, and the reason grew stronger once rotation
+# was widened to walk the whole pool: this budget is spent once per ACCOUNT, so
+# the full `max_retries` (default 10) becomes 10 x pool size requests aimed at a
+# provider that has just said it is overloaded -- 44 requests over ~190s for a
+# four-account pool, measured. Two attempts per account still absorbs the brief
+# 529 blips these codes usually are, while the pool walk (which tries a
+# DIFFERENT account, the thing most likely to succeed) happens sooner.
+MAX_SAME_CREDENTIAL_SERVER_RETRIES = 2
+
 
 def backoff_delay_ms(base_delay_ms: int, attempt: int, *, rng: random.Random | None = None) -> int:
     """``min(base * 2^(attempt-1), 8000)`` with 25% downward jitter."""
@@ -797,11 +807,16 @@ def _same_credential_retry_allowed(
 ) -> bool:
     if not error.retryable:
         return False
-    if not is_usage_limit_error(error):
-        return transport_retries < retry.max_retries
-    if (error.retry_after_ms or 0) > MAX_USAGE_RETRY_AFTER_MS:
-        return False
-    return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_USAGE_RETRIES)
+    if is_usage_limit_error(error):
+        if (error.retry_after_ms or 0) > MAX_USAGE_RETRY_AFTER_MS:
+            return False
+        return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_USAGE_RETRIES)
+    if is_server_side_failure(error):
+        # Capped: this budget is now spent once per ACCOUNT rather than once per
+        # request, so the full `max_retries` would multiply by the pool size and
+        # aim the product at a provider that is already saying it is overloaded.
+        return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_SERVER_RETRIES)
+    return transport_retries < retry.max_retries
 
 
 def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:

@@ -42,6 +42,7 @@ from local_operator.harness.types import AbortSignal
 from local_operator.providers.oauth.callback_server import (
     CallbackFlowOptions,
     LoginCallbacks,
+    LoginCancelledError,
     LoginError,
     OAuthCallbackFlow,
 )
@@ -116,10 +117,25 @@ def _trimmed(value: Any) -> str | None:
     return None
 
 
+def _failed(url: str, response: httpx.Response) -> LoginError:
+    """A transport failure, named by ENDPOINT and status rather than by body.
+
+    The body is deliberately not echoed. These endpoints are handed bearer
+    tokens and their error payloads quote request context back; a login error is
+    shown in the TUI and written to the log, so a raw body is the one place a
+    token could leak out of this module. The path and status are what a reader
+    needs in order to act.
+    """
+    return LoginError(
+        f"Z.AI request to {urllib.parse.urlsplit(url).path} failed "
+        f"({response.status_code} {response.reason_phrase})".rstrip()
+    )
+
+
 async def _get_json(http: httpx.AsyncClient, url: str, headers: dict[str, str]) -> Any:
     response = await http.get(url, headers=headers)
     if response.status_code != 200:
-        raise LoginError(f"Z.AI request failed ({response.status_code}) for {url}: {response.text}")
+        raise _failed(url, response)
     return response.json() if response.content else None
 
 
@@ -128,7 +144,7 @@ async def _post_json(
 ) -> Any:
     response = await http.post(url, json=body, headers=headers or {})
     if response.status_code != 200:
-        raise LoginError(f"Z.AI request failed ({response.status_code}) for {url}: {response.text}")
+        raise _failed(url, response)
     return response.json() if response.content else None
 
 
@@ -253,6 +269,14 @@ class ZaiOAuthFlow(OAuthCallbackFlow):
         return f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
 
     async def exchange_token(self, code: str, state: str, redirect_uri: str) -> dict[str, Any]:
+        # Checked BEFORE the exchange, as the reference implementation does.
+        # This flow has a side effect no other login here has: it CREATES a
+        # named API key in the user's Z.AI console. Minting one for a login the
+        # user has already cancelled leaves a credential they never agreed to
+        # and did not see created.
+        if self._signal is not None and self._signal.aborted:
+            raise LoginCancelledError(self._signal.reason or "Z.AI login cancelled")
+
         owns_client = self._http is None
         http = self._http or httpx.AsyncClient(timeout=_TIMEOUT_S)
         try:

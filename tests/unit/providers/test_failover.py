@@ -1953,3 +1953,76 @@ class TestCredentialErrorSaysWhichProblemItIs:
                 pass
 
         assert "No API key configured for provider 'openai'" in str(excinfo.value)
+
+
+class TestAnOverloadedProviderIsNotFloodedWhileRotating:
+    """Widening rotation must not multiply the load aimed at the outage.
+
+    Round 1 review (R2): the same-credential transport budget is spent once per
+    ACCOUNT, so the default `maxRetries: 10` became 10 x pool size requests sent
+    to a provider that had just answered "overloaded" -- measured at 44 requests
+    over ~190s for a four-account pool, against 22/~100s before the widening.
+    """
+
+    async def test_a_529_storm_is_bounded_per_account(self) -> None:
+        sent: list[str | None] = []
+        slept: list[int] = []
+
+        def overloaded(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            sent.append(api_key)
+            raise ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            slept.append(delay_ms)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(overloaded)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            auth = FakeAuth({"openai": ["k1", "k2", "k3", "k4"]})
+            # The DEFAULT budget, which is the configuration that misbehaved.
+            with pytest.raises(ProviderError):
+                async for _ in stream_with_failover(
+                    _request(), auth, {"retry": {"enabled": True}}, client_for
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        # Every account is still tried -- the pool walk is the point.
+        assert set(sent) == {"k1", "k2", "k3", "k4"}, sent
+        # But each is asked a bounded number of times, not `maxRetries` times.
+        for key in ("k1", "k2", "k3", "k4"):
+            assert sent.count(key) <= 3, (key, sent)
+        assert len(sent) <= 12, sent
+
+    async def test_an_ordinary_5xx_on_a_single_account_keeps_its_full_budget(self) -> None:
+        """The cap is per-account and only for server faults: a lone credential
+        must still get the retries the user configured."""
+        sent: list[str | None] = []
+
+        def flaky(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            sent.append(api_key)
+            raise ProviderError(500, "boom", retryable=True)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(flaky)
+
+        auth = FakeAuth({"openai": ["only"]})
+        with pytest.raises(ProviderError):
+            async for _ in stream_with_failover(
+                _request(),
+                auth,
+                {"retry": {"enabled": True, "baseDelayMs": 0, "maxRetries": 2}},
+                client_for,
+            ):
+                pass
+
+        # maxRetries=2 is below the server cap, so the user's setting governs.
+        assert sent == ["only", "only", "only"], sent
