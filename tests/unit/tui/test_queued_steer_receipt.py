@@ -32,7 +32,6 @@ from local_operator.tui.app import (
     DEFERRED_STEER_NOTICE,
     QUEUED_STEER_NOTICE,
     SENT_STEER_NOTICE,
-    STOPPED_STEER_NOTICE,
     OperatorApp,
 )
 from local_operator.tui.events import SteeringDelivered, TurnEnded
@@ -210,14 +209,14 @@ async def test_an_interrupted_turn_retires_the_promise_it_can_no_longer_keep() -
         await pilot.pause()
 
         texts = _notice_texts(app)
-        assert STOPPED_STEER_NOTICE in texts
+        assert DEFERRED_STEER_NOTICE in texts
         assert QUEUED_STEER_NOTICE not in texts
         assert SENT_STEER_NOTICE not in texts, "nothing was delivered"
         assert app._queued_steer_notices == []
         # The message is still in the engine's queue, so the row must not claim
         # it was lost — the user would retype and the agent would get it twice.
-        assert "not sent" not in STOPPED_STEER_NOTICE
-        assert "still queued" in STOPPED_STEER_NOTICE
+        assert "not sent" not in DEFERRED_STEER_NOTICE
+        assert "still queued" in DEFERRED_STEER_NOTICE
 
 
 @pytest.mark.asyncio
@@ -247,10 +246,11 @@ async def test_a_clean_turn_that_never_drained_says_the_message_is_still_queued(
         texts = _notice_texts(app)
         assert DEFERRED_STEER_NOTICE in texts
         assert QUEUED_STEER_NOTICE not in texts
-        # Neither of the other two outcomes: nothing was delivered, and nothing
-        # was lost either.
+        # Not the delivered row: nothing was sent. The waiting row is the same
+        # one an interrupted turn shows, deliberately — from the user's side the
+        # two are one fact (the message is queued and goes with their next
+        # message) and the action they take is identical.
         assert SENT_STEER_NOTICE not in texts
-        assert STOPPED_STEER_NOTICE not in texts
         assert app._queued_steer_notices == []
 
 
@@ -406,4 +406,4 @@ async def test_an_interrupt_spends_the_loud_ink_once() -> None:
         assert len(transcript_alarms) == 1, transcript_alarms
         assert "interrupted" in transcript_alarms[0]
         # And the settled row is present, quiet, and says the message survives.
-        assert any(STOPPED_STEER_NOTICE in row for row in rows), rows
+        assert any(DEFERRED_STEER_NOTICE in row for row in rows), rows

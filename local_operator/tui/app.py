@@ -214,14 +214,21 @@ RESTORED_COST_PREFIX = "≥"
 #: made the reader translate. All four now describe what the user observes.
 QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
 SENT_STEER_NOTICE = "sent — the agent has it now"
-#: The turn was interrupted before a boundary. `note`, NOT `warning`: nothing
-#: failed and nothing was lost, the message is simply still waiting — and the
-#: standalone `interrupted` notice is already on screen in amber for the same
-#: event, so a second amber row spends the loudest ink in the palette twice and
-#: reads as a stutter.
-STOPPED_STEER_NOTICE = "still queued — the turn was stopped, sends with your next message"
-#: The turn ended cleanly without ever reaching a boundary to drain at (the
-#: model answered with no further tool calls). Same state, different reason.
+#: The turn ended without ever reaching a boundary to drain at — interrupted,
+#: failed, or simply answered with no further tool calls. ONE string for all
+#: three, because they are one fact from the user's side: the message is waiting
+#: and goes with their next message, and what they do about it is identical.
+#:
+#: An earlier version named the interrupt in the row ("the turn was stopped"),
+#: which cost 22 cells to restate the `! interrupted` notice sitting one row
+#: below it in the loudest ink the palette has — the same redundancy `note`
+#: weight was chosen to avoid, surviving as words after being fixed as colour.
+#: It also made this the only string in the set to wrap below 61 columns, and
+#: three messages steered into one tool call turned that into six rows of
+#: near-identical text with the notice explaining them pushed to the bottom.
+#:
+#: Dropping it also stops the row being WRONG on the error path, where the turn
+#: was not stopped by anyone: it failed, and its own error notice says so.
 DEFERRED_STEER_NOTICE = "still queued — sends with your next message"
 
 
@@ -6417,7 +6424,7 @@ class OperatorApp(App[None]):
         # the queue — and that row would otherwise go on promising until some
         # later turn's first boundary settled it, minutes away and unrelated to
         # anything on screen.
-        self._settle_queued_steer_notices_unsent(interrupted=message.aborted or bool(message.error))
+        self._settle_queued_steer_notices_unsent()
 
     def _start_working_block(self, *, ends_empty_state: bool = True) -> None:
         """Mount the turn's working line, pinned to the foot of the transcript.
@@ -6818,39 +6825,33 @@ class OperatorApp(App[None]):
     def on_notice_posted(self, message: NoticePosted) -> None:
         self._append_block(NoticeBlock(message.text, message.kind))
 
-    def _settle_queued_steer_notices_unsent(self, *, interrupted: bool) -> None:
+    def _settle_queued_steer_notices_unsent(self) -> None:
         """Retire queued-steer rows the turn that just ended did not deliver.
 
         The delivery receipt only fires when ``_drain_steering`` actually takes
-        messages, and two ordinary paths end a turn without one:
+        messages, and three ordinary paths end a turn without one: the turn was
+        interrupted (Ctrl+C), it failed, or it ended cleanly with the model
+        answering and no further tool calls. All three leave a row promising a
+        delivery the app has no receipt for — the defect the receipt exists to
+        prevent, reached by every path that is not the delivery path.
 
-        - The turn was INTERRUPTED (Ctrl+C) or failed, so it never reached a
-          boundary. That message never goes at all.
-        - The turn ended CLEANLY without a boundary — the model answered with no
-          further tool calls after the steer landed. The message is still queued
-          and will go at the next turn's first boundary.
+        ONE message for all three, because from the user's side they are one
+        fact: the message is still queued (``abort`` stops the run without
+        draining the queue) and goes with their next message. Naming the cause
+        in the row was tried and removed — it restated the ``interrupted`` or
+        error notice sitting a row below it, cost the only string in the set
+        that wraps under 61 columns, and was simply wrong on the error path,
+        where nobody stopped anything.
 
-        Both leave a row promising a delivery the app has no receipt for, which
-        is the defect the receipt exists to prevent, reached by the two paths
-        that are not the delivery path. The second is milder (it really will be
-        sent) but not harmless: left alone, it settles minutes later against
-        whatever the user is looking at by then.
-
-        The two get DIFFERENT words because they are different facts, and a
-        single message would have to be wrong about one of them. Both are
-        ``warning`` weight rather than ``error``: nothing failed, and in the
-        clean case nothing is even lost.
+        ``note``, the weight the row already had: the state has not got worse,
+        so the row has no business getting louder — and the loud ink is already
+        spent, once, on the notice that explains why the turn ended.
         """
         if not self._queued_steer_notices:
             return
-        text = STOPPED_STEER_NOTICE if interrupted else DEFERRED_STEER_NOTICE
         for block in self._queued_steer_notices:
             try:
-                # `note`, the same weight the row already had. The state has not
-                # got worse — the message is still queued and still going — so
-                # the row has no business getting louder, and the interrupt path
-                # already has an amber `interrupted` notice of its own.
-                block.restate(text, "note")
+                block.restate(DEFERRED_STEER_NOTICE, "note")
             except Exception:  # a receipt must never take the app down
                 logger.debug("queued-steer notice could not be retired", exc_info=True)
         self._queued_steer_notices.clear()
