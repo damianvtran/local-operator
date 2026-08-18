@@ -789,7 +789,7 @@ MAX_SAME_CREDENTIAL_USAGE_RETRIES = 2
 # configured budget -- a lone credential, an override bearer or a pool whose
 # siblings are all spent must not lose retries it has nowhere else to spend --
 # and the cap engages only when the multiplication it exists to prevent has
-# actually begun. See `_rotation_has_produced_a_sibling` for why this is
+# actually begun. See `_request_has_rotated` for why this is
 # observed rather than predicted.
 MAX_SAME_CREDENTIAL_SERVER_RETRIES = 2
 
@@ -1506,7 +1506,7 @@ async def stream_with_failover(
                     retry,
                     # OBSERVED, not predicted: has rotation actually produced a
                     # different bearer for this request? See
-                    # `_rotation_has_produced_a_sibling`.
+                    # `_request_has_rotated`.
                     has_rotated=_request_has_rotated(state),
                     rotation_exhausted=exhausted_budget_restored,
                     server_fault_requests=server_fault_requests,
