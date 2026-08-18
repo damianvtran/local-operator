@@ -918,7 +918,7 @@ class ApprovalBlock(TranscriptBlock):
 #: the user is actually deciding between, and the letter it answers to, so the
 #: keys stay discoverable now that they are no longer the only way in.
 APPROVAL_CHOICES: tuple[tuple[str, str, str], ...] = (
-    ("Allow", "y", "run this call, and ask again next time"),
+    ("Allow", "y", "run this call and ask again next time"),
     ("Deny", "n", "refuse this call; the turn continues"),
     ("Allow all", "A", "stop asking for this session"),
 )
@@ -1102,6 +1102,23 @@ class ApprovalPrompt(AskPickerScreen):
         self.settle(None)
 
     # -- answering -----------------------------------------------------------
+    def row_key(self, index: int) -> str:
+        """The letter that answers this row: `y`, `n`, or `A`.
+
+        Rendered in the gutter where the ask picker puts its ordinal, so the
+        letters are discoverable again. They are the older interface here — they
+        predate the selectable list and are what a returning user reaches for —
+        and after the rework they were live bindings advertised nowhere at all
+        (D4, design round 1). The ordinals keep working; this only changes what
+        the gutter SAYS.
+
+        Read from the same table the key handler uses, so the letter printed
+        beside a row cannot disagree with the letter that answers it.
+        """
+        if 0 <= index < len(APPROVAL_CHOICES):
+            return APPROVAL_CHOICES[index][1]
+        return ""
+
     def _answer_with(self, key: str) -> None:
         """Settle from one of the answer KEYS, whichever route produced it.
 

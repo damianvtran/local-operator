@@ -24,6 +24,7 @@ from textual.widgets import Static
 
 from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.editor import Editor
 
 from .test_app_pilot import FakeSession, _factory
@@ -114,3 +115,35 @@ async def test_settling_the_picker_leaves_the_screen_above_it_alone() -> None:
         assert overlay in app.screen_stack
         # ...and the card is off the DOM, not merely settled.
         assert not picker.is_attached
+
+
+@pytest.mark.asyncio
+async def test_answering_the_last_question_takes_the_card_down() -> None:
+    """The ORDINARY path, which is the one that had no teardown at all.
+
+    The card resolves its own future from `settle`, so answering satisfied the
+    awaiting tool call and the `finally` had nothing to do — leaving the widget
+    mounted, the dock still holding its row, and focus still on a question
+    nobody was waiting for. The composer could not be typed into afterwards,
+    which is the same "the keys go nowhere" failure the anchoring exists to fix,
+    arriving one step later.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(10):
+            await pilot.pause(0.05)
+        assert app.query(AskPickerScreen), "no card was raised"
+
+        await pilot.press("enter")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+        for _ in range(10):
+            await pilot.pause(0.05)
+
+        # Nothing left behind: no widget, no reserved row, and the caret is back
+        # where the user types.
+        assert not app.query(AskPickerScreen)
+        assert not app.query_one("#prompt-host").display
+        assert isinstance(app.screen.focused, Editor)

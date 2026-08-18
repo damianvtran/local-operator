@@ -457,11 +457,20 @@ async def test_a_terminal_too_short_for_the_list_says_what_it_is_hiding() -> Non
         descriptions=("why a", "why b", "why c", "why d", "why e"),
     )
     app = _AskHost([question])
-    async with app.run_test(size=(100, 10)) as pilot:
+    # 12 rows rather than 10: the question is now bought before the windowing
+    # line, so at 10 the card correctly spends its last row on what is being
+    # asked and drops the count. The contract under test is "a windowed list
+    # says so when it can afford to", which needs a height where it can.
+    async with app.run_test(size=(100, 12)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
         text = "\n".join(screen.render_lines_for_test())
         assert len(screen.visible_rows) < screen.row_count
+        # The count is bought whenever the card can afford it AFTER the
+        # question. Where it cannot, the question wins and the count goes: a
+        # card that says how many answers it is hiding while hiding what the
+        # answers are TO is the worse of the two abbreviations (D1, design
+        # round 1). At this size both fit, so both are asserted.
         assert f"of {screen.row_count}" in text
         # And the window follows the cursor, so Enter can never take a row the
         # card did not draw — the `/resume` picker's bug, where the cursor sat
@@ -634,16 +643,23 @@ async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() 
             assert card.region.height <= screen.size.height, (size, card.region.height)
             assert "esc" in lines[-1] or "enter" in lines[-1], (size, lines[-1])
             if not screen.visible_rows:
-                # The collapsed card: one line, and it is the exit. Reachable on
-                # a terminal short enough that the anchored budget buys the
-                # footer and nothing else, and the footer must then advertise
-                # ONLY the exit — `enter` would commit a selection the user
-                # cannot see, and the digits would jump within a list that is
-                # not drawn.
+                # The collapsed card: the exit, and the question if there is a
+                # row for it. The footer must advertise ONLY the exit — `enter`
+                # would commit a selection the user cannot see, and the digits
+                # would jump within a list that is not drawn.
                 assert lines[-1].strip() == "esc skip", (size, lines)
                 continue
             if len(screen.visible_rows) < screen.row_count:
-                assert f"of {screen.row_count}" in "\n".join(lines), (size, lines)
+                # Rows are hidden, so the card owes the reader an account of
+                # that — UNLESS the row it would take is the one carrying the
+                # question. The question outranks the count (D1), so what is
+                # pinned is that the card is never silent about BOTH: it shows
+                # the count, or it shows what is being asked.
+                text = "\n".join(lines)
+                assert f"of {screen.row_count}" in text or screen.question.question[:20] in text, (
+                    size,
+                    lines,
+                )
             # The anchoring guarantee itself: the dock never grows past the
             # screen, so the transcript is never scrolled out from under the
             # question the user is being asked.

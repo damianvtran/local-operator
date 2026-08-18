@@ -1021,16 +1021,37 @@ class AskPickerScreen(Container):
         paid for, and it is paid for in the order the card cannot do without it:
 
         1. the footer — the only statement of how to leave;
-        2. one option row — a question with no answers is not a question;
-        3. the windowing line, whenever the window is short of the list, because
+        2. the FIRST LINE OF THE QUESTION — what is being asked;
+        3. one option row — a question with no answers is not a question;
+        4. the windowing line, whenever the window is short of the list, because
            a card quietly showing one of four has hidden three;
-        4. the question, every wrapped line of it, marked ``…`` if even that
-           cannot fit;
-        5. the title and its rule, which travel together — a rule under a title
+        5. the rest of the question, every wrapped line of it, marked ``…`` if
+           even that cannot fit;
+        6. the title and its rule, which travel together — a rule under a title
            is a caption, a rule under nothing is the edge of a box;
-        6. the rest of the option rows;
-        7. the blank spacers, which are rhythm and nothing else;
-        8. the descriptions, all of them or none.
+        7. the rest of the option rows;
+        8. the blank spacers, which are rhythm and nothing else;
+        9. the descriptions, all of them or none.
+
+        **The question outranks the options, and that ordering is a safety
+        property rather than a preference.** It used to sit below them, which
+        was defensible while this card only ever asked the ``ask`` tool's
+        questions: an option row at least says what one of the answers is. It
+        stopped being defensible when the approval gate started using this same
+        surface. Measured at 60x16 before this change, the approval card
+        rendered exactly three lines:
+
+            ❯ 1. Allow
+            showing 1–1 of 3
+            ↑↓ move · 1-9 jump · enter answer · esc deny
+
+        — an authorisation prompt for ``rm -rf /Users/damian/project/data``
+        that never names the tool, the command, or the target, with the cursor
+        parked on *Allow*. A user cannot consent to something the card declines
+        to state, and "Allow" without its object is worse than no card at all,
+        because it looks answerable. The question is now bought immediately
+        after the exit, so the last thing to go before the card gives up is
+        what it is asking about (D1, design round 1).
 
         A budget under :data:`MIN_BODY_ROWS` cannot buy even the first three, so
         the plan collapses to the footer alone — and at a budget of zero, which
@@ -1048,7 +1069,17 @@ class AskPickerScreen(Container):
             # this settles in one step rather than looping — and this branch is
             # the only place the row can be bought, which is the only place the
             # renderer will draw it from.
-            plan = self._allocate(width, question, budget, position=True)
+            windowed = self._allocate(width, question, budget, position=True)
+            # ...unless paying for it costs the QUESTION. The count is a
+            # refinement of the answers on offer; the question is what the card
+            # is for. Measured at 60x16 with a 3-row budget: buying the count
+            # took the last row the question had, leaving `❯ 1. Allow` over
+            # `showing 1–1 of 3` — a card that says how many answers it is
+            # hiding while hiding what the answers are TO (D1). Where the two
+            # compete, the question wins and the list stays honest by other
+            # means: the option rows it did draw are still numbered.
+            if windowed.question or not plan.question:
+                plan = windowed
         return plan
 
     def _allocate(
@@ -1070,30 +1101,39 @@ class AskPickerScreen(Container):
         room for one (round 3, R11).
         """
         if budget < MIN_BODY_ROWS:
-            # Nothing about the question fits. See :data:`MIN_BODY_ROWS`.
+            # Too little for the question, one answer and the exit together.
             #
-            # Two rows buy the selected row as well as the footer, and that row
-            # is worth having even with no question above it and no count
-            # beside it: on the free-text row it is the ONLY echo of what the
-            # user is typing, and a card that accepts a typed answer without
-            # showing it is worse than one showing a bare option. One row buys
-            # the exit alone; none is a card that cannot be drawn, and drawing
-            # it anyway is the clip itself (round 4, R15).
+            # Two rows go to the QUESTION and the exit, not to an option row and
+            # the exit. A bare `❯ 1. Allow` over `esc deny` is a prompt asking
+            # for authorisation while refusing to say what it would authorise —
+            # and it looks answerable, so the cursor sits on the permissive
+            # option with nothing on screen to weigh it against (D1). Naming the
+            # thing and stating how to leave is the honest minimum; the answers
+            # come back the moment there is a third row to put them on.
+            #
+            # One row buys the exit alone, and none is a card that cannot be
+            # drawn — drawing it anyway is the clip itself (round 4, R15).
+            first = question[:1] if budget >= 2 else ()
             return _CardLayout(
                 width=width,
-                question=(),
+                question=tuple(first),
                 show_title=False,
                 space_above=False,
                 space_below=False,
                 show_descriptions=False,
-                page=1 if budget >= 2 else 0,
+                page=0,
                 show_position=False,
                 show_footer=budget >= 1,
             )
-        remaining = budget - 2  # the footer, and one option row
+        # The footer, the first line of the question, and one option row: the
+        # three lines the card cannot say anything useful without. The question
+        # line is charged here rather than out of `remaining` below, which is
+        # what puts it ahead of the option rows in the priority order.
+        remaining = budget - 3
         if position:
             remaining -= 1
-        kept = list(question[:remaining])
+        # The first line is already paid for above; the rest competes at step 5.
+        kept = list(question[: remaining + 1])
         if len(kept) < len(question) and kept:
             # Say that the question continues. A silently halved question is
             # the one clip on this card the reader cannot detect: every other
@@ -1102,7 +1142,10 @@ class AskPickerScreen(Container):
             # `truncate_cells` marks its OWN cut, and two ellipses in a row read
             # as a rendering fault rather than as "there is more question".
             kept[-1] = f"{tail[:-1].rstrip() if tail.endswith('…') else tail} …"
-        remaining -= len(kept)
+        # Less ONE, because the question's first line was already bought above
+        # with the footer and the option row. Charging `len(kept)` here would
+        # bill it twice and hand the rest of the plan a budget short by a row.
+        remaining -= len(kept) - 1
         show_title = remaining >= 2
         if show_title:
             remaining -= 2
@@ -1304,7 +1347,7 @@ class AskPickerScreen(Container):
             out.append_text(self._row_text(index, width, ground, fg, dim, faint, layout))
             if layout.show_descriptions:
                 newline(index)
-                out.append_text(self._description_text(index, width, ground, muted, dim))
+                out.append_text(self._description_text(index, width, ground, muted, muted))
         if layout.space_below:
             newline(None)
 
@@ -1428,6 +1471,19 @@ class AskPickerScreen(Container):
             token = "overlay"
         return Style(bgcolor=theme_mod.semantic_color(token))
 
+    def row_key(self, index: int) -> str:
+        """The letter that answers row ``index`` directly, or ``""``.
+
+        Empty on this class: the ``ask`` picker's rows are addressed by ordinal
+        and have no letters of their own. :class:`ApprovalPrompt` overrides it,
+        because its three rows DO answer to letters (`y`/`n`/`A`) that predate
+        the list and that people have in their fingers.
+
+        It exists here so the gutter has one place to ask, rather than the
+        renderer growing a branch on which subclass it is drawing.
+        """
+        return ""
+
     def _row_number(self, index: int) -> str:
         """The digit gutter's contents for one row.
 
@@ -1439,7 +1495,18 @@ class AskPickerScreen(Container):
         with twelve options it drew a blank gutter while the footer still
         offered `1-9 jump`, so `Other` was unreachable by digit exactly where
         scanning the list is hardest (D13).
+
+        A row with a LETTER of its own shows that instead. On the approval card
+        the letters are the older interface — `y`/`n`/`A` predate the list and
+        people have them in their fingers — and after the rework they were live
+        bindings rendered nowhere, so "allow all" had lost its only discoverable
+        shortcut (D4, design round 1). Shown in the gutter the ordinal would
+        occupy, they cost no width, and the ordinals still work for anyone who
+        counts rows instead.
         """
+        key = self.row_key(index)
+        if key:
+            return f"{key}."
         if index < 9:
             return f"{index + 1}."
         if index == self.other_row:
@@ -1537,12 +1604,23 @@ class AskPickerScreen(Container):
     ) -> Text:
         """The row's second line: the recommendation tag, then the consequence.
 
-        Drawn at ``dim`` and NOT at ``faint`` like the footer's grammar words:
-        this line is the CONSEQUENCE of choosing the row, which is what the user
-        is reading the card to compare. The first captured frame had it at
-        ``faint`` on the ``overlay`` ground, where "nothing in the app reads it
-        any more" was barely present — the same contrast failure the approval
-        prompt's key hints were fixed for.
+        Drawn at ``muted``, which measures 6.51:1 on this card's ``overlay``
+        ground. It has been walked up this ramp twice for the same reason: the
+        first captured frame had it at ``faint`` (1.49:1, barely present), and
+        it then sat at ``dim`` for a release — 3.43:1, which is under the 4.5:1
+        WCAG AA floor for body text (D7, design round 1).
+
+        The floor is the right test rather than a nicety, because of what this
+        line CARRIES: it is the consequence of choosing the row, which is the
+        thing the user is reading the card to compare — and on the approval
+        prompt it is the difference between "ask again next time" and "stop
+        asking for this session". Text that decides an authorisation cannot be
+        the least legible text on the card.
+
+        It stays a step below the LABEL (``fg``, 11.30:1), so the ranking
+        between a row's name and its explanation is intact; what changed is
+        that the explanation is now readable in absolute terms and not only
+        relative to the label above it.
 
         The tag lives HERE, ahead of the prose, rather than after the label: on
         the label line it was paid for out of the label, so the one row the
@@ -1601,8 +1679,35 @@ class AskPickerScreen(Container):
             # `0-9` once the free-text row has taken `0`, because `1-9` then
             # advertised a range that stopped short of the list (D13).
             jump = f"{OTHER_JUMP_KEY}-9" if self.other_row >= 9 else "1-9"
+            # Where the rows carry LETTERS of their own, the footer names those
+            # instead of the digit range: the gutter is showing `y`/`n`/`A`, and
+            # a hint reading `1-9 jump` beside it describes a different keyboard
+            # from the one on screen.
             hints = [("↑↓", "move"), (jump, "jump"), ("enter", "answer")]
             ladder = ["↑↓", jump, "enter", "esc"]
+            # Rows that carry their own LETTER need no range hint at all: the
+            # letter is printed in each row's gutter, next to the label it
+            # answers, which says it better than a footer can. Repeating it here
+            # produced `y/n/A answer · enter answer` — two hints claiming the
+            # same verb, and the digit range would have been a claim about a
+            # keyboard the card is not showing.
+            if any(self.row_key(index) for index in self._window()):
+                hints = [pair for pair in hints if pair[0] != jump]
+                ladder = [key for key in ladder if key != jump]
+            # ...and only where there is somewhere to jump TO. The range was
+            # advertised unconditionally, so a card windowed down to a single
+            # row still offered `1-9 jump` — verified live on a 3-row approval
+            # card, where `5`, `7` and `9` did nothing at all (D3, design round
+            # 1). A key offered where it does nothing is the same lie the
+            # collapsed card's footer already refuses to tell about `enter`.
+            #
+            # Keyed on the DRAWN page rather than on `row_count`: the digits
+            # address rows by ordinal, and a row that is not on screen is one
+            # the user cannot see they are committing to.
+            drawn = len(self._window())
+            if drawn < 2:
+                hints = [pair for pair in hints if pair[0] != jump]
+                ladder = [key for key in ladder if key != jump]
         hints.append(self._exit_hint)
 
         def cells(pairs: list[tuple[str, str]]) -> int:
