@@ -3579,8 +3579,8 @@ class OperatorApp(App[None]):
                 # excerpt visible one row up would read as a bug, so this names
                 # what the label actually is.
                 notice(
-                    f"unnamed — the band is quoting the opener ({self._provisional_name}); "
-                    "/rename <title> names it"
+                    f"unnamed — the label above is a quote of your first message "
+                    f"({self._provisional_name}); /rename <title> names it"
                 )
             else:
                 notice("unnamed — /rename <title> names this conversation")
