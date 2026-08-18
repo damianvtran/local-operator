@@ -100,7 +100,7 @@ def echo_tool(executed: list[str], delay: float = 0.0, name: str = "echo") -> Ag
 def make_session(tmp_path, stream, tools=None, **kwargs) -> Session:
     transcript = Transcript(tmp_path / "sess")
     return Session(
-        model=MODEL,
+        model=kwargs.pop("model", MODEL),
         stream_fn=stream,
         tools=tools or [],
         transcript=transcript,
@@ -1503,3 +1503,95 @@ def test_context_breakdown_counts_wire_schemas_and_messages(tmp_path):
             "messages",
         )
     )
+
+
+def _config_dir_with(tmp_path, monkeypatch, subagents: dict[str, object] | None):
+    """Point the process at a throwaway config dir, optionally with a tier map.
+
+    ``_errand_model`` reads ``subagents.models.lo`` from the real user config,
+    so a test that did not redirect this would answer differently on a machine
+    that happens to have a cheap tier configured.
+    """
+    from local_operator.config import ConfigManager
+
+    config = tmp_path / f"config-{'tiered' if subagents else 'bare'}"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    manager = ConfigManager(config)
+    manager.set_config_value("subagents", subagents or {})
+    return config
+
+
+@pytest.mark.asyncio
+async def test_the_naming_errand_leaves_the_session_isolated_and_cheap(tmp_path, monkeypatch):
+    """``complete_once`` is auto-naming's only route to a provider, and it now
+    runs CONCURRENTLY with the user's turn, so everything that makes it safe to
+    do so lives on the REQUEST it builds.
+
+    The transport suites prove those flags are honoured, but they construct the
+    flag themselves, and every host suite that reaches naming replaces
+    ``complete_once`` on a fake — so nothing watched the one line that SETS it.
+    This asserts the request exactly as it leaves the session.
+    """
+    _config_dir_with(tmp_path, monkeypatch, None)  # no `lo` tier configured
+    captured: list[tuple[ChatRequest, AbortSignal | None]] = []
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        captured.append((request, signal))
+
+        async def gen():
+            yield StreamTextDelta(delta="<title>the login redirect loop</title>")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    session = make_session(tmp_path, stream_fn)
+    text = await session.complete_once("name this conversation", "fix the login redirect loop")
+    await session.dispose()
+
+    assert text == "<title>the login redirect loop</title>"
+    assert len(captured) == 1, "the errand is one call, not a loop"
+    request, signal = captured[0]
+    assert request.isolated is True, "the naming call reached the wire un-isolated"
+    assert request.replayable is False, "a title is worth one attempt, not a replay"
+    assert request.max_tokens == Session.ERRAND_MAX_TOKENS
+    assert request.model == session._errand_model()
+    assert request.model.model_id == MODEL.model_id, "no `lo` tier is configured here"
+    assert request.tools == [] and request.tool_choice == "none"
+    assert signal is None, "the errand carries no abort signal"
+    # It is not a turn: nothing about it may reach the transcript.
+    assert [entry.type for entry in session._transcript.entries()] == []
+
+
+@pytest.mark.asyncio
+async def test_the_errand_model_is_effort_clamped_on_both_routes(tmp_path, monkeypatch):
+    """``ERRAND_MAX_TOKENS`` is an output cap that COUNTS REASONING TOKENS, so a
+    128-token errand left on a reasoning model's default effort can spend the
+    whole budget thinking, emit no ``<title>`` at all and make ``parse_title``
+    return ``None`` — auto-naming would silently never work for that operator
+    while still billing the thinking.
+
+    Both routes out of ``_errand_model`` therefore clamp: the configured ``lo``
+    tier (whose ``build_model_spec`` effort is ``None`` for OpenAI reasoning
+    models, i.e. no ``reasoning.effort`` on the wire and the provider's own
+    default applied) and the fallback to the session's own model.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    _config_dir_with(tmp_path, monkeypatch, {"models": {"lo": "openai/gpt-5-mini"}})
+    reasoning_model = build_model_spec("anthropic", "claude-opus-5")
+    session = make_session(tmp_path, ScriptedStream([]), model=reasoning_model)
+
+    tier = build_model_spec("openai", "gpt-5-mini")
+    assert tier.reasoning_efforts, "this test needs a tier WITH an effort ladder"
+    assert tier.reasoning_effort is None, "unclamped, this spec sends no effort at all"
+
+    errand = session._errand_model()
+    assert (errand.provider, errand.model_id) == ("openai", "gpt-5-mini"), "the tier is preferred"
+    assert errand.reasoning_effort == tier.reasoning_efforts[0]
+
+    # Same clamp on the other route: no tier, so the session's own model.
+    _config_dir_with(tmp_path, monkeypatch, None)
+    fallback = session._errand_model()
+    assert fallback.model_id == reasoning_model.model_id
+    assert reasoning_model.reasoning_effort != reasoning_model.reasoning_efforts[0]
+    assert fallback.reasoning_effort == reasoning_model.reasoning_efforts[0]

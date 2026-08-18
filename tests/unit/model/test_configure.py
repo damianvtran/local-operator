@@ -832,3 +832,120 @@ class TestInfoFromListing:
         listing, _ = self._listing()
         with pytest.raises(ValueError, match="Model not found"):
             _info_from_listing(listing, "vendor/other", openrouter_default_model_info, "or")
+
+
+class TestAnIsolatedRequestTouchesNoneOfTheSessionsSharedState:
+    """``SessionStreamFn`` skips three session-wide steps for decoration.
+
+    Auto-naming runs CONCURRENTLY with the user's turn now, so a title call and
+    the turn reach this object at the same moment. Each step below is consumed
+    or mutated by whichever request arrives first, which is why a decorative
+    call must not take part in any of them.
+    """
+
+    @staticmethod
+    def _handler(captured: dict[str, Any]) -> Any:
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"response.completed","response":{"id":"resp_1",'
+                    b'"usage":{"input_tokens":1,"output_tokens":1}}}\n\ndata: [DONE]\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        return handler
+
+    @staticmethod
+    def _stream(tmp_path: Any) -> tuple[Any, Any]:
+        store = AuthStore(tmp_path / "auth.db")
+        store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+        # Auto effort is off by default, and off it cannot consume the message
+        # boundary — which would make "the isolated call did not consume it"
+        # true of every request and prove nothing.
+        stream = create_stream_fn(store, {"effort": {"auto": True}}, session_id="session-isolation")
+        return stream, store
+
+    async def _run(self, tmp_path: Any, *, isolated: bool) -> dict[str, Any]:
+        captured: dict[str, Any] = {}
+        stream, store = self._stream(tmp_path)
+        await stream._http.aclose()
+        stream._http = httpx.AsyncClient(transport=httpx.MockTransport(self._handler(captured)))
+        preflights: list[Any] = []
+        real_preflight = stream.preflight_usage
+
+        # Wraps rather than replaces: `preflight_usage` is also what CONSUMES
+        # the message boundary, so a stub would make the boundary assertion
+        # below pass for the wrong reason on the ordinary-request control.
+        async def spy_preflight(model: Any) -> None:
+            preflights.append(model)
+            await real_preflight(model)
+
+        stream.preflight_usage = spy_preflight  # type: ignore[method-assign]
+        notices: list[tuple[str, str]] = []
+        stream.set_notice_handler(lambda text, kind: notices.append((text, kind)))
+        spec = build_model_spec("openai", "gpt-5.4")
+        try:
+            await _collect_stream(
+                stream(
+                    ChatRequest(
+                        model=spec,
+                        messages=[
+                            Message.user(
+                                "refactor the compaction cut-point selector and prove it "
+                                "with an end-to-end test against the real transcript store"
+                            )
+                        ],
+                        isolated=isolated,
+                    ),
+                    None,
+                )
+            )
+        finally:
+            await stream.close()
+            store.close()
+        return {
+            "body": captured["body"],
+            "preflights": preflights,
+            "notices": notices,
+            "boundary_pending": stream._message_boundary_pending,
+            "message_effort": stream._message_effort,
+        }
+
+    @pytest.mark.asyncio
+    async def test_it_leaves_the_message_boundary_for_the_turn(self, tmp_path) -> None:
+        """The boundary is CONSUMED by the first request through. A title call
+        arriving first would classify effort from its own prompt, freeze it for
+        the turn's whole tool loop, and emit an "auto effort" notice for a
+        request the user never made."""
+        result = await self._run(tmp_path, isolated=True)
+        assert result["boundary_pending"] is True
+        assert result["message_effort"] is None
+        assert result["notices"] == []
+
+    @pytest.mark.asyncio
+    async def test_it_runs_no_quota_preflight(self, tmp_path) -> None:
+        """The preflight can BLOCK a credential and activate a fallback route
+        for the whole session — an outcome no title is worth."""
+        result = await self._run(tmp_path, isolated=True)
+        assert result["preflights"] == []
+
+    @pytest.mark.asyncio
+    async def test_it_does_not_ride_the_sessions_prompt_cache_key(self, tmp_path) -> None:
+        """The key identifies a request PREFIX. A naming call's prefix is a
+        different system block, so sharing the key buys no hit and writes a
+        competing entry under the name the turn's prefix is cached as."""
+        result = await self._run(tmp_path, isolated=True)
+        assert "prompt_cache_key" not in result["body"]
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_request_does_all_three(self, tmp_path) -> None:
+        """The control. Without it, each assertion above could be passing
+        because this fixture never reaches those code paths at all."""
+        result = await self._run(tmp_path, isolated=False)
+        assert result["boundary_pending"] is False
+        assert result["message_effort"] is not None
+        assert result["preflights"], "no preflight ran on an ordinary request"
+        assert result["body"]["prompt_cache_key"] == "session-isolation"

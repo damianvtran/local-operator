@@ -540,14 +540,30 @@ class AuthStore:
     # -- the cascade ---------------------------------------------------------
 
     async def get_api_key(
-        self, provider: str, session_id: str | None = None, *, force_refresh: bool = False
+        self,
+        provider: str,
+        session_id: str | None = None,
+        *,
+        force_refresh: bool = False,
+        read_only: bool = False,
     ) -> str | None:
-        """Resolve the API key for ``provider`` via the 7-step cascade."""
-        key, _row = await self._resolve(provider, session_id, force_refresh=force_refresh)
+        """Resolve the API key for ``provider`` via the 7-step cascade.
+
+        ``read_only`` makes the resolve decide nothing about routing — see
+        :meth:`_resolve`.
+        """
+        key, _row = await self._resolve(
+            provider, session_id, force_refresh=force_refresh, read_only=read_only
+        )
         return key
 
     async def get_oauth_access(
-        self, provider: str, session_id: str | None = None, *, force_refresh: bool = False
+        self,
+        provider: str,
+        session_id: str | None = None,
+        *,
+        force_refresh: bool = False,
+        read_only: bool = False,
     ) -> OAuthAccess | None:
         """The identity-carrying record for wire clients.
 
@@ -556,10 +572,17 @@ class AuthStore:
         row wins, ``kind == "api_key"`` otherwise. Runtime/config overrides
         deliberately short-circuit to ``None`` (they aim at gateways where
         stored identity does not apply).
+
+        ``read_only`` resolves without blocking a credential or moving session
+        stickiness, for a decorative call running beside a live turn — see
+        :meth:`_resolve` and
+        :attr:`~local_operator.harness.types.ChatRequest.isolated`.
         """
         if self._runtime_overrides.get(provider) or self._config_overrides.get(provider):
             return None
-        key, row = await self._resolve(provider, session_id, force_refresh=force_refresh)
+        key, row = await self._resolve(
+            provider, session_id, force_refresh=force_refresh, read_only=read_only
+        )
         if key is None:
             return None
         if row is not None and row.credential_type == "oauth":
@@ -604,10 +627,13 @@ class AuthStore:
         - **No stickiness.** ``_set_sticky`` pins which credential a SESSION
           transacts on. Reading a quota must not repoint the session's account
           as a side effect.
-        - **No blocking on refresh failure.** The cascade blocks a row that
+        - **No blocking on refresh failure.** A routing resolve blocks a row that
           fails to refresh so it can rotate to a sibling for the request in
           hand. Here the row is simply omitted: taking a credential out of
           service is a routing decision, and a read is not entitled to make it.
+          The last two are the same principle ``_resolve``'s ``read_only`` mode
+          applies to a decorative REQUEST, which needs a bearer but is likewise
+          not entitled to route the session.
 
         Logged-out rows are still excluded — ``list_credentials`` filters on
         ``disabled_cause``, and an account the user signed out of is genuinely
@@ -652,10 +678,33 @@ class AuthStore:
         return accesses
 
     async def _resolve(
-        self, provider: str, session_id: str | None, *, force_refresh: bool = False
+        self,
+        provider: str,
+        session_id: str | None,
+        *,
+        force_refresh: bool = False,
+        read_only: bool = False,
     ) -> tuple[str | None, StoredCredential | None]:
-        """The 7-step cascade; returns ``(key, winning row or None)``."""
+        """The 7-step cascade; returns ``(key, winning row or None)``.
+
+        ``read_only`` resolves WITHOUT making any routing decision: no
+        credential blocked when its refresh fails, no session stickiness
+        written and none cleared. It exists for a request that runs beside a
+        user's turn and must not be able to move that turn's account — see
+        :attr:`~local_operator.harness.types.ChatRequest.isolated`. The cascade
+        still READS stickiness, so a read-only resolve lands on the same
+        credential the turn is transacting on, which is the point. A successful
+        OAuth refresh still persists the rotated token: that is the same
+        account's own bookkeeping, not a decision about where requests go, and
+        dropping it would throw away a single-use refresh token.
+        """
         definition: ProviderDefinition | None = get_provider_definition(provider)
+
+        def pin(credential_id: int | None) -> None:
+            """Write (or, with ``None``, clear) session stickiness — unless this
+            resolve is read-only, in which case it is not ours to move."""
+            if not read_only:
+                self._set_sticky(provider, session_id, credential_id)
 
         # 1. Runtime override
         runtime = self._runtime_overrides.get(provider)
@@ -673,12 +722,13 @@ class AuthStore:
             try:
                 creds = await self._ensure_oauth_fresh(row, force=force_refresh)
             except AuthStoreError:
-                self.block_credential(row.id, provider)  # try a sibling
+                if not read_only:
+                    self.block_credential(row.id, provider)  # try a sibling
                 continue
             key_fn = definition.get_api_key if definition else None
             key = key_fn(creds) if key_fn else creds.get("access")
             if key:
-                self._set_sticky(provider, session_id, row.id)
+                pin(row.id)
                 refreshed = self.get_credential(row.id)
                 return key, refreshed or row
         if oauth_rows and force_refresh:
@@ -692,13 +742,13 @@ class AuthStore:
         for row in self._selection_order(login_rows, provider, session_id):
             key = row.data.get("key")
             if key:
-                self._set_sticky(provider, session_id, row.id)
+                pin(row.id)
                 return key, row
 
         # Leaving the OAuth tier: clear session stickiness so identity
         # attribution stops for non-OAuth requests (PR-16; cleared before
         # step 5, regardless of which later tier ends up winning).
-        self._set_sticky(provider, session_id, None)
+        pin(None)
 
         # 5. Env var tier (process env, then legacy credentials.env).
         env_key = self._env_api_key(provider)
@@ -714,7 +764,7 @@ class AuthStore:
         for row in self._selection_order(stored_rows, provider, session_id):
             key = row.data.get("key")
             if key:
-                self._set_sticky(provider, session_id, row.id)
+                pin(row.id)
                 return key, row
         # 7. Fallback resolver
         resolver = self._fallback_resolvers.get(provider)

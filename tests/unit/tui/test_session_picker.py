@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from rich.cells import cell_len
+from rich.style import Style
 from textual import events
 from textual.app import App, ComposeResult
 
@@ -113,6 +114,99 @@ def test_an_unreadable_or_empty_transcript_yields_no_name(tmp_path: Path) -> Non
     (partial / "transcript.jsonl").write_text('{"id": "e1", "type": "mess', encoding="utf-8")
     assert session_name(partial) == ""
     assert session_name(tmp_path / "sessions" / "missing") == ""
+
+
+def _message_with_image(text: str, data_chars: int) -> dict[str, object]:
+    """A user message carrying a pasted image, text block first — the order
+    ``Message.user(text, images)`` produces and the writer preserves."""
+    return {
+        "id": "e1",
+        "ts": 0,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "user",
+            "content": [
+                {"text": text},
+                {"data": "A" * data_chars, "mime_type": "image/png"},
+            ],
+        },
+    }
+
+
+def test_a_session_opening_with_a_screenshot_is_still_named(tmp_path: Path) -> None:
+    """One pasted image puts the first line past the scan window, and the
+    fragment used to be dropped — which left every session that begins with a
+    screenshot reading `(unnamed session)` in the picker for the rest of its
+    life. Measured on two real sessions whose first lines were 115,289 and
+    733,034 characters.
+
+    The window still bounds the read; what changed is that a fragment is mined
+    for the opener instead of discarded, which is safe because the text block
+    precedes the image data on the line.
+    """
+    directory = _write_transcript(
+        tmp_path,
+        "shot01",
+        [_message_with_image("why does the resume picker forget my sessions", NAME_SCAN_CHARS * 2)],
+    )
+    with (directory / "transcript.jsonl").open(encoding="utf-8") as handle:
+        assert len(handle.readline()) > NAME_SCAN_CHARS, "this case needs an oversized line"
+    assert session_name(directory) == "why does the resume picker forget my sessions"
+
+
+def test_a_fragment_is_never_named_after_the_image_it_carries(tmp_path: Path) -> None:
+    """A name taken from base64 would be worse than no name. When the text block
+    does NOT come first, the scan declines rather than reaching past the data."""
+    directory = tmp_path / "sessions" / "shot02"
+    directory.mkdir(parents=True)
+    payload = {
+        "id": "e1",
+        "ts": 0,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "user",
+            "content": [
+                {"data": "A" * (NAME_SCAN_CHARS * 2), "mime_type": "image/png"},
+                {"text": "this text is past the image"},
+            ],
+        },
+    }
+    (directory / "transcript.jsonl").write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    assert session_name(directory) == ""
+
+
+def test_a_fragment_whose_text_is_cut_off_yields_no_name(tmp_path: Path) -> None:
+    """A title cut mid-word reads like a bug. The value must close inside the
+    window to be used at all, so an opener longer than the window is declined
+    rather than truncated to whatever the read happened to reach."""
+    directory = tmp_path / "sessions" / "shot03"
+    directory.mkdir(parents=True)
+    line = '{"id":"e1","ts":0,"type":"message","payload":{"kind":"message","role":"user"'
+    line += ',"content":[{"text":"' + "word " * (NAME_SCAN_CHARS // 2)
+    (directory / "transcript.jsonl").write_text(line, encoding="utf-8")
+    assert session_name(directory) == ""
+
+
+def test_a_fragment_from_a_non_user_opener_is_declined(tmp_path: Path) -> None:
+    """The strict path matches ``role`` exactly so a tool result cannot name a
+    session; the fragment path has to hold the same line."""
+    directory = tmp_path / "sessions" / "shot04"
+    directory.mkdir(parents=True)
+    payload = {
+        "id": "e1",
+        "ts": 0,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": [{"text": "total 48"}, {"data": "A" * (NAME_SCAN_CHARS * 2)}],
+        },
+    }
+    (directory / "transcript.jsonl").write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    assert session_name(directory) == ""
 
 
 def test_rows_are_newest_first_and_carry_their_name(tmp_path: Path) -> None:
@@ -450,6 +544,35 @@ async def test_the_cursor_is_always_on_a_row_the_card_actually_draws() -> None:
 
 
 # --- selection legibility ---------------------------------------------------
+
+
+@pytest.mark.parametrize("theme_name", ["dark", "light"])
+def test_the_caret_is_muted_like_both_sibling_pickers(theme_name: str) -> None:
+    """The caret is `muted`, never the violet meta ink.
+
+    It was `label` — the ramp's violet for tips and skill labels — held in a
+    local named `accent`, which put the one cool mark on a warm card and said
+    "meta" where the frame meant "position". Asserted per ramp and against the
+    TOKEN rather than a hex, because the defect was a token choice: violet is
+    `#b48cd6` on dark and `#7c5a9e` on paper, and pinning one hex would let the
+    other ramp keep the bug.
+    """
+    original = theme_mod.current_theme()
+    theme_mod.set_theme(theme_name)
+    try:
+        rows = [_row("aaa111", "a named session"), _row("bbb222", "")]
+        for selected in (0, 1):  # named and unnamed: one caret, one ink
+            span = render_rows(rows, selected, 74, NOW)[selected].spans[0]
+            # Rich types ``Span.style`` as ``str | Style``; a span this file
+            # built carries the object, and parsing narrows it either way.
+            style = span.style if isinstance(span.style, Style) else Style.parse(span.style)
+            colour = style.color
+            assert colour is not None and colour.triplet is not None
+            assert colour.triplet.hex == theme_mod.semantic_color("muted")
+            assert colour.triplet.hex != theme_mod.semantic_color("label")
+            assert colour.triplet.hex != theme_mod.semantic_color("accent")
+    finally:
+        theme_mod.set_theme(original)
 
 
 def test_selecting_an_unnamed_row_brightens_it_like_any_other() -> None:
