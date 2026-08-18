@@ -1102,6 +1102,27 @@ class ApprovalPrompt(AskPickerScreen):
         self.settle(None)
 
     # -- answering -----------------------------------------------------------
+    def answer_keys(self) -> frozenset[str]:
+        """The approval letters, routable from the composer.
+
+        `y`/`n`/`A` rather than the picker's ordinals: these are the keys this
+        prompt has always advertised and the ones people have in their fingers.
+
+        Empty while the card is drawing no options, for the same reason
+        :meth:`on_key` refuses them there — an authorisation must never be
+        committable from a card that did not show what it was offering. `n` is
+        excluded from that suppression inside `on_key` (denial is the safe
+        direction and Escape stops the turn anyway), but it is not routed from
+        the COMPOSER, where the user is typing rather than answering.
+        """
+        if not self.visible_rows:
+            return frozenset()
+        return frozenset(self._ANSWER_KEYS)
+
+    def answer_from_key(self, character: str) -> None:
+        """Take ``character`` as an answer routed from the composer."""
+        self._answer_with(character)
+
     def row_key(self, index: int) -> str:
         """The letter that answers this row: `y`, `n`, or `A`.
 
