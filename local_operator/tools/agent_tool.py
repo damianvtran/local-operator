@@ -153,7 +153,11 @@ def _profile_line(profile: AgentProfile, *, installed: bool) -> str:
     # heavier. Tool restriction is the one attribute the guide calls "a
     # capability boundary, not advice", so the row must not communicate its
     # absence by saying nothing. `show` already spells this out; this matches.
-    marks.append(f"{len(profile.tools)} tools" if profile.tools else "all tools")
+    if not profile.tools:
+        marks.append("all tools")
+    else:
+        count = len(profile.tools)
+        marks.append(f"{count} tool" if count == 1 else f"{count} tools")
     if profile.effort:
         marks.append(profile.effort)
     suffix = f" [{', '.join(marks)}]" if marks else ""
@@ -419,15 +423,29 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
             f"no packaged starter named {name!r}; starters: {', '.join(list_seeds())}",
         )
     try:
-        profile = install_seed(name, registry=registry)
+        installed = install_seed(name, registry=registry)
     except NameTakenError:
         return _error(
             tool_call_id,
             "agent",
             _name_taken_message(name, installing=True),
         )
-    if profile is None:
+    if installed is None:
         return _error(tool_call_id, "agent", f"could not install starter {name!r}")
+    profile, already_there = installed
+    if already_there:
+        # Say the no-op out loud. `install` is the only verb here that sounds
+        # like "put the shipped one back", so answering "installed" to a
+        # deliberate skip leaves an operator believing they restored the
+        # packaged guidance while their own edited prompt is what the next
+        # delegation runs. Same failure shape C4 fixed on the non-role branch.
+        return _text(
+            tool_call_id,
+            "agent",
+            f"role {profile.name!r} is already installed and was left as-is (your edits are "
+            f"kept): op='show' name={profile.name!r} to read it, or op='update' "
+            f"name={profile.name!r} to change it.",
+        )
     return _text(
         tool_call_id,
         "agent",

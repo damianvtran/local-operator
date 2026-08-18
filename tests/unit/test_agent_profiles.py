@@ -169,6 +169,7 @@ class TestResolution:
         registry = AgentRegistry(tmp_path)
         installed = install_seed("reviewer", registry=registry)
         assert installed is not None
+        installed = installed[0]
         registry.set_agent_system_prompt(str(installed.agent_id), "MY HOUSE RULES")
 
         profile = resolve_profile("reviewer", registry=registry)
@@ -191,8 +192,10 @@ class TestResolution:
 class TestInstall:
     def test_installing_makes_an_ordinary_editable_registry_row(self, tmp_path) -> None:
         registry = AgentRegistry(tmp_path)
-        profile = install_seed("reviewer", registry=registry)
-        assert profile is not None and profile.agent_id
+        result = install_seed("reviewer", registry=registry)
+        assert result is not None
+        profile, already_there = result
+        assert profile.agent_id and not already_there
         agent = registry.get_agent_by_name("reviewer")
         assert agent is not None
         assert "role" in agent.tags
@@ -202,12 +205,17 @@ class TestInstall:
         """Two launches of the same role can race; the second must not undo an
         edit the operator made to the first."""
         registry = AgentRegistry(tmp_path)
-        first = install_seed("reviewer", registry=registry)
-        assert first is not None
+        first_result = install_seed("reviewer", registry=registry)
+        assert first_result is not None
+        first, first_already = first_result
+        assert not first_already
         registry.set_agent_system_prompt(str(first.agent_id), "EDITED")
 
-        second = install_seed("reviewer", registry=registry)
-        assert second is not None and second.agent_id == first.agent_id
+        second_result = install_seed("reviewer", registry=registry)
+        assert second_result is not None
+        second, second_already = second_result
+        assert second_already, "a second install is a deliberate no-op and must say so"
+        assert second.agent_id == first.agent_id
         assert second.instructions == "EDITED"
         assert len([a for a in registry.list_agents() if a.name == "reviewer"]) == 1
 

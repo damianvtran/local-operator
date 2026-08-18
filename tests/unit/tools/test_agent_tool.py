@@ -477,3 +477,31 @@ async def test_search_only_claims_best_first_when_it_ranked(context, monkeypatch
     assert degraded.startswith("closest roles:")
     assert "best first" not in degraded
     assert "- " in degraded, "the shortlist is still returned, just unordered"
+
+
+@pytest.mark.asyncio
+async def test_reinstalling_an_edited_role_reports_the_no_op(context, registry) -> None:
+    """D14: `install_seed` is deliberately idempotent, but the message did not
+    say so — and `install` is the only verb here that sounds like "put the
+    shipped one back". An operator recovering from a role they broke was told
+    `installed role 'reviewer'` while their own edited prompt remained what the
+    next delegation would run. Same failure shape C4 fixed on the non-role
+    branch.
+    """
+    await call(context, op="install", name="reviewer")
+    await call(context, op="update", name="reviewer", instructions="ONLY CHECK THE MIGRATIONS.")
+
+    body = await call(context, op="install", name="reviewer")
+
+    assert "already installed" in body and "left as-is" in body
+    profile = resolve_profile("reviewer", registry=registry)
+    assert profile is not None
+    assert "MIGRATIONS" in profile.instructions, "the edit must survive, and it does"
+
+
+@pytest.mark.asyncio
+async def test_a_single_tool_role_is_not_labelled_one_tools(context) -> None:
+    """D15: the badge was built unconditionally as `{n} tools`."""
+    await call(context, op="create", name="one", description="d", instructions="i", tools=["read"])
+    row = next(line for line in (await call(context, op="list")).splitlines() if "one" in line)
+    assert "[1 tool]" in row and "1 tools" not in row

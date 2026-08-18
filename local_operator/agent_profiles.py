@@ -409,8 +409,13 @@ def install_seed(
     *,
     registry: "AgentRegistry",
     overwrite: bool = False,
-) -> AgentProfile | None:
-    """Copy a packaged seed into the user's registry and return the profile.
+) -> tuple[AgentProfile, bool] | None:
+    """Copy a packaged seed into the registry; return ``(profile, was_already_there)``.
+
+    The second element is why this returns a tuple: the caller has to be able
+    to tell "I installed it" from "it was already there and I left it alone",
+    because reporting the first when the second happened misleads an operator
+    who is trying to restore a role they broke.
 
     This is the "readily available, pulled in as needed" step: seeds are not
     installed at startup (an empty registry should stay empty until something
@@ -442,7 +447,14 @@ def install_seed(
     if existing is not None and not is_role(existing) and not overwrite:
         raise NameTakenError(seed.name)
     if existing is not None and not overwrite:
-        return profile_from_agent(registry, existing)
+        # Already a role: return it UNTOUCHED (that idempotence is what keeps a
+        # concurrent second launch from clobbering operator edits) and say so
+        # via ``already_installed``, so the caller does not report a write that
+        # did not happen. The natural recovery guess after breaking a role is
+        # "install it again", and answering "installed" to a no-op leaves the
+        # operator believing the packaged guidance is back when their own
+        # edited prompt is what the next delegation will run.
+        return profile_from_agent(registry, existing), True
 
     tags = list(seed_tags(seed))
     if existing is None:
@@ -484,7 +496,7 @@ def install_seed(
     else:
         agent = existing
     registry.set_agent_system_prompt(agent.id, seed.instructions)
-    return profile_from_agent(registry, agent)
+    return profile_from_agent(registry, agent), False
 
 
 def seed_tags(profile: AgentProfile) -> tuple[str, ...]:
