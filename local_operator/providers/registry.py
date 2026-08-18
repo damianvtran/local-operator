@@ -319,7 +319,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         search_aliases=("grok",),
         name="xAI (Grok API key)",
         env_keys="XAI_API_KEY",
-        login=create_api_key_login("xAI", "https://console.x.ai/", "Paste your xAI API key"),
+        login=create_api_key_login("xAI", "https://console.x.ai/"),
         base_url="https://api.x.ai/v1",
     ),
     ProviderDefinition(
@@ -337,9 +337,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         search_aliases=("ds",),
         name="DeepSeek",
         env_keys="DEEPSEEK_API_KEY",
-        login=create_api_key_login(
-            "DeepSeek", "https://platform.deepseek.com/api_keys", "Paste your DeepSeek API key"
-        ),
+        login=create_api_key_login("DeepSeek", "https://platform.deepseek.com/api_keys"),
         base_url="https://api.deepseek.com/v1",
     ),
     ProviderDefinition(
@@ -354,7 +352,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         login=create_api_key_login(
             "Google AI Studio",
             "https://aistudio.google.com/apikey",
-            "Paste your Google AI Studio API key",
+            "The console calls it an AI Studio API key.",
         ),
         base_url="https://generativelanguage.googleapis.com",
         wire="google",
@@ -367,9 +365,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         ),
         name="Mistral AI",
         env_keys="MISTRAL_API_KEY",
-        login=create_api_key_login(
-            "Mistral", "https://console.mistral.ai/api-keys", "Paste your Mistral API key"
-        ),
+        login=create_api_key_login("Mistral", "https://console.mistral.ai/api-keys"),
         base_url="https://api.mistral.ai/v1",
     ),
     ProviderDefinition(
@@ -387,9 +383,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         ),
         name="OpenRouter",
         env_keys="OPENROUTER_API_KEY",
-        login=create_api_key_login(
-            "OpenRouter", "https://openrouter.ai/keys", "Paste your OpenRouter API key"
-        ),
+        login=create_api_key_login("OpenRouter", "https://openrouter.ai/keys"),
         base_url="https://openrouter.ai/api/v1",
     ),
     ProviderDefinition(
@@ -397,7 +391,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         name="Radient",
         env_keys="RADIENT_API_KEY",
         login=create_api_key_login(
-            "Radient", "https://radienthq.com/", "Paste your Radient Pass key"
+            "Radient", "https://radienthq.com/", "The console calls it a Radient Pass key."
         ),
         base_url="https://api.radienthq.com/v1",
     ),
@@ -413,7 +407,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         login=create_api_key_login(
             "Alibaba Cloud",
             "https://dashscope-intl.console.aliyun.com/",
-            "Paste your DashScope API key",
+            "The console calls it a DashScope API key.",
         ),
         base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     ),
@@ -429,7 +423,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         login=create_api_key_login(
             "QwenCloud Token Plan",
             "https://home.qwencloud.com/billing/subscription/token-plan-individual",
-            "Paste your Token Plan API key (sk-sp-…)",
+            "It starts with sk-sp-.",
         ),
         get_api_key=_token_plan_wire_key,
         base_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
