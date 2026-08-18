@@ -1278,7 +1278,15 @@ class AskPickerScreen(Container):
         """
         from local_operator.tui.widgets.editor import Editor
 
-        screen = self.screen
+        # `self.screen` RAISES `NoScreen` on an unmounted node rather than
+        # returning None, and this is reached from the footer, which is
+        # rendered in contexts where the card is not attached (the width tests
+        # build a card and ask it to lay out). Guarded so a layout question can
+        # never raise out of a render.
+        try:
+            screen = self.screen
+        except Exception:
+            return False
         if screen is None:
             return False
         try:
