@@ -594,10 +594,19 @@ async def test_a_background_job_cannot_strand_a_deferred_completion() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_completion_owed_while_focused_is_delivered_on_the_blur() -> None:
-    """Round 2, M6. The completion half of B1: a child settling while the user
-    was watching owed a toast that the focus gate suppressed, and a finished
-    session produces no further event to retry on — so it was dropped."""
+async def test_a_completion_watched_by_the_user_is_not_replayed_on_the_blur() -> None:
+    """Round 3, M7. The completion debt must NOT outlive the work.
+
+    Round 2's M6 fix treated a suppressed completion like a suppressed
+    question, and the two are not alike. A question outlives the moment it was
+    asked — it is still unanswered later, so a suppressed one stays owed (B1).
+    A completion is an instant: once the work finished in front of the user
+    there is nothing left to tell them. Retaining the debt meant the ONLY toast
+    the blur flush could ever deliver was one whose user had already watched it
+    land, announced whenever they next alt-tabbed away, unboundedly later.
+
+    So the flag is cleared once the work is over, delivered or not.
+    """
     from textual.events import AppBlur
 
     from local_operator.tui.events import SubagentEnded
@@ -608,13 +617,38 @@ async def test_a_completion_owed_while_focused_is_delivered_on_the_blur() -> Non
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
         app.on_turn_ended(TurnEnded(aborted=False, error=None))
-        # The child settles while the terminal still has focus.
+        # The child settles while the user is watching: nothing to announce.
         notifier.focused = True
         session.running_tasks = 0
         app.on_subagent_ended(SubagentEnded(job_id="j", label="c", status="completed"))
         await pilot.pause()
-        assert app._completion_deferred is True  # still owed
+        assert app._completion_deferred is False  # the debt is settled, not held
+        notifier.focused = False
+        before = len(notifier.calls)
         app.on_app_blur(AppBlur())
         await pilot.pause()
-    assert notifier.calls[-1] == ("complete", 0)
-    assert app._completion_deferred is False
+    assert notifier.calls[before:] == [("focus", False)]  # no stale completion
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_completion_is_not_announced_over_live_children() -> None:
+    """Round 3, N5. The outstanding-jobs guard, which no test pinned.
+
+    Without it, one child settling while siblings still work announces a
+    finish over live subagents — the B2 false finish, reintroduced from the
+    flush path instead of the turn-end path.
+    """
+    from local_operator.tui.events import SubagentEnded
+
+    session = JobsSession(running_tasks=2)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        before = len(notifier.calls)
+        session.running_tasks = 1  # one settled, one still running
+        app.on_subagent_ended(SubagentEnded(job_id="j1", label="a", status="completed"))
+        await pilot.pause()
+    assert notifier.calls[before:] == []
+    assert app._completion_deferred is True  # still owed, correctly

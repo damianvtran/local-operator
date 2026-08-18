@@ -3329,24 +3329,6 @@ class OperatorApp(App[None]):
             return
         self._notifier.set_focused(False)
         self._flush_pending_question()
-        self._flush_deferred_completion()
-
-    def _flush_deferred_completion(self) -> None:
-        """Deliver a finish that was owed but suppressed while focused.
-
-        The completion half of :meth:`_flush_pending_question`, and it exists
-        for the same reason: the child settle that owed the toast may have
-        landed while the user was watching, where delivery is correctly
-        suppressed — and a session whose work is finished produces no further
-        events to retry on. Without this the owed completion is dropped, which
-        is the edge-consumed-on-a-suppressed-delivery bug in its other form.
-        """
-        if not self._completion_deferred:
-            return
-        if self._outstanding_delegated_jobs():
-            return
-        if self._notify("complete", running_children=0):
-            self._completion_deferred = False
 
     def _flush_pending_question(self) -> None:
         """Announce an unanswered question raised while the terminal was focused.
@@ -7340,8 +7322,16 @@ class OperatorApp(App[None]):
             return
         if self._outstanding_delegated_jobs():
             return  # siblings still working; the last one to settle tells them
-        if self._notify("complete", running_children=0):
-            self._completion_deferred = False
+        # Cleared whether or not the toast was DELIVERED, and that asymmetry
+        # with the waiting latch is the point. A question outlives the moment
+        # it was asked — it is still unanswered later, so a suppressed one must
+        # stay owed. A completion is an INSTANT: once the work has finished in
+        # front of the user, there is nothing left to tell them, and retaining
+        # the debt meant the only toast this could ever deliver was one whose
+        # user had already watched it land — announced whenever they next
+        # alt-tabbed away, unboundedly later.
+        self._notify("complete", running_children=0)
+        self._completion_deferred = False
 
 
 def _model_spec(session) -> Any | None:
