@@ -9,9 +9,15 @@ comment, so the invariant is enforced in code rather than documented.
 
 Algorithm (``findCutPoint``): walk **backwards** from the newest message
 accumulating estimated tokens until the kept region reaches
-``keep_recent_tokens``, then snap **forward** to the first valid cut message
-at or after that index. Valid cut messages are ``user`` messages, assistant
+``keep_recent_tokens``, then snap to the nearest valid cut message — forward
+from that index when one exists (a later cut keeps more recent history), and
+otherwise backwards. Valid cut messages are ``user`` messages, assistant
 messages with no pending tool calls, or compaction-summary markers.
+
+The backwards fallback exists because a history captured MID-RUN ends inside
+an unfinished tool chain, where every trailing position is an illegal cut; a
+forward-only snap ran off the end and reported "nothing to compact" at exactly
+the moment the context was growing fastest. See :func:`_snap_to_valid_cut`.
 """
 
 from __future__ import annotations
@@ -47,12 +53,41 @@ def _message_tokens(message: AgentMessage) -> int:
     return 0
 
 
-def _is_valid_cut(messages: Sequence[AgentMessage], index: int) -> bool:
+def _result_indices(messages: Sequence[AgentMessage]) -> dict[str, int]:
+    """``tool_call_id`` -> index of the tool result answering it.
+
+    Precomputed once per :func:`find_cut_point` so the validity predicate is
+    O(1) per candidate instead of rescanning the suffix; the snap can inspect
+    every index, which made the naive form quadratic on exactly the long tool
+    runs this code exists to relieve.
+    """
+    return {
+        message.tool_call_id: index
+        for index, message in enumerate(messages)
+        if isinstance(message, Message) and message.role == "tool" and message.tool_call_id
+    }
+
+
+def _is_valid_cut(
+    messages: Sequence[AgentMessage], index: int, result_at: dict[str, int] | None = None
+) -> bool:
     """Whether cutting *before* ``messages[index]`` keeps pairing legal.
 
-    Valid: user messages, assistant messages with no pending tool calls,
-    compaction-summary markers. Tool results and assistants whose results
-    follow are never valid — see module docstring.
+    Valid: user messages, compaction-summary markers, assistant messages with
+    no tool calls, and an assistant message whose OWN calls are all answered at
+    or after ``index`` — that last case keeps the assistant and its results
+    together on the kept side, which is the actual pairing rule.
+
+    Treating every tool-calling assistant as invalid (the earlier rule) was
+    stricter than the invariant and starved compaction: inside a long tool run
+    every message is either a tool result or a tool-calling assistant, so NO
+    index qualified and the whole run was uncompactable no matter how large it
+    grew. The partition sweep already encodes the looser rule — it asserts an
+    assistant candidate's pending calls are answered in ``kept`` rather than
+    that no such candidate exists.
+
+    An UNANSWERED call is still invalid: its result has not been produced yet,
+    so keeping the assistant would hand the provider a dangling call.
     """
     message = messages[index]
     if _is_compaction_marker(message):
@@ -61,9 +96,51 @@ def _is_valid_cut(messages: Sequence[AgentMessage], index: int) -> bool:
         return False
     if message.role == "user":
         return True
-    if message.role != "assistant" or message.tool_calls:
+    if message.role != "assistant":
         return False
-    return True
+    if not message.tool_calls:
+        return True
+    if result_at is None:
+        result_at = _result_indices(messages)
+    return all(result_at.get(call.id, -1) >= index for call in message.tool_calls)
+
+
+def _snap_to_valid_cut(
+    messages: Sequence[AgentMessage], index: int, result_at: dict[str, int]
+) -> int | None:
+    """Nearest index at or after ``index`` that is a legal cut, else the
+    nearest one BEFORE it; ``None`` when the history has no legal cut at all.
+
+    Forward is preferred because a later cut keeps more recent history, which
+    is what ``keep_recent_tokens`` is asking for. The backwards fallback is
+    what makes the gate work MID-RUN, and it is not symmetric politeness — it
+    fixes a real starvation:
+
+    An unfinished tool run ends in an assistant message with pending tool
+    calls, usually followed by its tool results. Every one of those trailing
+    positions fails ``_is_valid_cut``, so a forward-only snap walks off the
+    end of the list and the caller reads that as "nothing to compact". A long
+    tool run is precisely when the context is growing fastest and no user turn
+    is coming to relieve it, so compaction was refused at every mid-turn
+    boundary and the session sailed past its configured threshold — relief
+    arrived only once the run finally ended and a terminal assistant message
+    made a forward cut legal again.
+
+    Cutting slightly EARLIER than the token walk asked for is the right trade:
+    it keeps a little more history than requested (never less), preserves the
+    call/result pairing rule exactly as the forward snap does, and lets a pass
+    actually run. The alternative — refusing — is what let the window fill.
+    """
+    total = len(messages)
+    forward = index
+    while forward < total and not _is_valid_cut(messages, forward, result_at):
+        forward += 1
+    if forward < total:
+        return forward
+    backward = min(index, total - 1)
+    while backward >= 0 and not _is_valid_cut(messages, backward, result_at):
+        backward -= 1
+    return backward if backward >= 0 else None
 
 
 def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) -> int | None:
@@ -71,9 +148,10 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
     summarizing.
 
     Walks backwards accumulating :func:`estimate_tokens` until the kept region
-    reaches ``keep_recent_tokens``, then snaps forward to the next valid cut
+    reaches ``keep_recent_tokens``, then snaps to the nearest valid cut
     message (role ``user``, or ``assistant`` without pending tool calls, or a
-    compaction-summary marker). Returns ``None`` when the accumulated region
+    compaction-summary marker) — forward when possible, else backwards, see
+    :func:`_snap_to_valid_cut`. Returns ``None`` when the accumulated region
     already covers everything (all tokens in the kept region) or when fewer
     than two REAL messages fall before the cut (nothing worth summarizing —
     a previous compaction's marker does not count, it is already a summary).
@@ -106,13 +184,15 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
         # Never reached the keep budget: everything is "recent".
         return None
 
-    # Snap forward to the first valid cut message. Skipping tool results and
+    result_at = _result_indices(messages)
+
+    # Snap to the nearest valid cut message. Skipping tool results and
     # pending-tool-call assistants keeps call/result pairing intact: the pair
     # always moves to the kept side together.
-    while index < total and not _is_valid_cut(messages, index):
-        index += 1
-    if index >= total:
+    snapped = _snap_to_valid_cut(messages, index, result_at)
+    if snapped is None:
         return None
+    index = snapped
 
     # The snap can collapse the kept region far below the budget — one user
     # message followed by a long tool chain walks into the chain and snaps to
@@ -124,11 +204,10 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
     if kept_tokens < keep_recent_tokens // 2 and index > 0:
         retry = backwards_walk(index - 1)
         if retry is not None:
-            index = retry
-            while index < total and not _is_valid_cut(messages, index):
-                index += 1
-            if index >= total:
+            snapped = _snap_to_valid_cut(messages, retry, result_at)
+            if snapped is None:
                 return None
+            index = snapped
 
     # Defensive invariant (the predicate already excludes violations; the
     # assertion makes a future regression loud instead of silent). GENERAL
