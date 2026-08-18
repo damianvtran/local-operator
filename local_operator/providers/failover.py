@@ -36,7 +36,7 @@ from local_operator.harness.types import (
 from local_operator.model.effort import EFFORT_ORDER, resolve_effort
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
-    from local_operator.providers.auth_store import OAuthAccess
+    from local_operator.providers.auth_store import OAuthAccess, StoredCredential
     from local_operator.providers.clients import WireClient
 
 # ---------------------------------------------------------------------------
@@ -438,10 +438,56 @@ def is_direct_credential_rotation_error(error: BaseException) -> bool:
     which deliberately excludes it: a refreshed token still has no credits, so
     the refresh step is as pointless here as for a 403 — but a spent balance is
     not a window that reopens, so the credential must not keep its sticky place.
+
+    Server-side failures (5xx, including Anthropic's 529 ``overloaded_error``,
+    and transport timeouts) are here too. A refresh cannot fix the PROVIDER
+    being overloaded, so the refresh step is equally pointless, and the sticky
+    credential is not at fault so it keeps its place — that is exactly the
+    contract this predicate expresses. See
+    :func:`allows_full_sibling_rotation` for why they must also be exempt from
+    the ordinary-401 switch cap.
     """
     if not isinstance(error, ProviderError):
         return False
-    return is_usage_limit_error(error) or error.status in (402, 403)
+    return (
+        is_usage_limit_error(error) or error.status in (402, 403) or is_server_side_failure(error)
+    )
+
+
+def is_server_side_failure(error: BaseException) -> bool:
+    """The PROVIDER failed, not the credential: 5xx, or a timeout/transport blip.
+
+    Kept separate from :func:`is_usage_limit_error` because the two want
+    opposite blocking behaviour — a quota error blocks the credential for the
+    reset window, while an overloaded provider must not get four credentials
+    blocked for a fault none of them caused. ``AuthStore.rotate_sibling``
+    deprioritises instead of blocking on the strength of this predicate.
+    """
+    if not isinstance(error, ProviderError):
+        return False
+    if error.kind in ("timeout", "transient"):
+        return True
+    return error.status is not None and error.status >= 500
+
+
+def allows_full_sibling_rotation(error: BaseException) -> bool:
+    """May this error cycle EVERY sibling, rather than one switch and stop?
+
+    The ``legacy_auth_switch_used`` cap in :class:`AuthRetryKeyState` exists for
+    the ordinary-401 case, where a second, third and fourth bearer are all
+    equally likely to be rejected and cycling them only delays a login prompt
+    the user has to answer anyway.
+
+    It is the wrong rule for a pool of accounts that fail INDEPENDENTLY. With
+    four Anthropic accounts and a 529 storm, the cap stopped after the second
+    account and reported the turn dead while two healthy accounts were never
+    asked — the reported failure. Quota is the same story: one account's spent
+    weekly window says nothing about the other three.
+
+    So exhaustion, payment, permission and server-side faults may walk the whole
+    pool; only an ordinary 401 keeps the single-switch cap.
+    """
+    return is_direct_credential_rotation_error(error)
 
 
 def retry_after_ms_from_error(error: BaseException) -> int | None:
@@ -1048,6 +1094,19 @@ class FailoverAuthStore(Protocol):
 
 
 @runtime_checkable
+class CredentialLister(Protocol):
+    """A store that can enumerate what it holds for a provider.
+
+    Optional, like :class:`OAuthAccessSource`: it exists only so a failure can
+    say WHY no bearer was resolved (nothing configured, versus everything
+    temporarily blocked). A store without it gets the unqualified wording,
+    which is the honest answer when the distinction cannot be checked.
+    """
+
+    def list_credentials(self, provider: str) -> "list[StoredCredential]": ...  # pragma: no cover
+
+
+@runtime_checkable
 class OAuthAccessSource(Protocol):
     """A store that can also hand back the identity-carrying OAuth record.
 
@@ -1266,12 +1325,15 @@ async def stream_with_failover(
                 if access is None and error is not None:
                     break  # rotation exhausted for this provider
                 if access is None and not _provider_allows_missing(provider):
+                    # "No API key configured" is only true when the provider has
+                    # NO credential at all. Said unconditionally it was actively
+                    # misleading: a signed-in OAuth account that was merely
+                    # rate-limited (blocked) resolves to None here too, and the
+                    # reported frame sent the user off to configure a key they
+                    # already had -- the reported `No API key configured for
+                    # provider 'openai'` on an account signed in via OAuth.
                     record(
-                        ProviderError(
-                            None,
-                            f"No API key configured for provider '{provider}'",
-                            retryable=False,
-                        ),
+                        _no_credential_error(auth, provider),
                         primary=is_primary,
                     )
                     break
@@ -1434,6 +1496,51 @@ async def _resolve_access_for_provider(
 
         record = OAuthAccess(access_token=token, credential_id=0, kind="api_key")
     return record
+
+
+def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:
+    """Say WHY no bearer could be resolved, distinguishing two opposite causes.
+
+    Resolution returns ``None`` both when a provider has never been configured
+    and when every credential it has is temporarily blocked (rate limit, a
+    failed refresh). Those need opposite actions from the user -- go and sign
+    in, versus wait or top up -- and reporting the first for the second is what
+    told a user with a working OAuth login that they had no API key.
+
+    Stores that cannot enumerate credentials (the structural protocol only
+    promises ``get_api_key``) fall back to the original wording, which is the
+    correct message whenever the answer is genuinely unknown.
+    """
+    rows: list["StoredCredential"] = []
+    if isinstance(auth, CredentialLister):
+        try:
+            rows = [row for row in auth.list_credentials(provider) if row.disabled_cause is None]
+        except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+            rows = []
+    if not rows:
+        return ProviderError(
+            None, f"No API key configured for provider '{provider}'", retryable=False
+        )
+    kinds = {row.credential_type for row in rows}
+    what = "OAuth sign-in" if "oauth" in kinds else "API key"
+    count = len(rows)
+    subject = (
+        f"The {what} credential for provider '{provider}' is"
+        if count == 1
+        else f"All {count} {what} credentials for provider '{provider}' are"
+    )
+    # Retryable: the credential comes back on its own once the block expires,
+    # which is materially different from a missing configuration.
+    return ProviderError(
+        None,
+        (
+            f"{subject} temporarily unavailable (rate limited, or a token refresh "
+            "failed). The credentials are still configured; retry once the limit "
+            "resets, or add another account."
+        ),
+        retryable=True,
+        kind="quota",
+    )
 
 
 def _provider_allows_missing(provider: str) -> bool:

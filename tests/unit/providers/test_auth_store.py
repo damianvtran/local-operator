@@ -488,3 +488,110 @@ class TestListOauthAccesses:
         accesses = await store.list_oauth_accesses("anthropic")
         assert [a.email for a in accesses] == ["b@example.com"]
         assert store.is_blocked(row.id, "anthropic") is False
+
+
+class TestProviderOutageDoesNotBlockHealthyAccounts:
+    """A 529 is the provider failing, not the credential.
+
+    Blocking on a provider-side fault walks the whole pool into the blocked
+    state during an outage -- every account unusable for a minute because the
+    provider had a bad second -- which is how a session with four Anthropic
+    accounts ran out of credentials to try.
+    """
+
+    @staticmethod
+    def _store(tmp_path: Any, count: int = 3) -> tuple[Any, list[Any]]:
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        # Distinct emails: the real pool is several ACCOUNTS, and rows without
+        # a distinct identity dedupe onto one row by design.
+        rows = [
+            store.upsert_credential(
+                "anthropic",
+                {
+                    "type": "oauth",
+                    "access": f"tok-{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"damian+{i}@example.com",
+                },
+            )
+            for i in range(count)
+        ]
+        return store, rows
+
+    def test_a_529_deprioritizes_rather_than_blocks(self, tmp_path: Any) -> None:
+        from local_operator.providers.failover import ProviderError
+
+        store, rows = self._store(tmp_path)
+        overloaded = ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        assert store.rotate_sibling("anthropic", "s1", overloaded, api_key="tok-0") is True
+        # Still usable: the account did nothing wrong.
+        assert store.is_blocked(rows[0].id, "anthropic") is False
+        # But it is no longer first choice, so the next attempt moves on.
+        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", None)
+        assert order[-1].id == rows[0].id
+
+    def test_a_quota_error_still_blocks_the_account_that_ran_out(self, tmp_path: Any) -> None:
+        """The distinction is the point: a spent window IS about the credential."""
+        from local_operator.providers.failover import ProviderError
+
+        store, rows = self._store(tmp_path)
+        quota = ProviderError(429, "rate_limit_error: usage limit reached", retryable=True)
+
+        store.rotate_sibling("anthropic", "s1", quota, api_key="tok-0")
+        assert store.is_blocked(rows[0].id, "anthropic") is True
+
+    def test_an_outage_across_the_whole_pool_leaves_every_account_usable(
+        self, tmp_path: Any
+    ) -> None:
+        """The regression, stated directly: after a 529 on each account in turn,
+        the pool must not be empty."""
+        from local_operator.providers.failover import ProviderError
+
+        store, rows = self._store(tmp_path)
+        overloaded = ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        for row in rows:
+            store.rotate_sibling("anthropic", "s1", overloaded, api_key=row.data["access"])
+
+        assert [store.is_blocked(row.id, "anthropic") for row in rows] == [False] * len(rows)
+        # And selection still offers all of them once the pool has been walked.
+        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", None)
+        assert len(order) == len(rows)
+
+
+class TestAggregatorKeysNeverSatisfyANamedProvider:
+    """An aggregator credential must not silently answer for a direct provider.
+
+    A session diagnosed its own `No API key configured for provider 'openai'`
+    as "auth is via RADIENT_API_KEY, so the openai fallback has no key". The
+    first half was right and the second was a guess: the resolution cascade is
+    strictly per-provider, and this pins that so a future convenience shortcut
+    ("fall back to whatever gateway key we have") cannot be added by accident.
+    Spending an aggregator's credit for a provider the user named, and routing
+    through two hops instead of one, are both silent when they happen.
+    """
+
+    async def test_a_radient_key_answers_only_for_radient(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.providers.auth_store import AuthStore
+
+        monkeypatch.setenv("RADIENT_API_KEY", "radient-secret")
+        store = AuthStore(db_path=tmp_path / "auth.db")
+
+        assert await store.get_api_key("radient") == "radient-secret"
+        for named in ("openai", "anthropic", "kimi", "zai"):
+            assert await store.get_api_key(named) is None, named
+
+    async def test_an_aggregator_is_reached_only_when_named(self) -> None:
+        """Aggregators are opt-in by SELECTION, not by credential availability:
+        they resell the same models, so nothing may route to one implicitly."""
+        from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+        # The set exists and is exactly the resellers -- a direct provider
+        # appearing here would make it reachable as an implicit substitute.
+        assert AGGREGATOR_PROVIDERS == {"openrouter", "radient"}

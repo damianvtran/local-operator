@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.providers.registry import (
@@ -180,3 +182,74 @@ def test_token_plan_oauth_row_spends_the_api_key_on_the_wire() -> None:
     oauth_variant = get_provider_definition("alibaba-token-plan-oauth")
     assert oauth_variant is not None
     assert oauth_variant.store_credentials_as == "alibaba-token-plan"
+
+
+class TestOAuthHostSplit:
+    """Providers serving OAuth and API keys from DIFFERENT hosts.
+
+    Kimi is the case: the coding-plan OAuth grant is only accepted at
+    ``api.kimi.com/coding/v1`` -- which is where ``k3`` lives -- while
+    ``KIMI_API_KEY`` belongs to the mainland ``api.moonshot.cn`` platform and
+    401s there. Verified live against both hosts.
+    """
+
+    def test_kimi_declares_the_coding_plan_host_for_oauth(self) -> None:
+        from local_operator.providers.registry import get_provider_definition
+
+        kimi = get_provider_definition("kimi")
+        assert kimi is not None
+        assert kimi.base_url == "https://api.moonshot.cn/v1"
+        assert kimi.oauth_base_url == "https://api.kimi.com/coding/v1"
+
+    def test_an_oauth_bearer_is_sent_to_the_oauth_host(self) -> None:
+        """Listing the subscription's models is worthless if inference then
+        sends them to the API-key host, where they 404."""
+        from local_operator.providers.auth_store import OAuthAccess
+        from local_operator.providers.clients import OpenAICompatClient
+
+        client = OpenAICompatClient(
+            base_url="https://api.moonshot.cn/v1",
+            oauth_base_url="https://api.kimi.com/coding/v1",
+        )
+        oauth = OAuthAccess(access_token="tok", credential_id=1, kind="oauth")
+        api_key = OAuthAccess(access_token="sk-x", credential_id=2, kind="api_key")
+
+        assert client._request_base_url(oauth) == "https://api.kimi.com/coding/v1"
+        assert client._request_base_url(api_key) == "https://api.moonshot.cn/v1"
+        assert client._request_base_url(None) == "https://api.moonshot.cn/v1"
+
+    def test_the_registry_base_on_a_spec_does_not_suppress_the_oauth_host(self) -> None:
+        """`build_model_spec` copies `definition.base_url` onto EVERY spec, so a
+        naive "did the spec pin a base?" test disables the OAuth host for every
+        request -- which is how a live k3 call reached the API-key platform and
+        401'd despite all of this being wired up. Only a base the registry did
+        NOT supply counts as a deliberate override.
+        """
+        from local_operator.model.configure import build_model_spec
+        from local_operator.providers.clients import OpenAICompatClient, client_for_spec
+
+        def oauth_host_of(spec: Any) -> str | None:
+            client = client_for_spec(spec)
+            assert isinstance(client, OpenAICompatClient)
+            return client._oauth_base_url
+
+        spec = build_model_spec("kimi", "k3")
+        assert spec.base_url == "https://api.moonshot.cn/v1"  # the registry's own
+        assert oauth_host_of(spec) == "https://api.kimi.com/coding/v1"
+
+        # A genuine override (a gateway) still wins and is never second-guessed.
+        assert oauth_host_of(spec.model_copy(update={"base_url": "https://gw.internal/v1"})) is None
+
+    def test_zai_oauth_shares_the_zai_credential_row_and_catalogue(self) -> None:
+        """The sign-in mints a durable key for the SAME provider, exactly as
+        ``xai-oauth`` does -- not a second catalogue."""
+        from local_operator.providers.registry import get_provider_definition
+
+        zai_oauth = get_provider_definition("zai-oauth")
+        zai = get_provider_definition("zai")
+        assert zai_oauth is not None and zai is not None
+        assert zai_oauth.store_credentials_as == "zai"
+        assert zai_oauth.base_url == zai.base_url
+        assert zai_oauth.login is not None
+        # No refresh: the minted key never expires, so there is nothing to refresh.
+        assert zai_oauth.refresh_token is None

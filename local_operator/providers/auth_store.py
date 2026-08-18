@@ -178,6 +178,12 @@ class AuthStore:
         self._fallback_resolvers: dict[str, Callable[[str], str | None]] = {}
         self._sticky: dict[tuple[str, str], int] = {}
         self._round_robin: dict[str, int] = {}
+        # Credentials that just failed on a PROVIDER-side fault, which is not
+        # their fault and so must not block them (see ``rotate_sibling``). They
+        # are merely sorted last, so an attempt moves to a sibling while the
+        # deprioritised row stays available as a last resort. Process-local and
+        # deliberately unpersisted: the condition it describes lasts seconds.
+        self._deprioritized: dict[str, set[int]] = {}
         self._refresh_locks: dict[int, asyncio.Lock] = {}
         self._conn = self._connect()
 
@@ -498,11 +504,42 @@ class AuthStore:
 
     # -- selection: stickiness + round-robin -------------------------------------
 
+    def deprioritize_credential(self, provider: str, credential_id: int) -> None:
+        """Sort ``credential_id`` last for ``provider`` without blocking it.
+
+        The half of ``rotate_sibling`` that applies when the PROVIDER failed
+        rather than the credential: a 529 storm must move the next attempt onto
+        another account, but blocking would strand a healthy account (and,
+        repeated across the pool, strand every one of them).
+        """
+        self._deprioritized.setdefault(provider, set()).add(credential_id)
+
+    def clear_deprioritized(self, provider: str, credential_id: int | None = None) -> None:
+        """Restore full priority once a credential succeeds again."""
+        if credential_id is None:
+            self._deprioritized.pop(provider, None)
+            return
+        self._deprioritized.get(provider, set()).discard(credential_id)
+
     def _selection_order(
         self, rows: list[StoredCredential], provider: str, session_id: str | None
     ) -> list[StoredCredential]:
         if not rows:
             return []
+        # Deprioritised rows go last while staying selectable. Applied before
+        # stickiness so a credential that just hit a provider fault does not
+        # keep winning on its sticky claim, and applied as a STABLE partition so
+        # the round-robin and hash orders below are otherwise untouched.
+        demoted = self._deprioritized.get(provider)
+        if demoted:
+            preferred = [r for r in rows if r.id not in demoted]
+            # Never return an empty preferred set: if every credential is
+            # deprioritised the pool has simply been through one full cycle, so
+            # the marks are stale and the rows are all equally good again.
+            if preferred:
+                rows = preferred + [r for r in rows if r.id in demoted]
+            else:
+                self._deprioritized.pop(provider, None)
         if session_id:
             sticky_id = self._sticky.get((provider, session_id))
             sticky = next((r for r in rows if r.id == sticky_id), None)
@@ -819,6 +856,7 @@ class AuthStore:
         """
         from local_operator.providers.failover import (
             is_invalidated_credential_error,
+            is_server_side_failure,
             is_usage_limit_error,
             retry_after_ms_from_error,
         )
@@ -834,9 +872,23 @@ class AuthStore:
             failing = None
 
         usage_limited = is_usage_limit_error(error)
+        # A provider-wide fault (5xx/529 overload, timeout) is not evidence
+        # against the CREDENTIAL. Blocking it would take a healthy account out
+        # of the pool for a minute because the provider had a bad second, and
+        # under a sustained outage that walks the whole pool into the blocked
+        # state until the session has nothing left to try -- while every one of
+        # those accounts would have served the very next request. So the row is
+        # left usable and only the sticky pointer moves, which is enough to send
+        # THIS attempt to a sibling.
+        server_side = is_server_side_failure(error)
         if failing is not None:
-            retry_after = retry_after_ms_from_error(error)
-            self.block_credential(failing.id, provider, block_ms=max(block_ms, retry_after or 0))
+            if server_side:
+                self.deprioritize_credential(provider, failing.id)
+            else:
+                retry_after = retry_after_ms_from_error(error)
+                self.block_credential(
+                    failing.id, provider, block_ms=max(block_ms, retry_after or 0)
+                )
             if usage_limited:
                 # Sticky preserved: same account stays first after backoff.
                 pass
@@ -853,7 +905,15 @@ class AuthStore:
             and not self.is_blocked(r.id, provider)
             and (credential_type is None or r.credential_type == credential_type)
         ]
-        return len(siblings) > 0
+        if siblings:
+            return True
+        # No untried sibling remains. For a provider-side fault the failing row
+        # was only deprioritised, never blocked, so it is still a legitimate
+        # thing to retry once the pool has been walked -- report that rather
+        # than declaring rotation exhausted and killing the turn.
+        if server_side and failing is not None:
+            self.clear_deprioritized(provider, failing.id)
+        return False
 
     @staticmethod
     def _row_matches_key(row: StoredCredential, api_key: str) -> bool:

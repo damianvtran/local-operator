@@ -1045,6 +1045,7 @@ def _cache_key(
     *,
     account_scoped: bool = False,
     account_id: str | None = None,
+    host_scoped: bool = False,
 ) -> str:
     """Cache document name, isolated by credential scope where required.
 
@@ -1065,6 +1066,13 @@ def _cache_key(
     if account_scoped and account_id:
         account_scope = hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
         return f"{storage_id}.oauth.{account_scope}.listing"
+    if host_scoped:
+        # A provider whose OAuth sign-in is served by a different HOST than its
+        # API key (``oauth_base_url``; Kimi's coding plan) returns a genuinely
+        # different catalogue per credential kind -- the subscription lists
+        # ``k3``, the mainland API-key platform does not. One document for both
+        # would let whichever ran last decide what the other kind can select.
+        return f"{storage_id}.oauth.listing"
     return f"{storage_id}.listing"
 
 
@@ -1196,7 +1204,12 @@ def _available_models(
     if definition is None or transport is None:
         return merge_models(rows, None), "static"
 
-    resolved_base = base_url or definition.base_url
+    # An OAuth credential may be served by a different host than the provider's
+    # API-key base (Kimi's coding plan; see ``oauth_base_url``). An explicit
+    # caller-supplied base still wins, because that is a deliberate override.
+    resolved_base = base_url or (
+        (definition.oauth_base_url if is_oauth else None) or definition.base_url
+    )
     if not resolved_base:
         return merge_models(rows, None), "static"
 
@@ -1245,7 +1258,12 @@ def _available_models(
         api_key=api_key,
         account_id=account_id,
     )
-    key = _cache_key(storage_id, account_scoped=account_scoped, account_id=account_id)
+    key = _cache_key(
+        storage_id,
+        account_scoped=account_scoped,
+        account_id=account_id,
+        host_scoped=bool(is_oauth and definition.oauth_base_url),
+    )
     payload = cached_listing(key, fetch, ttl_s=ttl_s, cache_dir=cache_dir)
     live_rows = _rows_from_payload(payload, capture)
     if live_rows is None:

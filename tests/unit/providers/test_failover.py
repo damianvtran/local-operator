@@ -649,7 +649,11 @@ async def test_transport_retries_honor_budget_same_key_first() -> None:
     assert excinfo.value.status == 503
     # Two same-key retries before rotation, then the sibling once.
     assert attempts == ["k1", "k1", "k1", "k2", "k2", "k2"]
-    assert len(auth.rotations) == 1  # rotation only after the budget is spent
+    # One rotation per exhausted credential. The last key rotates too, and finds
+    # no further sibling: a 5xx is a PROVIDER fault, so every account in the pool
+    # is asked before the turn is declared dead. Capping this at one rotation is
+    # what stranded two healthy Anthropic accounts during a 529 storm.
+    assert [key for _provider, key in auth.rotations] == ["k1", "k2"]
 
 
 async def test_long_rate_limit_retry_after_rotates_without_sleep(monkeypatch) -> None:
@@ -1832,3 +1836,120 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
         assert slept, "no backoff was spent"
         assert client.calls > 1, "only one attempt was made"
         assert state.active is not None, "no route was pinned"
+
+
+class TestProviderOutageWalksTheWholePool:
+    """A provider-side fault must ask every account, and blame none of them.
+
+    The reported incident: four Anthropic OAuth accounts, a 529
+    ``overloaded_error`` storm, and a turn that died reporting the 529 after
+    trying TWO of them. Two accounts with quota were never asked.
+    """
+
+    async def test_a_529_storm_tries_every_credential_in_the_pool(self) -> None:
+        """The regression: rotation stopped at the ordinary-401 switch cap."""
+        tried: list[str | None] = []
+
+        def overloaded(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            tried.append(api_key)
+            raise ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(overloaded)
+
+        auth = FakeAuth({"openai": ["acct-a", "acct-b", "acct-c", "acct-d"]})
+        settings = {"retry": {"baseDelayMs": 0, "maxRetries": 0, "fallbackChains": {}}}
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(_request(), auth, settings, client_for):
+                pass
+
+        assert excinfo.value.status == 529
+        assert set(tried) == {"acct-a", "acct-b", "acct-c", "acct-d"}, tried
+
+    async def test_an_ordinary_401_still_stops_after_one_switch(self) -> None:
+        """The cap is kept where it belongs: a rejected bearer is not a pool problem.
+
+        Cycling every sibling on a 401 only delays the login prompt the user has
+        to answer anyway, so widening rotation must not have widened this.
+        """
+        tried: list[str | None] = []
+
+        def unauthorized(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            tried.append(api_key)
+            raise ProviderError(401, "invalid bearer", retryable=False, auth_error=True)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(unauthorized)
+
+        auth = FakeAuth({"openai": ["acct-a", "acct-b", "acct-c", "acct-d"]})
+        settings = {"retry": {"baseDelayMs": 0, "maxRetries": 0, "fallbackChains": {}}}
+        with pytest.raises(ProviderError):
+            async for _ in stream_with_failover(_request(), auth, settings, client_for):
+                pass
+
+        assert len(tried) < 4, f"a 401 walked the whole pool: {tried}"
+
+
+class TestCredentialErrorSaysWhichProblemItIs:
+    """ "No API key configured" must not be said to a user who is signed in."""
+
+    async def test_a_rate_limited_oauth_account_is_not_reported_as_unconfigured(
+        self, tmp_path: Any
+    ) -> None:
+        """The reported frame: `No API key configured for provider 'openai'`
+        shown while an OAuth sign-in existed and was merely blocked."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        row = store.upsert_credential(
+            "openai",
+            {"type": "oauth", "access": "tok", "refresh": "r", "expires": None},
+        )
+        store.block_credential(row.id, "openai", block_ms=600_000)
+
+        def unreachable(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            raise AssertionError("no request should be sent without a bearer")
+
+        async def client_for(spec: ModelSpec) -> Any:
+            # Built before the credential is resolved, so the guard belongs on
+            # the STREAM rather than on construction.
+            return _FnClient(unreachable)
+
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(), store, {"retry": {"enabled": True}}, client_for
+            ):
+                pass
+
+        message = str(excinfo.value)
+        assert "No API key configured" not in message, message
+        assert "temporarily unavailable" in message
+        assert "OAuth sign-in" in message
+
+    async def test_a_provider_with_no_credential_still_says_so(self, tmp_path: Any) -> None:
+        """The original wording is correct when it is actually true."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+
+        def unreachable(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            raise AssertionError("no request should be sent without a bearer")
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(unreachable)
+
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(), store, {"retry": {"enabled": True}}, client_for
+            ):
+                pass
+
+        assert "No API key configured for provider 'openai'" in str(excinfo.value)
