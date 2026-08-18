@@ -9,6 +9,7 @@ exercised through it.
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Any
 
@@ -79,12 +80,23 @@ def test_num_never_yields_a_value_that_crashes_downstream() -> None:
     ):
         assert _num(bad) is None, bad
 
-    # ...and everything returned survives the operations callers perform on it.
-    for good in (0, 1, -5, 3.14, "42", "3.5", 1787009983644, 10**15, True):
+    # ...and everything returned survives the operations callers perform on it:
+    # `int()` (which is what raised before), formatting, and comparison. NaN
+    # would pass an `int()` check by raising, so the finiteness is asserted
+    # directly rather than implied by an always-true comparison.
+    for good, expected in (
+        (0, 0.0),
+        (-5, -5.0),
+        (3.14, 3.14),
+        ("42", 42.0),
+        ("3.5", 3.5),
+        (1787009983644, 1787009983644.0),
+        (10**15, 1e15),
+    ):
         value = _num(good)
-        assert value is not None
-        assert int(value) == int(float(good))
-        assert value > 0 or value <= 0  # comparable, i.e. not a NaN
+        assert value == expected
+        assert math.isfinite(value)  # type: ignore[arg-type]
+        assert isinstance(int(value), int)  # type: ignore[arg-type]
 
     assert _num(None, 7.0) == 7.0
 
@@ -545,6 +557,11 @@ async def test_zai_feature_bucket_is_the_breakdown_with_no_chat_model() -> None:
     assert future.shared is True
     # Chat models only, and no breakdown at all: both the plain request cap.
     assert (await classify(["glm-5.3", "glm-4.6"])).shared is True
+    # Vendor strings are not identifiers we mint, so a capitalised or padded
+    # model id is still a model id — a classification that turned on case would
+    # silently demote a real account cap to a tier.
+    assert (await classify(["GLM-5.3", "zread"])).shared is True
+    assert (await classify([" glm-5.3 ", "zread"])).shared is True
     plain = await classify([])
     assert plain.tier == ""
     assert plain.shared is True

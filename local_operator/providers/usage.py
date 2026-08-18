@@ -563,27 +563,34 @@ ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
 #: values observed on live coding-plan accounts are mapped; anything else falls
 #: through to a generic label rather than being guessed at, because mislabelling
 #: a monthly cap as hourly would make an exhausted plan look like it resets soon.
+def _is_zai_chat_model(code: str) -> bool:
+    """Whether a ``usageDetails`` code names a GLM chat model.
+
+    A SHAPE test rather than a lookup against the shipped catalogue, and the
+    distinction is the whole point: every id in ``glm_models`` already starts
+    with ``glm``, so a registry check would answer nothing the prefix does not
+    while dragging ``model.registry`` (~300 ms cold) onto a path that runs
+    inside a quota parse. What the prefix buys is the ids that do NOT exist
+    yet — a model launched after this release must not be mistaken for a
+    feature code.
+
+    Case-folded because the codes are vendor strings, not identifiers we mint,
+    and ``GLM-6`` naming a model while ``glm-6`` does not would be a
+    classification that turns on capitalisation.
+
+    The known feature codes (``search-prime``, ``web-reader``, ``zread``) share
+    no prefix with the model family, so the test is unambiguous today; it is
+    the tie-break for unknown codes that matters, and it resolves them to
+    "feature", which fails toward leaving the account cap alone.
+    """
+    return code.strip().lower().startswith("glm")
+
+
 #: Only the NAME is carried. An earlier revision paired each unit with a
 #: duration in seconds, which nothing read: the reset time arrives as an
 #: absolute ``nextResetTime`` from the vendor, so a locally derived window
 #: length would be a second, unreconciled answer to a question already
 #: answered — and the one that drifts if a window is redefined.
-def _is_zai_chat_model(code: str) -> bool:
-    """Whether a ``usageDetails`` code names a GLM chat model.
-
-    Deliberately a SHAPE test with a registry check in front of it, not a list
-    of known ids. The registry answers for everything shipped today; the ``glm``
-    prefix covers the ids that do not exist yet, which is the case that matters
-    because a model launched after this release must not be mistaken for a
-    feature code. Feature codes (``search-prime``, ``web-reader``, ``zread``)
-    share no prefix with the model family, so the test is unambiguous in both
-    directions.
-    """
-    from local_operator.model.registry import glm_models
-
-    return code in glm_models or code.lower().startswith("glm")
-
-
 _ZAI_WINDOW_UNITS: dict[int, str] = {
     3: "hour",
     4: "day",
@@ -635,10 +642,11 @@ async def fetch_zai_quota(client: httpx.AsyncClient, api_key: str) -> UsageRepor
       is the LIMIT and ``currentValue`` is the amount consumed — inverted
       relative to every other vendor here, which is the trap worth naming.
 
-    A ``TIME_LIMIT`` row whose ``usageDetails`` cover search-prime/web-reader/
-    zread is the separate Zread feature bucket rather than the account-wide
-    request cap, so it is tagged as a tier and NOT marked shared: exhausting it
-    stops those tools, not the plan.
+    A ``TIME_LIMIT`` row whose ``usageDetails`` name NO chat model is the
+    separate Zread feature bucket rather than the account-wide request cap, so
+    it is tagged as a tier and NOT marked shared: exhausting it stops those
+    tools, not the plan. The test is spelled in the negative on purpose — see
+    the note at the classification site.
     """
     payload = await _get_json(client, ZAI_QUOTA_URL, _bearer(api_key))
     if payload is None:
@@ -751,11 +759,11 @@ async def fetch_zai_quota(client: httpx.AsyncClient, api_key: str) -> UsageRepor
                     # redundant one: the tier indent and the dimmed label ramp
                     # already say this is not the account-wide cap.
                     #
-                    # The bucket covers search-prime, web-reader AND zread
-                    # together, so the label names one member of a set. Kept
-                    # because "Zread" is the name Z.AI's own plan page gives this
-                    # allowance, so it is the word a user will recognise from
-                    # their dashboard.
+                    # The bucket covers the non-chat tools together (today:
+                    # search-prime, web-reader, zread), so the label names one
+                    # member of a set. Kept because "Zread" is the name Z.AI's
+                    # own plan page gives this allowance, so it is the word a
+                    # user will recognise from their dashboard.
                     label=("Zread quota" if is_feature else "Request quota") + f" ({window})",
                     amount=amount,
                     window=window,

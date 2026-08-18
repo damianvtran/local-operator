@@ -1993,9 +1993,15 @@ reads the way its name suggests:
 - `TIME_LIMIT` is a **request** allowance, and its fields are inverted relative
   to every other vendor here: `usage` is the limit, `currentValue` the amount
   consumed.
-- A `TIME_LIMIT` whose `usageDetails` cover search-prime/web-reader/zread is the
-  separate Zread feature bucket, tagged `tier="zread"` and NOT `shared` —
-  exhausting it stops those tools, not the plan.
+- A `TIME_LIMIT` whose `usageDetails` name **no chat model** is the separate
+  Zread feature bucket, tagged `tier="zread"` and NOT `shared` — exhausting it
+  stops those tools, not the plan. The test is spelled in the negative because
+  every positive form is a dependency on a vendor enum: requiring the known
+  feature codes (or requiring the listed codes to be a subset of them) breaks
+  the moment Z.AI renames or adds one, and it breaks toward `shared=True`,
+  which `usage_health` applies to every model — telling a user with most of
+  their token quota intact that the account is depleted. Chat model ids are the
+  stable property, since the account-wide cap is denominated in them.
 
 Live evidence (real credential, real endpoints, through local-operator's own
 code paths):
@@ -2022,8 +2028,10 @@ subtract-cached-from-prompt behaviour for free. `calculate_cost` on the real
 returns $1.53 — the cache read priced at $0.26/Mtok rather than silently at the
 input rate.
 
-Evidence: `tests/unit/providers/test_usage.py` (three zai cases pinned to a
-payload captured live on 2026-08-17, including the percentage-only rows and the
-200-with-`success:false` path), `tests/unit/providers/test_registry.py`
+Evidence: `tests/unit/providers/test_usage.py` (seven zai cases pinned to a
+payload captured live on 2026-08-17 — the percentage-only rows, the inverted
+`TIME_LIMIT` fields, the feature-bucket classification including renamed and
+added codes, the label-width budget, a hostile-input sweep asserting the fetcher
+never raises, and the 200-with-`success:false` path), `tests/unit/providers/test_registry.py`
 (definition, coding-plan base URL, search aliases), and the `/login` picker and
 usage-panel frames captured from the real `OperatorApp`.
