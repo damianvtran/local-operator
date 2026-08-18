@@ -663,3 +663,72 @@ class TestDeprioritizationSurvivesTheOrderingItIsAppliedTo:
 
         assert rows[0].id not in store._deprioritized.get("anthropic", set())
         assert rows[1].id in store._deprioritized.get("anthropic", set())
+
+
+class TestDemotionLifecycle:
+    """A demotion mark must end -- on success, and never from a read."""
+
+    @staticmethod
+    def _store(tmp_path: Any) -> tuple[Any, list[Any]]:
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        rows = [
+            store.upsert_credential(
+                "anthropic",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+            for i in range(2)
+        ]
+        return store, rows
+
+    def test_an_isolated_read_never_clears_a_mark(self, tmp_path: Any) -> None:
+        """`read_only` is the isolated request's contract: it resolves without
+        making any routing decision, and clearing a demotion is one. A
+        decorative call running beside a turn must not move that turn's pool."""
+        store, rows = self._store(tmp_path)
+        for row in rows:
+            store.deprioritize_credential("anthropic", row.id)
+
+        # Every row demoted is the branch that clears; under read_only it must not.
+        store._selection_order(rows, "anthropic", "s1", read_only=True)
+        assert store._deprioritized.get("anthropic") == {rows[0].id, rows[1].id}
+
+        store._selection_order(rows, "anthropic", "s1")
+        assert not store._deprioritized.get("anthropic")
+
+    async def test_a_credential_that_serves_a_request_regains_its_priority(
+        self, tmp_path: Any
+    ) -> None:
+        """Otherwise the mark outlives the outage for the life of the process,
+        leaving a healthy account permanently last."""
+        from local_operator.harness.types import ChatRequest, ModelSpec
+        from local_operator.providers.failover import stream_with_failover
+
+        store, rows = self._store(tmp_path)
+        store.deprioritize_credential("anthropic", rows[0].id)
+
+        class _Ok:
+            async def stream(self, request: Any, key: Any, oauth_access: Any = None) -> Any:
+                return
+                yield
+
+        async def client_for(spec: Any) -> Any:
+            return _Ok()
+
+        request = ChatRequest(
+            model=ModelSpec(provider="anthropic", model_id="claude-opus-5"), messages=[]
+        )
+        async for _ in stream_with_failover(
+            request, store, {"retry": {"enabled": True}}, client_for, session_id="s1"
+        ):
+            pass
+
+        # The row that served the request is no longer demoted.
+        assert rows[1].id not in store._deprioritized.get("anthropic", set())

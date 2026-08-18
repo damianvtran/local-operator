@@ -804,6 +804,8 @@ def _same_credential_retry_allowed(
     error: ProviderError,
     transport_retries: int,
     retry: "RetrySettings",
+    *,
+    rotates_across_pool: bool = True,
 ) -> bool:
     if not error.retryable:
         return False
@@ -811,10 +813,17 @@ def _same_credential_retry_allowed(
         if (error.retry_after_ms or 0) > MAX_USAGE_RETRY_AFTER_MS:
             return False
         return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_USAGE_RETRIES)
-    if is_server_side_failure(error):
-        # Capped: this budget is now spent once per ACCOUNT rather than once per
-        # request, so the full `max_retries` would multiply by the pool size and
-        # aim the product at a provider that is already saying it is overloaded.
+    if is_server_side_failure(error) and rotates_across_pool:
+        # Capped ONLY when there is a pool to rotate through. The budget is spent
+        # once per ACCOUNT, so with several credentials the full `max_retries`
+        # multiplies by the pool size and aims the product at a provider that is
+        # already saying it is overloaded.
+        #
+        # `rotates_across_pool` is what keeps that reasoning honest: with a
+        # single credential there is no multiplication and nothing to rotate to,
+        # so capping there would only take away retries the user configured and
+        # fail a 500 blip that would have cleared -- a regression against the
+        # behaviour before any of this, for the users least able to absorb it.
         return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_SERVER_RETRIES)
     return transport_retries < retry.max_retries
 
@@ -1318,6 +1327,12 @@ async def stream_with_failover(
         current_token: str | None = None
         transport_retries = 0
         retry_same_key = False
+        # Whether a server-fault retry budget spent here will be spent AGAIN on
+        # a sibling. Only then does the per-account cap earn its keep; with one
+        # credential it would just remove retries the user asked for. Computed
+        # once per target rather than per attempt: the pool does not change
+        # mid-turn, and this must not add a query to the retry hot path.
+        pool_size = _credential_pool_size(auth, provider)
 
         while state.attempts <= AUTH_RETRY_MAX_ATTEMPTS:
             if signal is not None and signal.aborted:
@@ -1370,6 +1385,12 @@ async def stream_with_failover(
                     yield event
                 if route_state is not None and target == primary_target:
                     route_state.clear()
+                # This credential just served a request, so whatever provider
+                # fault demoted it has passed. Without this the mark outlived
+                # the outage for the life of the process, contradicting the
+                # "lasts seconds" reasoning it is justified by and leaving a
+                # perfectly good account permanently last in the pool.
+                _clear_demotion(auth, provider, access)
                 if buffered is None:
                     return  # clean completion; a buffered stream flushes below
             except asyncio.CancelledError:
@@ -1380,7 +1401,9 @@ async def stream_with_failover(
                 record(exc, primary=is_primary)
                 if not retry.enabled:
                     raise
-                if _same_credential_retry_allowed(exc, transport_retries, retry):
+                if _same_credential_retry_allowed(
+                    exc, transport_retries, retry, rotates_across_pool=pool_size > 1
+                ):
                     # 5xx/network-style failures use the configured budget.
                     # Rate limits retry once only when the advertised delay is
                     # short; long quota resets rotate or surface immediately.
@@ -1411,7 +1434,18 @@ async def stream_with_failover(
                 record(wrapped, primary=is_primary)
                 if not retry.enabled:
                     raise wrapped from exc
-                if transport_retries < retry.max_retries:
+                # Same budget rule as the ProviderError arm above, asked the same
+                # way. This branch used to test `retry.max_retries` directly,
+                # which quietly exempted it from the per-account server cap --
+                # and this is the arm RAW transport failures take (no client in
+                # clients.py catches httpx; `_guarded_chunks` deliberately raises
+                # ReadTimeout on a stall), so a timeout storm still sent
+                # max_retries x pool-size requests. `wrap_transport_error` stamps
+                # these `kind="timeout"`, so the shared predicate already
+                # classifies them correctly; the branch just was not asking.
+                if _same_credential_retry_allowed(
+                    wrapped, transport_retries, retry, rotates_across_pool=pool_size > 1
+                ):
                     transport_retries += 1
                     await _abortable_sleep(
                         backoff_delay_ms(retry.base_delay_ms, transport_retries, rng=rng), signal
@@ -1511,6 +1545,41 @@ async def _resolve_access_for_provider(
 
         record = OAuthAccess(access_token=token, credential_id=0, kind="api_key")
     return record
+
+
+def _clear_demotion(auth: FailoverAuthStore, provider: str, access: "OAuthAccess | None") -> None:
+    """Restore a credential's priority after it successfully served a request.
+
+    Best-effort and silent: a store need not implement demotion at all (it is an
+    ``AuthStore`` detail, not part of the failover protocol), and a bookkeeping
+    failure must never turn a SUCCESSFUL turn into an error.
+    """
+    if access is None or not access.credential_id:
+        return
+    clear = getattr(auth, "clear_deprioritized", None)
+    if not callable(clear):
+        return
+    try:
+        clear(provider, access.credential_id)
+    except Exception:  # noqa: BLE001 - never fail a served request on bookkeeping
+        logger.debug("could not clear demotion for %s/%s", provider, access.credential_id)
+
+
+def _credential_pool_size(auth: FailoverAuthStore, provider: str) -> int:
+    """How many usable credentials this provider has, for the retry cap.
+
+    Only the "is there more than one?" question matters, so a store that cannot
+    enumerate (the structural protocol promises only ``get_api_key``) answers
+    ``1``: without evidence of a pool, the honest default is the UNCAPPED
+    budget the user configured, since capping is only justified by the
+    multiplication a pool causes.
+    """
+    if not isinstance(auth, CredentialLister):
+        return 1
+    try:
+        return sum(1 for row in auth.list_credentials(provider) if row.disabled_cause is None)
+    except Exception:  # noqa: BLE001 - a retry decision must never raise
+        return 1
 
 
 def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:

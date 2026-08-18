@@ -549,7 +549,12 @@ class AuthStore:
             self._deprioritized.pop(provider, None)
 
     def _selection_order(
-        self, rows: list[StoredCredential], provider: str, session_id: str | None
+        self,
+        rows: list[StoredCredential],
+        provider: str,
+        session_id: str | None,
+        *,
+        read_only: bool = False,
     ) -> list[StoredCredential]:
         if not rows:
             return []
@@ -575,7 +580,13 @@ class AuthStore:
         # so popping the whole provider would let a one-row tier wipe the marks
         # belonging to rows it never saw.
         if not preferred:
-            self.clear_deprioritized(provider, [r.id for r in ordered])
+            # Not under ``read_only``: clearing the marks is a routing DECISION,
+            # and an isolated request running beside a user's turn must not be
+            # able to move that turn's account. It still gets the same order --
+            # all rows demoted means no reordering either way -- so the only
+            # difference is that it decides nothing, which is the contract.
+            if not read_only:
+                self.clear_deprioritized(provider, [r.id for r in ordered])
             return ordered
         return preferred + [r for r in ordered if r.id in demoted]
 
@@ -798,7 +809,7 @@ class AuthStore:
 
         # 3. OAuth credential
         oauth_rows = self._usable_key_rows(provider, "oauth", source=None)
-        for row in self._selection_order(oauth_rows, provider, session_id):
+        for row in self._selection_order(oauth_rows, provider, session_id, read_only=read_only):
             try:
                 creds = await self._ensure_oauth_fresh(row, force=force_refresh)
             except AuthStoreError:
@@ -819,7 +830,7 @@ class AuthStore:
 
         # 4. API key persisted by interactive login
         login_rows = self._usable_key_rows(provider, "api_key", source="login")
-        for row in self._selection_order(login_rows, provider, session_id):
+        for row in self._selection_order(login_rows, provider, session_id, read_only=read_only):
             key = row.data.get("key")
             if key:
                 pin(row.id)
@@ -841,7 +852,7 @@ class AuthStore:
             for row in self._usable_key_rows(provider, "api_key", source=None)
             if row.data.get("source") != "login"
         ]
-        for row in self._selection_order(stored_rows, provider, session_id):
+        for row in self._selection_order(stored_rows, provider, session_id, read_only=read_only):
             key = row.data.get("key")
             if key:
                 pin(row.id)

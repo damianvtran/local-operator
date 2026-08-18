@@ -117,34 +117,40 @@ def _trimmed(value: Any) -> str | None:
     return None
 
 
-def _failed(url: str, response: httpx.Response) -> LoginError:
-    """A transport failure, named by ENDPOINT and status rather than by body.
+def _failed(operation: str, response: httpx.Response) -> LoginError:
+    """A transport failure, named by OPERATION and status.
 
-    The body is deliberately not echoed. These endpoints are handed bearer
-    tokens and their error payloads quote request context back; a login error is
-    shown in the TUI and written to the log, so a raw body is the one place a
-    token could leak out of this module. The path and status are what a reader
-    needs in order to act.
+    Neither the body nor the URL is echoed. The bodies come from endpoints that
+    are handed bearer tokens and quote request context back, and the URLs embed
+    the account's organization id, project id and api-key id -- while a login
+    error is shown in the TUI and written to the log. The operation name says
+    which step failed, which is what a reader needs in order to act, without
+    putting account identifiers in front of them.
     """
     return LoginError(
-        f"Z.AI request to {urllib.parse.urlsplit(url).path} failed "
-        f"({response.status_code} {response.reason_phrase})".rstrip()
+        f"Z.AI {operation} failed ({response.status_code} {response.reason_phrase})".rstrip()
     )
 
 
-async def _get_json(http: httpx.AsyncClient, url: str, headers: dict[str, str]) -> Any:
+async def _get_json(
+    http: httpx.AsyncClient, url: str, headers: dict[str, str], operation: str
+) -> Any:
     response = await http.get(url, headers=headers)
     if response.status_code != 200:
-        raise _failed(url, response)
+        raise _failed(operation, response)
     return response.json() if response.content else None
 
 
 async def _post_json(
-    http: httpx.AsyncClient, url: str, body: dict[str, Any], headers: dict[str, str] | None = None
+    http: httpx.AsyncClient,
+    url: str,
+    body: dict[str, Any],
+    operation: str,
+    headers: dict[str, str] | None = None,
 ) -> Any:
     response = await http.post(url, json=body, headers=headers or {})
     if response.status_code != 200:
-        raise _failed(url, response)
+        raise _failed(operation, response)
     return response.json() if response.content else None
 
 
@@ -163,7 +169,7 @@ def _key_array(value: Any) -> list[dict[str, Any]]:
 async def _business_login(http: httpx.AsyncClient, oauth_access_token: str) -> str:
     """Trade the short-lived OAuth token for the biz token the APIs require."""
     data = _unwrap(
-        await _post_json(http, BUSINESS_LOGIN_URL, {"token": oauth_access_token}),
+        await _post_json(http, BUSINESS_LOGIN_URL, {"token": oauth_access_token}, "business login"),
         "business login",
     )
     token = None
@@ -185,7 +191,9 @@ async def mint_zai_api_key(http: httpx.AsyncClient, oauth_access_token: str) -> 
     auth = {"Authorization": f"Bearer {biz_token}"}
 
     customer = _unwrap(
-        await _get_json(http, f"{BIZ_BASE}/api/biz/customer/getCustomerInfo", auth),
+        await _get_json(
+            http, f"{BIZ_BASE}/api/biz/customer/getCustomerInfo", auth, "customer lookup"
+        ),
         "customer lookup",
     )
     orgs = customer.get("organizations") if isinstance(customer, dict) else None
@@ -206,13 +214,16 @@ async def mint_zai_api_key(http: httpx.AsyncClient, oauth_access_token: str) -> 
     existing = next(
         (
             k
-            for k in _key_array(_unwrap(await _get_json(http, keys_url, auth), "api key list"))
+            for k in _key_array(
+                _unwrap(await _get_json(http, keys_url, auth, "api key list"), "api key list")
+            )
             if k.get("name") == KEY_NAME
         ),
         None,
     )
     record = existing or _unwrap(
-        await _post_json(http, keys_url, {"name": KEY_NAME}, auth), "api key create"
+        await _post_json(http, keys_url, {"name": KEY_NAME}, "api key create", auth),
+        "api key create",
     )
     api_key = _trimmed(record.get("apiKey")) if isinstance(record, dict) else None
     if not api_key:
@@ -223,7 +234,9 @@ async def mint_zai_api_key(http: httpx.AsyncClient, oauth_access_token: str) -> 
     # across account states, so anything else can persist a key that cannot
     # authenticate — and it would fail at the first request, not at login.
     copied = _unwrap(
-        await _get_json(http, f"{keys_url}/copy/{urllib.parse.quote(api_key)}", auth),
+        await _get_json(
+            http, f"{keys_url}/copy/{urllib.parse.quote(api_key)}", auth, "api key copy"
+        ),
         "api key copy",
     )
     secret_key = _trimmed(copied.get("secretKey")) if isinstance(copied, dict) else None
@@ -286,6 +299,7 @@ class ZaiOAuthFlow(OAuthCallbackFlow):
                 # Deliberately NOT an RFC 6749 body: the provider's own client
                 # posts these fields and the endpoint rejects grant_type.
                 {"provider": "zai", "code": code, "redirect_uri": redirect_uri, "state": state},
+                "token exchange",
             )
             data = _unwrap(body, "token exchange")
             zai = data.get("zai") if isinstance(data, dict) else None
