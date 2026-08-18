@@ -4107,7 +4107,7 @@ class OperatorApp(App[None]):
         except Exception:
             return 0
 
-    def _outstanding_delegated_jobs(self) -> int:
+    def _outstanding_delegated_jobs(self, excluding: str | None = None) -> int:
         """Subagents that have not settled \u2014 including children still QUEUED.
 
         A different question from :meth:`_job_count`, which answers "how many
@@ -4137,6 +4137,15 @@ class OperatorApp(App[None]):
         it genuinely is over, and the later turn that reacts to its output is a
         separate completion worth its own notification.
 
+        ``excluding`` drops one job id from the tally, and it exists for a real
+        ordering hazard rather than for tidiness. ``SubagentEndEvent`` is
+        emitted from INSIDE the job coroutine (``harness/subagent.py``), while
+        the manager flips ``job.status`` to settled only once that coroutine
+        RETURNS — with an awaited transcript flush and task-group close in
+        between. A handler that drains the event inside that window therefore
+        counts the very child whose ending it is handling, concludes work is
+        outstanding, and drops the completion it was called to deliver.
+
         Never raises: a notification must not be able to take the app down.
         """
         manager = getattr(self._session, "jobs", None)
@@ -4144,7 +4153,11 @@ class OperatorApp(App[None]):
             return 0
         try:
             return sum(
-                1 for job in manager.list() if job.status == "running" and job.type == "task"
+                1
+                for job in manager.list()
+                if job.status == "running"
+                and job.type == "task"
+                and (excluding is None or str(getattr(job, "id", "")) != excluding)
             )
         except Exception:
             return 0
@@ -7320,7 +7333,12 @@ class OperatorApp(App[None]):
         # way, and "finished" is the fact the user is waiting to hear.
         if not self._completion_deferred:
             return
-        if self._outstanding_delegated_jobs():
+        # Excluding THIS child: its own end event reaches us before the manager
+        # has marked it settled (see `_outstanding_delegated_jobs`), so without
+        # the exclusion the last child to finish counts itself, the guard
+        # returns early, and the completion is lost — permanently, since the
+        # flag then latches and swallows every later completion in the session.
+        if self._outstanding_delegated_jobs(excluding=message.job_id):
             return  # siblings still working; the last one to settle tells them
         # Cleared whether or not the toast was DELIVERED, and that asymmetry
         # with the waiting latch is the point. A question outlives the moment

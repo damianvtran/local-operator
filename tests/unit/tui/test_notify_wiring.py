@@ -107,9 +107,14 @@ class JobsSession(FakeSession):
                 # `harness/jobs.py`).
                 from types import SimpleNamespace
 
+                # Ids match the `SubagentEnded.job_id`s the tests post, so a
+                # test can reproduce the REAL manager's ordering: the child's
+                # end event arrives while its own row is still `running`,
+                # because the manager settles it only after the coroutine that
+                # emitted the event returns (`harness/subagent.py`).
                 jobs = [
-                    SimpleNamespace(status="running", type="task", queued=False)
-                    for _ in range(session.running_tasks)
+                    SimpleNamespace(status="running", type="task", queued=False, id=f"j{i + 1}")
+                    for i in range(session.running_tasks)
                 ]
                 jobs += [
                     SimpleNamespace(status="running", type="task", queued=True)
@@ -419,12 +424,14 @@ async def test_siblings_still_working_keep_the_deferred_completion_waiting() -> 
         app._notifier = notifier  # type: ignore[assignment]
         app.on_turn_ended(TurnEnded(aborted=False, error=None))
         before = len(notifier.calls)
-        session.running_tasks = 1  # one settled, one still going
-        app.on_subagent_ended(SubagentEnded(job_id="j1", label="a", status="completed"))
+        # `j2` settles; `j1` is still listed and still running. The exclusion
+        # must drop only the job whose end this is.
+        session.running_tasks = 1
+        app.on_subagent_ended(SubagentEnded(job_id="j2", label="b", status="completed"))
         await pilot.pause()
         assert len(notifier.calls) == before  # nothing yet
         session.running_tasks = 0
-        app.on_subagent_ended(SubagentEnded(job_id="j2", label="b", status="completed"))
+        app.on_subagent_ended(SubagentEnded(job_id="j1", label="a", status="completed"))
         await pilot.pause()
     assert notifier.calls[-1] == ("complete", 0)
 
@@ -647,8 +654,42 @@ async def test_a_deferred_completion_is_not_announced_over_live_children() -> No
         app._notifier = notifier  # type: ignore[assignment]
         app.on_turn_ended(TurnEnded(aborted=False, error=None))
         before = len(notifier.calls)
-        session.running_tasks = 1  # one settled, one still running
-        app.on_subagent_ended(SubagentEnded(job_id="j1", label="a", status="completed"))
+        # `j2` settles while `j1` is still running: excluding the settling job
+        # must NOT hide the sibling that is genuinely still working.
+        session.running_tasks = 1
+        app.on_subagent_ended(SubagentEnded(job_id="j2", label="a", status="completed"))
         await pilot.pause()
     assert notifier.calls[before:] == []
     assert app._completion_deferred is True  # still owed, correctly
+
+
+@pytest.mark.asyncio
+async def test_the_last_child_still_counts_itself_when_its_end_arrives() -> None:
+    """Round 4, M8. The ordering the real manager actually produces.
+
+    `SubagentEndEvent` is emitted from INSIDE the job coroutine, and the
+    manager flips `job.status` to settled only once that coroutine returns —
+    with an awaited transcript flush in between. So the handler routinely runs
+    while the ending child's own row still reads `running`, and a guard that
+    counts it concludes work is outstanding and drops the completion. Worse,
+    the flag then latches, swallowing every later completion in the session.
+
+    Every other test here hand-sets the count to 0 before posting the event,
+    which hard-codes an ordering the real manager does not guarantee — so this
+    one deliberately leaves the child listed as running.
+    """
+    from local_operator.tui.events import SubagentEnded
+
+    session = JobsSession(running_tasks=1)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        assert app._completion_deferred is True
+        # NOT cleared: the manager has not settled it yet, exactly as in
+        # production when the event is drained inside that window.
+        app.on_subagent_ended(SubagentEnded(job_id="j1", label="c", status="completed"))
+        await pilot.pause()
+    assert notifier.calls[-1] == ("complete", 0)
+    assert app._completion_deferred is False
