@@ -113,13 +113,31 @@ _PATH_SEGMENT = re.compile(r"^(?:~|\.{0,2}/|/)")
 IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n\[]*)?\]")
 
 
+#: Appended to a marker whose image was downscaled on the way in. One glyph,
+#: two cells, and it buys back most of what the honest label costs: every 16:9
+#: screenshot now bounds to the same 1568x882, so three different captures
+#: pasted together would otherwise read as three identical markers where the
+#: source dimensions had told them apart (design round 1, D1). It also answers
+#: the question the number itself provokes — "why is this not the size I
+#: pasted?" — which no bare figure can.
+#:
+#: Chosen over spending width on both sizes: the marker sits inline in the
+#: user's prompt text and is an atomic editing unit, so it has to stay short.
+#: ``IMAGE_MARKER`` already matches it, since the tail is matched loosely for
+#: exactly this kind of later change.
+RESIZED_MARK = " ↓"
+
+
 def _bounded_dimensions(payload: bytes, info: ImageInfo) -> str:
-    """``WxH`` of the bytes actually attached, for the marker's label.
+    """The marker's label: ``WxH`` of the bytes actually attached.
 
     Read back from the BOUNDED payload rather than carried over from ``info``,
     which describes the file on disk. Once the paste path started resizing,
     reusing the source dimensions would print a marker claiming 2560x1440 next
     to a 1568x882 attachment — a receipt for something that was never sent.
+
+    Carries :data:`RESIZED_MARK` when the two differ, so the label still
+    distinguishes one paste from another and says why the number moved.
 
     A header sniff and not a decode: :func:`sniff_image` reads a fixed prefix,
     so this costs microseconds and cannot be made expensive by the payload. It
@@ -129,9 +147,11 @@ def _bounded_dimensions(payload: bytes, info: ImageInfo) -> str:
     never be the reason an attachment is lost.
     """
     bounded = sniff_image(payload)
-    if bounded is not None and bounded.dimensions:
-        return bounded.dimensions
-    return info.dimensions
+    if bounded is None or not bounded.dimensions:
+        return info.dimensions
+    if bounded.dimensions != info.dimensions and info.dimensions:
+        return f"{bounded.dimensions}{RESIZED_MARK}"
+    return bounded.dimensions
 
 
 def _marker_indices(text: str) -> list[int]:
@@ -1403,9 +1423,20 @@ class Editor(TextArea):
 
         Async because the bytes are BOUNDED before they are attached, and
         bounding means decoding — see :func:`~local_operator.imaging.
-        bound_image_for_model`. Nothing here may run a multi-hundred-millisecond
-        decode inline: this is a keystroke handler on the event loop, and a
-        20 MP screenshot measures ~315 ms, which is a visibly frozen composer.
+        bound_image_for_model`. This is a keystroke handler, so a
+        multi-hundred-millisecond decode inline would freeze the whole app: a
+        20 MP screenshot measures ~315 ms.
+
+        Be precise about what the thread buys, because it is not everything
+        (review round 1, F3). The LOOP keeps running — the transcript still
+        paints, other widgets still respond, a running turn still streams. This
+        WIDGET's own input does not: the pump awaits one handler before
+        dispatching the next message to the same widget, so keystrokes typed
+        during the decode are queued and flush when it ends. Nothing is lost and
+        the order is preserved, but the composer does go quiet for the duration,
+        which it did not before this bound existed. Accepted rather than hidden
+        behind a worker + late marker insertion, because a marker that appears
+        after the user has typed past its position is a worse bug than a pause.
         """
         candidates = _pasted_paths(pasted)
         if not candidates:

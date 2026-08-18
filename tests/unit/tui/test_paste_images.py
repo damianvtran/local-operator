@@ -37,6 +37,7 @@ from local_operator.tui.widgets import editor as editor_module
 from local_operator.tui.widgets.editor import (
     IMAGE_MARKER,
     MAX_ATTACHMENT_BYTES,
+    RESIZED_MARK,
     Editor,
     EditorSubmitted,
     _pasted_paths,
@@ -347,7 +348,44 @@ async def test_the_marker_reports_what_was_attached_not_what_is_on_disk(tmp_path
 
         (image,) = editor.referenced_images()
         delivered = Image.open(io.BytesIO(base64.b64decode(image.data))).size
-        assert editor.text == f"[Image #1, {delivered[0]}x{delivered[1]}] "
+        assert editor.text == f"[Image #1, {delivered[0]}x{delivered[1]}{RESIZED_MARK}] "
+
+
+@pytest.mark.asyncio
+async def test_a_resized_marker_says_so_and_stays_one_atomic_token(tmp_path) -> None:
+    """Design round 1, D1.
+
+    Every 16:9 screenshot bounds to the same 1568x882, so three different
+    captures pasted together would read as three identical markers and the label
+    would stop doing the job it exists for — telling one paste from another. The
+    mark restores that and explains why the number is not the size pasted.
+
+    It must not break the marker's grammar: ``IMAGE_MARKER`` still has to match
+    the whole thing, or the chip stops painting and the token stops deleting
+    atomically.
+    """
+    wide = _png(tmp_path / "wide.png", 2560, 1440)
+    tall = _png(tmp_path / "tall.png", 1440, 2560)
+    small = _png(tmp_path / "small.png", 800, 600)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, wide)
+        await _paste(app, pilot, tall)
+        await _paste(app, pilot, small)
+
+        # Resized ones are marked; the in-bounds one is not, because nothing
+        # about it changed and the mark would be a lie.
+        assert editor.text == (
+            f"[Image #1, 1568x882{RESIZED_MARK}] "
+            f"[Image #2, 882x1568{RESIZED_MARK}] "
+            "[Image #3, 800x600] "
+        )
+        # The grammar still holds: three whole markers, numbered in order.
+        assert [m.group(1) for m in IMAGE_MARKER.finditer(editor.text)] == ["1", "2", "3"]
+        assert len(editor.referenced_images()) == 3
 
 
 @pytest.mark.asyncio
@@ -418,6 +456,34 @@ async def test_the_decode_runs_off_the_event_loop_thread(tmp_path, monkeypatch) 
         assert editor.referenced_images(), "the image was not attached at all"
         assert seen, "the paste never bounded the image"
         assert seen[0] != threading.main_thread().name
+
+
+@pytest.mark.asyncio
+async def test_an_unlabelled_bound_falls_back_to_the_source_dimensions(
+    tmp_path, monkeypatch
+) -> None:
+    """The marker's label is a convenience and must never cost an attachment.
+
+    ``_bounded_dimensions`` reads the delivered size back with a header sniff.
+    If that ever fails to answer — a format whose header we cannot parse, or a
+    future encoder — the marker degrades to the source dimensions rather than
+    dropping the image or printing a number it invented. Pinned because the
+    fallback is otherwise unreachable and would rot silently (review round 1,
+    F6).
+    """
+    path = _png(tmp_path / "shot.png", 2560, 1440)
+    monkeypatch.setattr(editor_module, "sniff_image", lambda payload: None)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        (image,) = editor.referenced_images()
+        # Still bounded, still attached — only the LABEL degraded.
+        assert max(Image.open(io.BytesIO(base64.b64decode(image.data))).size) <= IMAGE_MAX_EDGE
+        assert editor.text == "[Image #1, 2560x1440] "
 
 
 # -- submitting ---------------------------------------------------------------

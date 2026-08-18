@@ -112,6 +112,114 @@ def test_the_summary_names_the_source_whenever_the_bytes_changed() -> None:
     assert "source 2560x1440" in summary
 
 
+def _oriented_jpeg(size: tuple[int, int], orientation: int | None) -> bytes:
+    """A JPEG with an asymmetric mark, optionally carrying an EXIF rotation.
+
+    The mark is what makes rotation OBSERVABLE: a uniform fixture would pass
+    every assertion below whether or not the pixels were ever turned.
+    """
+    image = Image.new("RGB", size, (20, 20, 20))
+    for x in range(size[0] // 4):
+        for y in range(size[1] // 4):
+            image.putpixel((x, y), (255, 0, 0))
+    buffer = io.BytesIO()
+    if orientation is None:
+        image.save(buffer, format="JPEG")
+    else:
+        exif = Image.Exif()
+        exif[274] = orientation
+        image.save(buffer, format="JPEG", exif=exif)
+    return buffer.getvalue()
+
+
+def _red_corner(payload: bytes) -> str:
+    """Which corner the fixture's bright mark ended up in.
+
+    How the rotation is OBSERVED. ``Orientation`` 6 turns the stored frame 90°
+    clockwise, so a mark stored top-left belongs top-right once the tag has been
+    honoured — which makes this the difference between "upright" and "sideways"
+    without asserting on a whole image.
+    """
+    image = Image.open(io.BytesIO(payload)).convert("RGB")
+    width, height = image.size
+
+    def red_at(x: int, y: int) -> bool:
+        pixel = image.getpixel((x, y))
+        assert isinstance(pixel, tuple), "RGB conversion should give a tuple"
+        return pixel[0] > 128
+
+    if red_at(width // 8, height // 8):
+        return "top-left"
+    if red_at(width - width // 8, height // 8):
+        return "top-right"
+    return "elsewhere"
+
+
+def test_orientation_does_not_depend_on_how_big_the_photo_was() -> None:
+    """Review round 1, F1.
+
+    A camera stores the sensor's raw frame plus an ``Orientation`` tag saying
+    how to turn it. Re-encoding drops the tag but not the pixels, so the resize
+    rung delivered a sideways photo while the verbatim rung — same photo, just
+    small enough to skip the resize — delivered an upright one. Two identical
+    images differing only in resolution arrived in different orientations.
+
+    Pinned as AGREEMENT between the two rungs rather than against one expected
+    orientation, because that is the actual defect: whichever way a provider
+    reads EXIF, one of the two answers was wrong.
+    """
+    small = _oriented_jpeg((1200, 900), orientation=6)
+    large = _oriented_jpeg((4000, 3000), orientation=6)
+
+    small_payload, _mime, _summary = bound_image_for_model(small, _sniffed(small))
+    large_payload, _mime, _summary = bound_image_for_model(large, _sniffed(large))
+
+    assert _red_corner(small_payload) == _red_corner(large_payload)
+    # And upright, not merely consistent: orientation 6 turns the frame 90° CW,
+    # so the mark that was top-left in the stored pixels belongs top-right.
+    assert _red_corner(small_payload) == "top-right"
+
+
+def test_a_rotated_photo_is_delivered_without_the_tag_that_rotated_it() -> None:
+    """Once the pixels are upright the tag must NOT survive, or a provider that
+    honours EXIF would rotate an already-rotated image a second time."""
+    source = _oriented_jpeg((1200, 900), orientation=6)
+    payload, _mime, _summary = bound_image_for_model(source, _sniffed(source))
+    assert Image.open(io.BytesIO(payload)).getexif().get(274) is None
+
+
+@pytest.mark.parametrize("orientation", [None, 1])
+def test_an_unrotated_photo_still_takes_the_verbatim_rung(orientation) -> None:
+    """The orientation check must not cost the cheap path.
+
+    ``ImageOps.exif_transpose`` returns a ``copy()`` when there is nothing to
+    do, so testing "did the object change?" reports every tagless image as
+    rotated and re-encodes it for nothing. Orientation ``1`` means "already
+    upright" and has to be read the same way as no tag at all.
+    """
+    source = _oriented_jpeg((800, 600), orientation=orientation)
+    payload, mime, _summary = bound_image_for_model(source, _sniffed(source))
+    assert payload == source
+    assert mime == "image/jpeg"
+
+
+def test_unreadable_exif_metadata_does_not_fail_the_image() -> None:
+    """Orientation is a refinement, not the payload. A corrupt EXIF block raises
+    from deep inside Pillow, and an unrotated image beats a failed attachment."""
+    source = _oriented_jpeg((800, 600), orientation=6)
+
+    class Exploding:
+        def __getattr__(self, name):
+            raise OSError("corrupt EXIF")
+
+    from local_operator import imaging
+
+    assert imaging._needs_exif_rotation(Exploding()) is False
+    # And the real path still delivers the image.
+    payload, _mime, _summary = bound_image_for_model(source, _sniffed(source))
+    assert payload
+
+
 def test_a_decompression_bomb_is_refused_before_it_is_decoded() -> None:
     """A bomb is small on disk by construction, so no byte cap can see it
     coming. The refusal has to come from the header dimensions, BEFORE the

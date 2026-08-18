@@ -31,11 +31,25 @@ pasted screenshot. The composer used to forward pasted bytes verbatim at
 whatever size the screen produced, which is exactly how a 2206x266 paste wedged
 a session permanently — the read tool had been bounded since it was written, so
 the hole was only visible from the path that had no bound at all.
+
+TWO KNOWING EXCEPTIONS, so a reader does not conclude the invariant is total:
+
+- ``compaction/snapcompact.py`` renders its own frames and does not come
+  through here. Their geometry is a per-provider billing decision rather than a
+  paste, and under the Google shape they are 2048x2046 — over the many-image
+  ceiling. That is reachable on another provider, since ``session.set_model``
+  can swap mid-session and a Gemini-shaped archive then replays to whatever is
+  current (review round 1, F4). It is left alone here because changing it means
+  re-deciding that billing trade, not because it is safe by construction; the
+  ``is_image_rejection`` degrade is the net under it.
+- ``_forward_undecoded`` cannot resize at all, because on that host there is no
+  decoder. See its own docstring for what it does enforce.
 """
 
 from __future__ import annotations
 
 import io
+from typing import Any
 
 from local_operator.helpers import heif_image_module, pillow_image_module
 from local_operator.media import ImageInfo
@@ -106,9 +120,12 @@ def _forward_undecoded(data: bytes, info: ImageInfo) -> tuple[bytes, str, str]:
 
     The DIMENSION cap cannot be enforced here — enforcing it means resizing,
     and resizing is exactly what is unavailable — so an oversized image on such
-    a host is named in the summary and forwarded anyway. That is a deliberate
-    residual: the caller is told, and the session-level degrade
-    (``providers.failover.is_image_rejection``) is the net underneath it.
+    a host is named in the returned SUMMARY and forwarded anyway. That is a
+    deliberate residual, and the summary is the only warning of it, so a caller
+    that discards the summary also discards the warning: ``read`` puts it in the
+    caption the model sees, while the composer currently drops it (review round
+    1, F2). The session-level degrade
+    (``providers.failover.is_image_rejection``) is the net underneath both.
     """
     if not info.sendable:
         # Not a degrade: no provider accepts HEIC, so forwarding it verbatim
@@ -130,6 +147,51 @@ def _forward_undecoded(data: bytes, info: ImageInfo) -> tuple[bytes, str, str]:
     else:
         summary += ", forwarded without resizing"
     return data, info.mime_type, summary
+
+
+#: EXIF tag number for ``Orientation``. Spelled as the integer rather than
+#: imported from ``PIL.ExifTags`` so that reading it costs no Pillow import on
+#: a path that may never decode anything.
+_EXIF_ORIENTATION_TAG = 274
+
+
+def _needs_exif_rotation(image: Any) -> bool:
+    """Does this image carry an ``Orientation`` tag that actually turns it?
+
+    Asked BEFORE transposing, because ``ImageOps.exif_transpose`` returns a
+    ``copy()`` when there is nothing to do — so "is this a different object?"
+    cannot answer it, and using that as the test silently destroyed the verbatim
+    rung (every tagless image re-encoded for nothing).
+
+    ``1`` means "already upright" and is treated as no rotation, so a camera
+    that writes the tag explicitly still gets the cheap path.
+
+    Best-effort: a corrupt EXIF block raises from deep inside Pillow, and the
+    honest answer to "is this rotated?" when the metadata is unreadable is no.
+    """
+    try:
+        return image.getexif().get(_EXIF_ORIENTATION_TAG, 1) not in (1, None)
+    except Exception:  # noqa: BLE001 — unreadable metadata is not a reason to fail an image
+        return False
+
+
+def _exif_transposed(image: Any) -> Any:
+    """``image`` rotated per its EXIF ``Orientation`` tag.
+
+    ``ImageOps`` is imported here rather than at module scope for the reason
+    given in :func:`~local_operator.helpers.pillow_image_module`: nothing in
+    this package may pay Pillow's import on a path that never decodes an image.
+
+    Best-effort by design. A corrupt or unreadable EXIF block raises from deep
+    inside Pillow, and an unrotated image is a far better outcome than a failed
+    attachment — orientation is a refinement, not the payload.
+    """
+    try:
+        from PIL import ImageOps
+
+        return ImageOps.exif_transpose(image) or image
+    except Exception:  # noqa: BLE001 — see the docstring; never fail an image for this
+        return image
 
 
 def _guard_pixel_budget(width: int, height: int) -> None:
@@ -193,18 +255,49 @@ def bound_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str
 
     try:
         image = image_module.open(io.BytesIO(data))
-        width, height = image.size
-        _guard_pixel_budget(width, height)
+        _guard_pixel_budget(*image.size)
         # Multi-frame sources never pass through: providers read frame 0 and
         # ignore the rest, so an animation's other frames are bytes uploaded to
         # be discarded.
         frames = getattr(image, "n_frames", 1)
         image.load()
 
+        # Bake EXIF orientation into the PIXELS before anything else looks at
+        # the size. A phone camera stores the sensor's raw frame plus an
+        # ``Orientation`` tag saying how to turn it, and re-encoding drops the
+        # tag while keeping the pixels — so a resized photo arrives sideways
+        # unless it is transposed first.
+        #
+        # Applied on EVERY rung rather than only before a resize, because the
+        # bug this closes is an INCONSISTENCY: the verbatim rung keeps the tag
+        # and the resize rung silently discarded it, so two identical photos
+        # differing only in resolution were delivered in different orientations
+        # (review round 1, F1). Transposing unconditionally means the delivered
+        # pixels are upright whichever rung runs, and the model never has to
+        # know a tag existed.
+        #
+        # It also settles the question the tag itself raises: a provider that
+        # ignores EXIF would render the untransposed image wrongly, and one that
+        # honours it would double-rotate a transposed image that still carried
+        # the tag. Transposing and re-encoding without the tag is correct under
+        # both, which is why this cannot be left to the provider.
+        #
+        # The tag is READ first and the transpose only runs when it says the
+        # image actually turns. That ordering is load-bearing: a tagless image
+        # must still reach the verbatim rung below with its ORIGINAL bytes, and
+        # ``exif_transpose`` returns a ``copy()`` rather than the same object
+        # when there is nothing to do — so testing identity afterwards would
+        # re-encode every ordinary screenshot for nothing.
+        rotated = _needs_exif_rotation(image)
+        if rotated:
+            image = _exif_transposed(image)
+        width, height = image.size
+
         long_edge = max(width, height)
         if (
             info.sendable
             and frames == 1
+            and not rotated
             and long_edge <= IMAGE_MAX_EDGE
             and len(data) <= IMAGE_MAX_BYTES
         ):
