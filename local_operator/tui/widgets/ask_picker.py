@@ -1361,6 +1361,11 @@ class AskPickerScreen(Container):
         still what it would draw — see :meth:`repaint_if_stale`, which the app
         calls on its 1 Hz tick. That makes a missed trigger a frame late rather
         than permanently wrong.
+
+        Not a pure reader: ``_window()`` clamps and writes back ``_offset``.
+        It is idempotent, so calling this never changes what the next paint
+        produces — but it is worth knowing before using it anywhere the
+        side effect would matter.
         """
         return (
             self.has_focus,

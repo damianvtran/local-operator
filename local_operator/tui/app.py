@@ -798,6 +798,10 @@ class OperatorApp(App[None]):
         # stopped (a queued asker wakes when the front prompt settles, and
         # without the latch it would mount a fresh question for a dead turn).
         self._approval: ApprovalPrompt | None = None
+        #: The composer's text as of the last Changed event, so a buffer that
+        #: went empty can be told apart from one the app emptied. See
+        #: `on_text_area_changed`.
+        self._composer_text_before: str = ""
         #: An answer key routed from the composer and parked for one keystroke,
         #: so a key that turns out to be the first character of a word never
         #: commits an answer. See `route_key_to_live_prompt`.
@@ -3796,12 +3800,47 @@ class OperatorApp(App[None]):
         # answered any other way, because for every other prompt the routed
         # keys already work from the composer and stealing focus would undo
         # D12's whole point.
-        if prompt is not None and not prompt.answer_keys():
+        #
+        # Keyed on the user DELETING their way to empty, not on the buffer
+        # being empty. `on_text_area_changed` fires for any document change,
+        # including the ones the app makes itself: SENDING a message empties
+        # the buffer, and so do `/btw` stashing a draft and a slash command
+        # clearing it. Keyed on emptiness, sending a message therefore handed
+        # the keyboard to the card — and the user's NEXT message was then typed
+        # into a question they had stopped looking at, with the space ticking a
+        # row and Enter answering it. Measured end to end: `please check the
+        # schema` sent, `ok next` typed, Enter, and the ask resolved
+        # `{'s': ['next']}` from a line the user meant for the agent (F9, agent
+        # review round 6).
+        #
+        # A shrinking buffer is the tell. Only a deletion moves from non-empty
+        # to empty one character at a time; a send, a stash and a clear all
+        # replace the document wholesale.
+        # `not answer_keys()` is true for two different reasons, and only one
+        # of them wants the keyboard: a MULTI-SELECT, which has answers the
+        # composer cannot reach, and a COLLAPSED card, which is drawing no
+        # options at all. Focus on a collapsed card buys nothing — there is
+        # nothing to move a cursor through and the permissive keys are refused
+        # there anyway (D9) — so it would be a pure theft (F9, agent review
+        # round 6). Asking for drawn rows separates the two.
+        if prompt is not None and not prompt.answer_keys() and prompt.visible_rows:
             try:
-                if not self._editor().text and not prompt.has_focus:
-                    prompt.focus()
+                editor = self._editor()
             except Exception:  # pragma: no cover - hosts with no composer
-                logger.debug("could not hand focus back to the prompt", exc_info=True)
+                return
+            emptied_by_hand = (
+                not editor.text
+                and self._composer_text_before
+                and len(self._composer_text_before) == 1
+            )
+            self._composer_text_before = editor.text
+            if emptied_by_hand and not prompt.has_focus:
+                prompt.focus()
+        else:
+            try:
+                self._composer_text_before = self._editor().text
+            except Exception:  # pragma: no cover - hosts with no composer
+                self._composer_text_before = ""
 
     def _open_subagent_view(self, job_id: str) -> None:
         """Enter the full-page subagent view for one task job.
