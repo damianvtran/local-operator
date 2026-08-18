@@ -360,10 +360,17 @@ async def test_a_child_parked_at_the_capacity_gate_still_blocks_completion() -> 
 
 
 @pytest.mark.asyncio
-async def test_a_backgrounded_bash_job_does_not_produce_a_second_toast() -> None:
-    """Both job types re-enter the conversation as a fresh turn when they
-    settle (`Session._on_job_completed` delivers `task` AND `bash`), so counting
-    only `task` announced the turn twice for one event."""
+async def test_a_backgrounded_bash_job_does_not_hold_the_completion() -> None:
+    """A turn that backgrounded a shell command IS finished.
+
+    Round 1 read the double-toast symptom as "count `bash` too"; round 2 showed
+    that inverts the feature (see the B4/B5 tests below), because a background
+    job may outlive the session and emits no `SubagentEnded`. The turn that
+    spawned it is genuinely over — the command is a side effect the user
+    started deliberately and can watch in its own tool card — so the completion
+    fires, and the later turn that reacts to the job's output is a separate
+    finish worth its own notification.
+    """
     session = JobsSession(running_bash=1)
     app, notifier = await _app_with_notifier(session)
     async with app.run_test(size=(80, 24)) as pilot:
@@ -371,7 +378,7 @@ async def test_a_backgrounded_bash_job_does_not_produce_a_second_toast() -> None
         app._notifier = notifier  # type: ignore[assignment]
         app.on_turn_ended(TurnEnded(aborted=False, error=None))
         await pilot.pause()
-    assert notifier.calls[-1] == ("complete", 1)
+    assert notifier.calls[-1] == ("complete", 0)
 
 
 @pytest.mark.asyncio
@@ -540,3 +547,74 @@ async def test_a_question_after_an_aborted_turn_is_still_announced() -> None:
         app._refresh_working_activity()
         await pilot.pause()
     assert notifier.kinds == ["approval", "approval"]
+
+
+# -- round 2 review: the B2/M2 fix's own regressions --------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_long_lived_background_job_does_not_disable_notifications() -> None:
+    """Round 2, B4. Counting `bash` in the completion gate looked symmetrical
+    with `task` and silently switched the feature off: a backgrounded
+    `npm run dev` never settles, so EVERY later completion in the session was
+    suppressed. The turn that spawned it genuinely is over — a background
+    command is a side effect the user started deliberately and can watch in its
+    own tool card."""
+    from local_operator.tui.events import TurnStarted
+
+    session = JobsSession(running_bash=1)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        for _ in range(3):
+            app.on_turn_started(TurnStarted())
+            await pilot.pause()
+            app.on_turn_ended(TurnEnded(aborted=False, error=None))
+            await pilot.pause()
+    delivered = [call for call in notifier.calls if call == ("complete", 0)]
+    assert len(delivered) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_background_job_cannot_strand_a_deferred_completion() -> None:
+    """Round 2, B5. `SubagentEnded` is posted only for `task` children, so a
+    `bash` job counted by the gate could CAUSE a deferral that nothing was able
+    to flush — losing the completion for good, on exactly the paths the
+    deferral was introduced to protect."""
+    session = JobsSession(running_bash=1)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        await pilot.pause()
+    assert app._completion_deferred is False
+    assert notifier.calls[-1] == ("complete", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_completion_owed_while_focused_is_delivered_on_the_blur() -> None:
+    """Round 2, M6. The completion half of B1: a child settling while the user
+    was watching owed a toast that the focus gate suppressed, and a finished
+    session produces no further event to retry on — so it was dropped."""
+    from textual.events import AppBlur
+
+    from local_operator.tui.events import SubagentEnded
+
+    session = JobsSession(running_tasks=1)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        # The child settles while the terminal still has focus.
+        notifier.focused = True
+        session.running_tasks = 0
+        app.on_subagent_ended(SubagentEnded(job_id="j", label="c", status="completed"))
+        await pilot.pause()
+        assert app._completion_deferred is True  # still owed
+        app.on_app_blur(AppBlur())
+        await pilot.pause()
+    assert notifier.calls[-1] == ("complete", 0)
+    assert app._completion_deferred is False

@@ -3329,6 +3329,24 @@ class OperatorApp(App[None]):
             return
         self._notifier.set_focused(False)
         self._flush_pending_question()
+        self._flush_deferred_completion()
+
+    def _flush_deferred_completion(self) -> None:
+        """Deliver a finish that was owed but suppressed while focused.
+
+        The completion half of :meth:`_flush_pending_question`, and it exists
+        for the same reason: the child settle that owed the toast may have
+        landed while the user was watching, where delivery is correctly
+        suppressed — and a session whose work is finished produces no further
+        events to retry on. Without this the owed completion is dropped, which
+        is the edge-consumed-on-a-suppressed-delivery bug in its other form.
+        """
+        if not self._completion_deferred:
+            return
+        if self._outstanding_delegated_jobs():
+            return
+        if self._notify("complete", running_children=0):
+            self._completion_deferred = False
 
     def _flush_pending_question(self) -> None:
         """Announce an unanswered question raised while the terminal was focused.
@@ -4108,7 +4126,7 @@ class OperatorApp(App[None]):
             return 0
 
     def _outstanding_delegated_jobs(self) -> int:
-        """Delegated work that has not settled \u2014 including jobs still QUEUED.
+        """Subagents that have not settled \u2014 including children still QUEUED.
 
         A different question from :meth:`_job_count`, which answers "how many
         children are actively running" for the status band and deliberately
@@ -4121,10 +4139,21 @@ class OperatorApp(App[None]):
         Gating on that number fired "task complete" over a child that had yet
         to run \u2014 the precise false finish the notification exists to prevent.
 
-        Counts ``bash`` as well as ``task``: a backgrounded shell job also
-        re-enters the conversation when it settles
-        (``Session._on_job_completed`` delivers both types), so a turn that
-        backgrounded a command has outstanding work by the same definition.
+        ``task`` ONLY, and that exclusion is the interesting half. Counting
+        backgrounded ``bash`` jobs here looks symmetrical (both types re-enter
+        the conversation when they settle) and breaks the feature outright in
+        two ways. A long-lived background job (``npm run dev``, a tail, a
+        watch) never settles, so every later completion in the session is
+        suppressed and the user is silently never notified again. And a
+        ``bash`` job emits no ``SubagentEnded``, so it can CAUSE a deferral
+        that nothing is able to flush, losing the completion for good.
+
+        The asymmetry is real rather than a compromise: a subagent is the
+        parent's own delegated reasoning, so the turn is not finished until it
+        is. A backgrounded command is a side effect the user started
+        deliberately and can watch in its own tool card; the turn that spawned
+        it genuinely is over, and the later turn that reacts to its output is a
+        separate completion worth its own notification.
 
         Never raises: a notification must not be able to take the app down.
         """
@@ -4133,9 +4162,7 @@ class OperatorApp(App[None]):
             return 0
         try:
             return sum(
-                1
-                for job in manager.list()
-                if job.status == "running" and job.type in ("task", "bash")
+                1 for job in manager.list() if job.status == "running" and job.type == "task"
             )
         except Exception:
             return 0
