@@ -1310,10 +1310,22 @@ def test_a_brief_title_leaves_no_dead_run_at_the_bands_right_edge(monkeypatch) -
     The reserve is what holds every sibling's column still while a model rewrites
     the title (D2), so it stays — but it used to be painted out to the band's
     right edge as well, which left a brief title trailed by a long run of blank
-    cells that no segment would ever occupy. Measured on a fully populated band
-    before this fix, the run was the SAME size at every terminal width, which is
-    the tell that it was the box's padding rather than a layout gap: 35 cells
-    after `short` and 39 after `a`, identical at 100, 120 and 160 columns.
+    cells that no segment would ever occupy. Measured before this fix on a band
+    carrying model, agents, jobs, context and cost: 39 cells after `a` and 35
+    after `short`, at 100, 120 and 160 columns.
+
+    The run's SIZE is not a constant, and an earlier version of this docstring
+    said it was. It tracks the name's box, which is itself elastic — on a fully
+    populated band (cwd and the alarm both present) the same measurement gives
+    29/35/39 for `a` and 25/31/35 for `short`, because the box only reaches the
+    full ``NAME_CELLS`` once the row is wide enough to spare it. The invariance
+    above is a property of one band shape, not of the defect.
+
+    What identifies the padding is therefore not a constant width but the
+    RELATIONSHIP: the run is exactly the box minus the ink, so it grows as the
+    box grows and vanishes when the title fills it. That is what this test pins,
+    by asserting the row ends on the title's last inked cell at every width
+    rather than by asserting any particular number of dead cells.
 
     Those cells are ordinary styled cells, so everything that reads the row
     rather than looking at it carried them — the app's own SVG export wrote 35
