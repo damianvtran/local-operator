@@ -1730,3 +1730,28 @@ async def test_an_unreadable_profile_says_so_in_the_log(
         and "OSError" in record.getMessage()
         for record in caplog.records
     ), [record.getMessage() for record in caplog.records]
+
+
+def test_only_ephemeral_session_dirs_are_claimed_for_retention(tmp_path: Path) -> None:
+    """The claim marker must not be written into an agent directory.
+
+    Retention only scans ``sessions/``, so a claim under ``agents/<id>/`` buys
+    nothing — and it does not merely waste a file: ``export_agent`` zips every
+    file in the agent directory, so the marker would ship to the Agent Hub and
+    be imported into other users' agent directories.
+    """
+    from local_operator.session.retention import SESSIONS_DIRNAME
+
+    registry = FakeRegistry(tmp_path)
+    agent = cast("AgentData", SimpleNamespace(id="a1"))
+
+    ephemeral, _ = _transcript_dir_and_agent_id(
+        agent, _args(train=False), cast("AgentRegistry", registry)
+    )
+    trained, _ = _transcript_dir_and_agent_id(
+        agent, _args(train=True), cast("AgentRegistry", registry)
+    )
+
+    # The condition `_prepare` gates the claim on.
+    assert ephemeral.parent.name == SESSIONS_DIRNAME
+    assert trained.parent.name != SESSIONS_DIRNAME

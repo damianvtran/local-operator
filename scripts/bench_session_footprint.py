@@ -309,7 +309,12 @@ def measure_retention(generated: int, ceiling: int, session_bytes: int) -> Reten
                 max_bytes=0,
                 max_age_days=0,
             )
-            peak = max(peak, result.bytes_remaining)
+            # ``bytes_on_disk``, not ``bytes_remaining``: live sessions are
+            # exempt from the ceilings and their bytes are reported separately,
+            # so the narrower figure would under-read the store by exactly the
+            # live session this benchmark deliberately keeps open — and the
+            # whole point here is to measure the real footprint.
+            peak = max(peak, result.bytes_on_disk)
             check(
                 len(list(sessions.iterdir())) <= ceiling + 1,
                 f"sessions/ held {len(list(sessions.iterdir()))} dirs over a ceiling of {ceiling}",

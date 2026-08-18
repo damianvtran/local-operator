@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from local_operator.harness.types import CustomMessage, Message
+from local_operator.harness.types import CustomMessage, Message, TextContent
 from local_operator.session.transcript import ENTRY_MESSAGE, Transcript, TranscriptEntry
 
 
@@ -200,5 +200,13 @@ async def test_append_recreates_a_directory_that_vanished_mid_session(tmp_path):
     assert json.loads(lines[0])["payload"]["content"][0]["text"] == "before"
     assert json.loads(lines[1])["payload"]["content"][0]["text"] == "after"
 
-    replayed = [m.content[0].text for m in Transcript(directory).build_llm_history()]
+    # Replay, narrowed explicitly: ``build_llm_history`` returns
+    # ``Message | CustomMessage`` over ``TextContent | ImageContent``, so
+    # reaching straight for ``.content[0].text`` does not type-check.
+    replayed: list[str] = []
+    for message in Transcript(directory).build_llm_history():
+        assert isinstance(message, Message)
+        block = message.content[0]
+        assert isinstance(block, TextContent)
+        replayed.append(block.text)
     assert replayed == ["before", "after"]

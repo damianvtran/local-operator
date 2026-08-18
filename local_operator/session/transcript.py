@@ -249,7 +249,7 @@ class Transcript:
     def _write_line(self, line: str) -> None:
         """Append one already-encoded line, recreating the store if it is gone.
 
-        The directory is not guaranteed to survive the session: retention
+        The DIRECTORY is not guaranteed to survive the session: retention
         sweeps the ephemeral store, an operator clears ``sessions/``, a
         temporary directory is reaped. Before this, a vanished directory made
         the append raise ``FileNotFoundError`` — and raise it again on every
@@ -258,12 +258,27 @@ class Transcript:
         turned into a permanently dead session, with no recovery short of
         restarting and no hint of what happened.
 
+        Scope, precisely: this recovers from the directory going away, which is
+        what ``open("a")`` cannot do for itself. It does NOT cover the file
+        alone being deleted — there ``open("a")`` succeeds and the store
+        silently restarts from this line, which is pre-existing behaviour and
+        not something this path can detect without stat-ing on every append.
+
         Recreating costs one ``mkdir`` on a path that is almost always present,
         since the happy path is the plain append and this runs only after it
         has already failed. The whole in-memory history is rewritten rather
         than just this line: a file that begins part way through a conversation
         replays as one, and a resume off it would silently drop everything said
-        before the directory went.
+        before the directory went. The rewrite goes through a temp file and
+        ``os.replace`` for the same reason :meth:`compact_file` does — an
+        interrupted recovery must not leave a half-written transcript where a
+        complete one is expected.
+
+        Only this instance's history can be restored. A SECOND ``Transcript``
+        on the same directory (two resumes of one session id) holds its own
+        ``_entries``, so whichever recovers last wins — the same hazard
+        ``harness.comms`` already refuses to create for subagents, recorded
+        here because the recovery path makes it reachable one more way.
         """
         try:
             with self.path.open("a", encoding="utf-8") as handle:
@@ -279,9 +294,10 @@ class Transcript:
             self.directory,
             len(self._entries),
         )
-        with self.path.open("w", encoding="utf-8") as handle:
-            handle.write("".join(item.to_json() + "\n" for item in self._entries))
-            handle.flush()
+        payload = "".join(item.to_json() + "\n" for item in self._entries)
+        tmp = self.path.with_suffix(self.path.suffix + ".recover")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, self.path)
 
     # -- replay -------------------------------------------------------------
 

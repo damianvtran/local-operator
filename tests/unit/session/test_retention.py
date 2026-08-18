@@ -8,16 +8,20 @@ there afterwards, on every path, including the ones that fail.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
 
 import pytest
 
 from local_operator.session.retention import (
+    CLAIM_TRUST_S,
     DEFAULT_MAX_AGE_DAYS,
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_SESSIONS,
     LIVE_MARKER_NAME,
     NEW_SESSION_GRACE_S,
+    _is_claimed,
     claim_session,
     release_session,
     sweep_from_config,
@@ -28,15 +32,18 @@ from local_operator.session.retention import (
 def _dead_pid() -> int:
     """A process id nothing owns.
 
-    Forked and reaped, so the id is genuinely unused rather than merely large
-    — a hardcoded number could belong to a live process on a busy machine and
-    make the test flake in the direction of "nothing was evicted".
+    Spawned and reaped so the id is genuinely unused rather than merely large:
+    a hardcoded number could belong to a live process on a busy machine and
+    would make these tests flake in the "nothing was evicted" direction.
+
+    ``subprocess`` rather than ``os.fork()``: pytest runs with threads (the
+    TUI suites start them), and forking a threaded process can deadlock the
+    child in the allocator. The pid is reaped by ``wait()`` before it is
+    returned, so ``os.kill(pid, 0)`` reports it gone.
     """
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - child exits immediately
-        os._exit(0)
-    os.waitpid(pid, 0)
-    return pid
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
 
 
 def _session(root, name: str, *, size: int = 1024, age_days: float = 0.0):
@@ -361,3 +368,94 @@ def test_directory_stays_under_budget_however_many_sessions_arrive(tmp_path, cei
         # +1 for the live directory, which is exempt from the ceiling.
         assert len(list(sessions.iterdir())) <= ceiling + 1
     assert live.exists()
+
+
+def test_live_bytes_are_reported_separately_from_governed_bytes(tmp_path):
+    """A claimed session is exempt from the ceilings, so ``bytes_remaining``
+    (what the ceilings govern) is NOT the size of the store. Reporting only
+    that figure made the sweep look compliant while the disk said otherwise;
+    a caller measuring the footprint needs ``bytes_on_disk``."""
+    sessions = tmp_path / "sessions"
+    running = _session(sessions, "running", size=50_000)
+    claim_session(running)
+    _session(sessions, "history", size=1_000, age_days=1)
+
+    result = sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
+
+    assert result.bytes_remaining == 1_000
+    assert result.bytes_live == 50_000
+    assert result.bytes_on_disk == 51_000
+
+
+def test_live_sessions_over_the_byte_ceiling_are_logged(tmp_path, caplog):
+    """The overshoot is the correct trade but must not be silent: it is the
+    only signal that the configured bound is not currently being honoured,
+    and without it a full volume looks like a clean sweep log."""
+    import logging
+
+    sessions = tmp_path / "sessions"
+    running = _session(sessions, "running", size=200_000)
+    claim_session(running)
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.retention"):
+        result = sweep_sessions(sessions, max_sessions=0, max_bytes=1_000, max_age_days=0)
+
+    assert running.exists()
+    assert result.bytes_live == 200_000
+    assert any("above the" in record.message for record in caplog.records)
+
+
+def test_a_released_claim_does_not_refresh_an_empty_directory(tmp_path):
+    """Claim churn used to bump the directory's mtime, so a session that
+    started, wrote nothing and exited looked freshly created and re-earned the
+    startup grace period on every sweep — exempting exactly the population the
+    empty-directory reap exists to collect."""
+    sessions = tmp_path / "sessions"
+    hollow = sessions / "hollow"
+    hollow.mkdir(parents=True)
+    claim_session(hollow)
+    release_session(hollow)
+    # The run happened well before the grace window; only the marker records it.
+    old = time.time() - NEW_SESSION_GRACE_S - 600
+    os.utime(hollow / LIVE_MARKER_NAME, (old, old))
+
+    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
+
+    assert not hollow.exists()
+
+
+def test_a_released_claim_reads_as_unclaimed_without_a_liveness_probe(tmp_path):
+    """``release_session`` overwrites rather than unlinks (to preserve the age
+    record), so the released marker must not read as a live claim — including
+    where the pid probe is unavailable."""
+    sessions = tmp_path / "sessions"
+    finished = _session(sessions, "finished", size=512, age_days=90)
+    claim_session(finished)
+    release_session(finished)
+
+    assert not _is_claimed(finished)
+
+    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=30)
+    assert not finished.exists()
+
+
+def test_an_unverifiable_claim_expires_instead_of_lasting_forever(tmp_path, monkeypatch):
+    """Where liveness cannot be probed (Windows), an unbounded claim would
+    exempt a directory from all three ceilings permanently, so every crash
+    would switch the module off one directory at a time."""
+    monkeypatch.setattr("local_operator.session.retention._LIVENESS_IS_VERIFIABLE", False)
+    monkeypatch.setattr("local_operator.session.retention._process_alive", lambda pid: True)
+
+    sessions = tmp_path / "sessions"
+    stale = _session(sessions, "stale", size=512, age_days=90)
+    claim_session(stale)
+    ancient = time.time() - CLAIM_TRUST_S - 60
+    os.utime(stale / LIVE_MARKER_NAME, (ancient, ancient))
+
+    fresh = _session(sessions, "fresh", size=512, age_days=90)
+    claim_session(fresh)
+
+    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=30)
+
+    assert not stale.exists(), "an unverifiable claim protected a directory forever"
+    assert fresh.exists(), "a recent claim must still protect a running session"

@@ -14,12 +14,22 @@ Three independent ceilings, any of which may be disabled by setting it to 0:
 - **total bytes** — at most N bytes across all of them.
 
 They compose rather than override: eviction runs age, then count, then bytes,
-oldest first, until every ceiling holds. Age alone would let a burst of
-activity blow the disk budget inside the window; bytes alone would keep a
-single ancient directory forever. Whatever the ceilings say, a LIVE session
-is never a candidate — evicting the transcript of a run that is currently
-appending to it would take out resume and compaction replay together, which
-is a far worse outcome than the disk it reclaims.
+oldest first, until every ceiling holds over the history it is allowed to
+touch. Age alone would let a burst of activity blow the disk budget inside the
+window; bytes alone would keep a single ancient directory forever.
+
+**The ceilings bound DEAD history, not the store.** A live session is never a
+candidate — evicting the transcript of a run that is currently appending to it
+would take out resume and compaction replay together, which is a far worse
+outcome than the disk it reclaims. So live sessions sit outside all three
+ceilings, and the store's true size is the bounded dead history plus whatever
+the live sessions are holding. That residue is unbounded in principle (N
+concurrent sessions against append-only transcripts) and small in practice (a
+heavy 60-turn day is ~80 KB), but it is real: it is why
+:func:`sweep_sessions` logs when live sessions alone exceed the byte ceiling
+rather than letting the overshoot pass silently, and why ``SweepResult``
+reports live bytes separately instead of folding them into a figure that
+reads as "what is on disk".
 
 "Live" means *every* running session, not just the one doing the sweeping.
 The sweep runs at startup, and the ``live_dir`` the starting session knows
@@ -65,6 +75,22 @@ LIVE_MARKER_NAME = ".session.pid"
 #: exotic platform) and one killed before it claimed.
 NEW_SESSION_GRACE_S = 300.0
 
+#: How long an unverifiable claim is trusted. Only consulted where liveness
+#: cannot be probed (Windows, see :func:`_process_alive`); on POSIX the pid
+#: probe is authoritative and a session of any length keeps its protection.
+#: Twelve hours is longer than any plausible session and far shorter than
+#: "forever", which is what the alternative amounts to.
+CLAIM_TRUST_S = 12 * 3600.0
+
+#: Whether this platform can actually answer "is that process alive?".
+#: Named rather than inlined because two different decisions read it and they
+#: must agree: liveness itself, and whether a claim needs an age bound.
+_LIVENESS_IS_VERIFIABLE = sys.platform != "win32"
+
+#: Written into the marker by :func:`release_session`. Never a real pid, so it
+#: reads as unclaimed on every platform without needing a liveness probe.
+RELEASED_PID = 0
+
 #: Config keys. Read through ``ConfigManager.get_config_value`` so the
 #: ceilings are editable with ``local-operator config edit`` like every other
 #: setting, rather than needing a second configuration mechanism.
@@ -92,12 +118,29 @@ class SweepResult:
     scanned: int = 0
     evicted: int = 0
     bytes_freed: int = 0
+    #: Bytes of EVICTABLE history left after the sweep — what the ceilings
+    #: actually govern. Not the size of the store: live sessions are exempt
+    #: and counted in ``bytes_live`` instead.
     bytes_remaining: int = 0
+    #: Bytes held by sessions that were skipped because a live process still
+    #: owns them. Reported separately so a caller measuring the footprint can
+    #: add the two rather than silently under-reading the store by this much.
+    bytes_live: int = 0
     errors: int = 0
 
     @property
     def changed(self) -> bool:
         return self.evicted > 0
+
+    @property
+    def bytes_on_disk(self) -> int:
+        """Everything the sweep saw: bounded history plus live sessions.
+
+        The figure to quote when the question is "how big is the store";
+        ``bytes_remaining`` answers the narrower "how much of it is subject to
+        the ceilings".
+        """
+        return self.bytes_remaining + self.bytes_live
 
 
 @dataclass(frozen=True)
@@ -134,10 +177,18 @@ def _process_alive(pid: int) -> bool:
     means the id IS taken (by another user's process), so it counts as alive —
     refusing to evict is always the safe side of this decision.
 
-    Windows has no signal 0; ``os.kill`` there terminates the process instead,
-    which would be catastrophic, so that platform reports "alive" and leans on
-    the marker's age instead. Being conservative costs at most one stale
-    directory per crashed run.
+    Windows has no signal 0 — ``os.kill`` there TERMINATES the target — so the
+    probe is unavailable and this returns ``True``. That answer alone would be
+    a disaster: every crash would leak a claim nothing can disprove, and since
+    a claimed directory is skipped entirely, the module would silently switch
+    itself off one directory at a time. :func:`_is_claimed` therefore bounds a
+    claim by its own age wherever liveness cannot be established (see
+    ``CLAIM_TRUST_S``); this function answers only the liveness question.
+
+    Pid REUSE is the residual risk on every platform: a leaked marker whose id
+    has since been recycled reads as alive. It costs one retained directory
+    until that unrelated process exits, never a deleted live one, which is the
+    direction this whole module should err in.
     """
     if pid <= 0:
         return False
@@ -182,30 +233,57 @@ def release_session(session_dir: Path) -> None:
     Wired into session dispose. Not required for correctness — a claim naming
     a dead pid is ignored anyway — but releasing it promptly means a session
     directory becomes evictable at the moment its run ends rather than when
-    the operating system happens to reuse the process id.
+    the operating system happens to reuse the process id. That matters most
+    for a HOST running several sessions in one process, where the owning pid
+    stays alive long after an individual session is gone.
+
+    The marker is overwritten with ``RELEASED_PID`` rather than removed, so it
+    keeps serving as an age record for a directory that holds nothing else
+    (see :func:`_activity_mtime`). Deleting it instead moved the directory's
+    own mtime to now, which made a session that wrote nothing look freshly
+    created and re-earn its startup grace period on every sweep — the exact
+    population the empty-directory reap is meant to collect. ``0`` is never a
+    real pid, so this reads as unclaimed everywhere.
     """
     try:
-        (session_dir / LIVE_MARKER_NAME).unlink()
+        (session_dir / LIVE_MARKER_NAME).write_text(str(RELEASED_PID), encoding="utf-8")
     except OSError:
         pass
 
 
-def _is_claimed(directory: Path) -> bool:
+def _is_claimed(directory: Path, now: float | None = None) -> bool:
     """Does a live process still own ``directory``?
 
     A marker holding an unparseable value is treated as NOT claimed: it is
     corrupt bookkeeping, and honouring it forever would make the directory
     immortal and quietly disable the ceilings.
+
+    The same reasoning bounds a claim this platform cannot verify. Where
+    :func:`_process_alive` can actually probe, its answer is authoritative and
+    a long-running session stays protected for as long as it runs. Where it
+    cannot (Windows), an unrefreshed claim is only trusted for
+    ``CLAIM_TRUST_S``; past that the directory returns to the ordinary
+    ceilings. Without that bound a single crash on such a platform would
+    exempt a directory from all three ceilings permanently.
     """
+    marker = directory / LIVE_MARKER_NAME
     try:
-        raw = (directory / LIVE_MARKER_NAME).read_text(encoding="utf-8").strip()
+        raw = marker.read_text(encoding="utf-8").strip()
     except OSError:
         return False
     try:
         pid = int(raw)
     except ValueError:
         return False
-    return _process_alive(pid)
+    if not _process_alive(pid):
+        return False
+    if _LIVENESS_IS_VERIFIABLE:
+        return True
+    try:
+        age = (time.time() if now is None else now) - marker.stat().st_mtime
+    except OSError:
+        return False
+    return age < CLAIM_TRUST_S
 
 
 def _activity_mtime(directory: Path, fallback: float) -> float:
@@ -225,26 +303,37 @@ def _activity_mtime(directory: Path, fallback: float) -> float:
     so folding either one in would refresh the age of every session this module
     touches and silently exempt old history from the age ceiling.
 
-    The directory's own mtime is the fallback for a directory with no content
-    yet — there, birth time is the only signal there is, and it is the right
-    one: that is a session still starting up.
+    For a directory with NO content the fallback is the marker's own mtime when
+    one is present, and the directory's otherwise. The directory's mtime cannot
+    be used on its own there: claiming and releasing both bump it, so a session
+    that started, wrote nothing and exited looked freshly created afterwards
+    and kept re-earning ``NEW_SESSION_GRACE_S`` — which is precisely the
+    population the empty-directory reap exists to collect. The marker records
+    when the run actually began, which is the honest age for a directory whose
+    only event was a session opening and closing.
     """
     newest: float | None = None
+    marker_stamp: float | None = None
     try:
         for entry in directory.rglob("*"):
             try:
-                if entry.name == LIVE_MARKER_NAME or not entry.is_file():
+                if not entry.is_file():
                     continue
                 stamp = entry.stat().st_mtime
             except OSError:
                 continue
+            if entry.name == LIVE_MARKER_NAME:
+                marker_stamp = stamp
+                continue
             newest = stamp if newest is None else max(newest, stamp)
     except OSError:
         return fallback
-    return fallback if newest is None else newest
+    if newest is not None:
+        return newest
+    return marker_stamp if marker_stamp is not None else fallback
 
 
-def _candidates(sessions_dir: Path, live: Path | None) -> list[_Candidate]:
+def _candidates(sessions_dir: Path, live: Path | None) -> tuple[list[_Candidate], int]:
     """Evictable session directories, least-recently-active first.
 
     Two kinds of directory are never candidates, and both exclusions exist
@@ -254,16 +343,21 @@ def _candidates(sessions_dir: Path, live: Path | None) -> list[_Candidate]:
     - ``live``, the sweeping session's own directory;
     - any directory still claimed by a live process (:func:`_is_claimed`),
       which is every other concurrently running session.
+
+    Returns the candidates AND the bytes held by those exempt directories, so
+    the caller can report the store's real size rather than only the part it
+    is allowed to govern.
     """
     live_resolved = live.resolve() if live is not None else None
     out: list[_Candidate] = []
+    live_bytes = 0
     for child in sessions_dir.iterdir():
         try:
             if not child.is_dir():
                 continue
-            if live_resolved is not None and child.resolve() == live_resolved:
-                continue
-            if _is_claimed(child):
+            exempt = live_resolved is not None and child.resolve() == live_resolved
+            if exempt or _is_claimed(child):
+                live_bytes += _dir_size(child)
                 continue
             stat = child.stat()
         except OSError:
@@ -276,7 +370,7 @@ def _candidates(sessions_dir: Path, live: Path | None) -> list[_Candidate]:
             )
         )
     out.sort(key=lambda candidate: candidate.mtime)
-    return out
+    return out, live_bytes
 
 
 def sweep_sessions(
@@ -311,7 +405,7 @@ def sweep_sessions(
     moment = now if now is not None else time.time()
     horizon = moment - max_age_days * 86400
     try:
-        candidates = _candidates(sessions_dir, live_dir)
+        candidates, live_bytes = _candidates(sessions_dir, live_dir)
     except OSError as exc:
         logger.warning("session retention: cannot scan %s: %s", sessions_dir, exc)
         return SweepResult(errors=1)
@@ -331,8 +425,9 @@ def sweep_sessions(
             keep.append(candidate)
 
     # Count then bytes, both oldest-first off the front of ``keep``. Bytes
-    # runs last because it is the ceiling that must hold unconditionally:
-    # trimming by count first often satisfies it for free.
+    # runs last because it is the ceiling that must hold over everything this
+    # sweep is allowed to touch — live sessions are exempt (see the module
+    # docstring) — and trimming by count first often satisfies it for free.
     if max_sessions > 0 and len(keep) > max_sessions:
         cut = len(keep) - max_sessions
         doomed.extend(keep[:cut])
@@ -369,6 +464,7 @@ def sweep_sessions(
         evicted=evicted,
         bytes_freed=freed,
         bytes_remaining=sum(candidate.size for candidate in keep),
+        bytes_live=live_bytes,
         errors=errors,
     )
     if result.changed:
@@ -377,6 +473,19 @@ def sweep_sessions(
             result.evicted,
             result.scanned,
             result.bytes_freed / 1024,
+        )
+    # Live sessions sit outside the ceilings, so the store can exceed the byte
+    # budget with nothing evictable left to reclaim. That is the correct trade
+    # (never delete a transcript in use) but it must not be SILENT: this is the
+    # only signal that the configured bound is not currently being honoured,
+    # and without it the failure mode is a full volume with a clean sweep log.
+    if max_bytes > 0 and live_bytes > max_bytes:
+        logger.warning(
+            "session retention: live sessions hold %.1f MB, above the %.1f MB ceiling; "
+            "they are exempt from eviction, so the store will stay over budget until "
+            "they end",
+            live_bytes / 1024 / 1024,
+            max_bytes / 1024 / 1024,
         )
     return result
 

@@ -932,14 +932,26 @@ async def _prepare(
     # what makes "never evict the session that is running" enforceable rather
     # than a race. Best-effort by construction (see retention.sweep_sessions):
     # reclaiming disk must never be the reason a session fails to start.
-    from local_operator.session.retention import claim_session, sweep_from_config
+    from local_operator.session.retention import (
+        SESSIONS_DIRNAME,
+        claim_session,
+        sweep_from_config,
+    )
 
     # CLAIM BEFORE SWEEPING, and in that order. The claim is what tells every
     # OTHER session's sweep that this directory belongs to a live run; written
     # afterwards, this session would be an anonymous empty directory for the
     # width of its own sweep, which is exactly the window a concurrent startup
     # used to delete it in.
-    claim_session(transcript_dir)
+    #
+    # Only under ``sessions/``. With ``--train`` (or a named agent) the
+    # transcript lives in ``agents/<id>/``, which retention never scans, so a
+    # claim there protects nothing — and it does not merely waste a file:
+    # ``AgentRegistry.export_agent`` zips every file in the agent directory,
+    # so the marker would ship to the Agent Hub and be imported into other
+    # users' agent directories.
+    if transcript_dir.parent.name == SESSIONS_DIRNAME:
+        claim_session(transcript_dir)
 
     sweep_from_config(config_manager, Path(agent_registry.config_dir), transcript_dir)
 

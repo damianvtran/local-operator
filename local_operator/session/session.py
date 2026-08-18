@@ -2712,14 +2712,22 @@ class Session:
             await self.jobs.dispose()
             self._wake.dispose()
             self._transcript.flush()
+        finally:
             # Drop the retention claim: this directory is now ordinary history
             # and another session's sweep may reclaim it. Kept here rather than
-            # in a dispose hook so it holds for every front end, and after the
-            # flush so the claim outlives the last write it protects.
+            # in a dispose hook so it holds for every front end.
+            #
+            # In the ``finally``, and FIRST in it: everything above can raise,
+            # and a dispose that blew up part way through must not leave the
+            # directory claimed for the rest of the process's life. On POSIX a
+            # leaked claim heals when the pid dies, but the marker is also the
+            # only thing standing between this directory and the ceilings, so
+            # releasing it is not something to make conditional on a clean
+            # teardown. Ordering against the flush above is preserved: this
+            # runs after it on every path where the flush runs at all.
             from local_operator.session.retention import release_session
 
             release_session(self._transcript.directory)
-        finally:
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:
