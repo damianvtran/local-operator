@@ -1195,8 +1195,8 @@ class TestZaiSignInMintsADurableKey:
         components was individually correct while their composition was not.
         """
         from local_operator.providers.auth_store import AuthStore
-        from local_operator.providers.registry import get_provider_definition
         from local_operator.providers.oauth.zai import ZaiOAuthFlow
+        from local_operator.providers.registry import get_provider_definition
 
         calls: list[str] = []
         flow = ZaiOAuthFlow(
