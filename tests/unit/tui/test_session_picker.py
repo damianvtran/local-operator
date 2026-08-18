@@ -19,7 +19,9 @@ from textual.app import App, ComposeResult
 from local_operator.resume import (
     NAME_MAX_CHARS,
     NAME_SCAN_CHARS,
+    ORIGIN_SUBAGENT,
     SessionRow,
+    mark_session_origin,
     recent_session_rows,
     session_name,
 )
@@ -219,6 +221,38 @@ def test_rows_are_newest_first_and_carry_their_name(tmp_path: Path) -> None:
     rows = recent_session_rows(tmp_path)
     assert [row.id for row in rows] == ["newer1", "older1"]
     assert [row.name for row in rows] == ["the newer one", "the older one"]
+
+
+def test_the_picker_offers_only_sessions_the_user_started(tmp_path: Path) -> None:
+    """A subagent's child session is not a conversation the user can recognise.
+
+    Children land in the same ``sessions/`` tree with the same shape, so the
+    picker named them by their opening message — which for a delegated run is
+    the role preamble the parent wrote. On one machine 40 of 50 offered rows
+    were ``[role: reviewer] You are an INDEPENDENT reviewer…`` and the user's
+    own sessions were paged off the bottom.
+    """
+    _write_transcript(tmp_path, "mine", [_message("user", "fix the resume picker")])
+    child = _write_transcript(
+        tmp_path, "child", [_message("user", "[role: reviewer] You are an INDEPENDENT reviewer")]
+    )
+    mark_session_origin(child, ORIGIN_SUBAGENT, label="reviewer")
+
+    rows = recent_session_rows(tmp_path)
+    assert [row.id for row in rows] == ["mine"]
+    # Hidden from the listing, still on disk: the transcript is what makes a
+    # stopped child resumable by id and readable after the fact.
+    assert (child / "transcript.jsonl").is_file()
+
+
+def test_a_session_with_no_marker_is_still_the_user_s(tmp_path: Path) -> None:
+    """Every conversation that predates the marker must keep appearing.
+
+    The filter reads absence as "the user's" precisely so an upgrade does not
+    empty the picker of real work.
+    """
+    _write_transcript(tmp_path, "before", [_message("user", "an older conversation")])
+    assert [row.id for row in recent_session_rows(tmp_path)] == ["before"]
 
 
 # --- filtering --------------------------------------------------------------

@@ -1082,6 +1082,83 @@ def test_resume_latest_picks_the_newest_transcript(tmp_path: Path) -> None:
     assert directory == sessions / "newer"
 
 
+def test_resume_latest_skips_a_subagent_that_finished_last(tmp_path: Path) -> None:
+    """``@latest`` means the newest conversation THE USER had.
+
+    A subagent writes its child transcript into the same ``sessions/`` tree, and
+    a delegated review routinely settles after the parent's final turn — which
+    made the child the newest directory on disk, so a bare ``--resume`` reopened
+    the reviewer instead of the session that launched it.
+    """
+    sessions = tmp_path / "sessions"
+    for name, when in (("mine", 1_000_000), ("child", 2_000_000)):
+        (sessions / name).mkdir(parents=True)
+        transcript = sessions / name / "transcript.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        os.utime(transcript, (when, when))
+    resume_mod.mark_session_origin(sessions / "child", resume_mod.ORIGIN_SUBAGENT, label="review")
+    registry = FakeRegistry(tmp_path)
+
+    directory, _ = session_factory._transcript_dir_and_agent_id(
+        None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
+    )
+    assert directory == sessions / "mine"
+
+
+def test_a_subagent_session_still_resumes_by_explicit_id(tmp_path: Path) -> None:
+    """Filtering narrows what is OFFERED, never what exists.
+
+    ``hub op='resume'`` continues a stopped child on its own directory, and an
+    operator debugging a delegated run has only its id to go on. Hiding the row
+    must not amputate the path that reaches it.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "child").mkdir(parents=True)
+    (sessions / "child" / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    resume_mod.mark_session_origin(sessions / "child", resume_mod.ORIGIN_SUBAGENT, label="review")
+
+    assert resume_mod.resume_dir(tmp_path, "child") == sessions / "child"
+
+
+def test_an_unreadable_origin_marker_leaves_the_session_the_user_s(tmp_path: Path) -> None:
+    """Absence and corruption both mean USER, and that direction is deliberate.
+
+    Marking user sessions instead would have hidden every conversation that
+    predates the marker. A listing showing one stale row is fixed by typing a
+    filter; one that hides your own work is not recoverable at all.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "mine").mkdir(parents=True)
+    (sessions / "mine" / resume_mod.ORIGIN_NAME).write_text("{not json", encoding="utf-8")
+    assert resume_mod.session_origin(sessions / "mine") == ""
+    assert resume_mod.is_user_session(sessions / "mine")
+
+    # A well-formed file that is not an object, and one with a non-string
+    # origin: both are the same "cannot read a claim off this" case.
+    (sessions / "mine" / resume_mod.ORIGIN_NAME).write_text("[1, 2]", encoding="utf-8")
+    assert resume_mod.is_user_session(sessions / "mine")
+    (sessions / "mine" / resume_mod.ORIGIN_NAME).write_text('{"origin": 7}', encoding="utf-8")
+    assert resume_mod.is_user_session(sessions / "mine")
+
+
+def test_marking_a_session_never_takes_the_run_down(tmp_path: Path, monkeypatch) -> None:
+    """Marking is bookkeeping for a listing; a child that cannot write it runs.
+
+    The cost of a failed write is one extra row in a picker. Raising here would
+    take down a delegated task for a directory a retention sweep just removed
+    or a volume that went read-only.
+    """
+    target = tmp_path / "sessions" / "child"
+
+    def denied(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise PermissionError("read-only volume")
+
+    monkeypatch.setattr(Path, "write_text", denied)
+    resume_mod.mark_session_origin(target, resume_mod.ORIGIN_SUBAGENT)
+    monkeypatch.undo()
+    assert resume_mod.is_user_session(target)
+
+
 @pytest.mark.parametrize("requested", ["nope", "..", "../../etc", "sub/dir", ""])
 def test_resume_refuses_a_session_it_cannot_verify(tmp_path: Path, requested: str) -> None:
     """A typo must FAIL, not start an empty session that looks resumed.

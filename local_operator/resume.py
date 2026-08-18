@@ -30,6 +30,23 @@ RESUME_LATEST = "@latest"
 #: are not turns (retention sweeps touch it), so it is not the clock to use.
 TRANSCRIPT_NAME = "transcript.jsonl"
 
+#: Marks a session directory as machine-started rather than user-started. A
+#: subagent's child session is an ephemeral directory under ``sessions/`` with
+#: exactly the shape of a real conversation, so nothing on disk told the two
+#: apart and the ``/resume`` picker offered every delegated review, design and
+#: scout run as if the user had opened it — on one machine 40 of 50 rows.
+#:
+#: A SIDECAR file rather than a field in the transcript: the picker's whole
+#: cost model is one bounded read per row, and a marker inside the JSONL could
+#: only be found by parsing it. ``Path.is_file()`` is one stat, and it answers
+#: even for a child whose transcript has not been written yet.
+ORIGIN_NAME = "origin.json"
+
+#: ``origin`` value for a session a subagent runs. The file is JSON, and the
+#: key is a string rather than a bare flag, so a future non-user origin (a
+#: scheduled run, a server-side session) is a new value and not a second file.
+ORIGIN_SUBAGENT = "subagent"
+
 #: How much of the opening message a session name may keep. Long enough to tell
 #: two days' work apart, short enough that a column of them still scans.
 NAME_MAX_CHARS = 64
@@ -71,6 +88,60 @@ class ResumeNotFound(Exception):
     """``--resume`` named a session that is not on disk (or none exist)."""
 
 
+def mark_session_origin(session_dir: Path, origin: str, **details: object) -> None:
+    """Record that ``session_dir`` was started by ``origin``, not by the user.
+
+    Written by whoever CREATES the directory, which is the only place that
+    knows: by the time the picker reads it back, a child session and a user's
+    conversation are the same shape on disk.
+
+    Best-effort by contract. Marking is bookkeeping for a listing, and a child
+    that cannot write its marker (read-only volume, a race with a retention
+    sweep that just removed the directory) must still RUN — the cost of the
+    failure is one extra row in a picker, and taking a delegated task down for
+    it would be the more expensive bug.
+    """
+    payload = {"origin": origin, **details}
+    try:
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / ORIGIN_NAME).write_text(json.dumps(payload), encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def session_origin(session_dir: Path) -> str:
+    """``origin`` recorded for a session, or ``""`` when it is the user's own.
+
+    Absence means USER, and that direction is deliberate. The alternative —
+    marking user sessions and hiding everything unmarked — would have made
+    every conversation that predates the marker disappear from the picker,
+    which loses real work; an unmarked child merely shows one stale row that
+    retention eventually evicts. A listing that shows too much is recoverable
+    by typing a filter, one that hides your own session is not.
+
+    Tolerant for the same reason :func:`session_name` is: this runs over every
+    session directory to paint a picker, so a truncated or hand-edited marker
+    yields ``""`` (treated as the user's) rather than taking the picker down.
+    """
+    try:
+        raw = (session_dir / ORIGIN_NAME).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    origin = payload.get("origin")
+    return origin if isinstance(origin, str) else ""
+
+
+def is_user_session(session_dir: Path) -> bool:
+    """True when a human started this session, so a picker may offer it."""
+    return not session_origin(session_dir)
+
+
 def resume_dir(config_dir: Path, requested: str) -> Path:
     """The session directory ``--resume`` names, or raise :class:`ResumeNotFound`.
 
@@ -86,7 +157,16 @@ def resume_dir(config_dir: Path, requested: str) -> Path:
     """
     sessions = config_dir / "sessions"
     if requested == RESUME_LATEST:
-        candidates = [path for path in sessions.glob("*") if (path / TRANSCRIPT_NAME).is_file()]
+        # ``@latest`` means the latest conversation THE USER had. A subagent
+        # writes its child transcript into the same directory, and a delegated
+        # review finishing after the parent's last turn made it the newest
+        # directory on disk — so a bare ``--resume`` reopened the reviewer
+        # rather than the session that launched it.
+        candidates = [
+            path
+            for path in sessions.glob("*")
+            if (path / TRANSCRIPT_NAME).is_file() and is_user_session(path)
+        ]
         if not candidates:
             raise ResumeNotFound("no previous session to resume")
 
@@ -137,7 +217,13 @@ def resolve_resume_id(config_dir: Path, requested: str) -> str:
 
 
 def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]]:
-    """``(id, mtime)`` for resumable sessions, newest first.
+    """``(id, mtime)`` for the USER's resumable sessions, newest first.
+
+    Subagent sessions are excluded (:func:`is_user_session`): they are the
+    machine's own scratch conversations, and a listing offered to a human is
+    about work the human did. They remain resumable by explicit id — nothing
+    here removes a directory, and ``hub op='resume'`` continues a child by its
+    own path — so this narrows what is OFFERED, never what exists.
 
     The mtime is RETURNED rather than used and dropped: the sort already reads
     it, and it is the one fact that makes a list of 12-hex ids pickable instead
@@ -150,9 +236,14 @@ def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]
     rows: list[tuple[str, float]] = []
     for path in (config_dir / "sessions").glob("*"):
         try:
-            rows.append((path.name, (path / TRANSCRIPT_NAME).stat().st_mtime))
+            mtime = (path / TRANSCRIPT_NAME).stat().st_mtime
         except OSError:
             continue
+        # After the stat, not before: the stat is what proves the directory is
+        # a session at all, and an unreadable marker must not cost a row.
+        if not is_user_session(path):
+            continue
+        rows.append((path.name, mtime))
     rows.sort(key=lambda row: row[1], reverse=True)
     return rows[:limit]
 
