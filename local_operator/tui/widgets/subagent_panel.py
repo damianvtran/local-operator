@@ -1,6 +1,6 @@
 """The dock-band subagent panel (item 6-TUI).
 
-The status band already carries the ◍/⊞ counters; this panel is the DETAIL
+The status band already carries the ◍/▣ counters; this panel is the DETAIL
 surface — one row per task job in the session's job manager: label, state
 glyph (a moving spinner while running, ✓/✗ once settled), elapsed time, and
 the latest progress the engine relayed. A row is the click/Enter target for
