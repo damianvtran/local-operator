@@ -705,7 +705,7 @@ async def test_the_prompt_never_hides_its_target_or_overflows(width: int) -> Non
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(width, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         view.append_block(
             ApprovalBlock("write_file", "[outside workspace] write: /Users/x/deep/config.yml")
@@ -735,7 +735,7 @@ async def test_the_answered_receipt_stays_on_one_row(width: int) -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(width, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         block = ApprovalBlock("write_file", "[outside workspace] write: /Users/x/deep/config.yml")
         app.query_one(TranscriptView).append_block(block)
         await pilot.pause(0.1)
@@ -769,7 +769,7 @@ async def test_the_hint_row_sheds_whole_choices(width: int) -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(width, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         app.query_one(TranscriptView).append_block(ApprovalBlock("bash", "run: make"))
         await pilot.pause(0.2)
         painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
@@ -805,7 +805,7 @@ async def test_a_dangerous_ask_never_paints_like_a_safe_one(width: int) -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(width, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         view.append_block(ApprovalBlock("write_file", f"{OUTSIDE_MARKER} write: /tmp/x/keys"))
         view.append_block(ApprovalBlock("write_file", "write: /tmp/x/keys"))
@@ -842,7 +842,7 @@ async def test_a_narrow_prompt_keeps_the_end_of_the_path(detail: str, expected_t
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(52, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
         await pilot.pause(0.2)
         painted = [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
@@ -925,7 +925,7 @@ async def test_the_prompt_cannot_be_repainted_from_a_tool_argument() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(90, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         block = ApprovalBlock("bash", f"run: {payload}")
         app.query_one(TranscriptView).append_block(block)
         await pilot.pause(0.2)
@@ -1025,7 +1025,7 @@ async def test_a_call_being_dictated_shows_a_row_that_moves() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="write")))
         await pilot.pause(0.1)
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
@@ -1069,7 +1069,7 @@ async def test_an_adopted_row_times_the_tool_not_the_dictation() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         app.post_message(ToolComposing(ToolCallComposeEvent(tool_call_id="c1", tool_name="write")))
         await pilot.pause(0.55)  # "dictation" time that must not be billed
         app.post_message(
@@ -1105,7 +1105,7 @@ async def test_the_composing_row_sheds_its_label_before_its_facts() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(34, 24)) as pilot:
-        await pilot.pause(0.2)
+        await _boot(pilot, app)
         app.post_message(
             ToolComposing(
                 ToolCallComposeEvent(tool_call_id="c1", tool_name="write", argument_bytes=12700)
@@ -1156,6 +1156,7 @@ async def test_a_dictated_name_moves_its_own_row_but_not_the_shared_column() -> 
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(110, 24)) as pilot:
+        await _boot(pilot, app)
         view = app.query_one(TranscriptView)
         settled = ToolCard("s1", "read", {}, None)
         view.append_block(settled)
@@ -1213,25 +1214,35 @@ async def test_a_marker_rung_exists_between_the_words_and_the_glyph() -> None:
     for width in range(90, 19, -1):
         app = OperatorApp(lambda: _factory(SteerableSession()))
         async with app.run_test(size=(width, 20)) as pilot:
+            await _boot(pilot, app)
             view = app.query_one(TranscriptView)
             view.append_block(ApprovalBlock("write_file", f"{OUTSIDE_MARKER} write: /etc/hosts"))
-            # Wait for the row to be PAINTED, not for 50ms. A flat pause is a
-            # guess about how long a compositor pass takes, and when it lost the
-            # race the row came back "" — which is not "this width shows no
-            # hazard", it is "this width was not measured". The empty string
-            # then fell through the membership test below, dropped that width
-            # out of `both`, and SPLIT THE BAND, so the `len(runs) == 1`
-            # assertion failed with a plausible-looking two-run result
-            # ([49, 39, 28]) that pointed at the ladder instead of at the clock.
-            # Measured ~1-2 failures in 9 full-suite runs on unmodified main.
+            # Wait for the row to SETTLE, not for 50ms and not merely for it to
+            # be non-empty. A flat pause is a guess about how long a compositor
+            # pass takes, and when it lost the race the width was measured off a
+            # frame the user never sees, dropped out of `both`, and SPLIT THE
+            # BAND — so `len(runs) == 1` failed with a plausible two-run result
+            # ([49, 39, 28]) that pointed at the hazard ladder instead of at the
+            # clock. Measured ~1-2 failures in 9 full-suite runs on unmodified
+            # main, and 2 in 8 under CPU contention.
             #
-            # The retry loop closes that: a width now yields a row or the test
-            # says so, and an unpainted frame can no longer masquerade as a
-            # measurement. The ceiling is a deadlock guard rather than a timing
-            # assumption.
+            # Waiting for a NON-EMPTY row does not fix it, which is the trap
+            # here: instrumenting the failing sweep shows `empties=0` and ~33
+            # frames carrying the intermediate "words" rung — `?` present, `!`
+            # absent. That frame is non-empty, so a first-non-empty read accepts
+            # it and classifies the width false exactly as an unpainted frame
+            # would. The defect was never emptiness; it is reading a frame that
+            # has not finished reflowing.
+            #
+            # So the read is repeated until it stops changing: two consecutive
+            # identical rows with a pause between them. That is the same rule
+            # the rest of this suite follows — wait for the condition, not for a
+            # duration — and it holds the band under the load that splits it.
+            # The ceiling is a deadlock guard rather than a timing assumption.
             row = ""
             for _ in range(200):
-                row = next(
+                await pilot.pause()
+                current = next(
                     (
                         strip.text
                         for strip in app.screen._compositor.render_strips()
@@ -1239,9 +1250,9 @@ async def test_a_marker_rung_exists_between_the_words_and_the_glyph() -> None:
                     ),
                     "",
                 )
-                if row:
+                if current and current == row:
                     break
-                await pilot.pause()
+                row = current
             assert row, f"the approval row never painted at width {width}"
         if PROMPT_GLYPH in row and HAZARD_GLYPH in row:
             both.append(width)
@@ -1277,6 +1288,7 @@ async def test_the_two_hazards_spell_out_different_sentences() -> None:
     for label, (detail, expected) in cases.items():
         app = OperatorApp(lambda: _factory(SteerableSession()))
         async with app.run_test(size=(96, 20)) as pilot:
+            await _boot(pilot, app)
             app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
             await pilot.pause(0.1)
             row = next(
@@ -1311,6 +1323,7 @@ async def test_the_verbose_threshold_measures_this_row_s_own_clause() -> None:
     for width in range(66, 61, -1):
         app = OperatorApp(lambda: _factory(SteerableSession()))
         async with app.run_test(size=(width, 20)) as pilot:
+            await _boot(pilot, app)
             app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
             await pilot.pause(0.05)
             row = next(
@@ -1346,6 +1359,7 @@ async def test_a_background_jobs_approval_survives_the_parents_stop_latch() -> N
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
         for _ in range(12):
             await pilot.pause()
         # Arm the latch exactly as a stop during the parent's turn does.
