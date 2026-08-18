@@ -128,12 +128,16 @@ async def _booted_gate(
     each of these tests passed when the file ran whole and failed when run
     alone, on `main` as much as here.
 
-    Paired with :func:`_boot` rather than replacing it, because they wait on two
-    different facts and a caller here needs both. `_boot` waits for the app to
-    ADOPT a session, which is what a submit needs; this waits for that session's
-    approval GATE to be installed, which is what an approval test needs, and the
-    gate is installed after the adoption. Calling only one leaves the other
-    race open.
+    Relationship to :func:`_boot`, which waits for the app to ADOPT a session:
+    this helper SUBSUMES that wait and does not need to be paired with it.
+    `_adopt_session` is synchronous and assigns `self._session` before it calls
+    `session.set_approval_handler(...)`, so a handler that exists proves an
+    adoption that already happened. The 13 tests here that call this alone are
+    correct as written; do not add a `_boot` in front of them.
+
+    `_boot` is what a test needs when it SUBMITS without ever touching the gate
+    — there the adoption is the only fact in question, and waiting on a handler
+    the test never uses would be waiting on the wrong thing.
     """
     for _ in range(100):
         if session.approval_handler is not None:
