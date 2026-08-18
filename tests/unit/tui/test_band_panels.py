@@ -725,9 +725,12 @@ async def test_the_band_inset_never_costs_the_subagent_list_its_screen(
 
     `AGENTS.md` is explicit that a screen whose virtual size exceeds its actual
     size is always a bug here: `Screen { overflow: hidden }` does not report it,
-    it silently clips a row off the top. So the inset is conditioned on a real
-    fit check rather than on a height threshold, which is the wrong instrument
-    for a panel with no floor to clamp against.
+    it silently clips a row off the top. The inset is therefore gated — on the
+    screen height and on the child count, both of which are known synchronously
+    and so cannot change between the frame that paints and the frame after it.
+    Gates that MEASURED the laid-out band were tried first and removed: every
+    one of them flipped mid-repaint and traded this overflow for visible
+    motion.
 
     Driven at MID heights on purpose. The seam suite runs everything at 40 rows,
     which is why this class of overflow was invisible to it.
@@ -797,10 +800,14 @@ async def test_the_band_inset_survives_resizing_across_its_floor() -> None:
             seen: dict[int, bool] = {}
             for height in (30, 16, 14, 13, 12, 13, 14, 16, 30):
                 await pilot.resize_terminal(100, height)
-                for _ in range(3):
-                    await pilot.pause()
-                app._refresh_band()
-                for _ in range(3):
+                # NO manual `_refresh_band()`. The production resize path is
+                # what is under test: `on_resize` schedules the band's
+                # re-decision itself, and an earlier version of this test
+                # supplied that call by hand — which made it pass while the
+                # real app sat on the previous height's answer until the 1 Hz
+                # poll. A test that provides the trigger it is meant to be
+                # checking for asserts nothing.
+                for _ in range(6):
                     await pilot.pause()
 
                 screen = app.screen
@@ -822,3 +829,58 @@ async def test_the_band_inset_survives_resizing_across_its_floor() -> None:
             assert seen[12] is False
         finally:
             builtin.TODO_STORE.pop(session.session_id, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("height", "children"), [(15, 5), (16, 6), (18, 8), (20, 10), (22, 10)])
+async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
+    height: int, children: int
+) -> None:
+    """The dock's inset must not be the row that overflows the screen.
+
+    ``SubagentPanel`` has no row cap — it mounts one row per task job, unlike
+    ``TodoPanel``, which budgets against the screen — so a long enough child
+    list overruns the dock on its own, on this branch and on ``main`` alike.
+    That defect is out of scope here. Not making it WORSE is not: the inset's
+    row is exactly what tips a list that currently just fits.
+
+    Each case is A/B'd against the identical frame with the class forced off, in
+    the same checkout, so the comparison isolates the inset rather than
+    comparing two builds. These five cells are the ones where a 112-cell sweep
+    (heights 13-40 x 1-10 children) found the inset causing an overflow that the
+    same frame without it did not have — all of the shape "children + chrome is
+    about the screen height".
+    """
+
+    async def _overflows(*, suppress_inset: bool) -> bool:
+        session = FakeSession()
+        session.jobs = _fake_jobs(*[_Job(f"sub-{i}", f"child {i}") for i in range(children)])
+        app = OperatorApp(_async_factory(session))
+        if suppress_inset:
+            original = type(app)._sync_band_inset
+
+            def without_inset(self: Any) -> None:
+                original(self)
+                self.query_one("#band").remove_class("has-slot")
+
+            app._sync_band_inset = without_inset.__get__(app)  # type: ignore[method-assign]
+        async with app.run_test(size=(100, height)) as pilot:
+            for _ in range(80):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            assert app._session is not None, "the session never booted"
+            for _ in range(4):
+                app._refresh_band()
+                for _ in range(3):
+                    await pilot.pause()
+            screen = app.screen
+            return tuple(screen.virtual_size) != tuple(screen.size)
+
+    with_inset = await _overflows(suppress_inset=False)
+    without_inset = await _overflows(suppress_inset=True)
+
+    assert not (with_inset and not without_inset), (
+        f"the inset caused an overflow at {height} rows with {children} children "
+        f"that the same frame without it does not have"
+    )

@@ -226,6 +226,12 @@ _BAND_SLOT_RHYTHM_ROWS = 1
 #: attempt to condition the row on measured slot heights made things worse.
 MIN_BAND_INSET_SCREEN_ROWS = 12
 
+#: Rows the column spends around the subagent list, used to decide whether the
+#: dock's inset still fits beside it (see `_subagent_rows_leave_room`): five for
+#: `#input-shell`, two for the transcript's padding, one for the panel's caption,
+#: one for its slot rhythm row, and one of conversation left over.
+_SUBAGENT_DOCK_ROWS = 10
+
 #: Passes `_refresh_band` makes over (panels, inset) before painting. Three,
 #: because the band's visibility, its inset row and `TodoPanel`'s row budget
 #: each depend on the previous one — see the comment in `_refresh_band` for the
@@ -2102,6 +2108,21 @@ class OperatorApp(App[None]):
         # can currently hold keeps the ~50 ms before the timer from showing a
         # card overhanging the frame with its prose clipped mid-word.
         self.call_after_refresh(self._sync_overlay_layout, force=True)
+        # The dock band is size-sensitive for the same reason the cards are, and
+        # had no resize trigger at all: its inset is gated on the screen height
+        # and `TodoPanel` budgets its rows against it, but nothing here asked
+        # either to re-decide. A terminal dragged across the inset's floor was
+        # left with the previous height's answer until the 1 Hz poll or an
+        # unrelated panel event happened to fire — measured at ~0.3 s of a band
+        # sized for a screen that no longer exists, with the overflow that
+        # implies.
+        #
+        # `call_after_refresh` rather than the timer: unlike the cards, the band
+        # is IN the layout, so it re-arranges with the frame and the pass after
+        # that refresh reads real numbers. The timer above then re-measures the
+        # cards over whatever the band settled to, which is the order those two
+        # already depend on.
+        self.call_after_refresh(self._refresh_band)
 
     def on_welcome_view_block_resized(self, message: WelcomeView.BlockResized) -> None:
         """The splash changed height, so the composition around it has moved.
@@ -3454,7 +3475,60 @@ class OperatorApp(App[None]):
         # change overflows in 28 cells against `main`'s 32 — a strict subset,
         # fixing four and introducing none — where an unconditional row
         # overflowed in 33 and the measured fit checks in 29 WITH reflow.
-        band.set_class(docked and screen_height > MIN_BAND_INSET_SCREEN_ROWS, "has-slot")
+        #
+        # The second half of the gate is the same shape and covers the case the
+        # height alone misses: a SUBAGENT list long enough to fill the screen by
+        # itself. `SubagentPanel` has no row cap — it mounts one row per job —
+        # so on those screens the dock is already at the edge and the inset is
+        # the row that tips it over. Swept over 112 cells (heights 13-40 x 1-10
+        # children), A/B'd against the identical frame with the class forced
+        # off: the inset causes overflow in five of them, all of the shape
+        # "children + chrome ~= screen".
+        #
+        # Gated on the JOB COUNT rather than on the panel's measured height,
+        # for the reason the fit checks were removed: a count is known
+        # synchronously and cannot change between the frame that paints and the
+        # frame after it, so it cannot flip and cannot reflow. The budget it is
+        # compared against is the same one `TodoPanel` reasons with — the dock's
+        # fixed rows plus the panel's own chrome.
+        band.set_class(
+            docked
+            and screen_height > MIN_BAND_INSET_SCREEN_ROWS
+            and self._subagent_rows_leave_room(screen_height),
+            "has-slot",
+        )
+
+    def _subagent_rows_leave_room(self, screen_height: int) -> bool:
+        """True unless the subagent list is already close to filling the screen.
+
+        ``SubagentPanel`` mounts one row per task job with no cap of its own
+        (unlike ``TodoPanel``, which budgets against the screen), so a long
+        enough child list overruns the dock without any help from the inset —
+        that overflow is this app's on ``main`` too and is out of scope here.
+        What IS in scope is not making it worse, and the inset's row is exactly
+        what tips a list that currently just fits.
+
+        Counted, not measured. A job count is available synchronously and cannot
+        change between the frame that paints and the frame after it; every
+        version of this gate that read a widget's height instead flipped
+        mid-repaint and showed the user a moving dock.
+
+        ``_SUBAGENT_DOCK_ROWS`` is what the column spends around the list: the
+        composer and its status band, the transcript's own padding rows, the
+        panel's caption, its slot rhythm row, and one row of conversation, which
+        is the floor below which the dock has taken the screen.
+        """
+        panel = self._subagent_panel
+        if panel is None or not panel.display:
+            return True
+        jobs = getattr(self._session, "jobs", None)
+        if jobs is None:  # reduced hosts, or before the session is adopted
+            return True
+        try:
+            rows = len([job for job in jobs.list() if getattr(job, "type", "") == "task"])
+        except Exception:  # unreadable ledger; nothing to protect against
+            return True
+        return rows + _SUBAGENT_DOCK_ROWS < screen_height
 
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
@@ -6891,11 +6965,11 @@ def slot_rows(slot: Any) -> int:
 
     ``outer_size.height`` is the truth once Textual has arranged the slot, and it
     is ZERO for one that has just been un-hidden — which is every mid-session
-    appearance of a panel, not a boot-only case. `_band_inset_fits` runs at
-    exactly that moment (the todo tool's own event, `SubagentStarted`), so a
-    measurement-only reading makes the first painted frame disagree with the
-    settled one: the dock lands flush and jumps down a row when the 1 Hz poll
-    re-asks, ~0.46 s later on the real event path.
+    appearance of a panel, not a boot-only case. `TodoPanel._band_sibling_rows`
+    reads this at exactly that moment (the todo tool's own event,
+    `SubagentStarted`), so a measurement-only reading makes the first painted
+    frame disagree with the settled one: the dock lands flush and jumps down a
+    row when the 1 Hz poll re-asks, ~0.46 s later on the real event path.
 
     The prediction asks the panel, because each already knows what it is about
     to paint — the todo panel from its own row budget, the subagent panel from
