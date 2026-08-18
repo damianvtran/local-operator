@@ -10,7 +10,7 @@ because the obvious implementation gets it wrong:
   nonsense yields ``None`` and the band keeps whatever it had. The call also
   runs alongside the turn rather than in front of it, and carries
   ``ChatRequest.isolated`` so a failure cannot move the turn's model, its
-  credential, or its effort — see that field's docstring for the five pieces
+  credential, or its effort — see that field's docstring for the six pieces
   of session-wide state that shuts off.
 - **Most messages do not deserve a call.** "hi", "thanks", "test" carry no
   topic; asking a model to title them spends money to produce noise. The
