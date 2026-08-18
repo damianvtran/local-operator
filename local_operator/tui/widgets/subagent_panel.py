@@ -873,7 +873,7 @@ class SubagentPanel(Container):
 
         The dock's inset check runs at the moment a panel appears — a
         ``SubagentStarted`` event — when the slot has not been arranged yet and
-        measures zero (see ``app._slot_rows``). This panel's height is simply
+        measures zero (see ``app.slot_rows``). This panel's height is simply
         its header plus one row per job, both of which are known as soon as
         ``sync`` has run, so answering here is what lets the dock paint its
         settled frame first instead of jumping a row at the next 1 Hz poll.

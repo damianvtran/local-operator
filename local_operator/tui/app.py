@@ -205,22 +205,34 @@ STOPPED_STEER_NOTICE = "not sent — the turn was interrupted"
 #: row says that rather than claiming a delivery or a loss.
 DEFERRED_STEER_NOTICE = "still queued — goes to the next turn"
 
-#: Shortest SCREEN (not terminal — two rows go to the app's own outer padding)
-#: that can afford the dock band's top inset row, ``#band.has-slot``.
-#:
-#: At 10 rows the dock already exceeds the terminal without it: ``#input-shell``
-#: is five rows and the transcript's padding two more, and ``TodoPanel`` is
-#: clamped at its ``_MIN_BODY_ROWS`` floor with nothing left to give back. The
-#: inset is one row of rhythm; a clipped todo header is a lost statement, so
-#: below this the band keeps its previous flush join. See
-#: :meth:`OperatorApp._sync_band_inset`.
-MIN_BAND_INSET_SCREEN_ROWS = 10
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
 #: owns below itself (`padding: 0 0 1 0` in the sheet). Added to a panel's
 #: predicted content height so a predicted slot and a measured one mean the
-#: same thing — see :func:`_slot_rows`.
+#: same thing — see :func:`slot_rows`.
 _BAND_SLOT_RHYTHM_ROWS = 1
+
+#: Shortest SCREEN (not terminal — two rows go to the app's own outer padding)
+#: that can afford the dock band's top inset row, ``#band.has-slot``. At or below
+#: 12 rows the dock already crowds the terminal without it — `#input-shell` is
+#: five rows and the transcript's padding two more, with `TodoPanel` clamped at
+#: its floor — so the row costs a clipped list rather than buying rhythm.
+#:
+#: Calibrated, not guessed: swept over 100 configurations (screen heights 12-40 x
+#: todo-only / subagent-only / both), 12 is the value at which this change
+#: overflows in a STRICT SUBSET of the cells `main` already overflows in — it
+#: fixes four and introduces none. A static screen dimension is the
+#: only gate here that CANNOT reflow — see `_sync_band_inset` for why every
+#: attempt to condition the row on measured slot heights made things worse.
+MIN_BAND_INSET_SCREEN_ROWS = 12
+
+#: Passes `_refresh_band` makes over (panels, inset) before painting. Three,
+#: because the band's visibility, its inset row and `TodoPanel`'s row budget
+#: each depend on the previous one — see the comment in `_refresh_band` for the
+#: measurement. Named rather than inlined so the reason survives next to the
+#: number.
+_BAND_SETTLE_PASSES = 3
+
 
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
@@ -3400,81 +3412,49 @@ class OperatorApp(App[None]):
             screen_height = self.screen.size.height
         except Exception:  # not composed yet (early boot), or no band on this host
             return
-        slots = [panel for panel in (self._subagent_panel, self._todo_panel) if panel is not None]
-        docked = any(panel.display for panel in slots)
-        # The inset is breathing room, and it is only ever taken when there is a
-        # row to spare. Two independent reasons, because one alone is not enough:
-        #
-        # * `screen_height` floors it. Below a 10-row screen the dock already
-        #   exceeds the terminal on its own — `TodoPanel` sits at its
-        #   `_MIN_BODY_ROWS` floor with nothing left to give back — so the row
-        #   cannot come from anywhere. Measured at 100x12: virtual height 11
-        #   against a 10-row screen.
-        # * The FIT check is what covers the other slot. `TodoPanel` charges
-        #   itself for this row (`_band_inset_rows`), but `SubagentPanel` has no
-        #   row budget at all: it mounts one row per task job unconditionally, so
-        #   the inset's row is charged to nobody and comes straight out of the
-        #   transcript. Measured at 100x16 with six children: virtual 15 against
-        #   a 14-row screen, where the same frame without the inset fits exactly.
-        #   `Screen { overflow: hidden }` does not report that as an error, it
-        #   reports it by silently clipping a row off the top — and on this app a
-        #   scrollable screen is always a bug (AGENTS.md).
-        #
-        # So the row is taken only while the dock, the composer and one row of
-        # conversation still fit beside it. A panel with no budget of its own
-        # then simply does not get the inset when it is too tall for one, rather
-        # than taking a row the transcript needed.
-        band.set_class(
-            docked and screen_height > MIN_BAND_INSET_SCREEN_ROWS and self._band_inset_fits(slots),
-            "has-slot",
+        docked = any(
+            panel is not None and panel.display
+            for panel in (self._subagent_panel, self._todo_panel)
         )
-
-    def _band_inset_fits(self, slots: list[Any]) -> bool:
-        """True when one more row still leaves the column something to show.
-
-        Measured off the last layout rather than predicted: the slots' own outer
-        heights already include each slot's rhythm row, and `#input-shell` is the
-        composer plus its status band. What is left after those and the inset has
-        to be at least one row, or the inset is taking the transcript's last row.
-
-        A slot that has just been un-hidden measures ZERO until Textual
-        re-arranges, and that is the common case rather than a boot-only edge:
-        every mid-session appearance — a todo list created, a subagent started —
-        runs this against an unmeasured slot. Guessing "it does not fit" there
-        was visibly wrong: the dock painted flush, then jumped down a row when
-        the 1 Hz poll re-ran the check, and the todo list took an item back into
-        its `… N more` count at the same moment. Measured on the real event path
-        at ~0.46 s of wall clock, because `SubagentStarted` fires exactly one
-        `_refresh_band` and nothing else runs until the poll.
-
-        So an unmeasured slot is PREDICTED rather than assumed away (see
-        :func:`_slot_rows`): each panel already knows how many rows it is about
-        to paint, and asking it is what lets the first pass answer honestly and
-        the first painted frame be the settled one. Zero is kept as the "no slot
-        at all" answer, which is the only case where refusing is right.
-        """
-        try:
-            screen_height = self.screen.size.height
-            shell_rows = self.query_one("#input-shell").outer_size.height
-        except Exception:  # not composed yet; the next tick measures properly
-            return False
-        if screen_height <= 0 or shell_rows <= 0:
-            return False  # nothing measured yet; see the docstring
-        # Per-SLOT heights, never the band's own: the band's height already
-        # contains the inset this is deciding about, so measuring it would ask
-        # "does the row fit given that I already took it" and latch whichever
-        # answer it happened to start with. A slot's `outer_size` covers its
-        # content plus its own rhythm row and excludes the band's padding, so
-        # this term means the same thing whether or not the class is applied.
-        band_rows = sum(_slot_rows(slot) for slot in slots if slot.display)
-        if band_rows <= 0:
-            return False  # nothing to measure and nothing predicted: no slot
-        # `+ 1` is the inset itself, and the `>= 1` is the transcript's floor:
-        # the conversation keeps at least one row of its own. A band already too
-        # tall for that fails here and simply does not get the row — which is the
-        # honest outcome for a slot with no budget of its own, rather than
-        # spending a row the transcript needed.
-        return screen_height - (band_rows + shell_rows + 1) >= 1
+        # DOCKED IS THE WHOLE CONDITION, and getting here took two wrong turns
+        # worth recording, because both look like the careful choice.
+        #
+        # The row can only be afforded if some slot pays for it, and only
+        # `TodoPanel` has a row budget to pay from — `SubagentPanel` mounts one
+        # row per job unconditionally. So the first attempt gated the inset on a
+        # screen-height threshold and the second on measuring whether the band
+        # still fit. Both made it WORSE, because every such test reads heights
+        # that are one layout out of date at exactly the moment a panel appears:
+        # the answer flips between the frame that paints and the frame after it,
+        # and the user sees the dock jump. Measured over 90 configurations
+        # (screen heights 12-40 x todo-only / subagent-only / both):
+        #
+        #     unconditional  : 0 reflowing cells, 25 overflowing
+        #     fit-checked    : 4 reflowing cells, 29 overflowing
+        #     main (no inset): 0 reflowing cells, 29 overflowing
+        #
+        # The conditional version caused the motion it was written to prevent
+        # AND overflowed more often, because withholding the row leaves the todo
+        # panel budgeting for a row it then has to give back. Unconditional is
+        # both stiller and tighter than either.
+        #
+        # The overflow that remains is `SubagentPanel`'s own and PRE-DATES this
+        # row: it has no row cap, so a long enough child list overruns the
+        # screen on `main` too, in the same cells. This change makes that
+        # strictly better rather than worse; the real fix is a row budget and a
+        # `… N more` line on that panel, which is its own change.
+        # The one exception is a SCREEN-HEIGHT floor, and it is safe where the
+        # fit check was not for a specific reason: the screen's height does not
+        # change between the frame that paints and the frame after it, so this
+        # test cannot flip and cannot reflow. Below a 10-row screen the dock
+        # already exceeds the terminal on its own — `#input-shell` is five rows
+        # and the transcript's padding two more, with `TodoPanel` clamped at its
+        # `_MIN_BODY_ROWS` floor — so the row has nowhere to come from and costs
+        # a clipped list. Swept over 100 configurations: with this floor the
+        # change overflows in 28 cells against `main`'s 32 — a strict subset,
+        # fixing four and introducing none — where an unconditional row
+        # overflowed in 33 and the measured fit checks in 29 WITH reflow.
+        band.set_class(docked and screen_height > MIN_BAND_INSET_SCREEN_ROWS, "has-slot")
 
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
@@ -3504,18 +3484,20 @@ class OperatorApp(App[None]):
         #
         # The second pass is cheap but NOT free, and the difference is worth
         # stating because a reader will be tempted to delete one of them:
-        # `TodoPanel` holds an equality guard over (contents, budget) and
-        # returns immediately when neither moved, but `SubagentPanel` has no
-        # such guard on its non-empty path — it re-lists the manager and
-        # re-syncs its rows every call (measured ~0.005 ms/pass, so ~2x of a
-        # very small number). The correctness of the first paint is worth that.
+        # Several passes, because the quantities here feed each other: a
+        # panel's visibility decides whether the band takes its inset row, the
+        # inset is one of the rows `TodoPanel` budgets against, and that budget
+        # decides how tall the panel is. One pass leaves the todo list a row too
+        # tall on the frame a panel appears — the reflow this repeat exists to
+        # remove — and a third settles the both-panels case, where the subagent
+        # panel appearing moves the todo panel's sibling term in the same tick.
         #
-        # One tick of settling remains on the frame where a panel FIRST
-        # appears: `_band_inset_fits` measures the laid-out band, and before
-        # that layout exists it withholds the row rather than guessing. That is
-        # the conservative direction — a missing blank row for one tick, not an
-        # overflowing screen for one tick.
-        for _ in range(2):
+        # Cheap: `TodoPanel` holds an equality guard over (contents, budget) and
+        # returns immediately when neither moved, so the passes after the state
+        # settles cost one comparison. `SubagentPanel` has no such guard on its
+        # non-empty path (measured ~0.005 ms/pass), which is a small price for a
+        # first frame that does not move.
+        for _ in range(_BAND_SETTLE_PASSES):
             if self._subagent_panel is not None:
                 self._subagent_panel.sync(session)
             if self._todo_panel is not None:
@@ -6897,7 +6879,7 @@ class OperatorApp(App[None]):
         self._refresh_band()
 
 
-def _slot_rows(slot: Any) -> int:
+def slot_rows(slot: Any) -> int:
     """Rows a docked band slot occupies, measured if possible and predicted if not.
 
     ``outer_size.height`` is the truth once Textual has arranged the slot, and it

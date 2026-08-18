@@ -264,6 +264,22 @@ class Transcript:
         refusing that would be the opposite error. Entries after the marker are
         exactly the readings that survived the pass.
 
+        PRUNED entries are excluded for the same reason, and pruning is the
+        case that makes this more than a compaction concern. Blanking a tool
+        result shrinks the live context exactly as a compaction pass does, but
+        it leaves no marker to draw a boundary on — the journal entry is folded
+        away by :meth:`compact_file` and the message row survives with its
+        original ``usage`` attached. Measured on a real prune: a reading of
+        640_000 against a true context of 12_666, which a host installs as
+        exact. So the rule is not "after the newest compaction" but "not
+        describing a context something has since shrunk", and both shrinking
+        passes are covered: the compaction boundary above, and the ``pruned``
+        flag here.
+
+        The flag is read from ``provider_payload`` — where both the live pass
+        (``compaction.pruning``) and the replay (``_pruned_entry``) set it — so
+        an entry counts as pruned whether the file has been folded yet or not.
+
         Returns the raw payload dicts rather than ``Usage`` objects: this module
         is the persistence layer and does not own the harness's models, and the
         caller is already parsing them.
@@ -273,10 +289,14 @@ class Transcript:
             if self._entries[index].type == ENTRY_COMPACTION:
                 start = index + 1
                 break
+        pruned = self.pending_prunes()
         return [
             dict(entry.payload["usage"])
             for entry in self._entries[start:]
-            if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict)
+            if entry.type == ENTRY_MESSAGE
+            and isinstance(entry.payload.get("usage"), dict)
+            and entry.id not in pruned
+            and not (entry.payload.get("provider_payload") or {}).get("pruned")
         ]
 
     def pending_prunes(self) -> dict[str, str]:

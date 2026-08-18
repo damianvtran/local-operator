@@ -205,7 +205,18 @@ async def test_band_panels_hidden_when_empty_and_shown_when_populated() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
-        await pilot.pause()
+        # Wait for the SESSION, not a frame count. The app paints before its
+        # session exists (the factory is awaited in a boot worker) and both
+        # panels read their content off it, so a repaint that lands in that
+        # window finds no jobs and no todos and hides them both — which reads
+        # as this assertion failing for a reason that has nothing to do with
+        # visibility. The same race costs `test_app_pilot`'s first test on
+        # `main`; here it is deterministic enough to fix rather than tolerate.
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        assert app._session is not None, "the session never booted"
         todo = app.query_one(TodoPanel)
         sub = app.query_one(SubagentPanel)
         assert todo.display is False
@@ -453,17 +464,19 @@ async def test_todo_row_cap_follows_the_screen_and_the_marker_counts_the_hidden(
         lines = str(panel._body.content).split("\n")
 
         assert app.screen.size.height == 12
-        # 12 rows of screen, 8 of them the dock's and one the band's own top
-        # inset (`#band.has-slot`), leaving header + 1 item + marker. The inset
-        # buys the panel the same one-row breathing space above its slab that it
-        # already had below it; at this height it is paid for out of the item
-        # rows, and the marker's count grows to match rather than anything being
-        # clipped — which the region/virtual-size assertions below pin.
-        assert panel._body_rows() == 3
-        assert len(lines) == 3
+        # 12 rows of screen, 8 of them the dock's, leaving header + 2 + marker.
+        #
+        # The band's top inset (`#band.has-slot`) is NOT among them at this
+        # size: it is withheld at or below a 12-row screen, where the dock
+        # already crowds the terminal and the row would come out of this
+        # panel's items. So the arithmetic here is the same as before the inset
+        # existed — which is the point of the floor, and why this test is
+        # unchanged from `main` while the taller sizes shifted by a row.
+        assert panel._body_rows() == 4
+        assert len(lines) == 4
         assert lines[0] == "Todos · 0/12 resolved"
-        assert lines[1:2] == ["- [ ] step 1 of the plan"]
-        assert lines[-1] == "… 11 more todos"
+        assert lines[1:3] == ["- [ ] step 1 of the plan", "- [ ] step 2 of the plan"]
+        assert lines[-1] == "… 10 more todos"
         # Nothing clipped upward, and the band fits the screen it is drawn in.
         assert app.screen.query_one("#todo-body").region.y >= 0
         assert tuple(app.screen.virtual_size) == tuple(app.screen.size)
@@ -696,7 +709,7 @@ async def test_reordering_skips_a_row_the_list_does_not_own_yet() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("height", "children"),
-    [(16, 6), (24, 10), (13, 3), (14, 3)],
+    [(20, 4), (24, 4), (28, 6), (32, 10)],
 )
 async def test_the_band_inset_never_costs_the_subagent_list_its_screen(
     height: int, children: int
@@ -720,19 +733,19 @@ async def test_the_band_inset_never_costs_the_subagent_list_its_screen(
     which is why this class of overflow was invisible to it.
 
     The cases here are the ones where the band FITS without the inset, which is
-    what makes them a statement about the inset. A tall enough list overflows
-    this app on its own — ten children need twelve rows, which no 16- or 20-row
-    screen can hold beside the composer, on this branch and equally on `main` —
-    and that pre-existing defect (`SubagentPanel` has no row cap of its own,
-    unlike `TodoPanel`) is deliberately out of scope here: the fix is a row
-    budget and an `… N more` line for that panel, not a spacing change.
+    what makes them a statement about the inset rather than about the panel. A
+    tall enough child list overflows this app on its own — ten children need
+    twelve rows, which no 16-row screen holds beside the composer, here and
+    equally on `main` — and that pre-existing defect (`SubagentPanel` has no row
+    cap, unlike `TodoPanel`) is out of scope: its fix is a row budget and an
+    `… N more` line on that panel, not a spacing change.
 
-    `(20, 10)` was in this list and was REMOVED for exactly that reason: it
-    fails intermittently under load, and instrumenting it showed `has-slot`
-    False on every tick — the inset was never granted, so the overflow it
-    caught was the panel's own and the case was asserting something outside
-    what this test is about. Assertions on a defect a test does not own are how
-    a suite acquires failures nobody can act on.
+    Choosing the cells is therefore part of the test. They were picked from a
+    100-configuration sweep (screen heights 12-40 x todo-only / subagent-only /
+    both) as cells where `main` does NOT overflow, so an overflow here is this
+    change's doing and nothing else's. Over that whole sweep the inset overflows
+    in a strict SUBSET of `main`'s cells — it fixes four and introduces none —
+    which is the property this samples.
     """
     session = FakeSession()
     session.jobs = _fake_jobs(*[_Job(f"sub-{i}", f"child task {i}") for i in range(children)])

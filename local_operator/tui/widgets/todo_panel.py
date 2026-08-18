@@ -323,7 +323,7 @@ class TodoPanel(Container):
         """Content rows this panel will paint, for a caller that cannot measure.
 
         The dock's inset check runs at the moment a panel appears, when the slot
-        has not been arranged yet and measures zero (see ``app._slot_rows``).
+        has not been arranged yet and measures zero (see ``app.slot_rows``).
         Answering from the painted body — falling back to the budget before the
         first paint — is what lets that check be right on the first frame rather
         than correcting itself a tick later, which the user sees as the dock
@@ -381,9 +381,9 @@ class TodoPanel(Container):
         "how much room will this paint actually have".
 
         The row's SIZE is still the stylesheet's (``#band.has-slot`` declares
-        one row); this only asks whether it is being spent. Degrades to 0 for
-        any host whose band is missing, the same posture as
-        :meth:`_band_sibling_rows`.
+        one row); this only asks whether it is being spent, which is true
+        whenever any slot is docked. Degrades to 0 for any host whose band is
+        missing, the same posture as :meth:`_band_sibling_rows`.
         """
         parent = self.parent
         if parent is None:
@@ -397,21 +397,28 @@ class TodoPanel(Container):
         """Rows the band's OTHER visible slots occupy, outer size included
         because each slot owns a rhythm row below itself.
 
-        Read off the last layout, which is the honest source: the repaint that
-        calls this runs after the band settled, so a sibling's height is the one
-        already on screen. Zero before the first layout — that only makes the
-        very first paint as generous as it used to be, and the next one corrects
-        it.
+        Measured where the sibling has been laid out and PREDICTED where it has
+        not, through the same ``app.slot_rows`` the band's inset check uses —
+        one answer to "how tall is that slot", so the two cannot disagree about
+        the same frame.
+
+        A raw ``outer_size`` read was wrong here for the reason it was wrong
+        there: a sibling that has just been un-hidden measures zero until
+        Textual re-arranges, and this runs at exactly that moment (a subagent
+        starting while a todo list is up). Reading zero makes this panel budget
+        for a band that is about to be several rows taller, so it paints too
+        many rows and the dock overflows the screen until the next poll — the
+        both-panels-docked case, which the single-panel fix did not reach.
+
+        Imported lazily: the app imports this module, so a module-level import
+        would close the cycle.
         """
         parent = self.parent
         if parent is None:
             return 0
-        rows = 0
-        for slot in parent.children:
-            if slot is self or not slot.display:
-                continue
-            rows += slot.outer_size.height
-        return rows
+        from local_operator.tui.app import slot_rows
+
+        return sum(slot_rows(slot) for slot in parent.children if slot is not self and slot.display)
 
     def _item_row(self, text: str, status: str, reason: str = "") -> Text:
         """One ``- [ ]``/``- [x]``/``- [~]``/``- [-]`` row — the tool's own
