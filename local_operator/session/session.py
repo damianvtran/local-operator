@@ -1683,6 +1683,21 @@ class Session:
 
             await self._maybe_compact()
         finally:
+            # LAST-RESORT durability. The persistence above runs only on the
+            # normal path: an exception out of the loop (the
+            # "model turn produced no assistant message" RuntimeError, a
+            # provider client raising past the stream handler), a
+            # ``CancelledError`` from Ctrl+C or dispose, or a steering-driven
+            # teardown all skip it entirely, and everything the run completed
+            # died in memory with it. The per-boundary flush covers whole tool
+            # batches; this covers the tail produced after the last boundary,
+            # including the assistant message whose own failure ended the run.
+            #
+            # Best-effort and never raising: this is a ``finally`` on the way
+            # out of a turn that may already be unwinding, and a transcript
+            # write that fails must not replace the original exception (which
+            # is what the caller and the incident journal need to see).
+            await self._persist_progress(self._context.messages)
             self._signal = None
             self._is_streaming = False
 
@@ -2049,6 +2064,33 @@ class Session:
         except OSError as exc:
             logger.warning("could not journal pruned tool outputs: %s", exc)
 
+    async def _persist_progress(self, messages: Sequence[AgentMessage]) -> None:
+        """Flush whatever the running turn has produced so far, best-effort.
+
+        The durability floor for a turn. :meth:`_persist_new_messages` is the
+        mechanism and stays strict (its callers on the normal path want a
+        failure to surface); this wrapper is for the two places that must
+        never fail the turn they are protecting — the tool-loop boundary hook
+        and ``_run_turn``'s ``finally`` — where the alternative to a swallowed
+        write error is losing the whole run instead of one message.
+
+        Snapshotted with ``list()`` because the live context is mutated by the
+        loop and the ``finally`` caller passes ``self._context.messages``
+        itself.
+        """
+        if self._disposed:
+            # A disposed session's transcript may already be flushed; its
+            # messages were persisted by the dispose path's awaited turn.
+            return
+        try:
+            await self._persist_new_messages(list(messages))
+        except asyncio.CancelledError:
+            # Cancellation must propagate: swallowing it here would keep a
+            # turn alive that the session is trying to tear down.
+            raise
+        except Exception:  # noqa: BLE001 — durability is best-effort
+            logger.warning("could not persist turn progress", exc_info=True)
+
     async def _persist_new_messages(self, messages: Sequence[AgentMessage]) -> None:
         """Append every message not already in the transcript, in order.
 
@@ -2087,6 +2129,20 @@ class Session:
         """
         if self._disposed:
             return None
+        # Durability FIRST, unconditionally, and before any compaction
+        # decision: this hook is the only place that sees the run's messages
+        # at a safe boundary, and every early return below it used to leave
+        # the whole run unpersisted until the run ended. Mid-run persistence
+        # existed only as a SIDE EFFECT of the compaction pass below (it needs
+        # a persisted cut target), so with ``mid_turn_enabled`` off — or
+        # simply below the threshold — a long tool run kept 100% of its work
+        # in memory. A session killed there (crash, SIGKILL, Ctrl+C) replayed
+        # to nothing but the user's prompt. Measured on a 6-step run: one
+        # entry on disk without this, ten with it.
+        #
+        # Idempotent by message id, so the post-run pass still writes each
+        # message exactly once.
+        await self._persist_progress(messages)
         try:
             from local_operator.compaction.api import CompactionSettings
         except ImportError:
