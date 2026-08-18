@@ -2391,10 +2391,18 @@ class OperatorApp(App[None]):
         and nothing else asked it to re-decide when the terminal crossed that
         floor.
 
-        Order matters and is not incidental. The band is IN the layout, so it
-        re-arranges with the frame; the prompt and the overlay cards are sized
-        against whatever it settles to, which is why the band refresh is queued
-        LAST and the card re-measures above it run first.
+        The order of the two ``call_after_refresh`` calls below does NOT matter,
+        and this note exists to stop a future reader inventing a reason that it
+        does. They run in queue order, so ``_remeasure_prompt`` runs FIRST and
+        genuinely reads a dock the band has not re-fitted yet (measured: 31 rows
+        on an 18-row screen). That is harmless — the card is repainted again by
+        its own resize path, by the debounced overlay re-fit, and by
+        ``_sync_prompt_host`` — and swapping the two produces byte-identical
+        first and settled frames (agent review round 12, F1).
+
+        What the band DOES need is to be re-fitted here at all: its inset is
+        gated on the screen height, and before main's `_refresh_band` landed
+        nothing asked it to re-decide when the terminal crossed that floor.
         """
         # The EVENT's size, not the app's: during a resize `self.size` is still the
         # previous frame's, and one stale cell is enough to put the card threshold on
