@@ -593,6 +593,17 @@ class AskPickerScreen(Container):
         refusal now answers in the footer's own row — see :meth:`_rejection`,
         which reverts as soon as there is something to take.
         """
+        # Nothing is committed from a card that drew no options.
+        #
+        # The cursor still sits on a row — often the RECOMMENDED one, which is
+        # preselected — so Enter on a collapsed card would take an answer the
+        # user was never shown. The footer already refuses to advertise `enter`
+        # there for exactly this reason; this makes the key agree with the hint
+        # rather than merely going unadvertised (D9, design round 2).
+        if not self.visible_rows:
+            self._rejected = True
+            self._repaint()
+            return
         chosen = self._chosen()
         if not chosen:
             self._rejected = True
@@ -1123,9 +1134,23 @@ class AskPickerScreen(Container):
             # thing and stating how to leave is the honest minimum; the answers
             # come back the moment there is a third row to put them on.
             #
-            # One row buys the exit alone, and none is a card that cannot be
-            # drawn — drawing it anyway is the clip itself (round 4, R15).
-            first = question[:1] if budget >= 2 else ()
+            # ONE row goes to the question, not to the exit.
+            #
+            # This is the same rule as the two-row case and it took a second
+            # round to get right. A single `esc deny` row was reachable at every
+            # width on a 13-row terminal, and it is the worst frame this card
+            # can draw: it names nothing, and the answer letters still work — so
+            # `y` approved `rm -rf /Users/x/project/data` from a card whose
+            # entire content was the word for refusing (D9, design round 2).
+            #
+            # The exit is the one thing a user can always guess, and Escape is
+            # the app's stop key everywhere regardless of what this footer says.
+            # What they cannot guess is what they are being asked. So on a
+            # single row the question wins and the footer goes.
+            #
+            # No rows at all is a card that cannot be drawn, and drawing it
+            # anyway is the clip itself (round 4, R15).
+            first = question[:1] if budget >= 1 else ()
             return _CardLayout(
                 width=width,
                 question=tuple(first),
@@ -1135,7 +1160,7 @@ class AskPickerScreen(Container):
                 show_descriptions=False,
                 page=0,
                 show_position=False,
-                show_footer=budget >= 1,
+                show_footer=budget >= 2,
             )
         # The footer, the first line of the question, and one option row: the
         # three lines the card cannot say anything useful without. The question
@@ -1234,6 +1259,21 @@ class AskPickerScreen(Container):
         """Re-measure: the width, the page size and the descriptions all come
         from the screen."""
         self._move_to(self.state.selected)
+
+    def remeasure(self) -> None:
+        """Re-run the layout against the CURRENT screen, from outside.
+
+        A hidden widget is not laid out, so it receives no ``Resize`` event —
+        which means a card that hid itself on a terminal too short to draw it
+        could never learn that the terminal had grown back. The question stayed
+        invisible for the rest of the turn while the tool went on waiting: a
+        shrink was a one-way door onto a permanently unanswerable prompt (D10,
+        design round 2).
+
+        The app calls this on every terminal resize instead, because the app
+        still gets the event when this widget does not.
+        """
+        self._repaint()
 
     def _repaint(self) -> None:
         body = getattr(self, "_body", None)

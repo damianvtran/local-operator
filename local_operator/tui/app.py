@@ -1970,13 +1970,40 @@ class OperatorApp(App[None]):
         # can currently hold keeps the ~50 ms before the timer from showing a
         # card overhanging the frame with its prose clipped mid-word.
         self.call_after_refresh(self._sync_overlay_layout, force=True)
-        # A live prompt re-budgets itself against the new size (its own
-        # `on_resize` does that), and whether it can be drawn AT ALL can change
-        # with it: shrinking past the point where even its footer fits hides the
-        # card, and the host's separation row must go with it or the dock keeps
-        # a row for a prompt painting nothing. Deferred for the same reason as
-        # the mount path — the card's own resize has to land first.
-        self.call_after_refresh(self._sync_prompt_host)
+        # A live prompt re-budgets itself against the new size, and whether it
+        # can be drawn AT ALL can change with it: shrinking past the point where
+        # even its footer fits hides the card, and the host's separation row
+        # must go with it or the dock keeps a row for a prompt painting nothing.
+        #
+        # The card is re-measured from HERE rather than left to its own
+        # `on_resize`, because a hidden widget is not laid out and so receives
+        # no resize event — a card that hid itself on a shrink could never learn
+        # the terminal had grown back, leaving the turn parked on a question
+        # that was invisible for the rest of the session (D10, design round 2).
+        # The app still gets the event when the card does not.
+        self.call_after_refresh(self._remeasure_prompt)
+
+    def _remeasure_prompt(self) -> None:
+        """Re-lay a live prompt against the current terminal, then fit the host."""
+        prompt = self._live_prompt()
+        remeasure = getattr(prompt, "remeasure", None)
+        if callable(remeasure):
+            try:
+                remeasure()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not re-measure the live prompt", exc_info=True)
+        self._sync_prompt_host()
+        # Hiding a widget takes focus off it and puts it nowhere, so a card that
+        # went undrawable on a shrink came back on the re-grow with the screen
+        # focusing NOTHING — visible, answerable in principle, and receiving no
+        # keys at all. Restored here because this is the path that made it
+        # drawable again.
+        if prompt is not None and getattr(prompt, "is_drawable", False):
+            try:
+                if self.screen is not None and self.screen.focused is not prompt:
+                    prompt.focus()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not re-focus the live prompt", exc_info=True)
 
     def on_welcome_view_block_resized(self, message: WelcomeView.BlockResized) -> None:
         """The splash changed height, so the composition around it has moved.
