@@ -2004,7 +2004,7 @@ code paths):
 fetch_usage(client, "zai")   -> coding plan: max
   zai:tokens:5hour           Token quota (5 hour)     12% used  ok  resets in 1h
   zai:tokens:1week           Token quota (1 week)     42% used  ok  resets in 6d4h
-  zai:features:zread:1month  Zread feature quota   0/4000 req   ok  resets in 30d4h
+  zai:features:zread:1month  Zread quota (1 month) 0/4000 req   ok  resets in 30d4h
 
 fetch_models("zai")          -> 9 live rows (glm-4.5 … glm-5.3), all ctx=0/unpriced
 merge_models(glm_models, …)  -> 9 rows, glm-5.3 ctx=1,000,000 in=$1.4 out=$4.4

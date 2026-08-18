@@ -558,6 +558,7 @@ async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> Usa
 #: rather than derived from the provider's ``base_url``.
 ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
 
+
 #: The `unit` enum Z.AI uses to describe a quota window's period. Only the
 #: values observed on live coding-plan accounts are mapped; anything else falls
 #: through to a generic label rather than being guessed at, because mislabelling
@@ -567,10 +568,21 @@ ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
 #: absolute ``nextResetTime`` from the vendor, so a locally derived window
 #: length would be a second, unreconciled answer to a question already
 #: answered — and the one that drifts if a window is redefined.
-#: The non-chat allowances Z.AI meters together as one bucket. A TIME_LIMIT row
-#: whose per-model breakdown lists ONLY these is that bucket rather than the
-#: account-wide request cap; see the classification note at the use site.
-_ZAI_FEATURE_CODES = frozenset({"search-prime", "web-reader", "zread"})
+def _is_zai_chat_model(code: str) -> bool:
+    """Whether a ``usageDetails`` code names a GLM chat model.
+
+    Deliberately a SHAPE test with a registry check in front of it, not a list
+    of known ids. The registry answers for everything shipped today; the ``glm``
+    prefix covers the ids that do not exist yet, which is the case that matters
+    because a model launched after this release must not be mistaken for a
+    feature code. Feature codes (``search-prime``, ``web-reader``, ``zread``)
+    share no prefix with the model family, so the test is unambiguous in both
+    directions.
+    """
+    from local_operator.model.registry import glm_models
+
+    return code in glm_models or code.lower().startswith("glm")
+
 
 _ZAI_WINDOW_UNITS: dict[int, str] = {
     3: "hour",
@@ -689,24 +701,29 @@ async def fetch_zai_quota(client: httpx.AsyncClient, api_key: str) -> UsageRepor
                 if isinstance(details, list)
                 else set()
             )
-            # A row is the feature bucket when EVERY code it lists is a known
-            # feature code — not "contains one" and not "contains all three".
+            # A row is the feature bucket when its breakdown lists NO chat
+            # model — the question is asked in the negative deliberately.
             #
-            # Both simpler tests fail in a direction that matters. Requiring all
-            # three fails OPEN if Z.AI adds or renames a feature: the row is
-            # reclassified as the account-wide request cap and marked
-            # ``shared=True``, which `usage_health` then applies to EVERY model,
-            # so a depleted zread bucket reads as a depleted plan and stops work
-            # that is not blocked. Matching ANY code fails the other way: a
-            # genuine account-wide cap whose per-model breakdown happens to
-            # mention zread would be demoted to a tier and excluded from the
-            # health check that should have gated the account.
+            # Every positive formulation is a maintenance dependency on a vendor
+            # enum, and each fails the moment that enum moves. Requiring all
+            # known feature codes breaks when Z.AI renames one; requiring the
+            # listed codes to be a SUBSET of the known ones breaks on a rename
+            # AND on an addition (a new tool code is not in our set, so the row
+            # stops looking like a feature bucket). Both fail in the direction
+            # that stops work: the row is reclassified as the account-wide cap
+            # with ``shared=True``, `usage_health` applies it to EVERY model,
+            # and a user with most of their token quota intact is told the
+            # account is depleted because the vendor shipped a new tool.
+            # Matching ANY known code fails the other way instead, demoting a
+            # genuine account cap that merely mentions a feature into a tier.
             #
-            # Subset-of-known is the test that survives both: a renamed feature
-            # still leaves every listed code inside the known set (still a
-            # tier), while an account cap listing real chat models does not
-            # (still shared). An empty list is not a feature bucket.
-            is_feature = bool(codes) and codes <= _ZAI_FEATURE_CODES
+            # Chat model ids are the stable property: the account-wide request
+            # cap is denominated in them, and a feature bucket never lists one.
+            # So an unrecognised code is read as a new FEATURE rather than a new
+            # model, which keeps a renamed or added tool inside the tier and
+            # leaves the account cap alone. An empty breakdown is not a feature
+            # bucket.
+            is_feature = bool(codes) and not any(_is_zai_chat_model(code) for code in codes)
             if percentage is None and used is None:
                 continue
             amount = UsageAmount(

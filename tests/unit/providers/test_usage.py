@@ -49,6 +49,46 @@ def _recording_client(payload, status: int = 200) -> tuple[httpx.AsyncClient, li
     return httpx.AsyncClient(transport=httpx.MockTransport(handler)), urls
 
 
+def test_num_never_yields_a_value_that_crashes_downstream() -> None:
+    """``_num`` is the single coercion boundary all nine fetchers share, so its
+    contract is what keeps "a quota fetcher never raises" true for fields nobody
+    has thought of yet.
+
+    Pinned at this level rather than only through one provider because the
+    guarantee is module-wide: a caller is entitled to assume anything `_num`
+    returns can be compared, formatted, and passed to ``int()``. ``json.loads``
+    accepts bare ``NaN``/``Infinity``, and an integer literal can exceed float
+    range (``10**400`` parses, then raises ``OverflowError`` on conversion) —
+    all of which must become ``None`` rather than a value that detonates later.
+    """
+    from local_operator.providers.usage import _num
+
+    # Unusable inputs become None...
+    for bad in (
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        10**400,
+        -(10**400),
+        "abc",
+        "",
+        None,
+        [],
+        {},
+        object(),
+    ):
+        assert _num(bad) is None, bad
+
+    # ...and everything returned survives the operations callers perform on it.
+    for good in (0, 1, -5, 3.14, "42", "3.5", 1787009983644, 10**15, True):
+        value = _num(good)
+        assert value is not None
+        assert int(value) == int(float(good))
+        assert value > 0 or value <= 0  # comparable, i.e. not a NaN
+
+    assert _num(None, 7.0) == 7.0
+
+
 def test_usage_health_shared_window_reaches_reserve() -> None:
     report = UsageReport(
         provider="anthropic",
@@ -444,14 +484,16 @@ async def test_zai_never_raises_on_any_hostile_numeric_field() -> None:
 
 
 @pytest.mark.asyncio
-async def test_zai_feature_bucket_is_codes_that_are_all_known_features() -> None:
-    """Neither "contains one" nor "contains all three" survives contact.
+async def test_zai_feature_bucket_is_the_breakdown_with_no_chat_model() -> None:
+    """The classification must survive Z.AI changing its own feature codes.
 
-    Matching ANY code demotes a genuine account-wide cap whose breakdown
-    mentions zread into a tier, excluding it from the health check that should
-    gate the account. Requiring ALL THREE promotes the feature bucket into the
-    account cap if Z.AI renames a feature, marking it ``shared`` so a depleted
-    zread allowance reads as a depleted plan.
+    Every positive test is a maintenance dependency on a vendor enum: requiring
+    all known codes breaks on a rename, and requiring a SUBSET of them breaks on
+    a rename *and* on an addition. Both fail toward ``shared=True``, which
+    `usage_health` applies to every model — so a user with most of their token
+    quota intact is told the account is depleted because the vendor shipped a
+    new tool. The cases below are therefore mostly about codes this code has
+    never seen; the live shape is the easy one.
     """
 
     async def classify(codes: list[str]) -> UsageLimit:
@@ -476,15 +518,33 @@ async def test_zai_feature_bucket_is_codes_that_are_all_known_features() -> None
         assert report is not None
         return report.limits[0]
 
-    # The live shape, and a renamed/extended feature set: still the tier.
+    # The live shape today.
     assert (await classify(["search-prime", "web-reader", "zread"])).tier == "zread"
-    assert (await classify(["search-prime", "zread"])).tier == "zread"
-    # An account-wide cap whose breakdown merely mentions zread alongside real
-    # chat models is NOT the feature bucket, and must stay shared.
+    # The bucket shrinks to one feature.
+    assert (await classify(["zread"])).tier == "zread"
+    # Z.AI ADDS a tool code we have never seen. A subset-of-known test fails
+    # here and marks the row shared; this must stay a tier.
+    added = await classify(["search-prime", "web-reader", "zread", "deep-research"])
+    assert added.tier == "zread"
+    assert added.shared is False
+    # Z.AI RENAMES every feature code. Still no chat model, so still a tier.
+    renamed = await classify(["search-prime-v2", "web-reader-v2", "zread-v2"])
+    assert renamed.tier == "zread"
+    assert renamed.shared is False
+
+    # An account-wide cap whose breakdown mentions a feature alongside real chat
+    # models is NOT the feature bucket, and must stay shared or the health check
+    # that should gate the account skips it.
     mixed = await classify(["glm-5.3", "zread"])
     assert mixed.tier == ""
     assert mixed.shared is True
-    # No breakdown at all is the plain request cap.
+    # A cap denominated in a model that does not exist yet: the shape test has
+    # to catch it, because the registry cannot.
+    future = await classify(["glm-6.0", "zread"])
+    assert future.tier == ""
+    assert future.shared is True
+    # Chat models only, and no breakdown at all: both the plain request cap.
+    assert (await classify(["glm-5.3", "glm-4.6"])).shared is True
     plain = await classify([])
     assert plain.tier == ""
     assert plain.shared is True
