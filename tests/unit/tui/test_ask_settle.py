@@ -1,15 +1,16 @@
-"""Taking the ``ask`` picker down without taking the wrong screen with it.
+"""Taking the ``ask`` card down without disturbing anything else on screen.
 
 ``_settle_ask_picker`` is the teardown path: a stop, an app quit, or a cancelled
 tool call resolves the question's future with whatever the user had answered and
-then has to get the modal off the screen, because a modal left up for a call that
+then has to get the card off screen, because a question left up for a call that
 no longer exists holds the keyboard hostage.
 
-It did that with ``pop_screen()``, which pops whatever the stack ENDS with rather
-than the screen whose future it just settled. With anything mounted above the
-question — a palette, a picker the user opened while the agent waited on them —
-that dismissed the wrong screen and left the settled picker mounted, which is
-both halves of the bug it was written to prevent.
+The card is anchored in the dock now rather than pushed as a modal screen, which
+retires the specific bug this file was written for (``pop_screen()`` popping
+whatever the stack ENDED with, dismissing the user's own modal and leaving the
+settled picker mounted). The INVARIANT survives the move and is what these tests
+still pin: settling answers the parked tool call, takes the card off the DOM, and
+touches nothing the user opened over it.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from textual.widgets import Static
 
 from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.editor import Editor
 
 from .test_app_pilot import FakeSession, _factory
 
@@ -46,52 +48,69 @@ def _question() -> AskQuestion:
 
 
 @pytest.mark.asyncio
-async def test_settling_the_picker_dismisses_it_when_it_is_on_top() -> None:
-    """The ordinary case, unchanged: the question is the top screen and comes
-    off, and the parked tool call gets its answer rather than hanging."""
+async def test_settling_the_picker_takes_the_card_down_and_answers_the_call() -> None:
+    """The ordinary case: the card is in the dock, comes off, and the parked
+    tool call gets its answer rather than hanging."""
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(90, 30)) as pilot:
         await pilot.pause()
         asked = asyncio.create_task(app.request_user_choice([_question()]))
-        await pilot.pause()
+        for _ in range(4):
+            await pilot.pause()
         picker = app._ask_screen
-        assert picker is not None and app.screen is picker
+        assert picker is not None
+        # Anchored in the dock, not covering the screen: the conversation the
+        # question is about stays visible behind it.
+        assert picker.is_attached
+        assert picker.parent is app.query_one("#prompt-host")
 
         app._settle_ask_picker()
-        await pilot.pause()
+        for _ in range(4):
+            await pilot.pause()
 
         await asyncio.wait_for(asked, 2)
-        assert picker not in app.screen_stack
-        assert app.screen is not picker
+        assert not picker.is_attached
+        # And the dock gives the rows back rather than holding an empty slot.
+        assert not app.query_one("#prompt-host").display
+        # Focus lands back in the composer, so the next keystroke goes somewhere.
+        assert isinstance(app.screen.focused, Editor)
 
 
 @pytest.mark.asyncio
 async def test_settling_the_picker_leaves_the_screen_above_it_alone() -> None:
-    """The regression: with another modal above the question, ``pop_screen``
-    dismissed THAT screen — the user's — and left the picker mounted on an
-    already-settled future, still holding the keyboard."""
+    """Settling must not disturb a screen the user opened over the question.
+
+    The original defect was ``pop_screen()`` taking whatever the stack ENDED
+    with: with a palette or picker opened while the agent waited, that dismissed
+    the user's screen and left the settled card mounted on an already-resolved
+    future. Anchoring the card in the dock removes the mechanism, and this pins
+    the property so a future revision cannot reintroduce it by reaching for the
+    screen stack again.
+    """
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(90, 30)) as pilot:
         await pilot.pause()
         asked = asyncio.create_task(app.request_user_choice([_question()]))
-        await pilot.pause()
+        for _ in range(4):
+            await pilot.pause()
         picker = app._ask_screen
         assert picker is not None
 
         overlay = Overlay()
         app.push_screen(overlay)
-        await pilot.pause()
+        for _ in range(3):
+            await pilot.pause()
         assert app.screen is overlay
 
         app._settle_ask_picker()
-        await pilot.pause()
+        for _ in range(4):
+            await pilot.pause()
 
         await asyncio.wait_for(asked, 2)
         # The screen the user is actually looking at survived...
         assert app.screen is overlay
         assert overlay in app.screen_stack
-        # ...and the picker is off the stack and off the DOM, not merely settled.
-        assert picker not in app.screen_stack
+        # ...and the card is off the DOM, not merely settled.
         assert not picker.is_attached

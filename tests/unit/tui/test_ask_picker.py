@@ -20,13 +20,16 @@ from __future__ import annotations
 import pytest
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
+from textual.containers import Container
 
 from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import (
     ASK_MAX_WIDTH,
-    CARD_PADDING_ROWS,
+    ASK_PADDING_CELLS,
+    MIN_TRANSCRIPT_ROWS,
     OTHER_LABEL,
+    PROMPT_HEIGHT_SHARE,
     RECOMMENDED_TAG,
     AskPickerScreen,
 )
@@ -54,7 +57,12 @@ def _question(
 
 
 class _AskHost(App[None]):
-    """A host whose only job is to own the modal under test."""
+    """A host whose only job is to own the card under test.
+
+    Mounts it into a plain container rather than pushing a screen: the card is
+    dock chrome now, not a modal, and a host that pushed it as a screen would be
+    exercising a mounting path the app no longer uses.
+    """
 
     def __init__(self, questions: list[AskQuestion]) -> None:
         super().__init__()
@@ -62,12 +70,12 @@ class _AskHost(App[None]):
         self.answered: list[dict[str, list[str]] | None] = []
 
     def compose(self) -> ComposeResult:
-        return iter(())
+        yield Container(id="prompt-host")
 
     async def open_picker(self) -> AskPickerScreen:
-        screen = AskPickerScreen(self._questions)
-        self.push_screen(screen, self.answered.append)
-        return screen
+        card = AskPickerScreen(self._questions, self.answered.append)
+        await self.query_one("#prompt-host", Container).mount(card)
+        return card
 
 
 # --- answering --------------------------------------------------------------
@@ -396,7 +404,11 @@ async def test_no_row_overflows_the_card_at_any_width() -> None:
         async with app.run_test(size=(width, 30)) as pilot:
             screen = await app.open_picker()
             await pilot.pause()
-            budget = min(ASK_MAX_WIDTH, max(1, width - 4))
+            # Derived from the card's own padding rather than written as a
+            # literal: the two are one measurement, and a hardcoded `width - 4`
+            # silently described the old modal's `padding: 1 2` after the
+            # docked card moved to the dock's one-cell rail.
+            budget = min(ASK_MAX_WIDTH, max(1, width - ASK_PADDING_CELLS * 2))
             for line in screen.render_lines_for_test():
                 assert cell_len(line) <= budget, (width, line)
 
@@ -418,8 +430,13 @@ async def test_a_short_terminal_drops_descriptions_before_it_drops_options() -> 
         assert "why a" in roomy
         assert len(screen.visible_rows) == screen.row_count
 
+    # 20 rows rather than the 16 this used when the card was a modal. The
+    # number is not the contract; the ORDER is, and the order needs a height
+    # where the descriptions are unaffordable and the rows are not. An anchored
+    # card reserves the conversation's share as well as the composer's, so it
+    # reaches that band at a taller terminal than a card that took the screen.
     app = _AskHost([question])
-    async with app.run_test(size=(100, 16)) as pilot:
+    async with app.run_test(size=(100, 20)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
         cramped = "\n".join(screen.render_lines_for_test())
@@ -479,7 +496,12 @@ def _long_question(recommended: int | None = 1) -> AskQuestion:
 
 
 async def _real_app_card(size: tuple[int, int], questions: list[AskQuestion]):
-    """The card pushed onto a real ``OperatorApp``, with the stylesheet applied."""
+    """The card and a real ``OperatorApp``, with the stylesheet applied.
+
+    Returned unmounted; :func:`_show` puts it in the app's real prompt host.
+    The pair is kept (rather than mounting here) because every caller wants to
+    drive the app's own ``run_test`` context around it.
+    """
     from local_operator.tui.app import OperatorApp
     from tests.unit.tui.test_app_pilot import FakeSession
 
@@ -489,6 +511,80 @@ async def _real_app_card(size: tuple[int, int], questions: list[AskQuestion]):
         return session
 
     return OperatorApp(lambda: factory()), AskPickerScreen(questions)
+
+
+def _baseline_app():  # type: ignore[no-untyped-def]
+    """A real app with no prompt raised, for measuring the dock on its own.
+
+    The comparison every overflow assertion in this file needs: at the shortest
+    terminals the composer and status band already exceed the screen, so the
+    question is never "does anything overflow" but "does raising a question
+    make it worse".
+    """
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    return OperatorApp(lambda: _factory(FakeSession()))
+
+
+async def _settle(app, pilot) -> None:  # type: ignore[no-untyped-def]
+    """Pump until the screen's geometry stops moving.
+
+    Three CONSECUTIVE identical frames, not two: the transient after a mount or
+    a boot is itself two frames long (the pre-arrange height repeats once before
+    the dock re-arranges), so a two-frame agreement can match ON the transient
+    and return early. Every overflow assertion in this file compares two such
+    measurements, and both sides have to be settled or the comparison is between
+    a settled number and a mid-arrange one.
+    """
+    # Settles on a RESOLVED frame — one where nothing overflows — and falls
+    # back to a merely stable one for the sizes that genuinely cannot fit the
+    # composer at all (20x5 and under), where overflow is the settled state and
+    # the assertions compare against a no-prompt baseline instead.
+    #
+    # This used to need a much longer budget, and that was hiding a real defect
+    # rather than absorbing jitter: the card under-counted the dock by one row
+    # (it summed the dock's children instead of measuring the dock, missing the
+    # row the container spends on itself), so at some sizes the overflow was
+    # permanent and no amount of pumping cleared it. With that fixed every size
+    # in this file resolves on the first frame.
+    stable = 0
+    previous = None
+    for _ in range(30):
+        await pilot.pause()
+        size = tuple(app.screen.size)
+        virtual = tuple(app.screen.virtual_size)
+        if size == virtual:
+            return
+        stable = stable + 1 if (size, virtual) == previous else 0
+        previous = (size, virtual)
+        if stable >= 4:
+            return
+
+
+async def _show(app, pilot, card) -> None:  # type: ignore[no-untyped-def]
+    """Raise ``card`` through the app's OWN mounting path, and let it settle.
+
+    ``app._mount_prompt`` rather than a hand-rolled mount, because these tests
+    exist to catch what the real composition clips, and a helper that mounts
+    differently measures a layout the app never produces. Written by hand it
+    also set ``display`` on the host directly, which skipped the drawability
+    sync the app does — so the host kept a row for a card that had hidden
+    itself, and the test saw two rows of overflow that the app does not have.
+
+    The settling belongs HERE, not at each call site. The host's visibility is
+    resolved through ``call_after_refresh`` plus the card's own repaint, so a
+    caller that paused twice read a half-settled dock and measured an overflow
+    that does not survive the next frame.
+    """
+    app._mount_prompt(card)
+    # Settle until the screen stops moving, rather than for a fixed number of
+    # pauses. Mounting the card takes two frames to reach its final height (the
+    # dock re-arranges, then `_sync_prompt_host` resolves the host's row), and a
+    # fixed count is a bet on how many pumps that takes on a loaded machine —
+    # lost intermittently, where the assertion then read a mid-arrange height
+    # and reported an overflow that does not survive the next frame.
+    await _settle(app, pilot)
 
 
 def _painted_rows(app) -> list[str]:  # type: ignore[no-untyped-def]
@@ -515,23 +611,47 @@ async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() 
         app, screen = await _real_app_card(size, [_long_question()])
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
-            app.push_screen(screen)
-            await pilot.pause()
-            await pilot.pause()
+            await _show(app, pilot, screen)
             lines = screen.render_lines_for_test()
+            if not lines:
+                # Below the card's minimum the honest card is no card, and the
+                # dock must not keep a row for it either. Asserted rather than
+                # skipped: a host still reserving space for a prompt painting
+                # nothing is what pushed the dock past the screen at 20x8.
+                assert not app.query_one("#prompt-host").display, size
+                assert tuple(app.screen.size) == tuple(app.screen.virtual_size), size
+                continue
             card = screen.query_one(".ask-picker")
-            # Every line the card lays out is a line the SCREEN can draw. Not
-            # the body's own region: a child that overflows its container still
+            # Every line the card lays out is a line the SCREEN actually drew.
+            # Measured on the COMPOSITED screen rather than against an
+            # arithmetic `room`: a child that overflows its container still
             # reports the height it wanted, so measuring that agreed with the
-            # clip instead of catching it. Textual drops the overflow silently
-            # and nothing else reads back that it happened.
-            room = screen.size.height - CARD_PADDING_ROWS
-            assert len(lines) <= room, (size, len(lines), room)
+            # clip instead of catching it — and now that the card shares the
+            # screen with the transcript and the composer, a recomputed budget
+            # here would be a second, drifting copy of `_body_rows`.
+            painted = _painted_rows(app)
+            assert lines[-1].strip() in "\n".join(painted), (size, lines[-1], painted)
             assert card.region.height <= screen.size.height, (size, card.region.height)
             assert "esc" in lines[-1] or "enter" in lines[-1], (size, lines[-1])
-            assert len(screen.visible_rows) >= 1, size
+            if not screen.visible_rows:
+                # The collapsed card: one line, and it is the exit. Reachable on
+                # a terminal short enough that the anchored budget buys the
+                # footer and nothing else, and the footer must then advertise
+                # ONLY the exit — `enter` would commit a selection the user
+                # cannot see, and the digits would jump within a list that is
+                # not drawn.
+                assert lines[-1].strip() == "esc skip", (size, lines)
+                continue
             if len(screen.visible_rows) < screen.row_count:
                 assert f"of {screen.row_count}" in "\n".join(lines), (size, lines)
+            # The anchoring guarantee itself: the dock never grows past the
+            # screen, so the transcript is never scrolled out from under the
+            # question the user is being asked.
+            assert tuple(app.screen.size) == tuple(app.screen.virtual_size), (
+                size,
+                tuple(app.screen.size),
+                tuple(app.screen.virtual_size),
+            )
 
 
 @pytest.mark.asyncio
@@ -556,60 +676,97 @@ async def test_the_footer_is_the_last_line_the_card_gives_up() -> None:
     for width in (20, 30, 40, 100):
         for height in (5, 6, 7, 8, 12):
             size = (width, height)
+            # What the dock measures with NO prompt raised. At the shortest of
+            # these the composer and its status band already exceed the screen,
+            # so "nothing overflows" is not true of this app at 20x5 and never
+            # was; what must be true is that raising a question does not make it
+            # worse. Captured per size so the comparison below is like-for-like.
+            baseline_app = _baseline_app()
+            async with baseline_app.run_test(size=size) as pilot:
+                # Settled by the SAME rule the measured app is, so the two
+                # numbers are taken at the same point in the layout's life. A
+                # fixed-count baseline read the dock mid-arrange and compared an
+                # unsettled height against a settled one.
+                await _settle(baseline_app, pilot)
+                baseline = tuple(baseline_app.screen.virtual_size)
+
             app, screen = await _real_app_card(size, [_long_question()])
             async with app.run_test(size=size) as pilot:
                 await pilot.pause()
-                app.push_screen(screen)
-                await pilot.pause()
-                await pilot.pause()
+                await _show(app, pilot, screen)
                 painted = _painted_rows(app)
-                room = screen.size.height - CARD_PADDING_ROWS
-                # The keys reached the TERMINAL, and reached it last: the footer
-                # is bought first and drawn last, so a clipped tail would take it
-                # and nothing else. Asserted before the counts because this is
-                # the assertion round 2's version could not make.
-                assert painted, (size, "nothing painted")
-                assert "esc" in painted[-1] or "enter" in painted[-1], (size, painted)
-                # And nothing was clipped to get there: the card lays out no more
-                # lines than the screen can draw.
-                assert len(painted) <= room, (size, painted, room)
-                assert len(screen.render_lines_for_test()) <= room, (size, room)
-                if room == 1:
+                lines = screen.render_lines_for_test()
+                if not lines:
+                    # Too short for even the exit. The card draws nothing and
+                    # the dock keeps no row for it, which is the honest card;
+                    # the clip is what happens when it draws anyway.
+                    assert not app.query_one("#prompt-host").display, size
+                    assert tuple(app.screen.virtual_size) == baseline, (size, baseline)
+                    continue
+                # The keys reached the TERMINAL. The footer is bought first and
+                # drawn last, so a clipped tail would take it and nothing else —
+                # this is the assertion the card's own `render_lines_for_test`
+                # cannot make, because an overflowing card still reports the
+                # lines it WANTED.
+                #
+                # `painted[-1]` is no longer the card's last row: the composer
+                # and the status band are painted below it now that the card is
+                # docked rather than covering the screen. So the footer is
+                # located in the painted frame instead of assumed to end it,
+                # which is a stronger check anyway — it fails both if the footer
+                # is missing and if it was clipped to something else.
+                assert lines[-1].strip() in "\n".join(painted), (size, lines[-1], painted)
+                assert "esc" in lines[-1] or "enter" in lines[-1], (size, lines[-1])
+                if not screen.visible_rows:
                     # One line is a line for the exit, and ONLY the exit: with
                     # no option row on screen, `enter` would commit a selection
                     # the user cannot see and the digits would jump within a
                     # list that is not there. Measured before the fix: at a
                     # 5-row terminal `down down down enter` committed an option
                     # nobody had been shown (round 4, R14).
-                    assert len(painted) == 1, (size, painted)
-                    assert painted[0].strip() == "esc skip", (size, painted)
-                    assert screen.visible_rows == [], (size, screen.visible_rows)
-                elif room == 2:
-                    # Two lines buy the selected row beside the footer, which is
-                    # what makes the free-text row echo what is being typed into
-                    # it (round 4, R15). The count is still not affordable.
-                    assert len(screen.visible_rows) == 1, (size, screen.visible_rows)
-                    assert f"of {screen.row_count}" not in "".join(painted), (size, painted)
-                else:
-                    assert len(screen.visible_rows) >= 1, size
+                    assert lines[-1].strip() == "esc skip", (size, lines)
+                elif len(screen.visible_rows) == 1:
+                    # One row beside the footer is what makes the free-text row
+                    # echo what is being typed into it (round 4, R15). The count
+                    # is not affordable at that budget.
+                    assert f"of {screen.row_count}" not in "".join(lines), (size, lines)
+                # Nothing was clipped to get there: raising the question left
+                # the dock exactly as tall as it was without one.
+                assert tuple(app.screen.virtual_size) == baseline, (
+                    size,
+                    tuple(app.screen.virtual_size),
+                    baseline,
+                )
 
     # Four rows and under: the body has no drawable line, and a card drawn into
-    # none of them is the clip itself. Its own padding is two rows the screen
-    # has not got, so laying it out also made the screen scrollable — which
-    # AGENTS.md calls always a bug on this app.
+    # none of them is the clip itself. Its own padding is rows the screen has
+    # not got, so laying it out makes the screen scrollable.
+    #
+    # The screen is ALREADY scrollable at these sizes with no prompt at all —
+    # the composer and its status band do not fit in four rows, which is a
+    # pre-existing property of the dock and not something this card can fix.
+    # So the assertion is a COMPARISON against that baseline rather than an
+    # absolute: raising a question must not make the overflow worse. Measured
+    # without this comparison the test asserted `size == virtual_size` at 40x4
+    # and failed on a tree where the prompt was never mounted.
     for size in ((40, 4), (40, 3), (30, 2), (20, 1)):
+        base_app = _baseline_app()
+        async with base_app.run_test(size=size) as pilot:
+            await _settle(base_app, pilot)
+            baseline = tuple(base_app.screen.virtual_size)
+
         app, screen = await _real_app_card(size, [_long_question()])
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
-            app.push_screen(screen)
-            await pilot.pause()
-            await pilot.pause()
+            await _show(app, pilot, screen)
+            for _ in range(4):
+                await pilot.pause()
             assert screen.render_lines_for_test() == [], size
-            assert _painted_rows(app) == [], (size, _painted_rows(app))
-            assert tuple(app.screen.size) == tuple(app.screen.virtual_size), (
+            assert not app.query_one("#prompt-host").display, size
+            assert tuple(app.screen.virtual_size) == baseline, (
                 size,
-                tuple(app.screen.size),
                 tuple(app.screen.virtual_size),
+                baseline,
             )
 
 
@@ -624,9 +781,7 @@ async def test_a_recommended_option_never_widens_the_card_past_the_screen() -> N
             app, screen = await _real_app_card(size, [_long_question(recommended)])
             async with app.run_test(size=size) as pilot:
                 await pilot.pause()
-                app.push_screen(screen)
-                await pilot.pause()
-                await pilot.pause()
+                await _show(app, pilot, screen)
                 assert tuple(app.screen.size) == tuple(app.screen.virtual_size), (
                     size,
                     recommended,
@@ -809,3 +964,77 @@ async def test_the_free_text_row_keeps_a_key_when_the_list_outruns_the_digits() 
         assert "0-9 jump" in text, text
         await pilot.press("0")
         assert screen.selected_index == screen.other_row
+
+
+# --- the anchoring guarantee -------------------------------------------------
+#
+# The reason this surface was moved out of a `ModalScreen`. A modal covered the
+# conversation the question was about, so a user who needed to re-read the tool
+# output, the error, or the plan in order to ANSWER had to dismiss the question
+# first — and could not scroll at all while it was up.
+
+
+@pytest.mark.asyncio
+async def test_the_conversation_stays_readable_behind_a_question() -> None:
+    """The card is a band above the composer, never a screen over the chat.
+
+    Pinned on the COMPOSITED frame rather than on the widget tree: what matters
+    is that conversation text is painted on the terminal at the same time as the
+    question, which is exactly what the modal made impossible.
+    """
+    from local_operator.tui.widgets.assistant import AssistantBlock
+    from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
+
+    app = _baseline_app()
+    card = AskPickerScreen([_long_question()])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # A conversation with a distinctive line in it, so the assertion cannot
+        # pass on chrome that merely looks like transcript.
+        for turn in range(6):
+            app._append_block(UserBlock(f"turn {turn}: what about the stale rows?"))
+            prose = AssistantBlock()
+            prose.update_text(f"answer {turn}: the audit log still has every row.")
+            app._append_block(prose)
+        await pilot.pause()
+        await _show(app, pilot, card)
+
+        painted = "\n".join(_painted_rows(app))
+        # The question is on screen...
+        assert "the agent needs your decision" in painted
+        # ...and so is the conversation it is about. The last exchange is the
+        # one a user would be reading to answer, so it is the one pinned.
+        assert "answer 5: the audit log still has every row." in painted
+        # The transcript keeps a real share of the screen. Asserted as a
+        # PROPORTION of the rows the two actually divide, not as "more than the
+        # card": a question with four options and a description each is
+        # legitimately tall, and the guarantee is that the conversation is still
+        # substantially there, not that it always wins. At 100x30 this is 9 rows
+        # of conversation against a 13-row card; the modal left zero.
+        transcript = app.query_one(TranscriptView)
+        divisible = transcript.region.height + card.region.height
+        assert transcript.region.height >= MIN_TRANSCRIPT_ROWS
+        assert transcript.region.height >= divisible * (1 - PROMPT_HEIGHT_SHARE)
+        # And the composer is still there to type into, below the question.
+        assert app.query_one("#input-shell").region.y > card.region.y
+
+
+@pytest.mark.asyncio
+async def test_the_question_sits_above_the_dock_band_and_stays_put() -> None:
+    """A question outranks status: it is what the turn is parked on.
+
+    The band (subagent jobs, todos) grows and shrinks on its own as work comes
+    and goes. Below the question that movement would shift the card under the
+    user's cursor mid-answer, so the prompt host is ordered above it.
+    """
+    app = _baseline_app()
+    card = AskPickerScreen([_long_question()])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _show(app, pilot, card)
+        host = app.query_one("#prompt-host")
+        band = app.query_one("#band")
+        shell = app.query_one("#input-shell")
+        # Ordered: question, then status, then the composer.
+        assert host.region.y < shell.region.y
+        assert band.region.y >= host.region.y + host.region.height

@@ -10,11 +10,25 @@ selectable, and the user's answer arriving as free text the agent then has to
 re-parse. This screen is the other half of the ``ask`` tool: one question at a
 time, keyboard and mouse, answering with the label the model wrote.
 
-It is built on the ``/resume`` picker's frame (``ModalScreen`` + one ``Static``,
-content-sized, measured against the screen every paint) because that surface
-already solved the parts that are easy to get wrong here: the card clipping its
-own footer, the cursor sitting on a row that was never drawn, and a click on the
-backdrop resolving to a row.
+It is ANCHORED IN THE DOCK, not pushed as a modal screen, and that is the
+central design decision. A ``ModalScreen`` covers the terminal: the question
+arrived and the conversation it is about — the tool output, the error, the plan
+the agent is asking about — went behind it, unreadable and unscrollable. A user
+who needed to look something up to answer had to abandon the question to do it.
+Mounted in ``#prompt-host`` instead, the card is a row band at the top of the
+input dock: the transcript keeps the rest of the screen, keeps its scrollback,
+and the card stays put while the user scrolls up for the context they need.
+
+It sits ABOVE the dock band (subagents, todos) rather than below it, because
+those panels are status and this is a question the turn is parked on: the thing
+being waited on belongs closest to the eye's resting place, and a status list
+that pushed the question around as jobs came and went would move the card under
+the user's cursor mid-answer.
+
+Its frame is the ``/resume`` picker's (one ``Static``, content-sized, measured
+every paint) because that surface already solved the parts that are easy to get
+wrong here: the card clipping its own footer, the cursor sitting on a row that
+was never drawn, and a click resolving to a row that was never painted.
 
 Two things it does that no other picker in this app does:
 
@@ -28,7 +42,7 @@ Two things it does that no other picker in this app does:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from rich.cells import cell_len
@@ -37,7 +51,8 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
-from textual.screen import ModalScreen
+from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
@@ -57,29 +72,87 @@ ASK_MIN_WIDTH = 30
 ASK_WIDTH_MARGIN = 6
 
 #: Cells of the card's own padding on EACH side, mirroring the horizontal half
-#: of ``padding: 1 2`` in the stylesheet.
-ASK_PADDING_CELLS = 2
+#: of ``padding: 1 1`` in the stylesheet. One cell rather than the modal's two:
+#: docked, this is the same rail every other panel in the dock uses (the
+#: composer's ``❯`` column, ``.band-body { padding: 0 1 }``), so the question
+#: starts in the column the rest of the dock starts in. Chrome that sets its
+#: own left edge is what makes a docked panel look detached from the input.
+ASK_PADDING_CELLS = 1
 
-#: The card's padding ROWS, mirroring the vertical half of the same rule. Kept
-#: separate from the cell budget above: they are the same number by coincidence,
-#: and spending one for the other is a bug waiting for the stylesheet to change.
-CARD_PADDING_ROWS = 2
 
-#: The card leaves a margin of conversation visible behind it, so it reads as
-#: floating over the turn rather than replacing it: one row in
-#: ``CARD_FLOAT_MARGIN_SHARE``, which is the ``max-height: 80%`` the ``/resume``
-#: card uses, written as the part it gives back.
+#: The single row the transcript claims even when it is showing nothing.
 #:
-#: It is written that way round because the margin has to YIELD, row by row, to
-#: what the card actually has to show (:meth:`AskPickerScreen._body_rows`). A
-#: flat share is a band worth having on a tall terminal and two rows of nothing
-#: on a short one, bought with the answers the user is being asked to choose
-#: between: at 100x14 it left three unusable rows under a card showing one
-#: option of four, and at 30x12 the card had no room for its footer at all (D1).
-#: Written instead as a threshold ("take the whole screen below N rows") the
-#: card GREW as the terminal shrank, showing ten options at 100x20 and nine at
-#: 100x24 — so the margin yields by the row, and never in a step.
-CARD_FLOAT_MARGIN_SHARE = 5
+#: It is ``height: 1fr`` and a sibling of the dock under the screen, so it takes
+#: a row whatever the dock does with the rest. A card that budgeted the screen
+#: without it produced a dock one row taller than the screen and a scrollable
+#: screen with the top of the question cut off. Distinct from
+#: :data:`MIN_TRANSCRIPT_ROWS`, which is the anchoring PREFERENCE: this is the
+#: layout engine's floor, and it applies even where the preference has yielded.
+_TRANSCRIPT_MIN_ROW = 1
+
+#: Rows to assume the rest of the dock needs before it has been laid out — a
+#: one-row composer, its chevron row's padding, and the status band. Used only
+#: on the first paint of a session's first question, and deliberately an
+#: OVER-estimate of the minimum dock: reserving rows the dock does not need
+#: costs one windowed row for one frame, while reserving too few lets the card
+#: lay out over the composer and lose its footer to the clip.
+_DOCK_ROWS_FALLBACK = 4
+
+#: Rows the card costs the dock beyond its own text: one padding row above, one
+#: below (the vertical half of ``padding: 1 1``), plus the one rhythm row its
+#: slot owns underneath (``.prompt-slot { padding: 0 0 1 0 }``), which separates
+#: the question from the band or the composer below it.
+#:
+#: Kept separate from the cell budget above rather than shared with it: the two
+#: were equal by coincidence under the old ``padding: 1 2`` and spending one for
+#: the other is a bug waiting for the stylesheet to move, which it since has.
+CARD_PADDING_ROWS = 3
+
+#: The most of the terminal the card may ever claim, as a share of its rows.
+#:
+#: This is the anchoring rule expressed as a number, and it is the whole reason
+#: the surface was moved out of a ``ModalScreen``. A modal took the screen, so
+#: the conversation the question is ABOUT went behind it: the tool output that
+#: prompted the ask, the error being asked about, the plan under discussion. A
+#: user who needed to re-read any of that to answer had to dismiss the question
+#: first. Capped here, the card is always a BAND and the transcript is always
+#: the rest of the screen.
+#:
+#: A share rather than a row count because the thing being protected is
+#: proportional: two rows of transcript under a card is not "some conversation
+#: visible", it is a sliver that answers nothing. The floor below is what keeps
+#: the rule meaningful on a short terminal, where a share alone rounds to almost
+#: everything.
+#:
+#: 0.7 is the same ratio omp's ask dialog settled on (``DIALOG_HEIGHT_RATIO``),
+#: and the agreement is not a coincidence: it is the point where a six-option
+#: question can still show the CONSEQUENCE line under each option on an
+#: ordinary 30-row terminal. Measured at 0.6 the card had 15 body rows against
+#: the 17 that question needs, so every description was dropped — and the
+#: descriptions are what the user is comparing when they choose. At 0.7 the same
+#: question draws in full and still leaves six rows of conversation.
+PROMPT_HEIGHT_SHARE = 0.7
+
+#: Conversation rows the card will not take, whatever the share above allows.
+#:
+#: The share is a ceiling on the CARD; this is a floor under the TRANSCRIPT, and
+#: both are needed because they bind at opposite ends of the size range. On a
+#: tall terminal the share is what stops a twelve-option question from filling
+#: the screen; on a short one the share alone would still leave the conversation
+#: with a row or two, so this takes over and the card windows its list instead.
+#:
+#: Four rows is the smallest number that shows an exchange rather than a
+#: fragment: a user block, its first line of reply, and the beginning of what
+#: came next. Below that the card is better off windowing — it can say "3 of 9"
+#: about its own list, and the transcript cannot say anything about what it is
+#: cut off from.
+#:
+#: It is a FLOOR and not the target. On a terminal with room to spare the share
+#: above is what governs, and it leaves considerably more; this only takes over
+#: where the share alone would leave the conversation a sliver. Both are needed
+#: because they bind at opposite ends of the size range — see
+#: :meth:`AskPickerScreen._body_rows`.
+MIN_TRANSCRIPT_ROWS = 4
 
 #: The smallest body :meth:`AskPickerScreen._allocate` can say anything about
 #: the QUESTION in: one option row, the windowing line that admits the rest of
@@ -191,15 +264,45 @@ class _CardLayout:
     show_footer: bool
 
 
-class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
-    """Put the ``ask`` tool's questions to the user; dismiss with the answers.
+class AskPickerScreen(Container):
+    """Put the ``ask`` tool's questions to the user; settle with the answers.
 
-    Dismisses with ``question id -> chosen strings``, or ``None`` when nothing
-    at all was answered. A PARTIAL mapping is deliberate: escaping out of the
-    third question does not throw away the first two, because a user who
-    answered and then stopped answering has still told the agent something, and
-    the tool reports the rest as not answered.
+    Settles with ``question id -> chosen strings``, or ``None`` when nothing at
+    all was answered. A PARTIAL mapping is deliberate: escaping out of the third
+    question does not throw away the first two, because a user who answered and
+    then stopped answering has still told the agent something, and the tool
+    reports the rest as not answered.
+
+    A ``Container`` mounted in the dock, not a ``ModalScreen``: see the module
+    docstring. The name is kept — it is what the app, the tests and the harness
+    already call this surface, and renaming a class to describe its parent
+    widget rather than its job would churn every call site to say nothing new.
+
+    It TAKES FOCUS, and that is what makes the keys work. The alternative is
+    app-level bindings while the composer keeps focus, and that cannot work
+    here: the answer keys are digits, letters and Space, and the composer is a
+    text buffer that would swallow every one of them as input. Focus is handed
+    back on settle (:meth:`restore_focus`), so answering never silently leaves
+    the user somewhere other than the composer.
     """
+
+    #: Focusable so the answer keys reach the card rather than the composer's
+    #: buffer. Same rule the approval prompt follows, for the same reason.
+    can_focus = True
+
+    class DrawableChanged(Message):
+        """The card started or stopped having anything to paint.
+
+        Raised on the edge only, so the host is not told the same thing on
+        every keystroke. The host reserves a separation row for the prompt and
+        must give it back when the terminal gets too short for the card to draw
+        at all — otherwise the dock keeps a row for a question painting nothing
+        and pushes itself past the screen.
+        """
+
+        def __init__(self, card: "AskPickerScreen") -> None:
+            super().__init__()
+            self.card = card
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
@@ -227,8 +330,42 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         Binding(OTHER_JUMP_KEY, "jump_other", "Other", show=False),
     ]
 
-    def __init__(self, questions: Sequence[AskQuestion]) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        questions: Sequence[AskQuestion],
+        on_settle: Callable[[dict[str, list[str]] | None], None] | None = None,
+        *,
+        allow_free_text: bool = True,
+        # Defaulted per INSTANCE rather than to a shared literal: two prompts
+        # can be attached at once for the few pump hops between one settling
+        # and the awaiting frame unmounting it, and a fixed id makes Textual
+        # refuse the second mount outright (`DuplicateIds`). Callers that want
+        # a stable handle pass their own.
+        widget_id: str | None = None,
+        title: str = "the agent needs your decision",
+        exit_hint: tuple[str, str] = ("esc", "skip"),
+    ) -> None:
+        super().__init__(id=widget_id or f"ask-picker-{id(self):x}", classes="prompt-slot")
+        #: Whether the list carries the trailing "Other (type your own)" row.
+        #:
+        #: A property of the SURFACE rather than of ``AskQuestion``, so the
+        #: model-facing tool schema is unchanged: the ``ask`` tool's contract is
+        #: that every question it asks accepts an answer nobody enumerated, and
+        #: that stays true. What varies is the host — the approval prompt reuses
+        #: this widget for a question with exactly three answers (allow, deny,
+        #: allow all), where a free-text row would offer to send prose to a
+        #: gate that can only return a boolean.
+        self._allow_free_text = allow_free_text
+        #: The card's title row. Varies by host because the two surfaces are
+        #: asking different kinds of question: ``ask`` wants a decision the
+        #: agent cannot make, and the approval gate wants permission to act.
+        self._title = title
+        #: The last hint in the footer, and the one the width ladder defends
+        #: hardest — a card with no stated way out is unusable. Its WORD differs
+        #: by host and the difference is load-bearing: "skip" is honest for a
+        #: question the agent can proceed without, and a lie for an approval,
+        #: where escaping denies the tool and stops the turn.
+        self._exit_hint = exit_hint
         # Both the question and every label are MODEL-CONTROLLED and reach a
         # real terminal, so both are stripped on the way in — the discipline the
         # approval prompt and the tool cards already apply. A label carrying CSI
@@ -252,6 +389,23 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         #: question wrapped; a click resolved by arithmetic landed on the row
         #: below whenever a description wrapped or the question did not.
         self._line_rows: list[int | None] = []
+        #: Called once with the answers when the card settles. The app resolves
+        #: the waiting tool call from it.
+        self._on_settle = on_settle
+        #: Guards the callback to EXACTLY ONE call. Several paths end this card
+        #: — Enter on the last question, Escape, and the app tearing it down on
+        #: a stop or an abort — and the tool call behind it is parked on a
+        #: future that raises if it is resolved twice. The same idempotence the
+        #: approval prompt's :meth:`resolve` has, for the same reason.
+        self._settled = False
+        #: What held focus when the card appeared, so answering hands it back
+        #: rather than leaving the user out of the composer.
+        self._restore_target: object | None = None
+        #: Whether the last paint produced any line at all. Starts True so the
+        #: first undrawable paint is an EDGE and is announced: starting False
+        #: would make "nothing to draw" the unremarkable case and leave the host
+        #: holding a row nobody asked it to give back.
+        self._drawable = True
         #: Set when Enter was pressed on a state that cannot answer, so the
         #: footer can say WHY rather than the card doing nothing at all (D4).
         #: Cleared by every key that changes the answer, so the complaint can
@@ -278,8 +432,8 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
 
     @property
     def row_count(self) -> int:
-        """Options plus the free-text row, which every question carries."""
-        return len(self.question.options) + 1
+        """Options, plus the free-text row where this surface offers one."""
+        return len(self.question.options) + (1 if self._allow_free_text else 0)
 
     @property
     def other_row(self) -> int:
@@ -287,8 +441,14 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
 
         Its NUMBER does move, and past nine it has none of its own, which is
         why :data:`OTHER_JUMP_KEY` is bound to it separately.
+
+        ``-1`` where the surface has no free-text row, which is deliberately an
+        index no row can equal: every ``index == self.other_row`` test in this
+        file then answers False without a second condition beside it, and the
+        one place the value is used as a destination (:meth:`action_jump_other`)
+        guards on the flag instead.
         """
-        return self.row_count - 1
+        return self.row_count - 1 if self._allow_free_text else -1
 
     @property
     def selected_index(self) -> int:
@@ -324,10 +484,39 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         """
         return dict(self._answers) or None
 
+    # -- settling ------------------------------------------------------------
+    def settle(self, answers: dict[str, list[str]] | None) -> None:
+        """Hand ``answers`` to the waiting tool call, exactly once.
+
+        Idempotent, because this card has several ends and they can race: the
+        user's Enter on the last question, their Escape, and the app tearing the
+        card down for a stop, an abort, or teardown. The tool call is parked on
+        a future, and resolving that twice raises out of whichever path lost.
+        """
+        if self._settled:
+            return
+        self._settled = True
+        callback = self._on_settle
+        self._on_settle = None
+        if callback is not None:
+            callback(answers)
+
+    @property
+    def settled(self) -> bool:
+        """Whether the answers have already been handed back."""
+        return self._settled
+
+    def restore_focus(self) -> None:
+        """Return focus to whatever held it when the question appeared."""
+        widget = self._restore_target
+        self._restore_target = None
+        if widget is not None and getattr(widget, "is_attached", False):
+            widget.focus()  # type: ignore[attr-defined]
+
     # -- actions -------------------------------------------------------------
     def action_cancel(self) -> None:
         """Escape: stop answering. Whatever was already answered still counts."""
-        self.dismiss(self._answers or None)
+        self.settle(self._answers or None)
 
     def action_move(self, delta: int) -> None:
         """Arrow/vi movement WRAPS: a discrete, deliberate keypress."""
@@ -345,8 +534,13 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         the one row that can express an answer nobody enumerated is the one row
         no key reaches — on exactly the questions where scanning the list is
         hardest (D13).
+
+        A no-op where the surface has no such row, rather than a jump to
+        ``-1``: the key is bound unconditionally, and the approval prompt that
+        reuses this widget has three answers and no fourth to reach.
         """
-        self._move_to(self.other_row)
+        if self._allow_free_text:
+            self._move_to(self.other_row)
 
     def action_toggle_row(self) -> None:
         """Space toggles a multi-select row; on a single-select it does nothing.
@@ -395,7 +589,7 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         self._rejected = False
         self._answers[self.question.id] = chosen
         if self._index + 1 >= len(self._questions):
-            self.dismiss(self._answers)
+            self.settle(self._answers)
             return
         self._index += 1
         self._offset = 0
@@ -490,9 +684,19 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         A multi-select click TOGGLES instead of answering — the gesture has to
         be repeatable there, and a click that confirmed the list would make the
         first pick the last one.
+
+        Any button-1 click on the card also takes FOCUS back, before the row
+        hit-test and whether or not it landed on a row. The card can lose focus
+        without being answered — the user clicks into the composer to look
+        something up while deciding — and without this the question sits there
+        advertising keys with nothing to receive them. Clicking the thing you
+        are being asked is the discoverable way back, and it is the affordance
+        the approval prompt already offers.
         """
         if getattr(event, "button", 1) != 1:
             return
+        if not self.has_focus:
+            self.focus()
         index = self._index_at(event)
         if index is None:
             return
@@ -520,9 +724,12 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         Three guards, all load-bearing, because a false positive here answers
         the agent's question on the user's behalf:
 
-        - the point must be inside the BODY's region — the modal's backdrop
-          covers the whole screen and bubbles clicks from well outside the card,
-          including columns beside it where ``y`` alone still looks valid;
+        - the point must be inside the BODY's region. The card is full-width in
+          the dock while its TEXT is not, so a click in the empty columns beside
+          a row still lands on this widget with a ``y`` that looks valid; and
+          the padding rows above and below the body do the same with an ``x``
+          that does. Region containment is what separates the card's ink from
+          the container it is painted in;
         - the line must map to a row in ``_line_rows``, which is recorded while
           painting, so the header, the blank spacers and the footer resolve to
           nothing rather than to whichever row the arithmetic lands on;
@@ -545,22 +752,43 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
 
     # -- geometry ------------------------------------------------------------
     def _screen_size(self) -> tuple[int, int]:
-        """The box this card's ``max-width``/``max-height`` resolve in.
+        """The box the card budgets itself against: the SCREEN's content box.
 
-        ``self.size`` (this Screen's CONTENT box), not ``self.app.size`` (the
-        terminal): ``Screen { padding: 1 }`` insets the content box, and the
-        stylesheet's percentage cap resolves against the content box, so
-        measuring the terminal asks for more rows than the container will draw
-        and Textual clips the difference silently — off the bottom, taking the
-        footer with it. The ``/resume`` picker and the usage panel measure the
-        screen for the same reason.
+        Deliberately not ``self.size``, which is the inverse of what the modal
+        version did and is forced by the move into the dock. A docked container
+        is sized BY its content: ``height: auto`` means ``self.size`` is
+        whatever the card asked for on the last paint, so budgeting against it
+        would be the card measuring its own shadow — it could never shrink,
+        because every measurement would confirm the height it already had.
+
+        And deliberately not ``self.app.size`` either, which is the raw
+        TERMINAL. ``Screen { padding: 1 }`` insets the box the dock is actually
+        laid out in, so the two differ by two rows: measured at an 80x12
+        terminal the screen's content box is 78x10, and a card budgeting
+        against 12 handed the dock two rows that did not exist. The dock came
+        out 11 rows tall inside a 10-row screen, ``virtual_size`` exceeded
+        ``size``, and the screen went scrollable with the top of the question
+        pushed off the frame — the condition AGENTS.md calls always a bug here.
+        Falls back to the app's own size only when the screen is not available,
+        which is the pre-layout case where nothing is drawn yet anyway.
         """
         try:
-            size = self.size
-            if not size.width or not size.height:  # not laid out yet
-                size = self.app.size
+            screen = self.screen if self.is_attached else None
+            size = screen.size if screen is not None else self.app.size
         except Exception:  # pragma: no cover - only before the app has a screen
             return 80, 24
+        if not size.width:  # pragma: no cover - pre-layout
+            return 80, 24
+        if not size.height:
+            # A screen with ZERO content rows is a real state, not an
+            # unmeasured one: `Screen { padding: 1 }` consumes two rows, so a
+            # terminal two rows tall leaves nothing at all. Falling back to the
+            # pre-layout default here (24 rows) was a defect — the card budgeted
+            # against a screen four times the terminal, laid out its full
+            # thirteen-line layout, and drove `virtual_size` to 20 rows on a
+            # screen of 0. Zero rows in, zero rows out, and the card is not
+            # drawn; the next resize brings it back.
+            return max(1, size.width), 0
         # No floor on the HEIGHT. Reporting at least eight rows on a six-row
         # screen is the same mistake the row budget used to make one level up:
         # every caller then divides rows the region does not have, and the
@@ -569,12 +797,97 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         # had budgeted for both (D1). The allocator handles a two-row budget.
         return max(1, size.width), max(1, size.height)
 
+    def _dock_reserved_rows(self) -> int:
+        """Rows the rest of the dock needs below this card, measured live.
+
+        The composer, the status band, and whatever the dock band is showing
+        (subagent list, todos) all sit under the question, and the card may not
+        push any of them off: the composer is where the answer to a free-text
+        row is typed, and the status band carries the working line that says the
+        turn is parked. Measured from the live widgets rather than assumed as a
+        constant, because the band's height is genuinely variable — it is zero
+        on an idle session and several rows with two subagents and a todo list —
+        and a constant would be wrong in whichever direction the session was not
+        in when it was written.
+
+        Falls back to a conservative estimate when the dock has not been laid
+        out yet (the first paint of the first question in a session), which
+        errs toward a SHORTER card: budgeting rows the dock turns out to need
+        is the failure that clips a footer, and budgeting too few only windows
+        the list one row earlier for one frame.
+        """
+        screen = self.screen if self.is_attached else None
+        if screen is None:
+            return _DOCK_ROWS_FALLBACK
+        # A host with no composer at all reserves nothing, and saying otherwise
+        # is not conservative, it is wrong: the reduced hosts (the widget tests,
+        # and any embedder mounting this card beside a transcript) have no dock,
+        # so charging them for one shrinks the card by four rows it was given.
+        # Distinguished from "the dock exists but has not been laid out yet" by
+        # asking whether the composer is THERE, not how tall it currently is.
+        if not screen.query("#input-shell"):
+            return 0
+        # The DOCK's own outer height, less whatever this card is currently
+        # contributing to it, rather than the sum of its other children.
+        #
+        # Summing the siblings misses what the dock spends on itself: measured
+        # at 30x12, `#prompt-host` (4) plus `#input-shell` (5) came to 9 while
+        # `#input-dock` measured 10, and the missing row put the whole dock past
+        # the screen — `virtual_size` 12 against `size` 10, permanently, because
+        # the card kept re-deriving the same one-row-too-many budget. Reading
+        # the container is also robust to a fourth child appearing later, which
+        # a hardcoded list of siblings is not.
+        dock = None
+        try:
+            dock = screen.query_one("#input-dock")
+        except Exception:  # pragma: no cover - only before the dock is composed
+            dock = None
+        if dock is not None and dock.display and dock.outer_size.height:
+            # This card's own contribution comes OUT of the reservation: what
+            # is being computed is the room left FOR it, and counting the rows
+            # it currently occupies would shrink the budget by whatever the card
+            # already claimed — a feedback loop that can only ratchet downward.
+            host = self.parent
+            mine = 0
+            if isinstance(host, Widget) and host.display:
+                mine = host.outer_size.height
+            return max(0, dock.outer_size.height - mine)
+        reserved = 0
+        seen = False
+        for selector in ("#band", "#input-shell"):
+            try:
+                widget = screen.query_one(selector)
+            except Exception:
+                continue
+            if not widget.display:
+                continue
+            # ``region.height``, NOT ``size.height``. Textual sizes border-box:
+            # ``size`` is the CONTENT box, and the rows the dock actually
+            # reserves are the outer ones. ``#input-shell`` carries
+            # ``padding: 1``, so the two differ by two rows there — and reading
+            # the content box let the card claim those two rows twice. Measured
+            # at 80x12: the dock came out one row taller than the screen, its
+            # region started at y=-1, and ``virtual_size`` (78, 12) exceeded
+            # ``size`` (78, 10) — the scrollable screen AGENTS.md calls always a
+            # bug on this app, with the top of the question scrolled off.
+            height = widget.region.height
+            if height:
+                reserved += height
+                seen = True
+        return reserved if seen else _DOCK_ROWS_FALLBACK
+
     def _card_width(self) -> int:
         """Content cells the card may use, measured against the terminal.
 
         The preferred floor applies only while it FITS: a minimum width is a
         preference and the terminal is not, so on a very narrow screen the card
         gives up its breathing margin and then the floor rather than overflowing.
+
+        ``ASK_PADDING_CELLS`` must stay equal to the horizontal half of this
+        card's ``padding`` in the stylesheet. They are two statements of one
+        measurement, and when they disagree the card either wastes cells it was
+        given or lays out lines wider than the panel can draw — which the panel
+        resolves by clipping, silently.
         """
         width, _ = self._screen_size()
         padding = ASK_PADDING_CELLS * 2
@@ -592,40 +905,106 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         return wrap_cells(self.question.question, width) or [""]
 
     def _body_rows(self, question_lines: int) -> int:
-        """Lines the card's BODY may draw before the container clips them.
+        """Lines the card's BODY may draw, with the transcript's share reserved.
 
-        The screen, less the margin the card floats in — and the margin yields
-        to what the card has to show, a row at a time, down to nothing. What it
-        yields to is the card WITHOUT its comforts: title, question, one line
-        per option, and the footer. The spacers and the descriptions are left
-        out on purpose, because they are the first things :meth:`_allocate`
-        gives up, and a card should not push the conversation off the screen to
-        keep a blank row.
+        Three limits, and the card takes the smallest. Each one exists because
+        the other two do not cover its case:
+
+        1. **What is left of the terminal** once the rest of the dock (composer,
+           status band, subagent/todo panels) and this card's own padding are
+           paid for. This is a hard limit — exceeding it does not make a taller
+           card, it makes a clipped one, and Textual clips the TAIL, which is
+           the footer the allocator buys first precisely because it is the only
+           statement of how to leave.
+        2. **The anchoring share** (:data:`PROMPT_HEIGHT_SHARE`): the card is a
+           band over a conversation, never a replacement for it. This is what
+           binds on a tall terminal, where limit 1 would happily hand a
+           twelve-option question the whole screen — which is the modal
+           behaviour this rework exists to remove.
+        3. **The transcript floor** (:data:`MIN_TRANSCRIPT_ROWS`): a share of a
+           short terminal still rounds to nearly all of it, so below roughly
+           fifteen rows the share stops protecting anything and this takes over.
 
         A CAP and not a fill: the body is ``height: auto``, so a card with
-        little to say still draws short and still floats.
+        little to say still draws short, and a two-option question does not
+        reserve room for twelve.
 
-        The result is what the card can DRAW, with no floor under it: two rows
-        go to ``Screen { padding: 1 }`` before this is measured
-        (:meth:`_screen_size`) and two more to the card's own padding, so a
-        terminal five rows tall leaves the body exactly one line and one four
-        rows tall leaves it none. Zero is the honest answer there, and a plan of
-        no lines is the honest card: there is nowhere to paint.
-
-        Returning more than this is not a bigger card but a clipped one, and
-        Textual clips the TAIL — the footer, the row :meth:`_allocate` buys
-        first precisely because it is the only statement of how to leave. That
-        is what a floor here bought: at heights 5 and 6 the card laid out three
-        lines into one or two and painted an option row with no keys under it
-        (round 3, R9-R11). :meth:`_allocate` spends this budget line by line and
-        never overdraws it, so nothing is clipped rather than the wrong thing
-        being.
+        There is no floor under the result. Zero is a legitimate answer on a
+        terminal with nothing to spare, and it is the honest one: a plan of no
+        lines draws no card, where a floor would lay out lines the region cannot
+        paint and let the compositor decide which to lose (round 3, R9-R11).
+        :meth:`_allocate` spends this budget line by line and never overdraws
+        it, so nothing is clipped rather than the wrong thing being.
         """
         _, height = self._screen_size()
-        room = max(0, height - CARD_PADDING_ROWS)
-        wanted = 2 + question_lines + self.row_count + 1
-        margin = min(height // CARD_FLOAT_MARGIN_SHARE, max(0, room - wanted))
-        return room - margin
+        # 1. What physically remains for this card, inside its own padding.
+        #
+        # ``MIN_TRANSCRIPT_ROWS`` is NOT what is subtracted here — that is the
+        # anchoring rule, applied below. This subtracts ONE row, because the
+        # transcript is ``height: 1fr`` and a flexible child still claims a row:
+        # the dock and the transcript are siblings under the screen, so a dock
+        # sized to the whole screen leaves the transcript to overflow it. Left
+        # out, the dock came to 11 rows on a 10-row screen and the screen went
+        # scrollable, which took the top of the question off the frame.
+        available = max(
+            0, height - self._dock_reserved_rows() - CARD_PADDING_ROWS - _TRANSCRIPT_MIN_ROW
+        )
+        # 2. and 3. Both anchoring rules are CEILINGS on the card, so the card
+        # takes the tighter of the two rather than the looser: they bind at
+        # opposite ends of the size range (the share on a tall terminal, the
+        # transcript floor on a short one), and taking the looser would let
+        # whichever is slack at this size cancel the one that is doing the work.
+        #
+        # The share is taken over the rows the card and the transcript actually
+        # DIVIDE — the screen less the composer and the dock band — rather than
+        # over the whole screen. Over the whole screen the dock's rows come out
+        # of the transcript's side of the split alone: measured at 100x30, a
+        # four-option question took 19 of 28 rows and left the conversation 4,
+        # which is the sliver this rework exists to prevent. Over the divisible
+        # rows the same question takes 16 and leaves 7.
+        divisible = max(0, height - self._dock_reserved_rows())
+        share = int(divisible * PROMPT_HEIGHT_SHARE) - CARD_PADDING_ROWS
+        floor = height - MIN_TRANSCRIPT_ROWS - self._dock_reserved_rows() - CARD_PADDING_ROWS
+        # The anchoring caps are ceilings on a card that has room to spare. They
+        # must not become a gag: on a short terminal both go to zero or below,
+        # and a question the agent is parked on that draws NO LINES AT ALL is a
+        # worse outcome than a thin strip of conversation. Measured at 40x10
+        # before this floor: the card was not drawn at all and the turn waited
+        # on an answer with nothing on screen to give it. So the two caps yield
+        # to :data:`MIN_BODY_ROWS` — the question, one option, and the footer.
+        #
+        # ``available`` is applied LAST and outside that floor, because it is
+        # the only one of the three that is not a preference. The floor says
+        # what the card would like to keep; ``available`` says what the screen
+        # physically has, and a floor allowed to win over it is not a taller
+        # card but a clipped one — measured at 80x12, where a 3-row floor over
+        # 2 rows of room put the dock one row past the screen and made the
+        # screen scrollable, cutting the top off the question.
+        anchored = max(min(share, floor), MIN_BODY_ROWS)
+        room = max(0, min(available, anchored))
+        # Never taller than it needs to be: the caps above are ceilings, and a
+        # card that padded itself out to its allowance would push the
+        # conversation up to show blank rows.
+        #
+        # `wanted` is the card at its FULL natural height — title and rule, the
+        # wrapped question, both spacer rows, every option with its description
+        # line, and the footer — and getting that wrong in the other direction
+        # is a real defect rather than a rounding difference. Computed as the
+        # MINIMAL card (one line per option, no descriptions, no spacers) this
+        # cap sat below what `_allocate` needed to buy the comforts, so the
+        # allocator was handed a budget that could never afford a description
+        # and the card silently lost every second line: measured as options
+        # drawn with no consequences under them, and a list that windowed at 13
+        # options on a terminal with room for all of them.
+        wanted = (
+            2  # title and its rule
+            + question_lines
+            + 2  # the spacer above the list and below it
+            + self.row_count * 2  # each option, plus its description line
+            + 1  # the windowing line, where the list turns out to need one
+            + 1  # the footer
+        )
+        return min(room, wanted)
 
     def _layout(self) -> _CardLayout:
         """Divide the body's rows BEFORE anything is drawn into them.
@@ -784,6 +1163,16 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
             yield self._body
 
     def on_mount(self) -> None:
+        """Take focus, remembering what held it so it can be handed back.
+
+        Focus is not optional for this surface: the answer keys are digits,
+        letters and Space, and every one of them is a character the composer
+        would take as input. The card that does not hold focus is a question
+        whose keys type into the prompt buffer instead of answering it.
+        """
+        screen = self.screen
+        self._restore_target = screen.focused if screen is not None else None
+        self.focus()
         self._repaint()
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -797,15 +1186,48 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
             return
         text = self._card_text()
         body.update(text)
+        drawable = bool(text.plain)
         card = body.parent
         if card is not None:
-            # A card with no drawable line is not a smaller card: its own
-            # ``padding: 1 2`` is two rows the screen has not got, so at three
-            # terminal rows and under the container pushed the screen's virtual
-            # height past its size — a scrollable screen, which AGENTS.md calls
-            # always a bug here, over a card painting nothing. Nothing to draw,
-            # nothing laid out; the next resize brings it back.
-            card.display = bool(text.plain)
+            # A card with no drawable line is not a smaller card: its padding is
+            # rows the screen has not got, so at three terminal rows and under
+            # the container pushed the screen's virtual height past its size — a
+            # scrollable screen, which AGENTS.md calls always a bug here, over a
+            # card painting nothing. Nothing to draw, nothing laid out; the next
+            # resize brings it back.
+            card.display = drawable
+        # And the same for THIS widget, which is the one that carries the
+        # padding now that the card is docked rather than modal. Hiding only the
+        # inner holder left the outer one claiming its own two padding rows
+        # around zero rows of content: measured at 40x10, that was two rows of
+        # pure chrome for a card drawing nothing, and `virtual_size` (38, 9)
+        # over `size` (38, 8) — a scrollable screen, which AGENTS.md calls
+        # always a bug here.
+        #
+        # The HOST's own row is not this widget's to write, and an earlier
+        # revision that wrote it directly was a bug: the app shows the host when
+        # it mounts a prompt, so two owners disagreed and which won depended on
+        # ordering. The card ANNOUNCES instead, and the app (the single writer)
+        # decides. A message rather than a direct call because the answer
+        # changes on any repaint — a resize, a question advancing, a typed
+        # character rewrapping the card — and each of those has to be able to
+        # bring the host's row back as well as take it away.
+        was_drawable = self._drawable
+        self._drawable = drawable
+        self.display = drawable
+        if was_drawable != drawable and self.is_attached:
+            self.post_message(self.DrawableChanged(self))
+
+    @property
+    def is_drawable(self) -> bool:
+        """Whether the card has any line to paint at this terminal size.
+
+        False on a terminal too short to show even the footer, where the card
+        hides itself rather than laying out rows the screen cannot draw. The
+        host reads this to decide whether to keep its own separation row, so
+        that row cannot outlive the card it separates.
+        """
+        return self._drawable
 
     def render_lines_for_test(self) -> list[str]:
         """The card as plain strings — what a user reads.
@@ -814,7 +1236,18 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         splits an empty card into ONE empty line and a caller counting that
         against the room the screen has would be told the card overflows a
         terminal it is painting nothing into.
+
+        Also empty while the card is HIDDEN. This method re-derives the text
+        rather than reading back what was painted, so on a terminal too short
+        to draw the card it would otherwise report the line the card WOULD
+        have drawn — and a caller then asserts that line reached the terminal,
+        which it never did. Measured as an intermittent failure at 30x12 where
+        the card reported `esc skip` against a frame that contained only the
+        composer. Whether the card is drawn is `display`'s answer, so this
+        defers to it rather than keeping a second opinion.
         """
+        if self.is_mounted and not self.display:
+            return []
         text = self._card_text()
         if not text.plain:
             return []
@@ -931,7 +1364,7 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         if rejection:
             row.append(rejection, style=muted)
             return _cut_row(row, width)
-        hints = self._footer_hints(width) if drawn else [("esc", "skip")]
+        hints = self._footer_hints(width) if drawn else [self._exit_hint]
         for position, (key, what) in enumerate(hints):
             if position:
                 row.append(" · ", style=dim)
@@ -959,7 +1392,7 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
         how much is left, and the title says what the card IS.
         """
         header = Text(no_wrap=True, overflow="ellipsis")
-        title = "the agent needs your decision"
+        title = self._title
         counter = (
             f"Question {self._index + 1} of {len(self._questions)}"
             if len(self._questions) > 1
@@ -1170,7 +1603,7 @@ class AskPickerScreen(ModalScreen["dict[str, list[str]] | None"]):
             jump = f"{OTHER_JUMP_KEY}-9" if self.other_row >= 9 else "1-9"
             hints = [("↑↓", "move"), (jump, "jump"), ("enter", "answer")]
             ladder = ["↑↓", jump, "enter", "esc"]
-        hints.append(("esc", "skip"))
+        hints.append(self._exit_hint)
 
         def cells(pairs: list[tuple[str, str]]) -> int:
             return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(

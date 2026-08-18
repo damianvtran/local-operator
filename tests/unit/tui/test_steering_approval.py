@@ -46,12 +46,15 @@ from local_operator.tui.events import (
     TurnStarted,
 )
 from local_operator.tui.widgets.approval import (
+    APPROVAL_CHOICES,
+    APPROVAL_KEY_BY_LABEL,
     CHOICES,
     HAZARD_GLYPH,
     OUTSIDE_MARKER,
     PROMPT_GLYPH,
     UNRESOLVABLE_MARKER,
     ApprovalBlock,
+    ApprovalPrompt,
 )
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
@@ -94,6 +97,27 @@ def _approval_gate(session: SteerableSession) -> Callable[[str, str], Awaitable[
     handler = session.approval_handler
     assert handler is not None, "the app never installed its approval handler"
     return cast("Callable[[str, str], Awaitable[bool]]", handler)
+
+
+async def _booted_gate(
+    pilot: Any, session: SteerableSession
+) -> Callable[[str, str], Awaitable[bool]]:
+    """Wait for the app to install its approval gate, then return it.
+
+    Waits on the CONDITION rather than on a duration. The fixed
+    ``pause(0.25)`` these tests used is a bet on how long boot takes, and the
+    bet is lost for the FIRST app built in a process: session creation runs in
+    a worker, and the first one through pays the import and construction cost
+    the later ones do not. Measured on an unmodified tree, the first app in a
+    process installed its handler at ~0.39s and every later one at ~0.30s — so
+    each of these tests passed when the file ran whole and failed when run
+    alone, on `main` as much as here.
+    """
+    for _ in range(100):
+        if session.approval_handler is not None:
+            return _approval_gate(session)
+        await pilot.pause(0.02)
+    raise AssertionError("the app never installed its approval handler")
 
 
 def rows(app: OperatorApp) -> list[str]:
@@ -213,20 +237,23 @@ async def test_approval_prompt_resolves_from_a_keystroke() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
-        assert session.approval_handler is not None
-
-        ask = _approval_gate(session)
+        ask = await _booted_gate(pilot, session)
         pending = asyncio.ensure_future(ask("bash", "run: rm -rf /tmp/x"))
         await pilot.pause(0.3)
-        block = app.query_one(ApprovalBlock)
-        assert app.screen.focused is block  # else the keys go to the composer
-        assert any("allow all" in row for row in rows(app))
+        prompt = app.query_one(ApprovalPrompt)
+        assert app.screen.focused is prompt  # else the keys go to the composer
+        # The three answers are offered as a LIST, not only as letters to aim
+        # at a focused widget, and the session-wide one names its scope.
+        assert any("Allow all" in row for row in rows(app))
+        # And the question is anchored in the dock, above the composer, rather
+        # than in the transcript where a busy turn scrolls it out of reach.
+        assert prompt.region.y > app.query_one(TranscriptView).region.y
 
         await pilot.press("y")
         assert await asyncio.wait_for(pending, 2) is True
         await pilot.pause(0.1)
         assert isinstance(app.screen.focused, Editor)  # focus handed back
+        assert not app.query(ApprovalPrompt)  # the question is gone
         assert any("allowed" in row for row in rows(app))  # decision kept
 
 
@@ -236,9 +263,8 @@ async def test_n_denies_one_tool_and_lets_the_turn_continue() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        ask = await _booted_gate(pilot, session)
         session.streaming = True
-        ask = _approval_gate(session)
         pending = asyncio.ensure_future(ask("write", "write: /etc/hosts"))
         await pilot.pause(0.3)
 
@@ -259,9 +285,8 @@ async def test_escape_denies_the_prompt_and_stops_the_turn() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        ask = await _booted_gate(pilot, session)
         session.streaming = True
-        ask = _approval_gate(session)
         first = asyncio.ensure_future(ask("write", "write: /etc/hosts"))
         second = asyncio.ensure_future(ask("bash", "run: rm -rf /"))
         await pilot.pause(0.3)
@@ -272,7 +297,7 @@ async def test_escape_denies_the_prompt_and_stops_the_turn() -> None:
         assert await asyncio.wait_for(second, 2) is False
         assert session.aborts == ["interrupted"]
         # No question is left on screen for a turn that has been stopped.
-        assert not [block for block in app.query(ApprovalBlock) if not block.answered]
+        assert not [prompt for prompt in app.query(ApprovalPrompt) if not prompt.answered]
 
 
 @pytest.mark.asyncio
@@ -281,8 +306,7 @@ async def test_allow_all_latches_for_the_session() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
-        ask = _approval_gate(session)
+        ask = await _booted_gate(pilot, session)
         first = asyncio.ensure_future(ask("bash", "run: make"))
         await pilot.pause(0.3)
         await pilot.press("A")
@@ -290,11 +314,11 @@ async def test_allow_all_latches_for_the_session() -> None:
         await pilot.pause(0.1)
 
         # No prompt is mounted for the second ask at all.
-        before = len(app.query(ApprovalBlock))
+        before = len(app.query(ApprovalPrompt))
         second = asyncio.ensure_future(ask("write", "write: out.txt"))
         assert await asyncio.wait_for(second, 2) is True
         await pilot.pause(0.1)
-        assert len(app.query(ApprovalBlock)) == before
+        assert len(app.query(ApprovalPrompt)) == before
 
 
 @pytest.mark.asyncio
@@ -308,9 +332,8 @@ async def test_interrupt_denies_a_parked_approval() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        ask = await _booted_gate(pilot, session)
         session.streaming = True
-        ask = _approval_gate(session)
         pending = asyncio.ensure_future(ask("bash", "run: sleep 99"))
         await pilot.pause(0.3)
 
@@ -325,8 +348,7 @@ async def test_clearing_the_transcript_settles_a_pending_approval() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
-        ask = _approval_gate(session)
+        ask = await _booted_gate(pilot, session)
         pending = asyncio.ensure_future(ask("bash", "run: make"))
         await pilot.pause(0.3)
 
@@ -382,19 +404,19 @@ async def test_a_queued_ask_is_denied_rather_than_re_asked_after_a_stop() -> Non
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        ask = await _booted_gate(pilot, session)
         session.streaming = True
-        ask = _approval_gate(session)
         first = asyncio.ensure_future(ask("bash", "run: one"))
         second = asyncio.ensure_future(ask("bash", "run: two"))
         await pilot.pause(0.3)
-        assert len(app.query(ApprovalBlock)) == 1  # serialized, not stacked
+        assert len(app.query(ApprovalPrompt)) == 1  # serialized, not stacked
 
         app.action_interrupt()
         assert await asyncio.wait_for(first, 2) is False
         assert await asyncio.wait_for(second, 2) is False
         await pilot.pause(0.2)
-        assert len(app.query(ApprovalBlock)) == 1  # no fresh question was mounted
+        # No fresh question was mounted for the stopped turn.
+        assert not app.query(ApprovalPrompt)
 
 
 @pytest.mark.asyncio
@@ -408,8 +430,7 @@ async def test_allow_all_is_seen_by_an_already_queued_ask() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
-        ask = _approval_gate(session)
+        ask = await _booted_gate(pilot, session)
         first = asyncio.ensure_future(ask("bash", "run: one"))
         second = asyncio.ensure_future(ask("write", "write: two"))
         await pilot.pause(0.3)
@@ -418,12 +439,12 @@ async def test_allow_all_is_seen_by_an_already_queued_ask() -> None:
         assert await asyncio.wait_for(first, 2) is True
         assert await asyncio.wait_for(second, 2) is True  # never asked again
         await pilot.pause(0.2)
-        assert len(app.query(ApprovalBlock)) == 1
+        assert not app.query(ApprovalPrompt)
 
 
 @pytest.mark.asyncio
 async def test_lowercase_a_does_not_disarm_the_gate() -> None:
-    """ "Allow all" needs Shift: the block holds focus, and ``a`` is a letter.
+    """ "Allow all" needs Shift: the card holds focus, and ``a`` is a letter.
 
     A user who did not notice focus moved and kept typing their next instruction
     would otherwise hit the most common letter in English and disable the
@@ -432,8 +453,7 @@ async def test_lowercase_a_does_not_disarm_the_gate() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
-        ask = _approval_gate(session)
+        ask = await _booted_gate(pilot, session)
         pending = asyncio.ensure_future(ask("bash", "run: one"))
         await pilot.pause(0.3)
 
@@ -441,15 +461,20 @@ async def test_lowercase_a_does_not_disarm_the_gate() -> None:
         await pilot.pause(0.2)
         assert not pending.done()  # the question is still being asked
         assert app._approve_all is False
-        # …and the keystroke was not swallowed: it went to the composer.
-        assert app.query_one(Editor).text == "a"
-        assert isinstance(app.screen.focused, Editor)
+        # The card KEEPS focus and keeps the question answerable.
+        #
+        # It used to hand focus to the composer and re-post the keystroke there,
+        # which is the defect this rework removes: from that point the letters
+        # the card still advertised went into the prompt buffer as text, so a
+        # user who pressed `y` watched a `y` appear in the composer while the
+        # tool went on waiting. The stray letter is dropped instead — this card
+        # is a question, not a text field, and the composer is one keystroke
+        # away by click or Tab.
+        prompt = app.query_one(ApprovalPrompt)
+        assert app.screen.focused is prompt
+        assert app.query_one(Editor).text == ""
 
-        # Clicking the prompt is the way back to answering it.
-        block = app.query_one(ApprovalBlock)
-        await pilot.click(block)
-        await pilot.pause(0.1)
-        assert app.screen.focused is block
+        # And the answer keys still work, with no click needed to restore focus.
         await pilot.press("y")
         assert await asyncio.wait_for(pending, 2) is True
 
@@ -473,7 +498,7 @@ async def test_approvals_command_restores_prompting() -> None:
         # And the gate really asks again.
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: x"))
         await pilot.pause(0.3)
-        assert app.query(ApprovalBlock)
+        assert app.query(ApprovalPrompt)
         await pilot.press("n")
         assert await asyncio.wait_for(pending, 2) is False
 
@@ -586,6 +611,19 @@ def test_the_answer_keys_match_the_bindings_and_the_hint_row() -> None:
     assert advertised - {"esc"} == bound
     assert "a" not in bound, "allow-all must need Shift; see CHOICES"
 
+    # The LIVE prompt is a different widget now, and it answers to the same
+    # letters. A drift here is invisible until someone presses a key that the
+    # card advertises and nothing handles, so the two are pinned to each other
+    # rather than each to a literal.
+    assert ApprovalPrompt._ANSWER_KEYS == bound
+    # Every letter that answers is also a row the user can pick without knowing
+    # it, which is the point of the list: a key-only answer is undiscoverable.
+    assert {key for _label, key, _why in APPROVAL_CHOICES} == bound
+    # And every row maps back to exactly one key, so a click and a keystroke
+    # cannot disagree about what was authorised.
+    assert set(APPROVAL_KEY_BY_LABEL.values()) == bound
+    assert len(APPROVAL_KEY_BY_LABEL) == len(APPROVAL_CHOICES)
+
 
 @pytest.mark.asyncio
 async def test_clearing_the_transcript_does_not_disarm_later_prompts() -> None:
@@ -598,9 +636,8 @@ async def test_clearing_the_transcript_does_not_disarm_later_prompts() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        ask = await _booted_gate(pilot, session)
         session.streaming = True
-        ask = _approval_gate(session)
 
         first = asyncio.ensure_future(ask("bash", "run: one"))
         await pilot.pause(0.3)
@@ -612,7 +649,7 @@ async def test_clearing_the_transcript_does_not_disarm_later_prompts() -> None:
         # The next tool of the same run still gets to ask.
         second = asyncio.ensure_future(ask("write", "write: two"))
         await pilot.pause(0.3)
-        assert app.query(ApprovalBlock), "a later tool of a live turn must still ask"
+        assert app.query(ApprovalPrompt), "a later tool of a live turn must still ask"
         await pilot.press("y")
         assert await asyncio.wait_for(second, 2) is True
 
@@ -638,7 +675,7 @@ async def test_approvals_ask_clears_a_latched_deny() -> None:
         assert app._approvals_are_denied(app._turn_epoch) is False
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: x"))
         await pilot.pause(0.3)
-        assert app.query(ApprovalBlock)
+        assert app.query(ApprovalPrompt)
         await pilot.press("y")
         assert await asyncio.wait_for(pending, 2) is True
 
@@ -865,11 +902,11 @@ async def test_approvals_auto_answers_the_question_on_screen() -> None:
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause(0.25)
+        await _booted_gate(pilot, session)
         session.streaming = True
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: make"))
         await pilot.pause(0.3)
-        assert app.query(ApprovalBlock)
+        assert app.query(ApprovalPrompt)
 
         app._run_slash_command("/approvals auto")
         await pilot.pause(0.2)
@@ -1319,3 +1356,42 @@ async def test_a_background_jobs_approval_survives_the_parents_stop_latch() -> N
         # to be truthy, so this asserted the right outcome for the wrong reason.
         app._approval.resolve(True)
         assert await task, "the answered job approval did not resolve truthy"
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_never_eats_a_half_typed_prompt() -> None:
+    """A question arriving mid-sentence must not cost the user their draft.
+
+    This is the risk the anchored prompt takes on. It grabs focus so its answer
+    keys work — the whole point of the rework — and it does so while the user
+    may be in the middle of typing, since an approval is raised by the agent
+    rather than by them. Two things therefore have to hold: the composer's text
+    survives untouched, and focus comes back to it once the question is
+    answered, so the sentence can be finished where it was left.
+
+    The old prompt got the first right and the second wrong in the opposite
+    direction: it handed focus AWAY on any printable key, which is what made
+    its own advertised answer keys stop working.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        ask = await _booted_gate(pilot, session)
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.load_text("please clean up the stale rows and then")
+        await pilot.pause(0.1)
+
+        pending = asyncio.ensure_future(ask("bash", "run: rm -rf ./build"))
+        await pilot.pause(0.3)
+        # The question took focus (or its keys would type into the draft)...
+        assert isinstance(app.screen.focused, ApprovalPrompt)
+        # ...and left the draft exactly as it was.
+        assert editor.text == "please clean up the stale rows and then"
+
+        await pilot.press("y")
+        assert await asyncio.wait_for(pending, 2) is True
+        await pilot.pause(0.2)
+        # Focus is handed back, and the sentence is still there to finish.
+        assert isinstance(app.screen.focused, Editor)
+        assert app.query_one(Editor).text == "please clean up the stale rows and then"
