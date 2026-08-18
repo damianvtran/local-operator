@@ -391,14 +391,21 @@ class JobManagerProtocol(Protocol):
 
     async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool: ...
 
-    # ``settled_event(job_id) -> asyncio.Event`` is deliberately NOT declared
-    # here. This Protocol is ``runtime_checkable`` and ``ToolContext.jobs``
-    # validates against it, so every method added becomes mandatory for every
-    # existing implementation — a host (or a test double) written against the
-    # older surface would stop validating the moment this shipped. ``wait``
-    # therefore probes for it with ``getattr`` and falls back to polling, which
-    # keeps the optimization opt-in for third-party managers rather than
-    # breaking them. See ``tools.builtin._await_any_settled``.
+    # Three methods are deliberately NOT declared here: ``settled_event``
+    # (event-driven ``wait``) and ``append_output``/``read_output`` (the live
+    # output channel behind ``jobs(op="peek")``).
+    #
+    # This Protocol is ``runtime_checkable`` and ``ToolContext.jobs`` validates
+    # against it, so every method added becomes mandatory for every existing
+    # implementation — a host, an embedder's manager, or a test double written
+    # against the older surface would stop validating the moment it shipped.
+    # Adding the output pair here really did break eight such doubles outright.
+    #
+    # Each caller therefore probes with ``getattr`` and degrades: ``wait`` falls
+    # back to polling (``tools.builtin._await_any_settled``), and peek reports
+    # "this manager records no live output" (``tools.builtin._peek_job``, and
+    # bash's output mirror). That costs one branch and keeps the capability
+    # opt-in for third-party managers rather than breaking them.
 
 
 @runtime_checkable
@@ -876,6 +883,29 @@ class NoticeEvent(AgentEvent[Literal["notice"]]):
     type: Literal["notice"] = "notice"
     text: str
     kind: Literal["info", "warning", "error"] = "info"
+
+
+class SteeringDeliveredEvent(AgentEvent[Literal["steering_delivered"]]):
+    """Queued steering messages have entered the model's context.
+
+    Emitted by the session at the moment its steering queue is DRAINED, which is
+    the only moment anything can honestly say a mid-turn message was delivered.
+    ``steer()`` is fire-and-forget by design — it drops a message on a queue the
+    loop empties at its next tool/message boundary — so before this there was no
+    signal at all between "queued" and the agent's eventual reply, and a front
+    end that told the user "queued" had nothing to correct it with.
+
+    ``count`` is how many messages went in together: a user who sent three lines
+    while a tool ran has them all delivered at one boundary, and a receipt per
+    message would claim three deliveries where there was one.
+
+    Not a NoticeEvent: this is a state transition a UI RECONCILES against (the
+    queued row it already painted), not a line to print. A notice would append a
+    second row saying the first row is now wrong.
+    """
+
+    type: Literal["steering_delivered"] = "steering_delivered"
+    count: int = 1
 
 
 class SubagentStartEvent(AgentEvent[Literal["subagent_start"]]):

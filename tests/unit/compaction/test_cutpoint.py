@@ -54,9 +54,16 @@ def test_cut_never_on_tool_result_or_pending_call_assistant():
     assert kept[0] is messages[cut]
 
 
-def test_snap_forward_walks_past_tool_cluster():
-    """When the walk stops ON the tool result, snapping must move forward to
-    the next legal message, never backwards into the cluster."""
+def test_snap_never_lands_on_a_tool_result():
+    """When the walk stops ON a tool result, the snap must leave it, and the
+    resulting partition must keep every call with its result.
+
+    The cut may land on the ISSUING assistant (index 2) rather than past the
+    whole cluster: that keeps the call and its result together on the kept
+    side, which is the actual pairing rule. Requiring the cut to clear the
+    cluster entirely was stricter than the invariant, and inside a long tool
+    run it left no legal cut at all — see ``_is_valid_cut``.
+    """
     messages = [
         _big_user(),
         _big_user(),
@@ -67,8 +74,11 @@ def test_snap_forward_walks_past_tool_cluster():
     keep = estimate_tokens(messages[4]) + estimate_tokens(messages[3])
     cut = find_cut_point(messages, keep)
     assert cut is not None
-    # Walk stops at index 3 (tool) or 2 (assistant w/ calls); snap lands on 4.
-    assert messages[cut] is messages[4]
+    assert messages[cut].role != "tool"
+    to_summarize, kept = prepare_partitions(messages, cut)
+    assert_partition_pair_integrity(to_summarize, kept)
+    # The pass has to be worth making: the summarized side is non-empty.
+    assert to_summarize
 
 
 def test_no_cut_when_everything_is_recent():
@@ -143,8 +153,17 @@ def test_one_summarizable_message_still_runs_when_it_is_the_reason_the_window_is
     assert find_cut_point([marker, _big_user(40), recent, tail], keep) is None
 
 
-def test_none_when_snap_runs_past_end():
-    """Trailing tool cluster with nothing valid after it -> None."""
+def test_history_ending_mid_tool_run_still_compacts():
+    """A history captured MID-RUN ends in a tool cluster with nothing after
+    it, and it must STILL yield a legal cut.
+
+    This is the mid-turn compaction bug in miniature. The old rule treated a
+    trailing cluster as uncuttable and answered ``None``, which the session
+    reports as "nothing to compact" — so a long tool run could not be
+    compacted at any size, sailed past the configured threshold, and got
+    relief only once the run ended. The cut lands on the issuing assistant,
+    which keeps the call/result pair intact.
+    """
     messages = [
         _big_user(),
         _big_user(),
@@ -152,7 +171,86 @@ def test_none_when_snap_runs_past_end():
         _tool_result("c1"),
     ]
     keep = estimate_tokens(messages[3]) + 10
-    assert find_cut_point(messages, keep) is None
+    cut = find_cut_point(messages, keep)
+    assert cut is not None
+    assert messages[cut].role != "tool"
+    to_summarize, kept = prepare_partitions(messages, cut)
+    assert to_summarize
+    assert_partition_pair_integrity(to_summarize, kept)
+
+
+def test_a_cut_never_keeps_an_assistant_whose_call_is_unanswered():
+    """The SAFETY half of the loosened rule, pinned against a live mutant.
+
+    `_is_valid_cut` admits an assistant whose own calls are answered at or
+    after the cut. The inverse must stay refused: an assistant holding a call
+    with NO result anywhere would, if kept, hand the provider a dangling tool
+    call, which is the same class of corruption as orphaning a result.
+
+    This is deliberately shaped so the *pairing* rule is what decides. An
+    earlier version of this test used a two-message history, which returns
+    ``None`` from the triviality rule (`index <= 1`) before the predicate is
+    ever consulted — it passed whatever `_is_valid_cut` did, so it pinned
+    nothing. Here there is ample summarizable history and a legal cut exists
+    (the trailing user message), so a cut IS returned and the only question is
+    where it may land.
+
+    Mutating the predicate's default from `-1` to a large value (treating an
+    unanswered call as answered) makes this fail, which is what a regression
+    would do.
+    """
+    unanswered = _assistant_with_call("never-answered")
+    messages = [
+        _big_user(),
+        _big_user(),
+        _big_user(),
+        unanswered,
+        Message.user("after " + "word " * 200),
+    ]
+    cut = find_cut_point(messages, estimate_tokens(messages[4]) + 10)
+    assert cut is not None, "this history has a legal cut and must produce one"
+    assert messages[cut] is not unanswered, (
+        "the cut kept an assistant whose tool call has no result anywhere, "
+        "which hands the provider a dangling call"
+    )
+
+    # The PROPERTY, over every budget that makes the walk stop at a different
+    # index, rather than the single mutant above — pinning one mutant leaves
+    # siblings alive (`>= 0` and `any`-for-`all` both survived a single-budget
+    # version of this test).
+    #
+    # Both halves of the predicate are load-bearing, and each is pinned by a
+    # sibling test below: `all` (not `any`) by the partially-answered case, and
+    # `>= index` (not `>= 0`) by the re-issued-id case.
+    #
+    # The property is about the CUT INDEX, which is all ``_is_valid_cut``
+    # governs: an assistant holding an unanswered call may never BE the cut.
+    # It deliberately does not assert that no such assistant is anywhere in the
+    # kept window, because a cut landing EARLIER than one keeps it, and that is
+    # true on `origin/main` too — an unanswered call is a property of the
+    # history the caller supplied, not something the cut point introduces.
+    # Asserting the wider claim fails on unmutated code, which is how this
+    # comment came to be here.
+    budgets = {estimate_tokens(m) for m in messages}
+    budgets |= {sum(estimate_tokens(m) for m in messages[i:]) for i in range(len(messages))}
+    answered_anywhere = {
+        m.tool_call_id for m in messages if isinstance(m, Message) and m.role == "tool"
+    }
+    checked = 0
+    for budget in sorted(b for b in budgets if b > 0):
+        candidate_cut = find_cut_point(messages, budget)
+        if candidate_cut is None:
+            continue
+        checked += 1
+        boundary = messages[candidate_cut]
+        assert boundary.role != "tool", f"budget {budget}: cut landed on a tool result"
+        if isinstance(boundary, Message) and boundary.tool_calls:
+            unresolved = [c.id for c in boundary.tool_calls if c.id not in answered_anywhere]
+            assert not unresolved, (
+                f"budget {budget}: the cut is an assistant whose calls {unresolved} "
+                "are answered nowhere, so the kept window opens with a dangling call"
+            )
+    assert checked, "no budget produced a cut, so this test asserted nothing"
 
 
 def test_empty_and_zero_budget():
@@ -295,3 +393,73 @@ def test_marker_tokens_use_raw_encoder():
     summary = "summary text " * 50
     marker = CustomMessage(custom_type="compaction_summary", details={"summary": summary})
     assert _message_tokens(marker) == _encode_len(summary)
+
+
+def test_a_partially_answered_assistant_is_not_a_valid_cut():
+    """`all`, not `any`: EVERY call of the boundary assistant must be answered.
+
+    An assistant issuing two calls where only one result has arrived is the
+    case that separates the two forms. Keeping it strands the unanswered call
+    on the kept side with no result, which is the dangling-call corruption in
+    the other direction from an orphaned result.
+
+    This exists because an earlier comment here claimed `any` was an
+    equivalent mutant, reasoning that an assistant always precedes its own
+    results. That premise is true and does not bear on this case: what
+    separates `all` from `any` is PARTIAL answering, not ordering. The claim
+    was false and the coverage it argued against is this test.
+    """
+    partial = _assistant_with_call("answered")
+    partial.tool_calls.append(ToolCall(id="never", name="bash", arguments={"command": "ls"}))
+    messages = [
+        _big_user(),
+        _big_user(),
+        _big_user(),
+        partial,
+        _tool_result("answered"),
+        Message.user("tail"),
+    ]
+
+    # Sized so the backwards walk STOPS on the partial assistant: it is the cut
+    # candidate, and `all` vs `any` decides whether it is accepted there. A
+    # budget that lets the walk stop past it never consults the predicate at
+    # all — the first version of this test did exactly that and passed under
+    # the `any` mutant, pinning nothing.
+    budget = sum(estimate_tokens(m) for m in messages[3:])
+    cut = find_cut_point(messages, budget)
+
+    assert cut is not None
+    assert messages[cut] is not partial, (
+        "the cut kept an assistant whose second call has no result, stranding a "
+        "dangling call at the head of the kept window"
+    )
+    to_summarize, kept = prepare_partitions(messages, cut)
+    assert_partition_pair_integrity(to_summarize, kept)
+
+
+def test_an_assistant_reissuing_an_already_answered_id_is_not_a_valid_cut():
+    """`>= index`, not `>= 0`: the result must follow THIS assistant.
+
+    ``_result_indices`` keys by ``tool_call_id`` and last occurrence wins, so a
+    re-issued id can resolve to a result that sits BEFORE the assistant that
+    re-issued it. Comparing against ``0`` accepts that (a result exists
+    somewhere); comparing against ``index`` is what requires the result to be
+    on the kept side of this cut.
+    """
+    first = _assistant_with_call("x")
+    reissued = _assistant_with_call("x")
+    messages = [
+        _big_user(),
+        first,
+        _tool_result("x"),
+        reissued,
+        Message.user("after " + "word " * 200),
+    ]
+
+    cut = find_cut_point(messages, estimate_tokens(messages[4]) + 10)
+
+    assert cut is not None
+    assert messages[cut] is not reissued, (
+        "the cut kept an assistant whose only matching result precedes it, so "
+        "the kept window opens with a call nothing answers"
+    )

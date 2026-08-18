@@ -80,7 +80,22 @@ ICON_MODEL = "◆"
 ICON_EFFORT = "▴"
 ICON_CWD = "⌂"
 ICON_AGENTS = "◍"
-ICON_JOBS = "⊞"
+#: Background jobs. Kept inside **Geometric Shapes (U+25xx)** like every other
+#: segment icon above, and that block is a hard constraint rather than a
+#: stylistic preference. This was `⊞` (U+229E SQUARED PLUS, Mathematical
+#: Operators) and it rendered as TOFU — an empty replacement box — in the
+#: operator's terminal, while every U+25xx glyph beside it on the same row
+#: painted correctly. One band screenshot showed `◆ ◍ ▦ ◈ ◷` all fine and the
+#: single U+22xx glyph among them broken, which is what identifies the block
+#: rather than the individual codepoint as the problem: terminal fonts that
+#: cover Geometric Shapes routinely stop short of Mathematical Operators.
+#: `▣` also stays visually distinct from `▦` (U+25A6), which sits directly
+#: beside it in the right group — a filled-square icon that reads as a
+#: crosshatched one at a glance would make two adjacent readings look alike.
+#: **Any new icon here belongs in U+25xx unless it has been checked in a real
+#: terminal**, because `cell_len` cannot see this: tofu still measures one cell,
+#: so the band's width arithmetic stays correct while the glyph is invisible.
+ICON_JOBS = "▣"
 ICON_CONTEXT = "▦"
 ICON_COST = "◈"
 ICON_DURATION = "◷"
@@ -88,6 +103,13 @@ ICON_DURATION = "◷"
 #: in ``rich.cells.cell_len``, so it satisfies the single-cell rule above; it
 #: was checked rather than assumed, because the band's arithmetic is exact and
 #: a two-cell glyph would drift the right group's edge by one column.
+#:
+#: NOTE: this is now the ONLY U+22xx (Mathematical Operators) glyph left in the
+#: palette, and so carries the same latent tofu risk that took `ICON_JOBS` above
+#: out of that block. It is deliberately left alone: it has not been observed
+#: broken, and swapping a working glyph on suspicion would trade a known state
+#: for an unknown one. Recorded so that a future report of an empty box next to
+#: the MCP count is diagnosed in one step instead of rediscovered.
 ICON_MCP = "⊙"
 #: Disarmed-gate alarm. Deliberately NOT one of the geometric segment icons
 #: above: this one is an ALARM, not a reading, and it reuses the app-wide
@@ -397,6 +419,88 @@ def format_context_usage(tokens: int, window: int) -> str:
     as two different states.
     """
     return context_spelling(tokens, window, form="full")
+
+
+#: Context sizes at which the reading changes colour, largest first. ABSOLUTE
+#: token counts, because the cost they warn about is absolute: 300k tokens is
+#: slow and expensive to re-send on every request whether the window is 1M or
+#: 200k, and a purely proportional ramp would leave a big window looking calm
+#: at exactly the size that hurts most. This mirrors the ladder omp shows for
+#: the same reading.
+#:
+#: These are only half the rule — see :data:`CONTEXT_COLOR_WINDOW_BANDS` for
+#: the proportional half, which is what makes the ramp reachable at all on the
+#: 200k-and-under models that are most of the registry.
+#:
+#: The hues are the palette's existing semantics rather than new tokens, so
+#: both themes get a legible ramp for free: `signal` (blue) is the neutral
+#: reading, `label` (purple) marks a context worth noticing, and `danger`
+#: (red) marks one at or past the point where compaction is due.
+CONTEXT_COLOR_BANDS: tuple[tuple[int, str], ...] = (
+    (500_000, "danger"),
+    (200_000, "label"),
+)
+
+#: Fractions of the context window that warm the reading to the same rungs,
+#: applied as a UNION with the absolute bands above (whichever is warmer wins).
+#:
+#: The absolute bands alone cannot do the segment's job, because 70% of the
+#: registry's windowed models are 200k or smaller: on those the reading could
+#: never leave the base colour, so it stayed calm blue at 100% full with
+#: compaction already overdue (the trigger for a 200k window is 160k). Once
+#: colour means "how full am I", a calm blue at 100% is not neutral, it is
+#: wrong. The fractions are set just under and at the compaction trigger's own
+#: default (``threshold_percent`` 0.80) so the warm rung appears while there is
+#: still headroom and the top rung coincides with the pass becoming due.
+CONTEXT_COLOR_WINDOW_BANDS: tuple[tuple[float, str], ...] = (
+    (0.80, "danger"),
+    (0.55, "label"),
+)
+
+#: Colour of a context reading below every band in :data:`CONTEXT_COLOR_BANDS`.
+CONTEXT_COLOR_BASE = "signal"
+
+#: Rungs warmest-first, so a union of two ladders can be resolved by rank.
+_CONTEXT_COLOR_RANK: tuple[str, ...] = ("danger", "label", CONTEXT_COLOR_BASE)
+
+
+def context_semantic_color(tokens: int, window: int = 0) -> str:
+    """Semantic colour name for a context reading of ``tokens``.
+
+    The warmer of two ladders wins: an ABSOLUTE token count
+    (:data:`CONTEXT_COLOR_BANDS`) and a FRACTION of ``window``
+    (:data:`CONTEXT_COLOR_WINDOW_BANDS`). Each guards a failure the other
+    cannot see, which is why this is a union rather than a choice:
+
+    - The absolute ladder is what makes a very large window legible. Re-sending
+      300k tokens on every request is slow and expensive whether the window is
+      1M or 200k, and a purely proportional ramp would leave a 1M session
+      looking calm at exactly the size that costs the most per turn.
+    - The proportional ladder is what makes a SMALL window legible, and without
+      it the segment was inert on most models: at 200k and below the absolute
+      rungs are unreachable, so the reading stayed blue through 100% full while
+      compaction was already due.
+
+    ``window <= 0`` (unknown) falls back to the absolute ladder alone, since a
+    percentage needs a denominator — the same rule the reading's text follows.
+
+    Strictly greater-than on both ladders, so a value sitting exactly on a
+    boundary keeps the calmer colour and a number hovering there does not
+    flicker between two hues.
+    """
+    color = CONTEXT_COLOR_BASE
+    for threshold, candidate in CONTEXT_COLOR_BANDS:
+        if tokens > threshold:
+            color = candidate
+            break
+    if window > 0:
+        for fraction, candidate in CONTEXT_COLOR_WINDOW_BANDS:
+            if tokens > window * fraction:
+                # Warmest wins: rank is warmest-first, so a lower index is warmer.
+                if _CONTEXT_COLOR_RANK.index(candidate) < _CONTEXT_COLOR_RANK.index(color):
+                    color = candidate
+                break
+    return color
 
 
 #: The forms a context reading may be written in, widest first. Named rather
@@ -1343,12 +1447,25 @@ class StatusLine:
         if "mcp" not in dropped:
             mcp = format_mcp(self._mcp)
             if mcp:
+                semantic = mcp_semantic(self._mcp)
                 parts.append(
                     (
                         ICON_MCP,
                         mcp,
                         Style(color=theme_mod.semantic_color("fg")),
-                        Style(color=theme_mod.semantic_color(mcp_semantic(self._mcp))),
+                        # BOLD when the lamp is an alarm, so weight tracks
+                        # "needs attention" across the whole band rather than
+                        # tracking which segment got a carrier first. The
+                        # context reading is bold on its warm rungs (a
+                        # colour-vision carrier), and without this the
+                        # self-correcting red outweighed the one state where
+                        # the agent is genuinely missing tools — worst on a
+                        # narrow terminal, where the ladder drops the segments
+                        # between the two and leaves them adjacent.
+                        Style(
+                            color=theme_mod.semantic_color(semantic),
+                            bold=semantic == "danger",
+                        ),
                     )
                 )
 
@@ -1414,9 +1531,36 @@ class StatusLine:
             if jobs:
                 parts.append((ICON_JOBS, jobs, Style(color=theme_mod.semantic_color("label"))))
         if "context" not in dropped:
-            usage = format_context_usage(*self._shown_context())
+            tokens, window = self._shown_context()
+            usage = format_context_usage(tokens, window)
             if usage:
-                parts.append((ICON_CONTEXT, usage, Style(color=theme_mod.semantic_color("signal"))))
+                # The one segment whose colour carries information: it warms
+                # from blue through purple to red as the context fills, so a
+                # session heading for compaction is visible at a glance
+                # instead of having to be read. The window is passed because
+                # the ramp is a union of an absolute and a proportional
+                # ladder; on a 200k model the absolute rungs are unreachable
+                # and the proportional half is the only thing that fires.
+                #
+                # BOLD on the warm rungs, because hue alone cannot carry this.
+                # `signal` and `label` are 35 dE apart in normal vision and
+                # 1.7 under deuteranopia (the commonest deficiency, ~6% of
+                # men) — indistinguishable, so for those readers the 200k step
+                # would simply not exist. Weight is orthogonal to hue, costs no
+                # cells, and moves nothing in the drop ladder's arithmetic
+                # since the text is unchanged. The base rung stays regular so
+                # "warm" remains the marked state rather than the default.
+                semantic = context_semantic_color(tokens, window)
+                parts.append(
+                    (
+                        ICON_CONTEXT,
+                        usage,
+                        Style(
+                            color=theme_mod.semantic_color(semantic),
+                            bold=semantic != CONTEXT_COLOR_BASE,
+                        ),
+                    )
+                )
         cost = self._shown_cost()
         if cost and "cost" not in dropped:
             parts.append((ICON_COST, cost, Style(color=theme_mod.semantic_color("warning"))))
@@ -1456,8 +1600,31 @@ class StatusLine:
             # (both `#e0b04b`, both 8.64:1 on the band's ground), so the band's
             # only alarm read as another figure. `danger` reads as an alarm and
             # measures 6.62:1 dark / 4.94:1 on the paper ramp, and it is the same
-            # ink the `⊙` lamp takes when MCP discovery fails — in this band red
-            # is the ALARM category, which is why two of them do not conflict.
+            # ink the `⊙` lamp takes when MCP discovery fails.
+            #
+            # Red in this band means NEEDS-ATTENTION, and three segments may take
+            # it: this one, the `⊙` MCP lamp, and the context reading's top rung.
+            # They do not conflict because each is the warmest state of a
+            # DIFFERENT segment, read off the glyph that precedes it, and none is
+            # a routine value — `!` means no tool will ask before it runs, `⊙`
+            # means configured tools are missing, and `▦` in red means the
+            # context is at or past its compaction trigger OR past the absolute
+            # re-send-cost rung. Those two coincide only where the window is
+            # small enough for the proportional ladder to govern: above ~625k
+            # the absolute rung fires at 500k while the resolved trigger is
+            # capped at 600k, so a 1M session shows red for a band of ~100k
+            # before a pass is actually due. It is the weakest of the three
+            # either way (compaction resolves it without the user acting), which
+            # is why it is the only one gated behind a threshold rather than
+            # being a state the segment can simply be in.
+            #
+            # BOLD on all three, so weight tracks "needs attention" rather than
+            # tracking which segment happened to get a carrier first. The
+            # context reading is bold on its warm rungs as a colour-vision
+            # carrier (see the ramp), and leaving the `⊙` lamp regular made the
+            # self-correcting red heavier than the one state where the agent is
+            # genuinely missing tools — most visible on a narrow terminal, where
+            # the ladder sheds the segments between them.
             #
             # The glyph rides INSIDE the styled text rather than in the icon slot,
             # because the loop below paints icons `dim` — which made the one alarm
@@ -1519,6 +1686,32 @@ class StatusLine:
         padded to the cells :meth:`_walk` reserved (:data:`NAME_CELLS`), so this
         arithmetic is the same at every title length and a short title leaves its
         leftover at the band's edge rather than shunting the group right.
+
+        That leftover is then CUT from the painted row, and the order of those
+        two steps is the whole point — it is NOT the same thing as aligning the
+        group by its ink. The gap above is still computed from the PADDED box, so
+        every column up to and including the name's first cell remains a function
+        of the row's geometry alone and nothing to the LEFT of the name can see
+        this cut. Aligning by ink instead was tried and reintroduces the exact
+        defect the reserve exists for: the alarm glyph goes back to moving with
+        the title, measured at 120/150/160 columns across the four titles in
+        ``_NAMES`` as columns 91/90/85/108, 121/120/115/138 and 122/117/125/148.
+        Here the only cells removed are the run of blanks BETWEEN the name's last
+        inked cell and the band's right edge, and nothing is ever painted there:
+        the name is the row's last segment by construction.
+
+        Worth removing because those blanks are not nothing. They are ordinary
+        cells carrying the band's own style, so anything that READS the row
+        rather than looking at it carries them: the SVG export writes 35 trailing
+        spaces after a `short` title at a 160-column terminal (0 after the cut),
+        and a reflow or a copy would take them the same way. A row whose right
+        edge is flush for a long title and 35 cells short for a brief one reads
+        as a rendering fault rather than as a band with less to say.
+
+        ``rstrip`` mutates, so it is applied to the freshly built row and never
+        to ``right``: trimming the caller's group in place would leave the fit
+        arithmetic in :meth:`_walk` measuring a different string than the box it
+        reserved, which is the bug this method exists to avoid.
         """
         if not right.plain:
             return left
@@ -1527,6 +1720,7 @@ class StatusLine:
         row.append_text(left)
         row.append(" " * gap, style=dim)
         row.append_text(right)
+        row.rstrip()
         return row
 
     def render_text(self, width: int) -> Text:

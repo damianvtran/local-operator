@@ -18,8 +18,10 @@ import re
 from typing import Any, NotRequired, TypedDict, cast
 
 from rich.cells import cell_len
+from rich.style import Style
 from textual.widgets import Static
 
+from local_operator.compaction.thresholds import CompactionSettings, should_compact
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import (
     _DROP_LADDER,
@@ -29,14 +31,20 @@ from local_operator.tui.widgets.status_line import (
     _MIN_GROUP_GAP,
     _SPINNER_FRAMES,
     _UNBOUNDED_RUNGS,
+    ICON_AGENTS,
     ICON_APPROVALS,
+    ICON_CONTEXT,
+    ICON_COST,
     ICON_CWD,
+    ICON_DURATION,
+    ICON_JOBS,
     ICON_MCP,
     ICON_MODEL,
     NAME_CELLS,
     NAME_CELLS_FLOOR,
     McpStatus,
     StatusLine,
+    context_semantic_color,
     drop_ladder,
     format_agents,
     format_context_usage,
@@ -1158,15 +1166,23 @@ def _swept_band(state: _LadderState, *, alarm: bool) -> StatusLine:
     return status
 
 
-def _name_box(row: str, name: str) -> int:
-    """Cells the trailing name segment RESERVED, its padding included.
+def _name_box(row: str, name: str, width: int) -> int:
+    """Cells the trailing name segment RESERVED, its unpainted tail included.
 
     The box is what the layout is built on, and it is not the same number as the
     ink in it: a word-boundary cut can leave `Bulk export the…` in an 18-cell box.
     Located from the name's own opening characters, which land on the box's first
     cell because the name is left-aligned in it.
+
+    Measured to ``width`` rather than to ``len(row)``, and that is the difference
+    between the box and the ink now that ``_compose`` stops painting the box's
+    trailing blanks. The reserve still runs to the band's right edge — the row is
+    laid out to exactly ``width`` and only then trimmed — so the edge, not the
+    last inked cell, is where the box ends. Reading ``len(row)`` here would make
+    this helper return the INK and quietly turn every caller into a test of the
+    string's length instead of the layout's reserve.
     """
-    return len(row) - row.rindex(name[:4])
+    return width - row.rindex(name[:4])
 
 
 def test_naming_a_session_never_costs_a_segment_for_nothing(monkeypatch) -> None:
@@ -1204,7 +1220,7 @@ def test_naming_a_session_never_costs_a_segment_for_nothing(monkeypatch) -> None
                     where = f"{label} alarm={alarm} width={width}"
                     lost = set(status._dropped) - bare - {"name"}
                     if status.is_showing("name"):
-                        box = _name_box(row, name)
+                        box = _name_box(row, name, width)
                         assert (
                             box >= NAME_CELLS_FLOOR
                         ), f"{where}: {sorted(lost)} spent for a {box}-cell name"
@@ -1226,6 +1242,13 @@ def test_the_alarms_column_does_not_move_when_the_title_changes(monkeypatch) -> 
 
     Asserted over the whole row rather than just the glyph: everything up to the
     name's own box has to be identical, or something else moved instead.
+
+    The row's painted LENGTH is deliberately not the assertion. ``_compose`` no
+    longer paints the name box's trailing blanks, so a brief title ends earlier
+    than a long one by design and comparing lengths would pin the ink instead of
+    the layout. What has to hold is that the box each title was given is the same
+    size — asserted below through ``_name_box``, which measures to the band's
+    right edge — and that is the property the length comparison stood in for.
     """
     monkeypatch.setenv("HOME", "/Users/tester")
     for label, state in _LADDER_STATES.items():
@@ -1243,7 +1266,14 @@ def test_the_alarms_column_does_not_move_when_the_title_changes(monkeypatch) -> 
             head = first[: first.index("!") + 1]
             for row in rows[1:]:
                 assert row.startswith(head), f"{label} width={width}: the row reflowed"
-                assert len(row) == len(first), f"{label} width={width}: the row changed width"
+            # The reserve itself, which is what the old length comparison meant:
+            # every title at this width was handed a box of the same size, so a
+            # title arriving or being rewritten cannot resize the segment under
+            # the reader. Measurable only where the name survived the ladder.
+            boxes = {
+                _name_box(row, name, width) for row, name in zip(rows, _NAMES) if name[:4] in row
+            }
+            assert len(boxes) <= 1, f"{label} width={width}: the name's box changed size {boxes}"
 
 
 def test_the_name_takes_every_cell_the_row_can_spare(monkeypatch) -> None:
@@ -1275,6 +1305,71 @@ def test_the_name_takes_every_cell_the_row_can_spare(monkeypatch) -> None:
     # More than the two widths the old constant pair allowed, and monotone in the
     # terminal's width over the range where the row is otherwise unchanged.
     assert len(set(boxes)) > 5, f"the name still has only {sorted(set(boxes))} widths"
+
+
+def test_a_brief_title_leaves_no_dead_run_at_the_bands_right_edge(monkeypatch) -> None:
+    """The name's box is RESERVED, but its unused tail is not PAINTED.
+
+    The reserve is what holds every sibling's column still while a model rewrites
+    the title (D2), so it stays — but it used to be painted out to the band's
+    right edge as well, which left a brief title trailed by a long run of blank
+    cells that no segment would ever occupy.
+
+    The run's SIZE is not a constant. Two earlier versions of this docstring
+    implied otherwise, and the second was written to fix the first — which is
+    the more useful half of the story, because a correction carries more
+    authority than an original and nobody re-checks a sentence whose commit
+    message says it is the fix.
+
+    The first version said the run was "identical at every width". The second
+    retracted that and then quoted a second illustrative triple, which reproduces
+    only under a band shape it did not name: the width-100 figure moves with the
+    cwd's length and with whether the alarm is armed, so the same measurement
+    yields a different first entry on a shorter path or a disarmed gate. A
+    figure quoted without the conditions that produce it is the same unenforced
+    universal in a narrower costume.
+
+    So no illustrative numbers are quoted here at all. What identifies the
+    padding is the RELATIONSHIP, which needs none: the run is exactly the box
+    minus the ink, so it grows as the box grows and vanishes when the title
+    fills it — while a layout gap would not track the title's length. The box is
+    itself elastic and only reaches the full ``NAME_CELLS`` once the row can
+    spare it, which is why any single measurement of the run is a fact about one
+    band shape rather than about the defect.
+
+    That relationship is what this test pins, by asserting the row ends on the
+    title's last inked cell at every width rather than by asserting any
+    particular number of dead cells.
+
+    Those cells are ordinary styled cells, so everything that reads the row
+    rather than looking at it carried them — the app's own SVG export wrote 35
+    trailing spaces after `short` at a 160-column terminal.
+
+    The two halves are asserted together on purpose. Trimming the tail is only
+    correct while the reserve behind it is untouched, so this pins that the row
+    ends on the title's last inked character AND that the box measured to the
+    band's edge is unchanged by how long the title is.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    for label, state in _LADDER_STATES.items():
+        status = _swept_band(state, alarm=True)
+        for width in (100, 120, 160):
+            boxes = set()
+            for name in ("a", "short", "Bulk export the invoice columns"):
+                status.update(conversation_name=name)
+                row = status.render_text(width).plain
+                if not status.is_showing("name"):
+                    continue
+                where = f"{label} width={width} name={name!r}"
+                assert (
+                    row == row.rstrip()
+                ), f"{where}: {len(row) - len(row.rstrip())} dead cells at the band's edge"
+                # The ink really is the title's, not a coincidence of truncation.
+                assert row.endswith(truncate_name(name, _name_box(row, name, width))), where
+                boxes.add(_name_box(row, name, width))
+            # ...and the reserve behind that trimmed tail did not move with the
+            # title's length, which is the property the padding used to provide.
+            assert len(boxes) <= 1, f"{label} width={width}: the box moved with the title {boxes}"
 
 
 def test_the_bands_cut_lands_on_a_word_like_the_excerpt_it_was_handed() -> None:
@@ -1362,3 +1457,225 @@ def test_the_band_still_paints_what_it_was_told() -> None:
 
     assert dock.painted is not None
     assert "$12.40" in dock.painted.plain
+
+
+def test_every_segment_icon_stays_in_the_block_the_terminal_font_covers() -> None:
+    """Segment icons live in Geometric Shapes (U+25xx), and that is a fix.
+
+    `ICON_JOBS` was `⊞` (U+229E SQUARED PLUS, Mathematical Operators) and
+    rendered as TOFU — an empty replacement box — in a real terminal, while
+    every U+25xx glyph on the same row painted correctly. That is what makes
+    this a property of the BLOCK rather than of one unlucky codepoint: fonts
+    that cover Geometric Shapes routinely stop short of Mathematical Operators.
+
+    This is asserted here because **no other check in the repo can see it**.
+    `cell_len` returns 1 for tofu exactly as it does for a real glyph, so the
+    band's width arithmetic stays correct and every layout test keeps passing
+    while the icon is invisible to the user. An SVG export embeds the character
+    rather than the rendered shape, so it cannot see it either. The only
+    instruments are a human looking at a terminal, and this rule.
+
+    `ICON_MCP` is deliberately EXCLUDED and left in U+22xx: it has not been
+    observed broken, so it is recorded as a known risk at its definition rather
+    than swapped on suspicion. If it is ever reported as an empty box, the fix
+    is to move it into U+25xx and add it to this test.
+
+    `ICON_APPROVALS` is excluded because it is plain ASCII `!`, and `ICON_CWD`
+    because `⌂` (U+2302) predates the band and has been on screen in every
+    release since without a report.
+    """
+    icons = {
+        "ICON_MODEL": ICON_MODEL,
+        "ICON_AGENTS": ICON_AGENTS,
+        "ICON_JOBS": ICON_JOBS,
+        "ICON_CONTEXT": ICON_CONTEXT,
+        "ICON_COST": ICON_COST,
+        "ICON_DURATION": ICON_DURATION,
+    }
+    for name, glyph in icons.items():
+        assert len(glyph) == 1, f"{name} is not a single codepoint: {glyph!r}"
+        point = ord(glyph)
+        assert 0x2500 <= point <= 0x25FF, (
+            f"{name} is U+{point:04X}, outside Geometric Shapes (U+25xx). "
+            "cell_len cannot detect tofu, so a glyph outside this block has to "
+            "be confirmed in a real terminal before it ships."
+        )
+        # The width rule the band's arithmetic depends on, checked on the same
+        # pass: a two-cell glyph would drift the right group's edge by a column.
+        assert cell_len(glyph) == 1, f"{name} is not one cell wide"
+
+    # The jobs and context icons sit side by side in the right group, so they
+    # have to be tellable apart at a glance and not merely unequal as strings.
+    assert ICON_JOBS != ICON_CONTEXT
+
+
+# ---------------------------------------------------------------------------
+# The context reading's colour ramp
+# ---------------------------------------------------------------------------
+
+
+def test_the_context_colour_warms_as_the_context_fills() -> None:
+    """Blue below 200k, purple above it, red above 500k.
+
+    The reading is the one number in the band whose colour carries
+    information: a session heading for compaction should be visible without
+    being read. This is the ABSOLUTE half of the ramp, which is what keeps a
+    very large window legible; an unknown window (0) isolates it, since the
+    proportional half needs a denominator.
+    """
+    assert context_semantic_color(0, 0) == "signal"
+    assert context_semantic_color(199_999, 0) == "signal"
+    assert context_semantic_color(200_001, 0) == "label"
+    assert context_semantic_color(499_999, 0) == "label"
+    assert context_semantic_color(500_001, 0) == "danger"
+
+
+def test_a_reading_exactly_on_a_boundary_keeps_the_calmer_colour() -> None:
+    """Strictly greater-than on both ladders, so a context parked on a
+    boundary does not flicker between two hues as the estimate wobbles by a
+    token."""
+    assert context_semantic_color(200_000, 0) == "signal"
+    assert context_semantic_color(500_000, 0) == "label"
+    # The proportional ladder on its own boundaries, isolated by a 200k window
+    # where the absolute rungs are unreachable and cannot mask the result:
+    # 55% is 110,000 and 80% is 160,000.
+    assert context_semantic_color(110_000, 200_000) == "signal"
+    assert context_semantic_color(110_001, 200_000) == "label"
+    assert context_semantic_color(160_000, 200_000) == "label"
+    assert context_semantic_color(160_001, 200_000) == "danger"
+
+
+def test_a_small_window_still_reaches_the_warm_rungs() -> None:
+    """D1: the absolute rungs are unreachable on most models.
+
+    70% of the registry's windowed models are 200k or smaller, so an
+    absolute-only ramp left them calm blue at 100% full with compaction
+    already overdue. The proportional half is what fires there.
+    """
+    assert context_semantic_color(100_000, 200_000) == "signal"
+    assert context_semantic_color(150_000, 200_000) == "label"
+    assert context_semantic_color(199_000, 200_000) == "danger"
+    assert context_semantic_color(200_000, 200_000) == "danger"
+
+
+def test_the_reading_is_never_calm_while_compaction_is_due_at_the_default_trigger() -> None:
+    """The property the ramp exists for, asserted against the REAL trigger.
+
+    Colour meaning "how full am I" is only honest if a calm reading implies
+    no pass is due. Checked against ``should_compact`` itself rather than
+    against the ramp's own thresholds, so the two cannot drift apart.
+
+    Scoped to the DEFAULT ``CompactionSettings`` on purpose, and named for it,
+    because the ramp's fractions are constants while the trigger is user
+    config: someone who sets ``threshold_percent`` below 0.55, or a
+    ``threshold_tokens``/explicit ``reserve_tokens`` that resolves lower than
+    the proportional rung, moves the trigger under the ramp and gets a calm
+    reading while a pass is due. That degrades to the pre-change appearance
+    rather than to a wrong one, and banding on the resolved trigger would
+    mean plumbing ``resolve_threshold_tokens`` into the band. The claim is
+    narrowed to what is actually verified rather than left sounding absolute.
+    """
+    settings = CompactionSettings()
+    for window in (131_072, 200_000, 1_000_000):
+        for numerator in range(1, 21):
+            tokens = int(window * numerator / 20)
+            if should_compact(tokens, window, settings):
+                assert context_semantic_color(tokens, window) != "signal", (
+                    f"{tokens:,}/{window:,} is past its compaction trigger "
+                    "but still paints the calm base colour"
+                )
+
+
+def test_the_band_paints_the_context_segment_in_its_band_colour() -> None:
+    """The ramp reaches the rendered row, not just the helper.
+
+    Asserted on a 1M window at each band, because the window is exactly what
+    the colour must NOT depend on — 300k of 1M is only 30% full and still
+    warrants the warmer hue, since re-sending 300k tokens is expensive
+    whatever the window.
+    """
+    for tokens, semantic in ((120_000, "signal"), (300_000, "label"), (700_000, "danger")):
+        status = StatusLine(_dock(200))
+        status.update(model_label="test/model", context_tokens=tokens, context_window=1_000_000)
+        row = status.render_text(200)
+        reading = format_context_usage(tokens, 1_000_000)
+        assert reading in row.plain
+        fills = _fills(row)
+        painted = {text: fill for text, fill in fills.items() if reading in text}
+        assert painted, f"the context segment was not painted for {tokens}"
+        expected = theme_mod.semantic_color(semantic).lower()
+        assert set(painted.values()) == {
+            expected
+        }, f"{tokens} tokens should paint {semantic} ({expected}), got {painted}"
+
+
+def test_the_three_context_bands_are_visually_distinct() -> None:
+    """A ramp nobody can tell apart is not a ramp. The three hues must be
+    separated in both themes, since the palette differs between them."""
+    for theme in ("dark", "light"):
+        hexes = [theme_mod.semantic_color(name, theme) for name in ("signal", "label", "danger")]
+        assert len(set(hexes)) == 3, f"{theme} reuses a hue across the context bands"
+
+
+def test_the_warm_rungs_carry_weight_as_well_as_hue() -> None:
+    """D3: hue alone cannot carry this signal.
+
+    `signal` and `label` are ~35 dE apart in normal vision and 1.7 under
+    deuteranopia, so for the commonest colour-vision deficiency the middle
+    rung would not exist at all. Weight is orthogonal to hue and costs no
+    cells. The base rung stays regular, so warm is the marked state.
+    """
+    weights: dict[int, bool] = {}
+    for tokens in (120_000, 300_000, 700_000):
+        status = StatusLine(_dock(200))
+        status.update(model_label="test/model", context_tokens=tokens, context_window=1_000_000)
+        row = status.render_text(200)
+        reading = format_context_usage(tokens, 1_000_000)
+        # ``Span.style`` is ``str | Style``; only the Style spans carry the
+        # paint, and narrowing keeps this honest rather than casting.
+        bolds = {
+            span.style.bold
+            for span in row.spans
+            if isinstance(span.style, Style)
+            and span.style.color is not None
+            and reading in row.plain[span.start : span.end]
+        }
+        assert len(bolds) == 1, f"the reading was painted inconsistently at {tokens}"
+        weights[tokens] = bool(bolds.pop())
+    assert weights[120_000] is False, "the calm rung must not be bold"
+    assert weights[300_000] is True, "the purple rung needs a non-colour carrier"
+    assert weights[700_000] is True, "the red rung needs a non-colour carrier"
+
+
+def test_weight_tracks_attention_across_every_red_in_the_band() -> None:
+    """D6: three segments may take red, and weight must not invert them.
+
+    The context reading is bold on its warm rungs as a colour-vision carrier.
+    Left alone, that made the one red the band calls self-correcting heavier
+    than the `⊙` MCP lamp, which is the state where the agent is genuinely
+    missing tools — the salience the alarm colour exists to protect. Worst on
+    a narrow terminal, where the drop ladder sheds what sits between them.
+    """
+    status = StatusLine(_dock(200))
+    status.update(
+        model_label="test/model",
+        context_tokens=700_000,
+        context_window=1_000_000,
+        mcp=McpStatus(configured=3, connected=2, failed=True),
+    )
+    row = status.render_text(200)
+    danger = theme_mod.semantic_color("danger").lower()
+
+    reds = {
+        row.plain[span.start : span.end]: span.style.bold
+        for span in row.spans
+        if isinstance(span.style, Style)
+        and span.style.color is not None
+        and span.style.color.triplet is not None
+        and span.style.color.triplet.hex.lower() == danger
+    }
+    assert reds, "expected the row to carry red marks"
+    assert all(reds.values()), (
+        f"a red mark is unweighted while another is bold, which inverts the "
+        f"band's attention order: {reds}"
+    )

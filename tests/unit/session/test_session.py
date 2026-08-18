@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Sequence
 
 import pytest
 
+from local_operator.compaction.api import CompactionSettings
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -35,6 +36,7 @@ from local_operator.harness.types import (
 from local_operator.providers.failover import ProviderError
 from local_operator.session.session import IMAGE_DROPPED_NOTICE, Session
 from local_operator.session.transcript import Transcript
+from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -1236,14 +1238,25 @@ async def test_mid_turn_compaction_at_continuing_boundary(tmp_path, monkeypatch)
     third = stream.requests[2]
     assert "SUMMARY(compressed)" in third.messages[0].text
 
-    # No resurrection: after the compaction entry the transcript holds only
-    # the run's three surviving messages (assistant, tool result, final
-    # assistant) — the primed history the pass summarized never re-lands
-    # after it, and nothing is persisted twice.
+    # No resurrection and no duplication. The mid-turn gate flushes the run's
+    # messages BEFORE it cuts (the cut target has to be a persisted entry), so
+    # surviving run messages legitimately sit on either side of the compaction
+    # entry and counting the tail is no longer the question. What must hold is
+    # the property that count stood in for: every message is stored exactly
+    # once, and replaying the transcript reproduces the live context — the
+    # summarized history does not come back, and the kept window is not lost.
     entries = session._transcript.entries()
-    c_index = next(i for i, e in enumerate(entries) if e.type == "compaction")
-    after = [e for e in entries[c_index + 1 :] if e.type == "message"]
-    assert len(after) == 3
+    message_ids = [e.id for e in entries if e.type == "message"]
+    assert len(message_ids) == len(set(message_ids)), "a message was persisted twice"
+
+    replayed = Transcript(session._transcript.directory).build_llm_history()
+    assert [
+        (getattr(m, "role", None) or getattr(m, "custom_type", None), getattr(m, "text", ""))
+        for m in replayed
+    ] == [
+        (getattr(m, "role", None) or getattr(m, "custom_type", None), getattr(m, "text", ""))
+        for m in session._context.messages
+    ]
 
     await session.dispose()
 
@@ -1595,3 +1608,158 @@ async def test_the_errand_model_is_effort_clamped_on_both_routes(tmp_path, monke
     assert fallback.model_id == reasoning_model.model_id
     assert reasoning_model.reasoning_effort != reasoning_model.reasoning_efforts[0]
     assert fallback.reasoning_effort == reasoning_model.reasoning_efforts[0]
+
+
+@pytest.mark.asyncio
+async def test_the_mid_turn_flush_never_persists_a_compaction_marker(tmp_path):
+    """F1: the mid-turn flush must not write the compaction summary marker.
+
+    The mid-turn gate persists the run's messages before it cuts, because the
+    cut target has to be a replayable transcript entry. It flushes from the
+    LIVE loop context — and after a pass that context is ``[marker, *kept]``.
+    The marker is not a todo reminder and its id is in no transcript, so a
+    flush excluding only reminders wrote it as a MESSAGE entry, while the pass
+    had already stored it as its own ``compaction`` entry. Replay then
+    reconstructs a superseded summary beside the live one.
+
+    Driven through the real tool loop rather than ``compact_now``, because the
+    flush lives in ``_on_turn_end`` and a manual pass never reaches it — an
+    earlier version of this test used ``compact_now`` and passed with the fix
+    reverted, pinning nothing.
+
+    Asserted on transcript ENTRIES, not on a duplicate-id count: every marker
+    carries a fresh uuid, so a resurrected marker is a new entry and never a
+    duplicate. A duplicate check is structurally blind to this.
+    """
+    big = "lorem ipsum dolor sit amet consectetur " * 1200
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text=big)]
+        )
+
+    tool = AgentTool(name="echo", parameters={"type": "object", "properties": {}}, execute=execute)
+
+    class ToolRunStream:
+        """Many tool batches, each reporting the prompt size it was really sent."""
+
+        def __init__(self, batches: int) -> None:
+            self.batches = batches
+            self.calls = 0
+
+        def __call__(self, request, signal):
+            index = self.calls
+            self.calls += 1
+            from local_operator.compaction.api import estimate_messages_tokens
+
+            size = estimate_messages_tokens(list(request.messages))
+            usage = Usage(input_tokens=size, context_tokens=size)
+
+            async def gen():
+                if index < self.batches:
+                    yield StreamTextDelta(delta=f"step {index} ")
+                    yield StreamToolCallDelta(
+                        index=0, id=f"c{index}", name="echo", argument_delta="{}"
+                    )
+                    yield StreamEndEvent(stop_reason="toolUse", usage=usage)
+                else:
+                    yield StreamTextDelta(delta="done")
+                    yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+            return gen()
+
+    stream = ToolRunStream(batches=40)
+    session = make_session(
+        tmp_path,
+        stream,
+        tools=[tool],
+        compaction_settings=CompactionSettings(keep_recent_tokens=20_000),
+    )
+
+    # Long enough to force several mid-run passes, so a marker is in the live
+    # context at a later boundary — which is the state that reproduces this.
+    await session.prompt("do the long thing " + "detail " * 200)
+
+    entries = session._transcript.entries()
+    assert [e for e in entries if e.type == "compaction"], "no pass ran; the test proves nothing"
+
+    markers_as_messages = [
+        entry
+        for entry in entries
+        if entry.type == "message" and entry.payload.get("custom_type") == "compaction_summary"
+    ]
+    assert markers_as_messages == [], (
+        f"{len(markers_as_messages)} compaction marker(s) were persisted as message "
+        "entries; on replay they resurrect superseded summaries beside the live one"
+    )
+
+    replayed = Transcript(session._transcript.directory).build_llm_history()
+    markers = [
+        m
+        for m in replayed
+        if isinstance(m, CustomMessage) and m.custom_type == "compaction_summary"
+    ]
+    assert len(markers) == 1, "replay must carry exactly one compaction summary"
+
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_subagent_never_persists_a_marker_or_reminder(tmp_path):
+    """F4: the cancelled-child writer uses the same allow-list as the session.
+
+    ``_persist_inflight`` writes a cancelled subagent's LIVE context straight
+    to its transcript so the turn is not lost. That context has the same two
+    ephemeral inhabitants as the parent's: after a compaction pass it begins
+    with the summary marker, and it may carry a todo reminder. Persisting
+    either corrupts the child's history — the marker replays a superseded
+    summary beside the live one, and a stored reminder comes back as a user
+    message nobody sent.
+
+    This path predates the mid-turn flush (it is byte-identical on the base
+    commit), but mid-turn compaction landing for real is what puts a marker in
+    a child's live context in the first place, so the exposure is new.
+    """
+    from local_operator.harness.subagent import _persist_inflight
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    child = make_session(tmp_path, stream)
+
+    # The live context a cancelled child can plausibly hold: a real user turn,
+    # a compaction marker from a pass that already ran, and a live reminder.
+    marker = CustomMessage(
+        custom_type="compaction_summary",
+        attribution="system",
+        details={"summary": "an earlier stretch of this session"},
+    )
+    reminder = CustomMessage(
+        custom_type=TODO_REMINDER_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "<system-reminder>still open</system-reminder>"},
+    )
+    real = Message.user("the work the child was doing")
+    child._context.messages = [marker, real, reminder]
+
+    await _persist_inflight(child)
+
+    entries = child._transcript.entries()
+    kinds = [
+        entry.payload.get("custom_type")
+        for entry in entries
+        if entry.type == "message" and entry.payload.get("kind") == "custom"
+    ]
+    assert "compaction_summary" not in kinds, (
+        "the cancelled child persisted a compaction marker; on resume it replays "
+        "a superseded summary beside the live one"
+    )
+    assert TODO_REMINDER_MESSAGE_TYPE not in kinds, (
+        "the cancelled child persisted a todo reminder, which replays as a user "
+        "message the user never sent"
+    )
+
+    # The real work still lands — the allow-list must not cost the turn.
+    assert any(
+        entry.type == "message" and entry.payload.get("role") == "user" for entry in entries
+    ), "the cancelled child's actual turn was dropped"
+
+    await child.dispose()

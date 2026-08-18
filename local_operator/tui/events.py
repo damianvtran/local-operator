@@ -49,6 +49,7 @@ from local_operator.harness.types import (
     NoticeEvent,
     RetryEndEvent,
     RetryStartEvent,
+    SteeringDeliveredEvent,
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
@@ -105,11 +106,21 @@ class ContextUsageReported(Message):
     stretch a user is watching it grow, the band reported the size the context
     had before the turn began. On a long tool-using turn that is a number tens
     of thousands of tokens stale, and it looks live.
+
+    ``usage`` is the whole reading the call reported, not just its size, so the
+    band's COST segment can move on the same signal for the same reason. Before
+    it did, money appeared only at ``agent_end``: a first turn that spent ten
+    minutes in tools showed no cost at all while it ran, which reads as a free
+    session precisely while it is becoming an expensive one. ``context_tokens``
+    stays a separate field rather than being read back off ``usage`` because the
+    controller resolves it with a fallback (``context_tokens or input_tokens``)
+    that the raw object does not carry.
     """
 
-    def __init__(self, context_tokens: int) -> None:
+    def __init__(self, context_tokens: int, usage: Any = None) -> None:
         super().__init__()
         self.context_tokens = context_tokens
+        self.usage = usage
 
 
 class TurnBoundaryStart(Message):
@@ -232,6 +243,20 @@ class RetryEnded(Message):
     def __init__(self, success: bool) -> None:
         super().__init__()
         self.success = success
+
+
+class SteeringDelivered(Message):
+    """Queued mid-turn messages reached the model's context.
+
+    The receipt the ``queued — sends when this step finishes`` row was missing:
+    the app settles that row against this instead of leaving a promise about the
+    future standing after the future arrived. ``count`` is how many messages
+    went in at the one boundary.
+    """
+
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self.count = count
 
 
 class SubagentStarted(Message):
@@ -457,7 +482,13 @@ class EventController:
                 or 0
             )
             if size:
-                self._post(ContextUsageReported(int(size)))
+                self._post(ContextUsageReported(int(size), message_usage))
+            else:
+                # A call that reported tokens but no size still cost money, and
+                # the cost segment must not be gated on the context segment
+                # having something to say. Posting with size 0 lets the app take
+                # the money and leave the reading alone.
+                self._post(ContextUsageReported(0, message_usage))
 
     def _handle_tool_compose(self, event: ToolCallComposeEvent) -> None:
         self._post(ToolComposing(event))
@@ -484,6 +515,13 @@ class EventController:
 
     def _handle_notice(self, event: NoticeEvent) -> None:
         self._post(NoticePosted(event.text, event.kind))
+
+    def _handle_steering_delivered(self, event: SteeringDeliveredEvent) -> None:
+        # No generation guard, deliberately: the drain belongs to whichever turn
+        # is running, and the app settles a row it is holding a direct reference
+        # to rather than looking one up by turn. A late event finds nothing held
+        # and does nothing.
+        self._post(SteeringDelivered(getattr(event, "count", 1)))
 
     def _handle_compaction_start(self, event: CompactionStartEvent) -> None:
         self._post(CompactionStarted(event.reason))
@@ -536,6 +574,7 @@ class EventController:
         "tool_execution_update": _handle_tool_update,
         "tool_execution_end": _handle_tool_end,
         "notice": _handle_notice,
+        "steering_delivered": _handle_steering_delivered,
         "compaction_start": _handle_compaction_start,
         "compaction_end": _handle_compaction_end,
         "retry_start": _handle_retry_start,

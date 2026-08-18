@@ -95,6 +95,7 @@ from local_operator.tui.events import (
     RetryEnded,
     RetryStarted,
     StartFlushTimer,
+    SteeringDelivered,
     SubagentEnded,
     SubagentProgress,
     SubagentStarted,
@@ -195,6 +196,98 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: this for new sessions" names the consequence, fits the same slot, and includes
 #: the article the clipped phrase lacked.
 PERSIST_HINT = "/model default saves this for new sessions"
+
+#: Marks a cost figure RESTORED from a resumed conversation rather than accrued
+#: this session. The restored number is a floor — only the last reported turn's
+#: usage survives in a priceable form — and it lands in the same cell a real
+#: running total does, so without a mark a resumed session's `$0.139` is
+#: indistinguishable from a session that has genuinely spent that. `≥` rather
+#: than a word because the segment sheds early on a narrow terminal and one cell
+#: is what the distinction is worth.
+#:
+#: It is NOT dropped by the next turn, which an earlier version claimed: a
+#: restored floor plus a real turn is still a floor, just a larger one. The
+#: figure only becomes exactly known for a session whose spend was accrued
+#: entirely in this process, so the mark is sticky for the life of the
+#: conversation and clears when the ledger it qualifies does.
+RESTORED_COST_PREFIX = "≥"
+
+#: The states of a mid-turn message, as one set so they cannot drift apart.
+#:
+#: The queued line is a promise about the future in the future tense, and the
+#: settled lines are the same fact in the past tense — the row is UPDATED IN
+#: PLACE (`NoticeBlock.restate`) rather than corrected by a second row, so the
+#: transcript ends up holding one statement that came true instead of a stale
+#: promise with a retraction under it. That matters more than it looks: a reader
+#: who scrolled away never sees the transition, only the settled row, so each of
+#: these has to stand alone with no memory of the one before it.
+#:
+#: There are two ways a turn can end without delivering, and BOTH leave the
+#: message in the engine's queue — `abort()` sets its flag and stops the run, it
+#: does not drain `_steering_queue` (verified: queued=1 before the abort,
+#: queued=1 after, and the next turn's first boundary takes it). So neither says
+#: "not sent", which an earlier draft did: a user who reads that retypes their
+#: message, the original arrives anyway, and the agent gets the instruction
+#: twice. The distinction that IS real is why the wait is happening, so that is
+#: what the two lines say.
+#:
+#: One noun for the boundary, deliberately. "step" and "turn" are different
+#: things internally — a turn contains several steps, which is exactly why the
+#: deferred case exists — and the UI teaches neither, so a pair that used both
+#: made the reader translate. All four now describe what the user observes.
+QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
+SENT_STEER_NOTICE = "sent — the agent has it now"
+#: The turn ended without ever reaching a boundary to drain at — interrupted,
+#: failed, or simply answered with no further tool calls. ONE string for all
+#: three, because they are one fact from the user's side: the message is waiting
+#: and goes with their next message, and what they do about it is identical.
+#:
+#: An earlier version named the interrupt in the row ("the turn was stopped"),
+#: which cost 22 cells to restate the `! interrupted` notice sitting one row
+#: below it in the loudest ink the palette has — the same redundancy `note`
+#: weight was chosen to avoid, surviving as words after being fixed as colour.
+#: It also made this the only string in the set to wrap below 61 columns, and
+#: three messages steered into one tool call turned that into six rows of
+#: near-identical text with the notice explaining them pushed to the bottom.
+#:
+#: Dropping it also stops the row being WRONG on the error path, where the turn
+#: was not stopped by anyone: it failed, and its own error notice says so.
+DEFERRED_STEER_NOTICE = "still queued — sends with your next message"
+
+
+#: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
+#: owns below itself (`padding: 0 0 1 0` in the sheet). Added to a panel's
+#: predicted content height so a predicted slot and a measured one mean the
+#: same thing — see :func:`slot_rows`.
+_BAND_SLOT_RHYTHM_ROWS = 1
+
+#: Shortest SCREEN (not terminal — two rows go to the app's own outer padding)
+#: that can afford the dock band's top inset row, ``#band.has-slot``. At or below
+#: 12 rows the dock already crowds the terminal without it — `#input-shell` is
+#: five rows and the transcript's padding two more, with `TodoPanel` clamped at
+#: its floor — so the row costs a clipped list rather than buying rhythm.
+#:
+#: Calibrated, not guessed: swept over 100 configurations (screen heights 12-40 x
+#: todo-only / subagent-only / both), 12 is the value at which this change
+#: overflows in a STRICT SUBSET of the cells `main` already overflows in — it
+#: fixes four and introduces none. A static screen dimension is the
+#: only gate here that CANNOT reflow — see `_sync_band_inset` for why every
+#: attempt to condition the row on measured slot heights made things worse.
+MIN_BAND_INSET_SCREEN_ROWS = 12
+
+#: Rows the column spends around the subagent list, used to decide whether the
+#: dock's inset still fits beside it (see `_subagent_rows_leave_room`): five for
+#: `#input-shell`, two for the transcript's padding, one for the panel's caption,
+#: one for its slot rhythm row, and one of conversation left over.
+_SUBAGENT_DOCK_ROWS = 10
+
+#: Passes `_refresh_band` makes over (panels, inset) before painting. Three,
+#: because the band's visibility, its inset row and `TodoPanel`'s row budget
+#: each depend on the previous one — see the comment in `_refresh_band` for the
+#: measurement. Named rather than inlined so the reason survives next to the
+#: number.
+_BAND_SETTLE_PASSES = 3
+
 
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
@@ -850,6 +943,27 @@ class OperatorApp(App[None]):
         #: retention window and a spend counter that goes DOWN when a finished
         #: child is evicted is worse than no counter at all.
         self._subagent_costs: dict[str, float] = {}
+        #: True when `_total_cost` includes money RESTORED from a resumed
+        #: conversation, which makes the band's figure a lower bound rather than
+        #: a total (see `_restore_reported_usage`). Sticky for the life of the
+        #: session: adding a real turn to a floor leaves a floor, so nothing
+        #: this session does can make the figure exactly known again. Cleared
+        #: only on a swap, where the ledger it qualifies is cleared too.
+        self._spend_is_floor: bool = False
+        #: Queued-steer rows still promising a delivery that has not happened.
+        #: Appended when a mid-turn submit is steered, drained when the engine
+        #: reports it took them (`on_steering_delivered`). A list because several
+        #: messages can be queued against one boundary and the engine delivers
+        #: them together; cleared on a session swap, where the rows belong to a
+        #: conversation that is no longer on screen.
+        self._queued_steer_notices: list[NoticeBlock] = []
+        #: What the CURRENT turn has already been billed for, per model call, by
+        #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
+        #: whole and is the authoritative figure, so it adds only the difference
+        #: and this resets to 0.0 at every turn boundary. Without it the two
+        #: writers would each bill the same tokens and the band would report
+        #: roughly double what a turn actually cost.
+        self._turn_accrued_cost: float = 0.0
         # Auto-naming fires while the conversation is STILL unnamed, at most
         # one attempt in flight. Latched here rather than on the session
         # holder because the app is what schedules the call, and a second
@@ -1248,6 +1362,14 @@ class OperatorApp(App[None]):
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
         self._render_resumed_history(session)
+        # BEFORE the measurement, and the order is load-bearing: this installs
+        # the provider's own exact reading for a resumed conversation, and
+        # `_measure_preloaded_context` refuses to spend an estimate once an
+        # exact figure is standing. Run the other way round, the estimate would
+        # land first and the exact restore would then be the thing overwriting
+        # it — same end state on a quiet boot, but the estimate is resolved in a
+        # worker, so which one won would depend on scheduling.
+        self._restore_reported_usage(session)
         self._measure_preloaded_context(session)
 
     async def _preflight_usage(self, session: Any) -> None:
@@ -1290,6 +1412,75 @@ class OperatorApp(App[None]):
             return
         self._adopt_session(session)
         await self._preflight_usage(session)
+
+    def _restore_reported_usage(self, session: Any) -> None:
+        """Put a RESUMED conversation's own token and cost figures on the band.
+
+        A resumed session opens on a conversation that already happened, and the
+        band is fed entirely by turns that end while this process is running —
+        so before this, `--resume` painted an empty-looking context and no spend
+        for a conversation that might be 40% through its window with real money
+        on it. Measured on a resumed session whose last provider reading was
+        402k of a 1M window: the band opened at `0.2%/1M` with no cost segment,
+        and stayed there until the next turn happened to end.
+
+        Two figures, from the same restored ``Usage`` and with deliberately
+        different standing:
+
+        - **Context** is the provider's own ``context_tokens`` for the last call
+          of the last turn, so it is installed EXACT (``context_is_estimate``
+          False). It is not a guess about the conversation; it is the number the
+          band would still be showing had the process never stopped. Being exact
+          is also what makes it suppress the local estimate below.
+        - **Cost** is the restored turn's price, and it is a FLOOR rather than
+          the session's true lifetime total: only the last reported turn's usage
+          survives in a form this can price, so a ten-turn conversation restores
+          the last turn's dollars and accrues from there. It is seeded anyway
+          because the alternative on screen is an empty segment, and empty reads
+          as "this session has cost nothing" — the one reading that is certainly
+          false. Undercounting a known-partial total beats asserting zero.
+
+        Degrades silently and completely. Reduced hosts (the pilot fakes, the
+        embedders) have no ``restored_usage``, an unpriceable model yields no
+        cost, and a transcript with no usage in it yields nothing at all — in
+        every one of those cases the band keeps exactly the behaviour it had.
+        """
+        restore = getattr(session, "restored_usage", None)
+        if not callable(restore) or self._status is None:
+            return
+        try:
+            usage = restore()
+        except Exception:  # a status readout must never take the app down
+            logger.debug("restored usage unavailable", exc_info=True)
+            return
+        if usage is None:
+            return  # nothing was ever reported: leave the estimate its job
+
+        context_tokens = getattr(usage, "context_tokens", None) or 0
+        if context_tokens > 0:
+            self._status.update(
+                context_tokens=int(context_tokens),
+                context_is_estimate=False,
+                context_window=_context_window(session),
+            )
+
+        # Priced through the same `_cost_for` every live turn uses, so a
+        # restored figure and an accrued one cannot disagree about what the same
+        # usage was worth. `_total_cost` is ASSIGNED rather than added to: this
+        # runs on adopt, where the ledger has just been zeroed for the swap, and
+        # `+=` would double the figure on a `/reload` that lands back on the
+        # same conversation (whose spend `_reconcile_reload` restores).
+        cost = self._cost_for(usage)
+        if cost:
+            self._total_cost = cost
+            # A FLOOR from here on, and the flag rather than the formatting is
+            # what says so: every writer of the cost cell reads it through
+            # `_spend_text`, so none of them can strip the mark by rendering the
+            # same money a different way. Only the last reported turn's usage
+            # survives in a priceable form, so this can be an order of magnitude
+            # under the conversation's real lifetime spend.
+            self._spend_is_floor = True
+            self._status.update(cost=self._spend_text())
 
     def _park_unadopted_session(self, built: asyncio.Future[Any]) -> None:
         """Hand a built-but-never-adopted session to teardown, if there is one.
@@ -1721,7 +1912,7 @@ class OperatorApp(App[None]):
                 self._set_welcome_visible(True)
         self._reconcile_reload(previous_id, previous_len, carried_spend, keep_context=keep_context)
 
-    def _reset_ledger_for_swap(self) -> tuple[float, dict[str, float]]:
+    def _reset_ledger_for_swap(self) -> tuple[float, dict[str, float], bool]:
         """Clear the transcript and the session-scoped band, for a swap.
 
         Returns the spend totals it just zeroed, for `_reconcile_reload` to put
@@ -1766,6 +1957,19 @@ class OperatorApp(App[None]):
         carried_spend = (self._total_cost, dict(self._subagent_costs))
         self._total_cost = 0.0
         self._subagent_costs.clear()
+        # The flag describes the totals just zeroed. `_reconcile_reload` puts
+        # both back together when the reload lands on the same conversation.
+        was_floor, self._spend_is_floor = self._spend_is_floor, False
+        # The held queued-steer rows were just removed with the rest of the
+        # ledger, so the references are to widgets no longer on screen. Left in
+        # the list, the replacement session's first delivery would "settle"
+        # rows the user cannot see and the rows it CAN see would keep promising.
+        self._queued_steer_notices.clear()
+        # The per-call accrual belongs to a turn on the session being replaced.
+        # Left standing, the NEXT session's first `agent_end` would subtract the
+        # dead conversation's already-billed calls from its own turn total and
+        # under-report that turn by exactly that much.
+        self._turn_accrued_cost = 0.0
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -1793,7 +1997,7 @@ class OperatorApp(App[None]):
             # first turn ended.
             cost="",
         )
-        return carried_spend
+        return (*carried_spend, was_floor)
 
     def _conversation_id(self) -> str:
         """Which conversation is open, or "" when none is."""
@@ -1814,7 +2018,7 @@ class OperatorApp(App[None]):
         self,
         previous_id: str,
         previous_len: int,
-        carried_spend: tuple[float, dict[str, float]],
+        carried_spend: tuple[float, dict[str, float], bool],
         *,
         keep_context: bool,
     ) -> None:
@@ -1835,12 +2039,16 @@ class OperatorApp(App[None]):
         every time a reload refreshes the MCP servers.
         """
         if previous_id and self._conversation_id() == previous_id:
-            total, children = carried_spend
+            total, children, was_floor = carried_spend
             self._total_cost = total
             self._subagent_costs.update(children)
+            # The provenance travels with the money. Without it a `/reload` onto
+            # the same conversation repainted the identical restored floor as a
+            # bare figure — same number, same provenance, honesty mark gone, on
+            # the one command that promises to change nothing.
+            self._spend_is_floor = was_floor
             if self._status is not None:
-                spend = self._spend_total()
-                self._status.update(cost=format_cost(spend) if spend else "")
+                self._status.update(cost=self._spend_text())
         if not keep_context:
             return
         remaining = self._history_length()
@@ -2176,10 +2384,17 @@ class OperatorApp(App[None]):
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         """Re-fit size-sensitive chrome after a terminal resize.
 
-        The status band is NOT re-fitted here: it answers to its own ``Resize``
-        instead (see :class:`Band` and :meth:`on_band_box_changed`), which covers
-        this case and the boot-card handover, where the band's box changes and the
-        terminal's does not.
+        The status band answers to its own ``Resize`` as well (see :class:`Band`
+        and :meth:`on_band_box_changed`), which covers the boot-card handover
+        where the band's box changes and the terminal's does not. It is ALSO
+        re-fitted from here, at the end: its inset is gated on the screen height
+        and nothing else asked it to re-decide when the terminal crossed that
+        floor.
+
+        Order matters and is not incidental. The band is IN the layout, so it
+        re-arranges with the frame; the prompt and the overlay cards are sized
+        against whatever it settles to, which is why the band refresh is queued
+        LAST and the card re-measures above it run first.
         """
         # The EVENT's size, not the app's: during a resize `self.size` is still the
         # previous frame's, and one stale cell is enough to put the card threshold on
@@ -2223,6 +2438,21 @@ class OperatorApp(App[None]):
         # that was invisible for the rest of the session (D10, design round 2).
         # The app still gets the event when the card does not.
         self.call_after_refresh(self._remeasure_prompt)
+        # The dock band is size-sensitive for the same reason the cards are, and
+        # had no resize trigger at all: its inset is gated on the screen height
+        # and `TodoPanel` budgets its rows against it, but nothing here asked
+        # either to re-decide. A terminal dragged across the inset's floor was
+        # left with the previous height's answer until the 1 Hz poll or an
+        # unrelated panel event happened to fire — measured at ~0.3 s of a band
+        # sized for a screen that no longer exists, with the overflow that
+        # implies.
+        #
+        # `call_after_refresh` rather than the timer: unlike the cards, the band
+        # is IN the layout, so it re-arranges with the frame and the pass after
+        # that refresh reads real numbers. The timer above then re-measures the
+        # cards over whatever the band settled to, which is the order those two
+        # already depend on.
+        self.call_after_refresh(self._refresh_band)
 
     def _remeasure_prompt(self) -> None:
         """Re-lay a live prompt against the current terminal, then fit the host."""
@@ -3618,6 +3848,13 @@ class OperatorApp(App[None]):
 
     def _clear_transcript(self) -> None:
         self._transcript_view().clear_blocks()  # fires the on_clear hook
+        # Same reason as the session swap: the rows those references point at
+        # have just been removed, and a delivery landing afterwards must not
+        # try to settle widgets that are no longer in the transcript. The
+        # messages themselves are unaffected — `/clear` empties the screen, not
+        # the engine's queue — so the delivery still happens, it just has no row
+        # left to report it on.
+        self._queued_steer_notices.clear()
         # ``ends_empty_state=False``: the receipt reports on the CLEAR, so the
         # session has not started talking and the splash the clear just restored
         # must survive it. Going through ``_append_block`` rather than straight to
@@ -3964,7 +4201,20 @@ class OperatorApp(App[None]):
             # the user is waiting for, and below `warning`, which is an alarm this
             # is not. Three warning-tinted rows on one frame for routine receipts
             # is how the loudest ink in the palette stops meaning anything.
-            self._append_block(NoticeBlock("queued — sends when this step finishes", "note"))
+            # Held, not just appended: this row is a promise about the future
+            # ("sends when this step finishes") and the reference is what lets
+            # `on_steering_delivered` settle it into a statement of fact once
+            # the engine actually takes the message. Without that, the row went
+            # on saying `queued` for the rest of the session and the agent's
+            # eventual reply was the only evidence it had ever been delivered.
+            #
+            # A LIST because a user can queue several messages while one tool
+            # runs, and the engine delivers whatever has accumulated at the next
+            # boundary — all of them, together. Settling only the newest would
+            # leave the earlier rows lying.
+            queued = NoticeBlock(QUEUED_STEER_NOTICE, "note")
+            self._append_block(queued)
+            self._queued_steer_notices.append(queued)
             # Still worth a title: the steering message can be the first thing
             # in the conversation that actually says what the task is.
             self._maybe_name_conversation(text)
@@ -4351,7 +4601,7 @@ class OperatorApp(App[None]):
                 self._status.update(
                     subagents=agents,
                     jobs=jobs,
-                    cost=format_cost(total) if total else None,
+                    cost=self._spend_text(total) or None,
                 )
         # The band's belt to the event stream's suspenders: elapsed time and
         # job status move with no Subagent*/tool-end event at all, so the 1 Hz
@@ -4360,6 +4610,121 @@ class OperatorApp(App[None]):
         # free — and never raises, since a status surface may not take the app
         # down (see the panels' own docstrings).
         self._refresh_band()
+
+    def _sync_band_inset(self) -> None:
+        """Give the band its top inset only while it actually holds a slot.
+
+        See ``#band.has-slot`` in the stylesheet for what the row is for. The
+        toggle is here because visibility is a runtime fact: both panels hide
+        themselves when their store is empty, and CSS cannot express "pad only
+        if a child is displayed". Padding a container whose children are all
+        hidden still reserves the row, which on the boot splash is a bare
+        surface strip in a composition measured to the row.
+
+        Never raises: the band is chrome, and a status surface must not be able
+        to take the app down (the same posture as the panels' own ``sync``).
+        """
+        try:
+            band = self.query_one("#band")
+            screen_height = self.screen.size.height
+        except Exception:  # not composed yet (early boot), or no band on this host
+            return
+        docked = any(
+            panel is not None and panel.display
+            for panel in (self._subagent_panel, self._todo_panel)
+        )
+        # DOCKED IS THE WHOLE CONDITION, and getting here took two wrong turns
+        # worth recording, because both look like the careful choice.
+        #
+        # The row can only be afforded if some slot pays for it, and only
+        # `TodoPanel` has a row budget to pay from — `SubagentPanel` mounts one
+        # row per job unconditionally. So the first attempt gated the inset on a
+        # screen-height threshold and the second on measuring whether the band
+        # still fit. Both made it WORSE, because every such test reads heights
+        # that are one layout out of date at exactly the moment a panel appears:
+        # the answer flips between the frame that paints and the frame after it,
+        # and the user sees the dock jump. Measured over 90 configurations
+        # (screen heights 12-40 x todo-only / subagent-only / both):
+        #
+        #     unconditional  : 0 reflowing cells, 25 overflowing
+        #     fit-checked    : 4 reflowing cells, 29 overflowing
+        #     main (no inset): 0 reflowing cells, 29 overflowing
+        #
+        # The conditional version caused the motion it was written to prevent
+        # AND overflowed more often, because withholding the row leaves the todo
+        # panel budgeting for a row it then has to give back. Unconditional is
+        # both stiller and tighter than either.
+        #
+        # The overflow that remains is `SubagentPanel`'s own and PRE-DATES this
+        # row: it has no row cap, so a long enough child list overruns the
+        # screen on `main` too, in the same cells. This change makes that
+        # strictly better rather than worse; the real fix is a row budget and a
+        # `… N more` line on that panel, which is its own change.
+        # The one exception is a SCREEN-HEIGHT floor, and it is safe where the
+        # fit check was not for a specific reason: the screen's height does not
+        # change between the frame that paints and the frame after it, so this
+        # test cannot flip and cannot reflow. Below a 10-row screen the dock
+        # already exceeds the terminal on its own — `#input-shell` is five rows
+        # and the transcript's padding two more, with `TodoPanel` clamped at its
+        # `_MIN_BODY_ROWS` floor — so the row has nowhere to come from and costs
+        # a clipped list. Swept over 100 configurations: with this floor the
+        # change overflows in 28 cells against `main`'s 32 — a strict subset,
+        # fixing four and introducing none — where an unconditional row
+        # overflowed in 33 and the measured fit checks in 29 WITH reflow.
+        #
+        # The second half of the gate is the same shape and covers the case the
+        # height alone misses: a SUBAGENT list long enough to fill the screen by
+        # itself. `SubagentPanel` has no row cap — it mounts one row per job —
+        # so on those screens the dock is already at the edge and the inset is
+        # the row that tips it over. Swept over 112 cells (heights 13-40 x 1-10
+        # children), A/B'd against the identical frame with the class forced
+        # off: the inset causes overflow in five of them, all of the shape
+        # "children + chrome ~= screen".
+        #
+        # Gated on the JOB COUNT rather than on the panel's measured height,
+        # for the reason the fit checks were removed: a count is known
+        # synchronously and cannot change between the frame that paints and the
+        # frame after it, so it cannot flip and cannot reflow. The budget it is
+        # compared against is the same one `TodoPanel` reasons with — the dock's
+        # fixed rows plus the panel's own chrome.
+        band.set_class(
+            docked
+            and screen_height > MIN_BAND_INSET_SCREEN_ROWS
+            and self._subagent_rows_leave_room(screen_height),
+            "has-slot",
+        )
+
+    def _subagent_rows_leave_room(self, screen_height: int) -> bool:
+        """True unless the subagent list is already close to filling the screen.
+
+        ``SubagentPanel`` mounts one row per task job with no cap of its own
+        (unlike ``TodoPanel``, which budgets against the screen), so a long
+        enough child list overruns the dock without any help from the inset —
+        that overflow is this app's on ``main`` too and is out of scope here.
+        What IS in scope is not making it worse, and the inset's row is exactly
+        what tips a list that currently just fits.
+
+        Counted, not measured. A job count is available synchronously and cannot
+        change between the frame that paints and the frame after it; every
+        version of this gate that read a widget's height instead flipped
+        mid-repaint and showed the user a moving dock.
+
+        ``_SUBAGENT_DOCK_ROWS`` is what the column spends around the list: the
+        composer and its status band, the transcript's own padding rows, the
+        panel's caption, its slot rhythm row, and one row of conversation, which
+        is the floor below which the dock has taken the screen.
+        """
+        panel = self._subagent_panel
+        if panel is None or not panel.display:
+            return True
+        jobs = getattr(self._session, "jobs", None)
+        if jobs is None:  # reduced hosts, or before the session is adopted
+            return True
+        try:
+            rows = len([job for job in jobs.list() if getattr(job, "type", "") == "task"])
+        except Exception:  # unreadable ledger; nothing to protect against
+            return True
+        return rows + _SUBAGENT_DOCK_ROWS < screen_height
 
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
@@ -4370,10 +4735,44 @@ class OperatorApp(App[None]):
         treat a missing manager as empty).
         """
         session = self._session
-        if self._subagent_panel is not None:
-            self._subagent_panel.sync(session)
-        if self._todo_panel is not None:
-            self._todo_panel.sync(session)
+        # Three steps, and the order is load-bearing rather than tidy.
+        #
+        # A panel's own `sync` is what decides whether it is displayed at all
+        # (its store went from empty to non-empty), and the band's inset exists
+        # only while something is docked — so visibility has to be settled
+        # before the inset can be. But the inset also SPENDS one of the rows
+        # `TodoPanel` sizes its list against, so the budget has to be settled
+        # before the list is painted. Those two orderings conflict, and doing
+        # only one of them is what produced a visible reflow: the list appeared
+        # at its pre-inset height and lost a row on the following tick.
+        #
+        # Resolved by paying for a second `sync`: settle visibility, settle the
+        # inset from it, then repaint against the budget that results. Verified
+        # necessary rather than assumed — with a single pass the todo list
+        # paints 4 rows against a settled budget of 3 at 100x14 and corrects on
+        # the next tick, which is a row of visible reflow.
+        #
+        # The second pass is cheap but NOT free, and the difference is worth
+        # stating because a reader will be tempted to delete one of them:
+        # Several passes, because the quantities here feed each other: a
+        # panel's visibility decides whether the band takes its inset row, the
+        # inset is one of the rows `TodoPanel` budgets against, and that budget
+        # decides how tall the panel is. One pass leaves the todo list a row too
+        # tall on the frame a panel appears — the reflow this repeat exists to
+        # remove — and a third settles the both-panels case, where the subagent
+        # panel appearing moves the todo panel's sibling term in the same tick.
+        #
+        # Cheap: `TodoPanel` holds an equality guard over (contents, budget) and
+        # returns immediately when neither moved, so the passes after the state
+        # settles cost one comparison. `SubagentPanel` has no such guard on its
+        # non-empty path (measured ~0.005 ms/pass), which is a small price for a
+        # first frame that does not move.
+        for _ in range(_BAND_SETTLE_PASSES):
+            if self._subagent_panel is not None:
+                self._subagent_panel.sync(session)
+            if self._todo_panel is not None:
+                self._todo_panel.sync(session)
+            self._sync_band_inset()
         # The open subagent page rides the SAME tick, for the same reason: a
         # child's elapsed time and its last tool both move with no event, and
         # a page that only advanced on relayed events sat frozen through every
@@ -7385,7 +7784,32 @@ class OperatorApp(App[None]):
         cost_text: str | None = None
         cost = self._cost_for(message.usage)
         if cost is not None:
-            self._total_cost += cost
+            # Only the REMAINDER. `on_context_usage_reported` has been billing
+            # this turn's calls as they landed so the segment moves while the
+            # agent works; this figure prices the whole turn and supersedes the
+            # running one, so adding it whole would count every already-billed
+            # call twice.
+            remainder = cost - self._turn_accrued_cost
+            if remainder < 0:
+                # The floor is the right BEHAVIOUR — a lifetime spend counter
+                # that walks backwards is worse than one that is slightly high —
+                # but it is not a non-event, so it is not swallowed. It means the
+                # two paths disagreed about the same turn: `agent_end` sums only
+                # the messages it carries, and a mid-turn compaction's survivor
+                # filter can drop messages this app already billed live. Logged
+                # so the accounting bug behind it is discoverable instead of
+                # sitting invisibly on the session's total.
+                logger.debug(
+                    "turn total %.6f is below the %.6f already accrued; keeping the accrued figure",
+                    cost,
+                    self._turn_accrued_cost,
+                )
+            self._total_cost += max(0.0, remainder)
+        # The turn is over either way, so the per-call ledger closes here rather
+        # than only on the path that priced something: a turn whose cost came
+        # back unpriceable must not leave its accrual standing to be subtracted
+        # from the NEXT turn's total.
+        self._turn_accrued_cost = 0.0
         # Fold in whatever the children have spent BEFORE reading the total: a
         # turn that delegated has almost certainly moved their figures, and the
         # 1 Hz poll would otherwise be what first showed it.
@@ -7404,7 +7828,7 @@ class OperatorApp(App[None]):
             # returns None for a dead session, so without this clause the leftover
             # dict alone would repaint the dead conversation's total into a band
             # that was just emptied on purpose.
-            cost_text = format_cost(total)
+            cost_text = self._spend_text(total)
         elif message.usage is not None and getattr(message.usage, "input_tokens", 0):
             # D20: the turn billed tokens but pricing is unknown — render an
             # explicit "unavailable" so the segment's absence reads as that,
@@ -7430,6 +7854,14 @@ class OperatorApp(App[None]):
             # N+1 rows when several tools were running.
             self._append_block(NoticeBlock("interrupted", "warning"))
         self._interrupted_cards = 0
+        # EVERY turn end reconciles its queued rows, because the invariant is
+        # simply stated: a row still held when a turn ends is one this turn did
+        # not deliver. A clean end can leave one — the model answers with no
+        # further tool calls, so the loop reaches no boundary and never drains
+        # the queue — and that row would otherwise go on promising until some
+        # later turn's first boundary settled it, minutes away and unrelated to
+        # anything on screen.
+        self._settle_queued_steer_notices_unsent()
         # LAST, and only after the turn's outcome is known, because the outcome
         # decides which of the three notifications this is:
         #
@@ -7641,6 +8073,46 @@ class OperatorApp(App[None]):
             if cost is not None:
                 self._subagent_costs[job.id] = cost
 
+    def _spend_text(self, total: float | None = None) -> str:
+        """The session's spend as the band should SPELL it, mark included.
+
+        Every writer of the cost cell goes through here, because the mark is a
+        property of the FIGURE and not of the moment one particular caller
+        happens to render it. Five sites write that cell — turn end, the per-call
+        accrual, the 1 Hz subagent harvest, `/reload`'s reconciliation and the
+        restore itself — and when only the restore knew about the mark, the
+        other four silently stripped it: a resumed session's honest `≥$2.10`
+        became a bare `$2.60` the moment a child reported spend, and `/reload`
+        repainted the identical floor unmarked, on a command whose whole
+        contract is that it changes nothing about the conversation.
+
+        The mark stays until a figure is no longer a floor, which is not the
+        same as "until something else is added to it": a restored floor plus a
+        real turn is still a floor, just a larger one. Only a session whose
+        spend was accrued entirely in this process is exactly known.
+
+        Zero spends NO segment, and picking that spelling settled a genuine
+        disagreement rather than ratifying a majority. Before this helper the
+        five callers had four different zero behaviours: `/reload`'s
+        reconciliation wrote `""` (the only explicit empty), the 1 Hz subagent
+        harvest passed `None` — which
+        :meth:`~local_operator.tui.widgets.status_line.StatusLine.update` reads
+        as "do not write this segment", leaving whatever was there standing, NOT
+        as an empty — turn end reached `format_cost(0.0)` and printed `$0.0000`,
+        and the restore and per-call accrual could not reach zero at all because
+        a truthiness guard returned first, so they expressed no opinion.
+
+        Only one site had a considered zero policy, and this follows it, because
+        it is the one this codebase argues for in its own words: see
+        :func:`~local_operator.tui.costs.turn_cost`, where a confident `$0.0000`
+        over billed tokens is called the more expensive lie. An unpriced model
+        reaching the band as `0.0` is exactly the case that would print it.
+        """
+        spend = self._spend_total() if total is None else total
+        if not spend:
+            return ""
+        return f"{RESTORED_COST_PREFIX if self._spend_is_floor else ''}{format_cost(spend)}"
+
     def _spend_total(self) -> float:
         """Everything this session has spent: its own turns plus its children's.
 
@@ -7758,20 +8230,40 @@ class OperatorApp(App[None]):
         self._refresh_working_activity()
 
     def on_context_usage_reported(self, message: ContextUsageReported) -> None:
-        """Move the context reading DURING a turn, not only when it ends.
+        """Move the context reading AND the cost DURING a turn, not only at its end.
 
         An agentic turn is many model calls over many minutes, and each one
         reports the context it ran against. Waiting for ``agent_end`` meant the
         band showed the pre-turn size for the whole time the agent was working
         — the exact stretch a user watches it for. Reported as exact, because
         it is the provider's own number.
+
+        Money moves on the same signal and for the same reason. Cost used to
+        appear only when the whole turn settled, so a brand-new session's FIRST
+        turn showed no cost at all while it ran — reported from the field as
+        "the cost doesn't start tracking until after the second message". A turn
+        that spends ten minutes in tools is at its most expensive precisely
+        while the segment is empty, and an empty segment reads as free.
+
+        ``_turn_accrued_cost`` is what keeps the two writers honest. This one
+        pays per call as the calls happen; ``on_turn_ended`` prices the turn as
+        a whole and is authoritative (it sums every call, including any this
+        never saw). Recording what was already taken lets the end add only the
+        REMAINDER instead of billing the turn twice.
         """
         assert self._status is not None
-        self._status.update(
-            context_tokens=message.context_tokens,
-            context_is_estimate=False,
-            context_window=_context_window(self._session),
-        )
+        if message.context_tokens > 0:
+            self._status.update(
+                context_tokens=message.context_tokens,
+                context_is_estimate=False,
+                context_window=_context_window(self._session),
+            )
+        cost = self._cost_for(message.usage)
+        if not cost:
+            return
+        self._total_cost += cost
+        self._turn_accrued_cost += cost
+        self._status.update(cost=self._spend_text())
 
     def on_tool_composing(self, message: ToolComposing) -> None:
         """Show the call the model is still dictating (TUI-026).
@@ -7873,6 +8365,87 @@ class OperatorApp(App[None]):
 
     def on_notice_posted(self, message: NoticePosted) -> None:
         self._append_block(NoticeBlock(message.text, message.kind))
+
+    def _settle_queued_steer_notices_unsent(self) -> None:
+        """Retire queued-steer rows the turn that just ended did not deliver.
+
+        The delivery receipt only fires when ``_drain_steering`` actually takes
+        messages, and three ordinary paths end a turn without one: the turn was
+        interrupted (Ctrl+C), it failed, or it ended cleanly with the model
+        answering and no further tool calls. All three leave a row promising a
+        delivery the app has no receipt for — the defect the receipt exists to
+        prevent, reached by every path that is not the delivery path.
+
+        ONE message for all three, because from the user's side they are one
+        fact: the message is still queued (``abort`` stops the run without
+        draining the queue) and goes with their next message. Naming the cause
+        in the row was tried and removed — it restated the ``interrupted`` or
+        error notice sitting a row below it, cost the only string in the set
+        that wraps under 61 columns, and was simply wrong on the error path,
+        where nobody stopped anything.
+
+        ``note``, the weight the row already had: the state has not got worse,
+        so the row has no business getting louder — and the loud ink is already
+        spent, once, on the notice that explains why the turn ended.
+        """
+        if not self._queued_steer_notices:
+            return
+        for block in self._queued_steer_notices:
+            try:
+                block.restate(DEFERRED_STEER_NOTICE, "note")
+            except Exception:  # a receipt must never take the app down
+                logger.debug("queued-steer notice could not be retired", exc_info=True)
+        self._queued_steer_notices.clear()
+
+    def on_steering_delivered(self, message: SteeringDelivered) -> None:
+        """Settle the rows for the messages this delivery actually took.
+
+        The engine has taken those messages into context, so the promise those
+        rows were making has come true and they say so — in place, in the past
+        tense. Appending a second notice instead would leave the stale `queued`
+        claim on screen above its own correction, and spend a row doing it.
+
+        ``count`` bounds it, and the OLDEST rows settle first, because the drain
+        is not always the whole queue: it awaits a disk append per message, and
+        a message steered during that await lands after the ``while`` has
+        already exited. It is genuinely still queued and will go at the next
+        boundary, so settling its row here would claim a delivery that has not
+        happened. FIFO matches the queue's own order, so "the first ``count``
+        rows" and "the messages that went" are the same set.
+        """
+        if not self._queued_steer_notices:
+            return  # a delivery for rows this app is no longer holding
+        # Defensive bounds: a producer that omits `count` (or sends a nonsense
+        # one) must not settle nothing, and must not settle more rows than are
+        # held. One is the floor because a delivery event means at least one
+        # message went.
+        try:
+            count = int(getattr(message, "count", 1) or 1)
+        except Exception:
+            # `Exception`, not a list of the types that came to mind. The first
+            # attempt named `TypeError`/`ValueError` and still died on
+            # `float("inf")`, which raises `OverflowError` — a value from a
+            # producer this app does not own found the one gap in a guard
+            # written precisely because the producer is not ours. Enumerating
+            # failure modes is how that gap reappears; the surrounding handlers
+            # all take the broad posture for the same reason.
+            # A receipt must never take the app down, and this handler is one
+            # `int()` away from being the exception to that: the field crosses a
+            # thread boundary from a producer this app does not own. One
+            # delivery is the safe reading — the event means at least one
+            # message went.
+            logger.debug("steering delivery reported an unusable count", exc_info=True)
+            count = 1
+        taken = max(1, min(count, len(self._queued_steer_notices)))
+        settled, self._queued_steer_notices = (
+            self._queued_steer_notices[:taken],
+            self._queued_steer_notices[taken:],
+        )
+        for block in settled:
+            try:
+                block.restate(SENT_STEER_NOTICE, "success")
+            except Exception:  # a receipt must never take the app down
+                logger.debug("queued-steer notice could not be settled", exc_info=True)
 
     def on_compaction_started(self, message: CompactionStarted) -> None:
         self._append_block(NoticeBlock("compacting context…", "info"))
@@ -7989,6 +8562,49 @@ class OperatorApp(App[None]):
         # holding ids past it would let a later batch's guard skip a child that
         # really is running. Cleared wherever the flag it serves is cleared.
         self._settled_child_ids.clear()
+
+
+def slot_rows(slot: Any) -> int:
+    """Rows a docked band slot occupies, measured if possible and predicted if not.
+
+    ``outer_size.height`` is the truth once Textual has arranged the slot, and it
+    is ZERO for one that has just been un-hidden — which is every mid-session
+    appearance of a panel, not a boot-only case. `TodoPanel._band_sibling_rows`
+    reads this at exactly that moment (the todo tool's own event,
+    `SubagentStarted`), so a measurement-only reading makes the first painted
+    frame disagree with the settled one: the dock lands flush and jumps down a
+    row when the 1 Hz poll re-asks, ~0.46 s later on the real event path.
+
+    The prediction asks the panel, because each already knows what it is about
+    to paint — the todo panel from its own row budget, the subagent panel from
+    the rows it has mounted — and adds the slot's own rhythm row
+    (`.band-slot { padding: 0 0 1 0 }`) so both branches mean the same thing.
+    A panel that answers neither contributes 1: it is displayed, so it is at
+    least a row, and under-counting is what puts a row back into the transcript
+    that the dock is about to take.
+    """
+    try:
+        measured = int(slot.outer_size.height)
+    except Exception:  # not a laid-out widget (reduced hosts)
+        measured = 0
+    predicted = 0
+    predict = getattr(slot, "predicted_rows", None)
+    if callable(predict):
+        try:
+            # `cast` because `getattr` on a duck-typed slot widens to `object`;
+            # the `except` below is what actually guards a bad implementation.
+            rows = cast(Callable[[], int], predict)()
+            predicted = max(1, int(rows)) + _BAND_SLOT_RHYTHM_ROWS
+        except Exception:  # a prediction must never break a repaint
+            logger.debug("band slot could not predict its height", exc_info=True)
+    # The LARGER of the two, never "measured if it looks measured". A slot is
+    # not simply arranged-or-not: mid-layout it reports a PARTIAL height, and
+    # trusting that over the prediction is a race — observed as an intermittent
+    # overflow where a 12-row subagent list measured 3, the inset was granted on
+    # the strength of it, and the rows then arrived. Both terms describe the same
+    # slot, so the larger is the safe one: it can only ever withhold the inset,
+    # which costs a blank row, where the smaller costs a scrollable screen.
+    return max(measured, predicted, 1)
 
 
 def _model_spec(session) -> Any | None:

@@ -749,6 +749,44 @@ class NoticeBlock(TranscriptBlock):
         self.set_content(self._build())
         self.finalize()
 
+    def restate(self, text: str, kind: NoticeKind) -> None:
+        """Replace what this notice SAYS, after it was already finalized.
+
+        The one notice that outlives its own truth is a PENDING one. "queued —
+        sends when this step finishes" is a promise about the future, and when
+        the future arrives the row goes on promising it: a user who queued a
+        message during a turn was left reading `queued` for the rest of the
+        session, with the agent's eventual reply as the only evidence it had
+        ever been delivered. Reported from the field as exactly that.
+
+        A second notice underneath was the alternative and is worse: it spends a
+        row to correct a row, and the stale claim stays on screen above its own
+        retraction. Updating in place means the transcript holds one statement
+        that became true, which is what actually happened.
+
+        Deliberately narrow. Blocks here are immutable once finalized — the
+        container's whole scroll and spacing accounting assumes it — so this
+        does NOT unfreeze the block for general editing: it re-runs the same
+        build with new text, re-measures, and re-freezes, the same three steps
+        :meth:`on_resize` already takes for a re-wrap. Callers must hold their
+        own reference to the block they are settling; nothing here looks one up.
+        """
+        self._text = text
+        self._token = self._KIND_TOKENS.get(kind, "dim")
+        self._glyph = NOTICE_GLYPHS.get(kind, "·")
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build())
+        finally:
+            self._finalized = was_finalized
+        # The row count can change with the words (one line at 90 columns, two
+        # at 40), and the container spaces blocks by height — so the gap around
+        # this one is re-asked rather than left describing the old text.
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.refresh_gap_around(self)
+
     #: The kind field: the spine indent plus the glyph and its space. Every row
     #: reserves exactly this — :meth:`_build` writes ``indent + glyph + " "`` on
     #: the first and ``hanging`` (the same width, blank) on the rest, which is
