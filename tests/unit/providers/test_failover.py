@@ -648,11 +648,17 @@ async def test_transport_retries_honor_budget_same_key_first() -> None:
         async for _ in stream_with_failover(_request(), auth, settings, client_for):
             pass
     assert excinfo.value.status == 503
-    # Two same-key retries before rotation, then the sibling once.
-    # Each credential spends the configured budget, then the turn rotates; when
-    # rotation runs out the bearer in hand finishes its budget ONCE more, since
-    # the pre-rotation allowance exists only to get a turn moving to another
-    # account and there is no longer one to move to.
+    # `k1` spends its budget, the turn rotates to `k2`, and when rotation then
+    # reports no further sibling the bearer in hand is restored for one more
+    # pass -- the pre-rotation allowance exists only to get a turn moving to
+    # another account, and there is no longer one to move to.
+    #
+    # `k2` therefore appears twice over: `transport_retries` is reset whenever
+    # the resolved token changes, and rotation exhausting resolves to None
+    # first, so the restored pass starts a fresh budget rather than the
+    # remainder of the spent one. That accounting is PRE-EXISTING -- `main`
+    # produces the same per-credential counts for the same settings -- and the
+    # turn ceiling is what bounds it; see the note at the restore site.
     assert attempts == ["k1", "k1", "k1", "k2", "k2", "k2", "k2", "k2", "k2"]
     # Every credential in the pool is asked before the turn is declared dead: a
     # 5xx is a PROVIDER fault, so the next ACCOUNT is the thing most likely to

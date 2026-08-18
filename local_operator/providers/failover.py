@@ -544,18 +544,10 @@ class AuthRetryKeyState:
     refresh step and may cycle every distinct sibling instead.
     """
 
+    #: Every DISTINCT bearer rotation has returned for this request. Also the
+    #: retry budget's evidence that rotation happened at all: see
+    #: :func:`_request_has_rotated`.
     attempted_keys: set[str] = dataclasses.field(default_factory=set)
-    #: What ``AuthStore.rotate_sibling`` last reported: whether ANOTHER usable
-    #: credential remained after the failing one was set aside. Recorded rather
-    #: than recomputed because the store is the only thing that knows its own
-    #: cascade -- tiers, blocks, credential types and aliases included. Starts
-    #: Set once rotation has been ATTEMPTED and the store has answered. ``None``
-    #: means "not yet asked", which the budget rule treats as "there may be one"
-    #: -- so the first bearer spends the small per-credential allowance and the
-    #: turn moves on to discover the truth, rather than burning ten attempts in
-    #: place while three healthy accounts wait (the reported bug) or being
-    #: capped on an assumption that never gets tested (its mirror image).
-    sibling_available: bool | None = None
     last_key: str | None = None
     refreshed_current: bool = False
     legacy_auth_switch_used: bool = False
@@ -856,16 +848,16 @@ def _same_credential_retry_allowed(
         # against the turn ceiling: four accounts, and only two were ever tried,
         # which is the original reported bug arriving by a new route.
         #
-        # So while a sibling remains reachable, each bearer gets the small
-        # per-credential allowance and the turn moves on. `has_untried_sibling`
-        # is the driver's OBSERVATION that rotation is still producing new
-        # bearers, not a prediction from the credential table.
+        # So each bearer gets a small allowance and the turn moves on, until
+        # rotation reports it has nowhere left to go. `has_rotated` and
+        # `rotation_exhausted` are both OBSERVATIONS the driver made -- what
+        # rotation already did -- never predictions about the credential table.
         if rotation_exhausted:
             # Rotation has been tried and there is no other credential, so the
             # small allowances below -- which exist ONLY to get a turn moving to
             # another account -- have nothing left to buy. The bearer in hand
-            # gets exactly the budget the user configured: no more (it was
-            # asked for) and no less (it is all there is).
+            # gets the budget the user configured rather than an allowance
+            # sized for a pool that does not exist.
             return transport_retries < retry.max_retries
         if has_rotated:
             return transport_retries < min(retry.max_retries, MAX_SAME_CREDENTIAL_SERVER_RETRIES)
@@ -880,9 +872,6 @@ def _same_credential_retry_allowed(
         # types, override bearers, rows split across tiers), and each drift took
         # retries away from someone who had nowhere else to spend them.
         return transport_retries < min(retry.max_retries, MAX_FIRST_CREDENTIAL_SERVER_RETRIES)
-        # Nothing left to rotate onto: the configured budget is the right answer
-        # again, because there is no multiplication left to prevent. This is the
-        # lone credential, the override bearer, and the last account standing.
     return transport_retries < retry.max_retries
 
 
@@ -1435,11 +1424,25 @@ async def stream_with_failover(
                     ):
                         exhausted_budget_restored = True
                         access = last_access
-                        # `transport_retries` is deliberately NOT reset: the
-                        # attempts already spent on this bearer are part of the
-                        # budget the user configured, so carrying them makes the
-                        # TOTAL exactly `max_retries` rather than the allowance
-                        # plus a second full budget on top.
+                        # NOTE: `transport_retries` was already zeroed a few
+                        # lines above, because rotation returning nothing makes
+                        # `token` None and so trips the `token != current_token`
+                        # reset. The restored pass therefore starts a FRESH
+                        # `max_retries`, and a lone credential's total for one
+                        # target is roughly twice the configured budget rather
+                        # than exactly it.
+                        #
+                        # That is deliberate here, and it is also what the
+                        # unpatched code does: the same reset makes a single
+                        # credential spend `max_retries` per rotation cycle on
+                        # `main` too (verified A/B: identical counts at
+                        # maxRetries 0/1/3/5). The turn ceiling above is what
+                        # actually bounds it. Making the total exact is a real
+                        # improvement but it is a pre-existing accounting
+                        # question, not part of this change, and tightening it
+                        # here would silently reduce retries for every
+                        # single-credential user in a PR about the opposite
+                        # problem.
                         error = None
                     else:
                         break  # rotation exhausted for this provider
@@ -1642,13 +1645,7 @@ async def _resolve_access_for_provider(
                 if record is None:
                     return await _key()
             elif ctx.last_chance:
-                # The store's OWN answer to "is another credential left?", kept
-                # for the retry-budget decision. Nothing else in this module
-                # knows the cascade's tiers, blocks and aliases well enough to
-                # work it out, and five review rounds of trying proved it.
-                state.sibling_available = bool(
-                    auth.rotate_sibling(provider, session_id, ctx.error, api_key=ctx.previous_key)
-                )
+                auth.rotate_sibling(provider, session_id, ctx.error, api_key=ctx.previous_key)
                 record = await _access()
                 if record is None:
                     return await _key()
