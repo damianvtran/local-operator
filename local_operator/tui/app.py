@@ -761,6 +761,14 @@ class OperatorApp(App[None]):
         # answer a question that has already been reported.
         self._ask_screen: AskPickerScreen | None = None
         self._ask_pending: asyncio.Future[dict[str, list[str]] | None] | None = None
+        #: The live "paste your API key" prompt, for the same reason the two
+        #: references above exist: the login coroutine is parked on a future
+        #: only this app resolves, so a teardown that leaves it pending hangs
+        #: the dispose it is waiting behind. Typed as ``Any`` because the widget
+        #: module is imported lazily inside :meth:`_request_login_key` (it is
+        #: needed only by a login, and every interactive session imports this
+        #: module).
+        self._key_prompt: Any = None
         self._approve_all: bool = False
         # What a NEW session opens in, read from config at mount and rewritten
         # by `/approvals default <mode>`. Held beside `_approve_all` rather than
@@ -1337,6 +1345,10 @@ class OperatorApp(App[None]):
         # tool's call is parked on a future only this app resolves, so a live
         # question would hold the dispose it is waiting behind.
         self._settle_ask_picker()
+        # A login's key prompt is the third future in this family, and it
+        # outlives a turn: the flow runs as a worker, not inside the turn, so
+        # nothing else here would ever settle it.
+        self._settle_key_prompt()
         # The working line belongs to the turn being thrown away. Left standing
         # it does two kinds of damage: the widget goes on animating a turn that
         # no longer exists, and the stale `_working_block` reference makes
@@ -2316,6 +2328,9 @@ class OperatorApp(App[None]):
         # future, and an abort it cannot see leaves the turn waiting on a
         # question the user has just asked to stop.
         self._settle_ask_picker()
+        # And a login's key prompt: Ctrl+C with one on screen otherwise left the
+        # prompt holding focus for a flow the user has just interrupted.
+        self._settle_key_prompt()
         if self._session is not None:
             self._session.abort("interrupted")
 
@@ -2536,6 +2551,28 @@ class OperatorApp(App[None]):
                     screen.remove()
             except Exception:  # pragma: no cover - teardown races only
                 logger.debug("ask picker was already gone", exc_info=True)
+
+    def _settle_key_prompt(self) -> None:
+        """Cancel a live API-key prompt, freeing the login parked on it.
+
+        Called by the paths that END a turn or tear the app down, for the same
+        reason those paths settle the approval card and the ``ask`` picker: the
+        login coroutine is awaiting a future that only this app resolves, so
+        leaving it pending stalls a dispose that awaits teardown.
+
+        Cancelling (``None``) rather than submitting whatever was half typed:
+        a partial key is not a credential, and storing one would write a
+        credential row that shadows a working environment key. Unlike the ask
+        picker — where a partial answer still tells the agent something — there
+        is no useful partial value here.
+        """
+        block = self._key_prompt
+        self._key_prompt = None
+        if block is not None:
+            try:
+                block.resolve(None)
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("key prompt was already settled", exc_info=True)
 
     def _latch_approval_answer(self, answer: str) -> None:
         """What an answer means beyond the one call. Runs BEFORE the future.
@@ -2870,6 +2907,14 @@ class OperatorApp(App[None]):
         # but NOT latched: /clear does not stop the turn, and latching here
         # denied every later write/exec tool of the run with no prompt.
         self._settle_live_approval()
+        # The login key prompt is the same hazard and was the worse one: the
+        # widget goes with the transcript, but the login worker parked on its
+        # future is not a turn, so nothing else here reached it. Ctrl+L during
+        # a login left the future pending AND `_login_lock` held, so every
+        # later `/login` in the session reported "a login is already in
+        # progress" and offered no prompt — the session could never log in
+        # again. Cancelling frees both.
+        self._settle_key_prompt()
         self._exit_hint = None  # its widget went with the transcript
         self._streaming_block = None
         self._tool_cards = {}
@@ -2985,6 +3030,9 @@ class OperatorApp(App[None]):
         # Same window, same hazard: the ask tool's future is resolved by nothing
         # but this app, so a question still on screen would hold the dispose.
         self._settle_ask_picker()
+        # And the login key prompt, which is awaited by a worker rather than by
+        # a turn and so is not covered by either of the two above.
+        self._settle_key_prompt()
         # First, and synchronously: the restore is one write on a driver that
         # is still up, and everything below it can await. An exception in
         # session teardown would otherwise leave the user's shell wearing this
@@ -5679,12 +5727,28 @@ class OperatorApp(App[None]):
         flow in ``App.suspend()`` and so tore the UI down mid-login, then blocked
         on a paste prompt the user had no reason to expect.
 
-        ``on_manual_code_input`` is deliberately ABSENT. The loopback callback
-        server is the real path — it is already listening before the URL is
-        shown, and the browser redirect completes the flow with no typing. A
-        paste prompt is a fallback for a browser on a different machine, which
-        is a CLI situation; offering it here would mean reading stdin while the
-        app owns it.
+        ``on_manual_code_input`` is attached for providers that ACCEPT a paste
+        and for no others, which is two distinct cases:
+
+        - ``requires_paste_prompt`` — the paste IS the login (every "paste your
+          API key" provider, plus the QwenCloud Token Plan, which reads its key
+          before starting a device flow). These have no loopback server and
+          nothing to fall back FROM, so a TUI with no prompt could not log in to
+          them at all: `/login alibaba` opened the browser and then failed with
+          "requires an interactive code prompt" every time.
+        - ``paste_code_flow`` — Anthropic's optional fallback for a browser on
+          another machine, raced against the loopback callback.
+
+        A loopback-only provider still gets NO prompt, which is what the
+        original blanket omission was protecting: there the callback server is
+        already listening before the URL is shown and the redirect completes the
+        flow with no typing, so a prompt would only compete with it.
+
+        The prompt does NOT read stdin — the objection that produced the
+        omission. It is a focused transcript block
+        (:class:`KeyPromptBlock`), the same device the tool-approval gate uses
+        to answer a question the harness would otherwise put to ``input()`` on a
+        terminal Textual owns in raw mode.
         """
         # ``callback_server`` is imported HERE: it drags in http.server, ssl and
         # email (~138 ms, 150-odd modules) for a loopback listener that only a
@@ -5706,7 +5770,78 @@ class OperatorApp(App[None]):
         def on_progress(message: str) -> None:
             self._append_block(NoticeBlock(message, "info"))
 
-        return LoginCallbacks(on_auth_url=on_auth_url, on_progress=on_progress)
+        # ``getattr`` rather than attribute access: ``definition`` is typed
+        # ``object`` here because an embedding host may pass its own provider
+        # record, and a host whose definitions predate this field must degrade
+        # to "no prompt" rather than raising out of a login.
+        if not getattr(definition, "accepts_paste_prompt", False):
+            return LoginCallbacks(on_auth_url=on_auth_url, on_progress=on_progress)
+
+        label = getattr(definition, "name", None) or getattr(definition, "id", "this provider")
+        # WHICH value the prompt is reading, which decides both its wording and
+        # whether it masks. ``requires_paste_prompt`` means the paste IS the
+        # login and the value is a long-lived API key; the only other way to
+        # reach here is Anthropic's optional fallback, whose paste is a
+        # single-use OAuth ``code#state`` the user needs to read back.
+        secret = bool(getattr(definition, "paste_prompt_required", False))
+
+        async def on_manual_code_input() -> str | None:
+            # ``sole_path`` tracks ``secret`` here and is a DIFFERENT question
+            # that happens to have the same answer for every provider in the
+            # registry: "is the paste the only way this login can finish?".
+            # Anthropic's is not (the loopback callback is still listening and a
+            # declined paste re-parks), so declining must not be reported as a
+            # cancelled login.
+            return await self._request_login_key(str(label), secret=secret, sole_path=secret)
+
+        return LoginCallbacks(
+            on_auth_url=on_auth_url,
+            on_progress=on_progress,
+            on_manual_code_input=on_manual_code_input,
+        )
+
+    async def _request_login_key(
+        self, provider_label: str, *, secret: bool = True, sole_path: bool = True
+    ) -> str | None:
+        """Put a paste prompt in the transcript and await the key.
+
+        Awaited by the login flow on this app's own loop (``_login_flow`` runs
+        as a Textual worker), so the block is mounted directly here rather than
+        marshalled across threads — the same reason
+        :meth:`request_tool_approval` mounts its card inline.
+
+        Returns the pasted text, or ``None`` for a cancel, which is exactly the
+        ``on_manual_code_input`` contract. The value is never logged, never
+        echoed, and is not retained by the block once handed over.
+        """
+        from local_operator.tui.widgets.key_prompt import KeyPromptBlock
+
+        # The aside and the subagent page both hide or float over the
+        # transcript, so a prompt mounted behind either would be invisible while
+        # still holding focus — the login would be parked on an answer the user
+        # can neither see nor reach. Same yield the approval gate performs, for
+        # the same reason.
+        self._close_subagent_view()
+        self._close_aside()
+        block = KeyPromptBlock(provider_label, secret=secret, sole_path=sole_path)
+        self._key_prompt = block
+        self._append_block(block)
+        try:
+            return await block.wait()
+        except asyncio.CancelledError:
+            # The prompt task was cancelled. Two different situations arrive
+            # here and the block cannot tell them apart from the cancellation
+            # alone, so it is told: for Anthropic the paste RACES the loopback
+            # callback, and a browser redirect that wins cancels this task on
+            # the SUCCESS path (``LoopbackFlow._await_code`` cancels every
+            # waiter in a ``finally``). Reporting that as a cancelled login put
+            # "login cancelled" directly above the success notice.
+            block.resolve(None, superseded=True)
+            raise
+        finally:
+            block.restore_focus()
+            if self._key_prompt is block:
+                self._key_prompt = None
 
     async def _login_flow(self, provider: str) -> None:
         """Run the login on the event loop, reporting into the transcript.
@@ -5718,6 +5853,12 @@ class OperatorApp(App[None]):
 
         async def notice(body: str, kind: NoticeKind = "info") -> None:
             self._append_block(NoticeBlock(body, kind))
+
+        # Imported HERE for the same reason ``_login_callbacks`` imports its
+        # own name lazily: ``callback_server`` drags in http.server, ssl and
+        # email (~138 ms) for a loopback listener only a login needs, and this
+        # module is what every interactive session imports.
+        from local_operator.providers.oauth.callback_server import LoginCancelledError
 
         assert self._providers is not None
         if self._login_lock is None:
@@ -5734,6 +5875,15 @@ class OperatorApp(App[None]):
             # warning whenever it becomes visible again (`set_visible(True)`
             # calls `_poll`), and it is hidden right now because the notice
             # above is a transcript block.
+        except LoginCancelledError:
+            # A cancel is an OUTCOME, not a failure. Reported as a red "login
+            # failed: … cancelled" it told the user their own Escape had broken
+            # something, which is both false and the sort of message that sends
+            # someone looking for a problem to fix. The prompt block has already
+            # painted its own "cancelled" receipt, so this stays quiet about the
+            # detail and only closes the sentence the "logging in to …" notice
+            # opened.
+            await notice("login cancelled.", "info")
         except Exception as error:
             await notice(f"login failed: {error}", "error")
         finally:

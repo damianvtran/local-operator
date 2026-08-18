@@ -29,11 +29,22 @@ if TYPE_CHECKING:  # lazy at runtime: the CLI top level must not import these
 def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     """print-based callbacks for terminal logins.
 
-    The paste-code prompt is attached ONLY for providers that declare
-    ``paste_code_flow`` (a trap otherwise: for the rest it races the loopback HTTP
-    callback and leaves the terminal blocked). It runs in a thread via
-    ``asyncio.to_thread(input, ...)`` so the callback server keeps serving
-    the browser redirect while the prompt is pending.
+    The paste prompt is attached for providers that ACCEPT one, which is two
+    distinct cases and used to be read as one:
+
+    - ``requires_paste_prompt`` — pasting is the whole login (every
+      "paste your API key" provider). Gating these on ``paste_code_flow``, as
+      this did, attached no prompt and made the login fail every time with
+      "requires an interactive code prompt" — for eight of the eleven
+      providers that offer one.
+    - ``paste_code_flow`` — Anthropic's optional fallback, raced against the
+      loopback callback for the case where the browser is on another machine.
+
+    A loopback-only provider still gets NO prompt: there the prompt races the
+    HTTP callback and leaves the terminal blocked on a line nobody will type.
+
+    The prompt runs in a thread via ``asyncio.to_thread(input, ...)`` so the
+    callback server keeps serving the browser redirect while it is pending.
     """
 
     def on_auth_url(url: str, instructions: str | None = None) -> None:
@@ -44,14 +55,51 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     def on_progress(message: str) -> None:
         print(message)
 
+    # The prompt says what it wants. "Paste the code here" is wrong for the
+    # providers this now serves — they want an API key off a dashboard, and a
+    # user told to paste a "code" goes looking for an OAuth code that does not
+    # exist for them.
+    wants_api_key = definition.paste_prompt_required
+    prompt = (
+        "Paste your API key here (empty to cancel): "
+        if wants_api_key
+        else "Paste the code here (empty to cancel): "
+    )
+
+    def read_line() -> str:
+        """Read the pasted value, hiding it when it is a long-lived secret.
+
+        ``getpass`` for an API KEY, which is the discipline ``CredentialManager``
+        and the web-search CLI already apply to this same class of value: a
+        provider key does not expire, and ``input()`` leaves it sitting in the
+        scrollback of a terminal that is frequently being screen-shared while
+        someone sets a tool up. Before this change no paste-a-key provider could
+        reach this prompt at all, so making them work is also what makes the
+        echo reachable. The TUI half masks it for the same reason.
+
+        A plain ``input()`` for an OAuth CODE, the other branch: it is
+        single-use, expires in minutes, and is spent the moment it is redeemed,
+        while being a long opaque string the user genuinely needs to SEE to
+        check their paste landed whole. Hiding it would cost real legibility to
+        protect a value that is not worth protecting.
+        """
+        if wants_api_key:
+            # Imported here rather than at module scope: this module is on the
+            # CLI's startup path and getpass drags in termios/tty for a prompt
+            # only an interactive login reaches.
+            import getpass
+
+            return getpass.getpass(prompt)
+        return input(prompt)
+
     async def on_manual_code_input() -> str | None:
         try:
-            value = await asyncio.to_thread(input, "Paste the code here (empty to cancel): ")
+            value = await asyncio.to_thread(read_line)
         except (EOFError, KeyboardInterrupt):
             return None
         return value.strip() or None
 
-    manual_input = on_manual_code_input if definition.paste_code_flow else None
+    manual_input = on_manual_code_input if definition.accepts_paste_prompt else None
     return LoginCallbacks(
         on_auth_url=on_auth_url, on_progress=on_progress, on_manual_code_input=manual_input
     )

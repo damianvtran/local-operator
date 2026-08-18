@@ -844,6 +844,32 @@ ApprovalBlock:focus {
     background: $lo-tint-select;
 }
 
+/* The login key prompt. Deliberately the SAME language as the approval card
+ * above rather than a variation on it: both are "the app is parked on you"
+ * blocks that take focus and resolve a future, and giving them two visual
+ * idioms would make the user learn the pattern twice.
+ *
+ * Height is content-sized for the same reason: pending is three or four rows
+ * (question, optional instruction, masked value, key hints) and the receipt
+ * collapses to one. Every count comes from the widget's own state rather than
+ * from a width-dependent measurement. */
+KeyPromptBlock {
+    height: auto;
+    background: $lo-surface;
+}
+
+KeyPromptBlock.key-prompt-pending {
+    background: $lo-raised;
+}
+
+/* Focus matters more here than anywhere else in the transcript: every printable
+ * key is captured by this block rather than reaching the composer, so the user
+ * has to be able to see where their typing is going before they paste a secret
+ * into it. Same `tint-select` the other two focusable transcript blocks use. */
+KeyPromptBlock:focus {
+    background: $lo-tint-select;
+}
+
 /* ── dock band (subagent task list + todo list) ────────────────────────── *
  *
  * Sits between the transcript and the composer: a POSITIONER that reserves
