@@ -29,8 +29,13 @@ from local_operator.tui.widgets.status_line import (
     _MIN_GROUP_GAP,
     _SPINNER_FRAMES,
     _UNBOUNDED_RUNGS,
+    ICON_AGENTS,
     ICON_APPROVALS,
+    ICON_CONTEXT,
+    ICON_COST,
     ICON_CWD,
+    ICON_DURATION,
+    ICON_JOBS,
     ICON_MCP,
     ICON_MODEL,
     NAME_CELLS,
@@ -1158,15 +1163,23 @@ def _swept_band(state: _LadderState, *, alarm: bool) -> StatusLine:
     return status
 
 
-def _name_box(row: str, name: str) -> int:
-    """Cells the trailing name segment RESERVED, its padding included.
+def _name_box(row: str, name: str, width: int) -> int:
+    """Cells the trailing name segment RESERVED, its unpainted tail included.
 
     The box is what the layout is built on, and it is not the same number as the
     ink in it: a word-boundary cut can leave `Bulk export the…` in an 18-cell box.
     Located from the name's own opening characters, which land on the box's first
     cell because the name is left-aligned in it.
+
+    Measured to ``width`` rather than to ``len(row)``, and that is the difference
+    between the box and the ink now that ``_compose`` stops painting the box's
+    trailing blanks. The reserve still runs to the band's right edge — the row is
+    laid out to exactly ``width`` and only then trimmed — so the edge, not the
+    last inked cell, is where the box ends. Reading ``len(row)`` here would make
+    this helper return the INK and quietly turn every caller into a test of the
+    string's length instead of the layout's reserve.
     """
-    return len(row) - row.rindex(name[:4])
+    return width - row.rindex(name[:4])
 
 
 def test_naming_a_session_never_costs_a_segment_for_nothing(monkeypatch) -> None:
@@ -1204,7 +1217,7 @@ def test_naming_a_session_never_costs_a_segment_for_nothing(monkeypatch) -> None
                     where = f"{label} alarm={alarm} width={width}"
                     lost = set(status._dropped) - bare - {"name"}
                     if status.is_showing("name"):
-                        box = _name_box(row, name)
+                        box = _name_box(row, name, width)
                         assert (
                             box >= NAME_CELLS_FLOOR
                         ), f"{where}: {sorted(lost)} spent for a {box}-cell name"
@@ -1226,6 +1239,13 @@ def test_the_alarms_column_does_not_move_when_the_title_changes(monkeypatch) -> 
 
     Asserted over the whole row rather than just the glyph: everything up to the
     name's own box has to be identical, or something else moved instead.
+
+    The row's painted LENGTH is deliberately not the assertion. ``_compose`` no
+    longer paints the name box's trailing blanks, so a brief title ends earlier
+    than a long one by design and comparing lengths would pin the ink instead of
+    the layout. What has to hold is that the box each title was given is the same
+    size — asserted below through ``_name_box``, which measures to the band's
+    right edge — and that is the property the length comparison stood in for.
     """
     monkeypatch.setenv("HOME", "/Users/tester")
     for label, state in _LADDER_STATES.items():
@@ -1243,7 +1263,14 @@ def test_the_alarms_column_does_not_move_when_the_title_changes(monkeypatch) -> 
             head = first[: first.index("!") + 1]
             for row in rows[1:]:
                 assert row.startswith(head), f"{label} width={width}: the row reflowed"
-                assert len(row) == len(first), f"{label} width={width}: the row changed width"
+            # The reserve itself, which is what the old length comparison meant:
+            # every title at this width was handed a box of the same size, so a
+            # title arriving or being rewritten cannot resize the segment under
+            # the reader. Measurable only where the name survived the ladder.
+            boxes = {
+                _name_box(row, name, width) for row, name in zip(rows, _NAMES) if name[:4] in row
+            }
+            assert len(boxes) <= 1, f"{label} width={width}: the name's box changed size {boxes}"
 
 
 def test_the_name_takes_every_cell_the_row_can_spare(monkeypatch) -> None:
@@ -1275,6 +1302,71 @@ def test_the_name_takes_every_cell_the_row_can_spare(monkeypatch) -> None:
     # More than the two widths the old constant pair allowed, and monotone in the
     # terminal's width over the range where the row is otherwise unchanged.
     assert len(set(boxes)) > 5, f"the name still has only {sorted(set(boxes))} widths"
+
+
+def test_a_brief_title_leaves_no_dead_run_at_the_bands_right_edge(monkeypatch) -> None:
+    """The name's box is RESERVED, but its unused tail is not PAINTED.
+
+    The reserve is what holds every sibling's column still while a model rewrites
+    the title (D2), so it stays — but it used to be painted out to the band's
+    right edge as well, which left a brief title trailed by a long run of blank
+    cells that no segment would ever occupy.
+
+    The run's SIZE is not a constant. Two earlier versions of this docstring
+    implied otherwise, and the second was written to fix the first — which is
+    the more useful half of the story, because a correction carries more
+    authority than an original and nobody re-checks a sentence whose commit
+    message says it is the fix.
+
+    The first version said the run was "identical at every width". The second
+    retracted that and then quoted a second illustrative triple, which reproduces
+    only under a band shape it did not name: the width-100 figure moves with the
+    cwd's length and with whether the alarm is armed, so the same measurement
+    yields a different first entry on a shorter path or a disarmed gate. A
+    figure quoted without the conditions that produce it is the same unenforced
+    universal in a narrower costume.
+
+    So no illustrative numbers are quoted here at all. What identifies the
+    padding is the RELATIONSHIP, which needs none: the run is exactly the box
+    minus the ink, so it grows as the box grows and vanishes when the title
+    fills it — while a layout gap would not track the title's length. The box is
+    itself elastic and only reaches the full ``NAME_CELLS`` once the row can
+    spare it, which is why any single measurement of the run is a fact about one
+    band shape rather than about the defect.
+
+    That relationship is what this test pins, by asserting the row ends on the
+    title's last inked cell at every width rather than by asserting any
+    particular number of dead cells.
+
+    Those cells are ordinary styled cells, so everything that reads the row
+    rather than looking at it carried them — the app's own SVG export wrote 35
+    trailing spaces after `short` at a 160-column terminal.
+
+    The two halves are asserted together on purpose. Trimming the tail is only
+    correct while the reserve behind it is untouched, so this pins that the row
+    ends on the title's last inked character AND that the box measured to the
+    band's edge is unchanged by how long the title is.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    for label, state in _LADDER_STATES.items():
+        status = _swept_band(state, alarm=True)
+        for width in (100, 120, 160):
+            boxes = set()
+            for name in ("a", "short", "Bulk export the invoice columns"):
+                status.update(conversation_name=name)
+                row = status.render_text(width).plain
+                if not status.is_showing("name"):
+                    continue
+                where = f"{label} width={width} name={name!r}"
+                assert (
+                    row == row.rstrip()
+                ), f"{where}: {len(row) - len(row.rstrip())} dead cells at the band's edge"
+                # The ink really is the title's, not a coincidence of truncation.
+                assert row.endswith(truncate_name(name, _name_box(row, name, width))), where
+                boxes.add(_name_box(row, name, width))
+            # ...and the reserve behind that trimmed tail did not move with the
+            # title's length, which is the property the padding used to provide.
+            assert len(boxes) <= 1, f"{label} width={width}: the box moved with the title {boxes}"
 
 
 def test_the_bands_cut_lands_on_a_word_like_the_excerpt_it_was_handed() -> None:
@@ -1362,3 +1454,53 @@ def test_the_band_still_paints_what_it_was_told() -> None:
 
     assert dock.painted is not None
     assert "$12.40" in dock.painted.plain
+
+
+def test_every_segment_icon_stays_in_the_block_the_terminal_font_covers() -> None:
+    """Segment icons live in Geometric Shapes (U+25xx), and that is a fix.
+
+    `ICON_JOBS` was `⊞` (U+229E SQUARED PLUS, Mathematical Operators) and
+    rendered as TOFU — an empty replacement box — in a real terminal, while
+    every U+25xx glyph on the same row painted correctly. That is what makes
+    this a property of the BLOCK rather than of one unlucky codepoint: fonts
+    that cover Geometric Shapes routinely stop short of Mathematical Operators.
+
+    This is asserted here because **no other check in the repo can see it**.
+    `cell_len` returns 1 for tofu exactly as it does for a real glyph, so the
+    band's width arithmetic stays correct and every layout test keeps passing
+    while the icon is invisible to the user. An SVG export embeds the character
+    rather than the rendered shape, so it cannot see it either. The only
+    instruments are a human looking at a terminal, and this rule.
+
+    `ICON_MCP` is deliberately EXCLUDED and left in U+22xx: it has not been
+    observed broken, so it is recorded as a known risk at its definition rather
+    than swapped on suspicion. If it is ever reported as an empty box, the fix
+    is to move it into U+25xx and add it to this test.
+
+    `ICON_APPROVALS` is excluded because it is plain ASCII `!`, and `ICON_CWD`
+    because `⌂` (U+2302) predates the band and has been on screen in every
+    release since without a report.
+    """
+    icons = {
+        "ICON_MODEL": ICON_MODEL,
+        "ICON_AGENTS": ICON_AGENTS,
+        "ICON_JOBS": ICON_JOBS,
+        "ICON_CONTEXT": ICON_CONTEXT,
+        "ICON_COST": ICON_COST,
+        "ICON_DURATION": ICON_DURATION,
+    }
+    for name, glyph in icons.items():
+        assert len(glyph) == 1, f"{name} is not a single codepoint: {glyph!r}"
+        point = ord(glyph)
+        assert 0x2500 <= point <= 0x25FF, (
+            f"{name} is U+{point:04X}, outside Geometric Shapes (U+25xx). "
+            "cell_len cannot detect tofu, so a glyph outside this block has to "
+            "be confirmed in a real terminal before it ships."
+        )
+        # The width rule the band's arithmetic depends on, checked on the same
+        # pass: a two-cell glyph would drift the right group's edge by a column.
+        assert cell_len(glyph) == 1, f"{name} is not one cell wide"
+
+    # The jobs and context icons sit side by side in the right group, so they
+    # have to be tellable apart at a glance and not merely unequal as strings.
+    assert ICON_JOBS != ICON_CONTEXT
