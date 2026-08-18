@@ -11,6 +11,7 @@ import inspect
 import json
 import os
 import sqlite3
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -1877,3 +1878,68 @@ def test_the_backfill_stamps_only_what_the_machine_itself_wrote(tmp_path: Path) 
     assert resume_mod.backfill_session_origins(tmp_path) == 0
     (sessions / "child_role" / resume_mod.ORIGIN_NAME).unlink()
     assert resume_mod.backfill_session_origins(tmp_path) == 1
+
+
+def test_stamping_a_session_does_not_reset_its_retention_clock(tmp_path: Path) -> None:
+    """Retention sorts and age-expires on the DIRECTORY's mtime, and creating
+    a file inside a directory moves it.
+
+    So stamping an existing session silently reset its clock to now: the
+    backfill resurrected delegated runs that were already past the age ceiling
+    and, because eviction is oldest-first, spent their retained slots on the
+    user's own conversations. Writing a marker is bookkeeping ABOUT a session,
+    never activity IN it, so it must not answer "when was this last used".
+    """
+    sessions = tmp_path / "sessions"
+    directory = sessions / "child"
+    directory.mkdir(parents=True)
+    (directory / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    aged = time.time() - 40 * 86400
+    os.utime(directory, (aged, aged))
+
+    resume_mod.mark_session_origin(directory, resume_mod.ORIGIN_SUBAGENT, label="review")
+
+    assert not resume_mod.is_user_session(directory), "the marker must still be written"
+    assert abs(directory.stat().st_mtime - aged) < 1, "stamping moved the retention clock"
+
+
+def test_the_backfill_reaches_every_directory_not_just_the_first_page(tmp_path: Path) -> None:
+    """The cap is on work done, never on how far the scan reaches.
+
+    Slicing the directory list instead sounds equivalent and is not: the list
+    sorts by hex NAME and the same prefix is recomputed every startup, so a
+    directory sorting past the cut was never visited on any run, ever — its
+    origin decided by where its random name fell in an alphabet.
+    """
+    sessions = tmp_path / "sessions"
+
+    def seed(name: str, opening: str) -> None:
+        directory = sessions / name
+        directory.mkdir(parents=True)
+        entry = {
+            "id": "e1",
+            "ts": 0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": opening}]},
+        }
+        (directory / resume_mod.TRANSCRIPT_NAME).write_text(
+            json.dumps(entry) + "\n", encoding="utf-8"
+        )
+
+    # Children sort AFTER every user session, and past a small cap.
+    for index in range(12):
+        seed(f"0{index:04d}", "my own work")
+    for index in range(4):
+        seed(f"f{index:04d}", "[role: reviewer]\nreview the diff")
+
+    assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 4
+    for index in range(4):
+        assert not resume_mod.is_user_session(sessions / f"f{index:04d}")
+
+    # The cap still bounds the work: with more children than the limit, a run
+    # stamps at most ``limit`` and the next startup continues.
+    for index in range(4, 12):
+        seed(f"f{index:04d}", "[role: reviewer]\nreview the diff")
+    assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 5
+    assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 3
+    assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 0

@@ -6268,10 +6268,17 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
         # row that cannot be resumed it is a string to mistake for the job id
         # rather than something to type.
         if row.resumable and row.session_id:
-            lines.append(f"    transcript session id: {row.session_id}")
+            lines.append(
+                f"    transcript {row.session_id} (read it with"
+                f" local-operator --resume {row.session_id})"
+            )
     if any(row.resumable for row in rows):
         lines.append("")
-        lines.append("Resume one with hub op='resume' and an instruction for what to do next.")
+        lines.append(
+            "Resume one with hub op='resume' and its JOB id, plus an instruction for "
+            "what to do next. The transcript id above is not a job id: it opens the "
+            "child's history for reading and starts no agent."
+        )
     return _text(
         tool_call_id,
         "hub",

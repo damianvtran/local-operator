@@ -1670,3 +1670,35 @@ def test_a_child_that_never_started_has_no_session_id_to_offer():
     [row] = comms.roster()
 
     assert row.session_id is None
+
+
+def test_the_roster_text_tells_the_two_ids_apart(tmp_path):
+    """Both ids are `uuid4().hex[:12]`, so they are visually identical.
+
+    The roster prints a job id and a transcript id two lines apart, and the
+    line under them said "Resume one with hub op='resume'" — which takes the
+    JOB id and rejects the transcript id with `unknown subagent`. Two
+    indistinguishable ids beside an instruction that fits only one is a
+    coin-flip, so each id now names what it is for.
+    """
+    from local_operator.tools.builtin import _hub_list
+
+    session_dir = tmp_path / "9f2c1a0b7e44"
+    session_dir.mkdir()
+    comms, jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), session_dir)
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.record_outcome("job-1", "failed", "provider 500")
+    comms.detach("job-1")
+    del jobs.jobs["job-1"]
+
+    block = _hub_list("call-1", comms).content[0]
+    assert isinstance(block, TextContent)
+    text = block.text
+
+    # The transcript id is shown with the command that actually takes it.
+    assert "local-operator --resume 9f2c1a0b7e44" in text
+    # And the resume instruction says which id it wants, so the transcript id
+    # sitting above it is not read as the argument.
+    assert "JOB id" in text
+    assert "not a job id" in text

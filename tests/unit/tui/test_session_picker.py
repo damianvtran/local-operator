@@ -906,7 +906,7 @@ def test_the_empty_card_says_whose_sessions_are_missing() -> None:
     screen = SessionPickerScreen([], NOW)
     card = "\n".join(screen.render_lines_for_test())
     assert RESUME_EMPTY_NOTICE in card
-    assert "delegated subagent runs are not listed" in card
+    assert "subagent runs are not listed" in card
 
 
 def test_one_session_is_not_announced_as_1_sessions() -> None:
@@ -924,3 +924,23 @@ def test_one_session_is_not_announced_as_1_sessions() -> None:
         ).render_lines_for_test()
     )
     assert "2 sessions" in plural
+
+
+def test_the_empty_notice_fits_inside_the_card() -> None:
+    """The notice is the card's own empty body, and the card is capped.
+
+    The first wording ran to 76 cells against a 74-cell cap and hung past the
+    rule at full width — much further on a narrow terminal, where every
+    neighbouring row sheds cells to fit. Measured rather than eyeballed,
+    because this is the one row with no truncation behind it.
+    """
+    from local_operator.tui.widgets.session_picker import (
+        PICKER_MAX_WIDTH,
+        RESUME_EMPTY_NOTICE,
+    )
+
+    assert cell_len(RESUME_EMPTY_NOTICE) <= PICKER_MAX_WIDTH
+
+    screen = SessionPickerScreen([], NOW)
+    for line in screen.render_lines_for_test():
+        assert cell_len(line) <= PICKER_MAX_WIDTH, line

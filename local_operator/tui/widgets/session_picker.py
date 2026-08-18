@@ -82,7 +82,13 @@ NAME_MIN_CELLS = 16
 #: whose only surviving sessions are children — reachable through retention,
 #: which evicts the older parent before its newer children — "no previous
 #: sessions" was false and told the user nothing about why.
-RESUME_EMPTY_NOTICE = "no conversations of yours to resume — delegated subagent runs are not listed"
+#:
+#: It must also FIT: this string is the card's own empty body, and the card
+#: is capped at :data:`PICKER_MAX_WIDTH` cells. The first wording ran to 76
+#: cells and hung two past the rule at full width — and much further on a
+#: narrow terminal, where every neighbouring row sheds cells to fit. Anything
+#: edited here is measured against that cap, not eyeballed.
+RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are not listed"
 
 #: Rows of sessions shown before the list scrolls, when the terminal has room.
 #: A page that fills the screen makes the modal feel like a mode switch rather

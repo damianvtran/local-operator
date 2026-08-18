@@ -17,6 +17,7 @@ transcript-directory decision, so the rule has one definition.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import NamedTuple
@@ -113,11 +114,31 @@ def mark_session_origin(session_dir: Path, origin: str, **details: object) -> No
     sweep that just removed the directory) must still RUN — the cost of the
     failure is one extra row in a picker, and taking a delegated task down for
     it would be the more expensive bug.
+
+    **The directory's mtime is preserved**, and that is load-bearing rather
+    than tidy. Retention sorts and age-expires on the DIRECTORY's mtime
+    (``session/retention.py``), and creating a file inside a directory moves
+    it — so stamping a session silently reset its retention clock to now.
+    Measured on twin stores: marking existing directories kept 3 delegated
+    runs the picker will never show while deleting 3 of the user's own
+    conversations, and resurrected 59 children that were already past the age
+    ceiling. Writing a marker is bookkeeping ABOUT a session, never activity
+    IN it, so it must not answer the question "when was this session last
+    used". A directory this call creates has no prior mtime and is unaffected.
     """
     payload = {"origin": origin, **details}
     try:
+        # Read before the write: this is the value the write is about to
+        # destroy. ``None`` for a directory that does not exist yet, which is
+        # the fresh-child path and needs no restore.
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
         session_dir.mkdir(parents=True, exist_ok=True)
         (session_dir / ORIGIN_NAME).write_text(json.dumps(payload), encoding="utf-8")
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
     except (OSError, TypeError, ValueError):
         return
 
@@ -178,7 +199,16 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
 
     Best-effort and bounded like every other function here: it runs at
     startup, so an unreadable directory is skipped rather than raised, and
-    ``limit`` caps the work on a store that has grown large.
+    ``limit`` caps how many directories are STAMPED per run.
+
+    The cap is on work done, never on how far the scan reaches. Capping the
+    scan instead — slicing the directory list — sounds equivalent and is not:
+    the list sorts by hex NAME, and the same prefix is recomputed on every
+    startup, so any directory sorting past the cut was never visited on any
+    run, ever. Measured: a 600-directory store with 50 children sorting after
+    the cut stamped 0 on three consecutive startups. Deciding a session's
+    origin by where its random name falls in an alphabet is not a policy
+    anyone would choose deliberately.
     """
     stamped = 0
     sessions = config_dir / "sessions"
@@ -186,7 +216,7 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
         directories = sorted(sessions.iterdir())
     except OSError:
         return 0
-    for directory in directories[:limit]:
+    for directory in directories:
         if stamped >= limit:
             break
         try:
