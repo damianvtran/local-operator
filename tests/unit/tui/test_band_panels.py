@@ -217,7 +217,18 @@ async def test_band_panels_hidden_when_empty_and_shown_when_populated() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
-        await pilot.pause()
+        # Wait for the SESSION, not a frame count. The app paints before its
+        # session exists (the factory is awaited in a boot worker) and both
+        # panels read their content off it, so a repaint that lands in that
+        # window finds no jobs and no todos and hides them both — which reads
+        # as this assertion failing for a reason that has nothing to do with
+        # visibility. The same race costs `test_app_pilot`'s first test on
+        # `main`; here it is deterministic enough to fix rather than tolerate.
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        assert app._session is not None, "the session never booted"
         todo = app.query_one(TodoPanel)
         sub = app.query_one(SubagentPanel)
         assert todo.display is False
@@ -466,6 +477,13 @@ async def test_todo_row_cap_follows_the_screen_and_the_marker_counts_the_hidden(
 
         assert app.screen.size.height == 12
         # 12 rows of screen, 8 of them the dock's, leaving header + 2 + marker.
+        #
+        # The band's top inset (`#band.has-slot`) is NOT among them at this
+        # size: it is withheld at or below a 12-row screen, where the dock
+        # already crowds the terminal and the row would come out of this
+        # panel's items. So the arithmetic here is the same as before the inset
+        # existed — which is the point of the floor, and why this test is
+        # unchanged from `main` while the taller sizes shifted by a row.
         assert panel._body_rows() == 4
         assert len(lines) == 4
         assert lines[0] == "Todos · 0/12 resolved"
@@ -698,3 +716,220 @@ async def test_reordering_skips_a_row_the_list_does_not_own_yet() -> None:
 
         assert orphan not in panel._list.children
         assert [row for row in panel._list.children] == [panel._rows["b"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("height", "children"),
+    [(20, 4), (24, 4), (28, 6), (32, 10)],
+)
+async def test_the_band_inset_never_costs_the_subagent_list_its_screen(
+    height: int, children: int
+) -> None:
+    """The dock's top inset is only taken when there is a row to spare.
+
+    `TodoPanel` charges itself for that row (`_band_inset_rows`), but
+    `SubagentPanel` has NO row budget: it mounts one row per task job
+    unconditionally. So on the subagent side the inset's row is charged to
+    nobody and comes straight out of the transcript — measured at 100x16 with
+    six children as virtual height 15 against a 14-row screen, where the same
+    frame without the inset fits exactly.
+
+    `AGENTS.md` is explicit that a screen whose virtual size exceeds its actual
+    size is always a bug here: `Screen { overflow: hidden }` does not report it,
+    it silently clips a row off the top. The inset is therefore gated — on the
+    screen height and on the child count, both of which are known synchronously
+    and so cannot change between the frame that paints and the frame after it.
+    Gates that MEASURED the laid-out band were tried first and removed: every
+    one of them flipped mid-repaint and traded this overflow for visible
+    motion.
+
+    Driven at MID heights on purpose. The seam suite runs everything at 40 rows,
+    which is why this class of overflow was invisible to it.
+
+    The cases here are the ones where the band FITS without the inset, which is
+    what makes them a statement about the inset rather than about the panel. A
+    tall enough child list overflows this app on its own — ten children need
+    twelve rows, which no 16-row screen holds beside the composer, here and
+    equally on `main` — and that pre-existing defect (`SubagentPanel` has no row
+    cap, unlike `TodoPanel`) is out of scope: its fix is a row budget and an
+    `… N more` line on that panel, not a spacing change.
+
+    Choosing the cells is therefore part of the test. They were picked from a
+    100-configuration sweep (screen heights 12-40 x todo-only / subagent-only /
+    both) as cells where `main` does NOT overflow, so an overflow here is this
+    change's doing and nothing else's. Over that whole sweep the inset overflows
+    in a strict SUBSET of `main`'s cells — it fixes four and introduces none —
+    which is the property this samples.
+    """
+    session = FakeSession()
+    session.jobs = _fake_jobs(*[_Job(f"sub-{i}", f"child task {i}") for i in range(children)])
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, height)) as pilot:
+        await pilot.pause()
+        app._refresh_band()
+        for _ in range(4):
+            await pilot.pause()
+
+        screen = app.screen
+        assert tuple(screen.virtual_size) == tuple(screen.size), (
+            f"the band overflowed the screen at {height} rows with {children} children: "
+            f"virtual={tuple(screen.virtual_size)} size={tuple(screen.size)}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_band_inset_survives_resizing_across_its_floor() -> None:
+    """Shrinking and re-growing the terminal lands on the same frame each time.
+
+    The dock's inset is gated on a SCREEN DIMENSION, and this is the property
+    that makes that gate safe where the measured ones this replaced were not: a
+    screen height cannot change between two frames of one repaint, so the answer
+    cannot flip mid-paint. It can still be wrong across a RESIZE, which is the
+    one input that does change it — and a gate with hysteresis would leave the
+    band in a different state at 14 rows depending on whether the user got there
+    by shrinking or by growing.
+
+    Walked down past the floor and back up, asserting the state is a function of
+    the height alone. The overflow assertion is deliberately paired with it: at
+    these sizes `main` overflows at six of the ten steps and this walks through
+    with one, so the floor is not buying stillness at the cost of the screen.
+    """
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        assert app._session is not None, "the session never booted"
+        builtin.TODO_STORE[session.session_id] = [
+            {"text": f"step {n}", "status": "pending"} for n in range(5)
+        ]
+        try:
+            seen: dict[int, bool] = {}
+            for height in (30, 16, 14, 13, 12, 13, 14, 16, 30):
+                await pilot.resize_terminal(100, height)
+                # NO manual `_refresh_band()`. The production resize path is
+                # what is under test: `on_resize` schedules the band's
+                # re-decision itself, and an earlier version of this test
+                # supplied that call by hand — which made it pass while the
+                # real app sat on the previous height's answer until the 1 Hz
+                # poll. A test that provides the trigger it is meant to be
+                # checking for asserts nothing.
+                for _ in range(6):
+                    await pilot.pause()
+
+                screen = app.screen
+                inset = app.query_one("#band").has_class("has-slot")
+                # Same height, same answer — whichever direction it arrived from.
+                if height in seen:
+                    assert seen[height] == inset, (
+                        f"the inset is {inset} at {height} rows going one way and "
+                        f"{seen[height]} the other: the gate has hysteresis"
+                    )
+                seen[height] = inset
+                assert tuple(screen.virtual_size) == tuple(screen.size), (
+                    f"the band overflowed the screen at {height} rows: "
+                    f"virtual={tuple(screen.virtual_size)} size={tuple(screen.size)}"
+                )
+            # And the gate did something across this walk, or the test proves
+            # nothing: tall screens take the row and short ones do not.
+            assert seen[30] is True
+            assert seen[12] is False
+        finally:
+            builtin.TODO_STORE.pop(session.session_id, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("height", "children"), [(15, 5), (16, 6), (17, 7), (18, 8), (20, 10)])
+async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
+    height: int, children: int
+) -> None:
+    """The dock's inset must not be the row that overflows the screen.
+
+    ``SubagentPanel`` has no row cap — it mounts one row per task job, unlike
+    ``TodoPanel``, which budgets against the screen — so a long enough child
+    list overruns the dock on its own, on this branch and on ``main`` alike.
+    That defect is out of scope here. Not making it WORSE is not: the inset's
+    row is exactly what tips a list that currently just fits.
+
+    Each case is A/B'd against the identical frame with the class forced off, in
+    the same checkout, so the comparison isolates the inset rather than
+    comparing two builds.
+
+    The cells are exactly those where the PREVIOUS head granted the inset and
+    the inset then caused an overflow — found by sweeping heights 14-26 against
+    1-10 children on that head and keeping every cell where the A/B diverged.
+    Choosing them that way is what makes this a regression test rather than a
+    restatement: on the fixed head the gate WITHHOLDS the row in all five, which
+    is the fix, and the assertion below holds either by the row being refused or
+    by it being granted without cost.
+
+    An earlier version parameterized cells where the gate withheld the inset on
+    both heads. Those compare one build against itself and can only ever pass —
+    the test was green and vacuous.
+    """
+
+    async def _overflows(*, suppress_inset: bool) -> bool:
+        session = FakeSession()
+        session.jobs = _fake_jobs(*[_Job(f"sub-{i}", f"child {i}") for i in range(children)])
+        app = OperatorApp(_async_factory(session))
+        if suppress_inset:
+            original = type(app)._sync_band_inset
+
+            def without_inset(self: Any) -> None:
+                original(self)
+                self.query_one("#band").remove_class("has-slot")
+
+            app._sync_band_inset = without_inset.__get__(app)  # type: ignore[method-assign]
+        async with app.run_test(size=(100, height)) as pilot:
+            for _ in range(80):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            assert app._session is not None, "the session never booted"
+            for _ in range(4):
+                app._refresh_band()
+                for _ in range(3):
+                    await pilot.pause()
+            screen = app.screen
+            return tuple(screen.virtual_size) != tuple(screen.size)
+
+    # The A/B is only meaningful where the inset is actually GRANTED. Where the
+    # gate withholds it the two runs are the same build painting the same frame,
+    # and any difference between them is the subagent panel's own pre-existing
+    # overflow — which varies run to run at the cells where its row count sits
+    # exactly on the screen height, and would make this test flaky about a
+    # defect it does not own.
+    async def _inset_granted() -> bool:
+        """Whether the gate actually gives this configuration the row."""
+        session = FakeSession()
+        session.jobs = _fake_jobs(*[_Job(f"sub-{i}", f"child {i}") for i in range(children)])
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=(100, height)) as pilot:
+            for _ in range(80):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            for _ in range(4):
+                app._refresh_band()
+                for _ in range(3):
+                    await pilot.pause()
+            return app.query_one("#band").has_class("has-slot")
+
+    # A cell where the gate withholds the row compares the same frame with
+    # itself; the assertion still holds, and holds trivially. Recorded rather
+    # than skipped so a reader can see which of the two ways each cell passes.
+    granted = await _inset_granted()
+
+    with_inset = await _overflows(suppress_inset=False)
+    without_inset = await _overflows(suppress_inset=True)
+
+    assert not (with_inset and not without_inset), (
+        f"the inset caused an overflow at {height} rows with {children} children "
+        f"that the same frame without it does not have "
+        f"(inset granted here: {granted})"
+    )

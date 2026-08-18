@@ -56,6 +56,11 @@ GLYPH_FAILED = "✗"
 GLYPH_CANCELLED = "⊘"
 GLYPH_QUEUED = "⏳"
 
+#: Rows the panel spends on chrome rather than on jobs: the ``Subagents``
+#: caption. Named because :meth:`SubagentPanel.predicted_rows` adds it to the
+#: job count, and a reader of that sum should not have to count `compose`.
+_HEADER_ROWS = 1
+
 #: Seam between the numbers on a row. The same ` · ` the full-page view's
 #: title uses between its own facts, one tone under them — a row and the page
 #: it opens must punctuate the same way.
@@ -862,6 +867,22 @@ class SubagentPanel(Container):
     def compose(self):  # type: ignore[override]
         yield self._header
         yield self._list
+
+    def predicted_rows(self) -> int:
+        """Content rows this panel will paint, for a caller that cannot measure.
+
+        The dock's inset check runs at the moment a panel appears — a
+        ``SubagentStarted`` event — when the slot has not been arranged yet and
+        measures zero (see ``app.slot_rows``). This panel's height is simply
+        its header plus one row per job, both of which are known as soon as
+        ``sync`` has run, so answering here is what lets the dock paint its
+        settled frame first instead of jumping a row at the next 1 Hz poll.
+
+        Never raises and never returns less than one: a displayed panel is at
+        least a row, and under-counting hands the transcript a row the dock is
+        about to take.
+        """
+        return max(1, len(self._rows) + _HEADER_ROWS)
 
     def on_unmount(self) -> None:
         self._stop_spinner()
