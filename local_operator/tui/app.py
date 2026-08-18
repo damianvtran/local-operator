@@ -2188,7 +2188,13 @@ class OperatorApp(App[None]):
         because the usage panel lit up".
         """
         self._sync_composer_focus()
-        self._keep_prompt_answerable()
+        # Only while a question is actually waiting. Cheap and, more to the
+        # point, SCOPED: this handler sees every focus change in the app, and
+        # the guard has no business running — or querying the DOM — for the
+        # subagent page closing, a picker opening, or any other focus move that
+        # has nothing to do with an unanswered prompt.
+        if self._approval is not None or self._ask_screen is not None:
+            self._keep_prompt_answerable()
 
     def on_descendant_blur(self, event: DescendantBlur) -> None:
         self._sync_composer_focus()
@@ -2734,14 +2740,25 @@ class OperatorApp(App[None]):
             host = self.query_one("#prompt-host", Container)
         except Exception:  # pragma: no cover - only during teardown
             return
-        # Hidden unconditionally, not on `not host.children`: `Widget.remove()`
-        # is deferred (it returns an awaitable and the child is still in
-        # `children` on this frame), so the emptiness test read the card that
-        # was on its way out and left the host displayed — a row of dock chrome
-        # standing after the question was answered. The host holds at most one
-        # prompt and this runs as that prompt leaves, so "empty" is what it is
-        # about to be; a prompt raised after this re-shows it on mount.
-        host.display = False
+        # Hidden only when nothing ELSE is still being asked.
+        #
+        # `Widget.remove()` is deferred — it returns an awaitable and the child
+        # is still in `children` on this frame — so a plain `not host.children`
+        # test reads the card on its way out and leaves the host displayed, a
+        # row of dock chrome standing after the question was answered. The
+        # departing card is therefore excluded by identity rather than by
+        # waiting for the removal to land.
+        #
+        # What this must NOT do is assume the host holds one prompt. Approvals
+        # serialize against `self._approval`, but `request_user_choice` mounts
+        # into this same host with no interlock, so an `ask` and an approval can
+        # legitimately overlap. Hiding unconditionally then hid a LIVE ask card
+        # the moment an approval beside it was answered: the question stayed
+        # attached and awaited while being invisible and unreachable — the
+        # turn parked on an answer the user cannot see, which is the hang class
+        # this module exists to remove (F1, agent review round 1).
+        remaining = [child for child in host.children if child is not card]
+        host.display = bool(remaining)
         # The card's own restore target can be missing or stale, and then focus
         # has nowhere to land: the widget is gone but the screen still names it
         # as focused, so every later keystroke goes to a removed node and the
@@ -2760,7 +2777,13 @@ class OperatorApp(App[None]):
         # put the caret somewhere else while the question was up.
         try:
             screen = self.screen
-            if held_focus and screen is not None:
+            # A prompt that is still owed an answer outranks the composer: with
+            # an `ask` and an approval overlapping, answering one must hand the
+            # keyboard to the other rather than to the draft.
+            successor = self._live_prompt()
+            if successor is not None and successor is not card:
+                successor.focus()
+            elif held_focus and screen is not None:
                 focused = screen.focused
                 # "Somewhere the user can type" is the test, not "somewhere".
                 #

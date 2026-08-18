@@ -147,3 +147,49 @@ async def test_answering_the_last_question_takes_the_card_down() -> None:
         assert not app.query(AskPickerScreen)
         assert not app.query_one("#prompt-host").display
         assert isinstance(app.screen.focused, Editor)
+
+
+@pytest.mark.asyncio
+async def test_an_overlapping_ask_survives_an_answered_approval() -> None:
+    """Two prompts can be live at once, and answering one must not bury the other.
+
+    Approvals serialize against `_approval`, but `request_user_choice` mounts
+    into the same host with no interlock, so an `ask` and an approval genuinely
+    overlap. Hiding the host unconditionally as one card left took the OTHER
+    question off screen while it was still attached and still awaited: a turn
+    parked on an answer the user could no longer see or reach, which is the
+    hang class this whole module exists to remove (F1, agent review round 1).
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            await pilot.pause(0.02)
+            if getattr(session, "approval_handler", None) is not None:
+                break
+        app._set_approve_all(False)
+        app._approvals_default_auto = False
+
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(10):
+            await pilot.pause(0.02)
+        handler = getattr(session, "approval_handler", None)
+        assert handler is not None, "the app never installed its approval gate"
+        approving = asyncio.ensure_future(handler("bash", "run: make"))
+        for _ in range(20):
+            await pilot.pause(0.02)
+        assert app.query(AskPickerScreen), "the ask card is not up"
+
+        # Answer the APPROVAL and leave the ask standing.
+        await pilot.press("y")
+        assert await asyncio.wait_for(approving, 2) is True
+        for _ in range(20):
+            await pilot.pause(0.02)
+
+        # The surviving question is still visible, still holds the keyboard...
+        assert app.query_one("#prompt-host").display, "the live ask was hidden"
+        assert app.query(AskPickerScreen), "the live ask was unmounted"
+        assert isinstance(app.screen.focused, AskPickerScreen)
+        # ...and is still answerable.
+        await pilot.press("enter")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}

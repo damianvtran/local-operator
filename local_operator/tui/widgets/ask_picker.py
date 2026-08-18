@@ -80,15 +80,27 @@ ASK_WIDTH_MARGIN = 6
 ASK_PADDING_CELLS = 1
 
 
-#: The single row the transcript claims even when it is showing nothing.
+#: Rows the transcript claims even when it is showing nothing at all.
 #:
 #: It is ``height: 1fr`` and a sibling of the dock under the screen, so it takes
-#: a row whatever the dock does with the rest. A card that budgeted the screen
-#: without it produced a dock one row taller than the screen and a scrollable
+#: its rows whatever the dock does with the rest. A card that budgeted the
+#: screen without them produced a dock taller than the screen — a scrollable
 #: screen with the top of the question cut off. Distinct from
 #: :data:`MIN_TRANSCRIPT_ROWS`, which is the anchoring PREFERENCE: this is the
 #: layout engine's floor, and it applies even where the preference has yielded.
-_TRANSCRIPT_MIN_ROW = 1
+#:
+#: TWO, not one: ``TranscriptView`` carries ``padding: 1 0 1 1`` — a row of the
+#: conversation's own ground above and below — and padding is inside the
+#: scrollable region, so both survive. Written as 1 the budget was short by
+#: exactly one row and `virtual_size` exceeded `size` at 100x14, 54x14, 80x13,
+#: 30x12 and 40x12 (F2, agent review round 1).
+#:
+#: It was invisible to every geometry test in this file because they all mount
+#: into an app with an EMPTY transcript, which is still in the boot layout —
+#: and ``Screen.boot TranscriptView`` drops the padding to ``0 0 0 1``,
+#: cancelling the error exactly. The tests now seed a conversation, which is
+#: also the only state in which this surface is ever actually used.
+_TRANSCRIPT_MIN_ROWS = 2
 
 #: Rows to assume the rest of the dock needs before it has been laid out — a
 #: one-row composer, its chevron row's padding, and the status band. Used only
@@ -947,7 +959,7 @@ class AskPickerScreen(Container):
         # out, the dock came to 11 rows on a 10-row screen and the screen went
         # scrollable, which took the top of the question off the frame.
         available = max(
-            0, height - self._dock_reserved_rows() - CARD_PADDING_ROWS - _TRANSCRIPT_MIN_ROW
+            0, height - self._dock_reserved_rows() - CARD_PADDING_ROWS - _TRANSCRIPT_MIN_ROWS
         )
         # 2. and 3. Both anchoring rules are CEILINGS on the card, so the card
         # takes the tighter of the two rather than the looser: they bind at
