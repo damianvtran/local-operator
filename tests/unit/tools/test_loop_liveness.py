@@ -183,7 +183,7 @@ async def test_concurrent_image_reads_keep_the_loop_live(
     # thread wall time but no CPU, so the structural half is the only one that
     # can see it, and it must therefore watch the whole path — not just the
     # expensive end of it.
-    spy = OffLoopSpy(monkeypatch, "_read_file_snapshot", "_encode_image_for_model")
+    spy = OffLoopSpy(monkeypatch, "_read_file_snapshot", "bound_image_for_model")
     probe = LoopCpuProbe()
     probe.start()
     try:

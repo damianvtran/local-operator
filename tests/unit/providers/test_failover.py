@@ -1547,12 +1547,43 @@ def test_an_image_rejection_is_recognised_in_both_the_raised_and_rendered_forms(
         "messages.31.content.4.image.source.base64.data: Image does not match "
         "the provided media type image/jpeg",
         "Unsupported image format",
+        # The DIMENSION refusals. Both were missed by the original marker list,
+        # and the many-image one is the wording that wedged a real session on
+        # 2026-08-18: the composer had attached a 2206x266 screenshot verbatim,
+        # and the request crossed twenty images a hundred turns later.
+        "messages.0.content.2.image.source.base64.data: At least one of the image "
+        "dimensions exceed max allowed size for many-image requests: 2000 pixels",
+        "messages.5.content.1.image.source.base64.data: At least one of the image "
+        "dimensions exceed max allowed size: 8000 pixels",
     ],
 )
 def test_the_wordings_providers_actually_use_are_all_recognised(message: str) -> None:
     """Sampled from the reports this degrade exists for, not invented:
-    anthropics/claude-code#12009, #13594, #31142, #50708."""
+    anthropics/claude-code#12009, #13594, #31142, #50708, #12351, #39185."""
     assert is_image_rejection(ProviderError(400, message))
+
+
+def test_the_many_image_refusal_degrades_in_the_rendered_form_too() -> None:
+    """The form the session actually receives, for the case that wedged a
+    session.
+
+    ``AgentEndEvent.error`` carries the rendered string, and that is the value
+    ``_degrade_if_image_rejected`` is handed. A marker that matched only the
+    raised form would leave the session bricked exactly as before, so this pins
+    the path rather than the predicate's convenient half.
+
+    The many-image limit is worth its own test because of how it ARRIVES: no
+    image changed and no request was malformed, the conversation simply grew
+    past twenty images and a block that had been accepted for a hundred turns
+    started being refused forever.
+    """
+    refusal = ProviderError(
+        400,
+        "messages.0.content.2.image.source.base64.data: At least one of the image "
+        "dimensions exceed max allowed size for many-image requests: 2000 pixels",
+    )
+    assert str(refusal).startswith("invalid request (HTTP 400)")
+    assert is_image_rejection(str(refusal))
 
 
 @pytest.mark.parametrize(
