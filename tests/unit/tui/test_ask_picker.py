@@ -1400,3 +1400,81 @@ async def test_the_footer_follows_the_draft_as_it_is_typed() -> None:
         assert "answer" in restored, restored
         await pilot.press("1")
         assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_a_multi_select_over_a_draft_is_answerable_by_keyboard() -> None:
+    """A question with no routed keys must not be mouse-only.
+
+    The card yields focus to a draft on mount (D12), which costs nothing for
+    most questions because their answer keys are routed from the composer. A
+    MULTI-SELECT has none — it is answered by Space and Enter, which the
+    composer owns — so one arriving over a draft was answerable only by mouse
+    or by abandoning it: `space`, the digits, `enter`, the arrows and `tab` all
+    went to the composer, and `shift+tab` is bound to `cycle_effort` (D17,
+    design round 5). It is a regression from anchoring the card, which as a
+    `ModalScreen` simply held the keyboard.
+
+    Emptying the composer is the user saying they are done typing, so the
+    question takes the caret back — and only for a card that cannot be answered
+    any other way, which the companion assertion below pins.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "hmm":
+            await pilot.press(character)
+        await pilot.pause(0.1)
+
+        asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
+        for _ in range(16):
+            await pilot.pause()
+        # The draft keeps the caret while it has text (D12).
+        assert isinstance(app.screen.focused, Editor)
+
+        for _ in range(len("hmm")):
+            await pilot.press("backspace")
+        await pilot.pause(0.3)
+        # ...and gives it back once empty, because nothing else can answer this.
+        assert isinstance(app.screen.focused, AskPickerScreen)
+
+        await pilot.press("space")
+        await pilot.press("enter")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_clearing_a_draft_does_not_steal_the_caret_from_a_routable_card() -> None:
+    """The focus hand-back is scoped to cards that need it, and no others.
+
+    A single-select IS answerable from the composer (its ordinals are routed),
+    so emptying the buffer must leave the caret where the user put it —
+    otherwise the hand-back would undo D12, which exists to stop the card
+    taking the keyboard from someone who is typing.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "hmm":
+            await pilot.press(character)
+        await pilot.pause(0.1)
+
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(16):
+            await pilot.pause()
+        for _ in range(len("hmm")):
+            await pilot.press("backspace")
+        await pilot.pause(0.3)
+
+        assert isinstance(app.screen.focused, Editor)
+        # And it is answerable from there, which is why the caret can stay.
+        await pilot.press("1")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}

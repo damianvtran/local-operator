@@ -3762,6 +3762,29 @@ class OperatorApp(App[None]):
                 remeasure()
             except Exception:  # pragma: no cover - teardown races only
                 logger.debug("could not repaint the live prompt", exc_info=True)
+        # Emptying the composer hands the keyboard back to the question.
+        #
+        # The card yields focus to a draft on mount (D12), and for most
+        # questions that costs nothing because the answer keys are routed. A
+        # MULTI-SELECT has no routed keys at all — it is answered by Space and
+        # Enter, which the composer owns — so a multi-select arriving over a
+        # draft was answerable only by mouse or by abandoning it: `space`, the
+        # digits, `enter`, the arrows and `tab` all went to the composer, and
+        # `shift+tab` is bound to `cycle_effort` (D17, design round 5). That is
+        # a regression from anchoring the card, which was a `ModalScreen` and
+        # simply held the keyboard.
+        #
+        # Clearing the draft is the user saying they are done typing, so the
+        # question takes the caret back. Scoped to a card that cannot be
+        # answered any other way, because for every other prompt the routed
+        # keys already work from the composer and stealing focus would undo
+        # D12's whole point.
+        if prompt is not None and not prompt.answer_keys():
+            try:
+                if not self._editor().text and not prompt.has_focus:
+                    prompt.focus()
+            except Exception:  # pragma: no cover - hosts with no composer
+                logger.debug("could not hand focus back to the prompt", exc_info=True)
 
     def _open_subagent_view(self, job_id: str) -> None:
         """Enter the full-page subagent view for one task job.
