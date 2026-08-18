@@ -415,21 +415,28 @@ async def test_receipts_stay_distinguishable_when_the_row_is_truncated() -> None
     columns, so the narrowest terminals could not tell a stored credential from
     a cancelled login. The glyph carries the outcome, as it does on the sibling
     approval card."""
-    for width in (100, 27, 20, 14, 10):
+    for width in (100, 27, 24, 20, 14, 10):
         app = _PromptHost()
         async with app.run_test(size=(width, 20)) as pilot:
-            stored = KeyPromptBlock("Alibaba Cloud (Qwen)")
-            await app.mount(stored)
-            await pilot.pause()
-            stored.resolve("sk-abc123")
+            # All FOUR settled states, not just the pair originally filed:
+            # design round 2 (D7) found the two informational receipts
+            # colliding at 14-24 columns by the same mechanism, and they are
+            # opposites — the login is still running versus the login is over.
+            rendered: list[str] = []
+            for value, sole_path, superseded in (
+                ("sk-abc123", True, False),  # key received
+                (None, True, False),  # login cancelled
+                (None, False, False),  # paste skipped, browser still listening
+                (None, True, True),  # superseded: the login finished elsewhere
+            ):
+                block = KeyPromptBlock("Alibaba Cloud (Qwen)", sole_path=sole_path)
+                await app.mount(block)
+                await pilot.pause()
+                block.resolve(value, superseded=superseded)
+                await pilot.pause()
+                rendered.append(_rendered(block))
 
-            cancelled = KeyPromptBlock("Alibaba Cloud (Qwen)")
-            await app.mount(cancelled)
-            await pilot.pause()
-            cancelled.resolve(None)
-            await pilot.pause()
-
-            assert _rendered(stored) != _rendered(cancelled), width
+            assert len(set(rendered)) == 4, (width, rendered)
 
 
 @pytest.mark.asyncio

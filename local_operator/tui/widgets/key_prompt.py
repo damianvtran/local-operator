@@ -71,9 +71,14 @@ MASK_MAX_CELLS = 32
 #: ``ApprovalBlock.CHOICES``. Ordered enter -> esc: the affirmative is what the
 #: user came here to do, and the hint row sheds whole choices from the right,
 #: so the key that submits survives to the narrowest terminals.
-#: Cells between two choices on the hint row. Three spaces, matching the gap
-#: ``ApprovalBlock`` puts between its own key hints, so the two prompts the app
-#: parks on read as one surface rather than two.
+#: Cells between two choices on the hint row.
+#:
+#: Three spaces, which is NOT what ``ApprovalBlock`` uses — its hint row joins
+#: choices with ``" · "``. The difference is deliberate: that row carries four
+#: choices whose labels are single words (``deny``, ``allow``), where a middot
+#: is what stops them reading as one phrase. This row has two, each already a
+#: key plus a verb, and a separator glyph between them competes with the ``·``
+#: the settled receipt opens with.
 HINT_SEPARATOR = "   "
 
 CHOICES: tuple[tuple[str, str], ...] = (
@@ -305,15 +310,23 @@ class KeyPromptBlock(TranscriptBlock):
         if event.key in ("enter", "escape"):
             return
         if event.key in ("tab", "shift+tab"):
-            # Tab is SWALLOWED while the prompt is live, and this is a security
+            # TAB is swallowed while the prompt is live, and that is a security
             # boundary rather than a focus preference. Textual's default Tab
             # moves focus to the next focusable widget, which is the composer:
             # the prompt went on saying it was waiting (its ground differs from
             # the focused ground by ~1.04:1, which nobody perceives), the user
             # kept typing their key into the composer, and Enter SENT THE API
-            # KEY TO THE MODEL as a chat message — where it lands in the
-            # transcript in plain text and in the provider's logs. Verified end
-            # to end before this guard existed.
+            # KEY TO THE MODEL as a chat message — into the transcript in plain
+            # text and into the provider's logs. Verified end to end before this
+            # guard existed.
+            #
+            # SHIFT+TAB never reaches here: the app binds it as a PRIORITY
+            # binding (`cycle_effort`), and Textual matches priority bindings
+            # before the focused widget's handlers. It is listed anyway because
+            # this block's own default for a focus key must be "swallow" — if
+            # that app binding is ever narrowed or moved, the safe behaviour is
+            # already here rather than one forgotten line away. It costs nothing
+            # and it is not what stops shift+tab today.
             #
             # A prompt the app is parked on owns the keyboard until it is
             # answered; both ways out (enter, escape) are on this block and are
@@ -448,10 +461,18 @@ class KeyPromptBlock(TranscriptBlock):
             # Same device and the same two characters ``ApprovalBlock`` uses for
             # its own settled receipt, and the same pair the transcript's
             # success/error notices use.
+            # The two informational receipts put their DISTINGUISHING word before
+            # the provider label, because truncation eats the tail: with the
+            # label first, "paste skipped" and "paste no longer needed" both cut
+            # to "· Alibaba Cloud paste…" at 24 columns and below, and those two
+            # are opposites (the login is still running / the login is over).
+            # Same defect the glyphs fixed for success-vs-cancel, one row over.
+            # Success and cancel keep the label first: their glyphs already
+            # separate them, and the label is the more useful lead there.
             if self._superseded:
                 # Says only what this BLOCK knows: it stopped being needed. The
                 # login's own outcome notice, success or failure, follows it.
-                return row(("· ", dim), (f"{self.provider_label} paste no longer needed", muted))
+                return row(("· ", dim), ("no longer needed ", muted), (self.provider_label, dim))
             if self._submitted is None:
                 if not self.sole_path:
                     # Declining here does not end the login (see ``sole_path``):
@@ -460,8 +481,8 @@ class KeyPromptBlock(TranscriptBlock):
                     # failure glyph: nothing failed.
                     return row(
                         ("· ", dim),
-                        (f"{self.provider_label} paste skipped ", muted),
-                        ("— still waiting for the browser", dim),
+                        ("paste skipped ", muted),
+                        (f"{self.provider_label} — still waiting for the browser", dim),
                     )
                 return row(("✗ ", danger), (f"{self.provider_label} login cancelled", muted))
             return row(
