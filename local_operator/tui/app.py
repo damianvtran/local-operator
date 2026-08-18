@@ -2050,9 +2050,21 @@ class OperatorApp(App[None]):
         # focusing NOTHING — visible, answerable in principle, and receiving no
         # keys at all. Restored here because this is the path that made it
         # drawable again.
+        # Only when focus is NOWHERE, which is the state this repairs. Written
+        # as "not the prompt", it fired on every resize regardless of where the
+        # caret was — so a one-column resize while the user was typing took the
+        # keyboard, and the next character of their sentence answered the
+        # question: a `space` ticked a row, and on an approval a `y` AUTHORISED
+        # `rm -rf /data` (F10, agent review round 7). The composer's one-
+        # keystroke hold is a correct defence and was simply bypassed, because
+        # it only guards keys that arrive AT the composer.
+        #
+        # The two cases are cleanly distinguishable and this is the narrower
+        # one: hiding a widget leaves `focused` as None, while a typing user
+        # leaves it as the Editor.
         if prompt is not None and getattr(prompt, "is_drawable", False):
             try:
-                if self.screen is not None and self.screen.focused is not prompt:
+                if self.screen is not None and self.screen.focused is None:
                     prompt.focus()
             except Exception:  # pragma: no cover - teardown races only
                 logger.debug("could not re-focus the live prompt", exc_info=True)
@@ -2962,6 +2974,15 @@ class OperatorApp(App[None]):
         # anything needs to move at all: a card that never had focus must not
         # yank it from wherever the user put it.
         held_focus = bool(getattr(card, "has_focus", False))
+        # Where the caret was before the removal, so it can be put back if the
+        # removal moves it. Read now: a removed widget reports nothing useful.
+        # Guarded: `self.screen` RAISES `ScreenStackError` during teardown,
+        # and this runs on the way out of a gate that teardown can end.
+        try:
+            screen_now = self.screen
+        except Exception:  # pragma: no cover - teardown races only
+            screen_now = None
+        focused_before = screen_now.focused if screen_now is not None else None
         # A key held for THIS card can never answer anything now. The commit
         # path already refuses to answer a prompt that is no longer live, so
         # this is not the correctness guard — it is the timer not outliving the
@@ -3024,9 +3045,25 @@ class OperatorApp(App[None]):
             # A prompt that is still owed an answer outranks the composer: with
             # an `ask` and an approval overlapping, answering one must hand the
             # keyboard to the other rather than to the draft.
+            # The surviving prompt takes the keyboard only if the DEPARTING one
+            # had it. Unconditional, this is F10's defect through the overlap
+            # door: answering one question while the user is typing into the
+            # composer would move the caret onto the other one, where the next
+            # character of their sentence is an answer (F11, agent review round
+            # 7 — same class as F10, narrower reach, same fix).
             successor = self._live_prompt()
             if successor is not None and successor is not card:
-                successor.focus()
+                if held_focus:
+                    successor.focus()
+                elif focused_before is not None and focused_before.is_attached:
+                    # The departing card did NOT have the keyboard, so nothing
+                    # should move — but removing a widget makes Textual focus
+                    # the next focusable node, which here is the surviving
+                    # prompt. Put the caret back where the user had it, or a
+                    # question settling elsewhere silently moves the keyboard
+                    # onto the other one mid-sentence (F11, agent review round
+                    # 7 — F10's defect through the overlap door).
+                    focused_before.focus()
             elif held_focus and screen is not None:
                 focused = screen.focused
                 # "Somewhere the user can type" is the test, not "somewhere".
