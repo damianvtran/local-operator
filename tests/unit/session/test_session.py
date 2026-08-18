@@ -36,6 +36,7 @@ from local_operator.harness.types import (
 from local_operator.providers.failover import ProviderError
 from local_operator.session.session import IMAGE_DROPPED_NOTICE, Session
 from local_operator.session.transcript import Transcript
+from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -1701,3 +1702,64 @@ async def test_the_mid_turn_flush_never_persists_a_compaction_marker(tmp_path):
     assert len(markers) == 1, "replay must carry exactly one compaction summary"
 
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_subagent_never_persists_a_marker_or_reminder(tmp_path):
+    """F4: the cancelled-child writer uses the same allow-list as the session.
+
+    ``_persist_inflight`` writes a cancelled subagent's LIVE context straight
+    to its transcript so the turn is not lost. That context has the same two
+    ephemeral inhabitants as the parent's: after a compaction pass it begins
+    with the summary marker, and it may carry a todo reminder. Persisting
+    either corrupts the child's history — the marker replays a superseded
+    summary beside the live one, and a stored reminder comes back as a user
+    message nobody sent.
+
+    This path predates the mid-turn flush (it is byte-identical on the base
+    commit), but mid-turn compaction landing for real is what puts a marker in
+    a child's live context in the first place, so the exposure is new.
+    """
+    from local_operator.harness.subagent import _persist_inflight
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    child = make_session(tmp_path, stream)
+
+    # The live context a cancelled child can plausibly hold: a real user turn,
+    # a compaction marker from a pass that already ran, and a live reminder.
+    marker = CustomMessage(
+        custom_type="compaction_summary",
+        attribution="system",
+        details={"summary": "an earlier stretch of this session"},
+    )
+    reminder = CustomMessage(
+        custom_type=TODO_REMINDER_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "<system-reminder>still open</system-reminder>"},
+    )
+    real = Message.user("the work the child was doing")
+    child._context.messages = [marker, real, reminder]
+
+    await _persist_inflight(child)
+
+    entries = child._transcript.entries()
+    kinds = [
+        entry.payload.get("custom_type")
+        for entry in entries
+        if entry.type == "message" and entry.payload.get("kind") == "custom"
+    ]
+    assert "compaction_summary" not in kinds, (
+        "the cancelled child persisted a compaction marker; on resume it replays "
+        "a superseded summary beside the live one"
+    )
+    assert TODO_REMINDER_MESSAGE_TYPE not in kinds, (
+        "the cancelled child persisted a todo reminder, which replays as a user "
+        "message the user never sent"
+    )
+
+    # The real work still lands — the allow-list must not cost the turn.
+    assert any(
+        entry.type == "message" and entry.payload.get("role") == "user" for entry in entries
+    ), "the cancelled child's actual turn was dropped"
+
+    await child.dispose()

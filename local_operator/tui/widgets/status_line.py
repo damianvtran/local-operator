@@ -1447,12 +1447,25 @@ class StatusLine:
         if "mcp" not in dropped:
             mcp = format_mcp(self._mcp)
             if mcp:
+                semantic = mcp_semantic(self._mcp)
                 parts.append(
                     (
                         ICON_MCP,
                         mcp,
                         Style(color=theme_mod.semantic_color("fg")),
-                        Style(color=theme_mod.semantic_color(mcp_semantic(self._mcp))),
+                        # BOLD when the lamp is an alarm, so weight tracks
+                        # "needs attention" across the whole band rather than
+                        # tracking which segment got a carrier first. The
+                        # context reading is bold on its warm rungs (a
+                        # colour-vision carrier), and without this the
+                        # self-correcting red outweighed the one state where
+                        # the agent is genuinely missing tools — worst on a
+                        # narrow terminal, where the ladder drops the segments
+                        # between the two and leaves them adjacent.
+                        Style(
+                            color=theme_mod.semantic_color(semantic),
+                            bold=semantic == "danger",
+                        ),
                     )
                 )
 
@@ -1595,10 +1608,23 @@ class StatusLine:
             # DIFFERENT segment, read off the glyph that precedes it, and none is
             # a routine value — `!` means no tool will ask before it runs, `⊙`
             # means configured tools are missing, and `▦` in red means the
-            # context is at or past its compaction trigger. That last one is the
-            # weakest of the three (compaction resolves it without the user
-            # acting), which is why it is the only one gated behind a threshold
-            # rather than being a state the segment can simply be in.
+            # context is at or past its compaction trigger OR past the absolute
+            # re-send-cost rung. Those two coincide only where the window is
+            # small enough for the proportional ladder to govern: above ~625k
+            # the absolute rung fires at 500k while the resolved trigger is
+            # capped at 600k, so a 1M session shows red for a band of ~100k
+            # before a pass is actually due. It is the weakest of the three
+            # either way (compaction resolves it without the user acting), which
+            # is why it is the only one gated behind a threshold rather than
+            # being a state the segment can simply be in.
+            #
+            # BOLD on all three, so weight tracks "needs attention" rather than
+            # tracking which segment happened to get a carrier first. The
+            # context reading is bold on its warm rungs as a colour-vision
+            # carrier (see the ramp), and leaving the `⊙` lamp regular made the
+            # self-correcting red heavier than the one state where the agent is
+            # genuinely missing tools — most visible on a narrow terminal, where
+            # the ladder sheds the segments between them.
             #
             # The glyph rides INSIDE the styled text rather than in the icon slot,
             # because the loop below paints icons `dim` — which made the one alarm

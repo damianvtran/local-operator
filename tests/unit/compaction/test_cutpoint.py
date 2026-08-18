@@ -209,18 +209,52 @@ def test_a_cut_never_keeps_an_assistant_whose_call_is_unanswered():
     ]
     cut = find_cut_point(messages, estimate_tokens(messages[4]) + 10)
     assert cut is not None, "this history has a legal cut and must produce one"
-    candidate = messages[cut]
-    assert candidate is not unanswered, (
+    assert messages[cut] is not unanswered, (
         "the cut kept an assistant whose tool call has no result anywhere, "
         "which hands the provider a dangling call"
     )
-    # Stated as the general property too, so the assertion is about the class
-    # rather than about this one message object.
-    if candidate.role == "assistant":
-        answered = {
-            m.tool_call_id for m in messages[cut:] if isinstance(m, Message) and m.role == "tool"
-        }
-        assert all(c.id in answered for c in candidate.tool_calls)
+
+    # The PROPERTY, over every budget that makes the walk stop at a different
+    # index, rather than the single mutant above — pinning one mutant leaves
+    # siblings alive (`>= 0` and `any`-for-`all` both survived a single-budget
+    # version of this test).
+    #
+    # Two sibling mutants (`>= 0` for `>= index`, and `any` for `all`) survive
+    # this and are EQUIVALENT rather than uncaught: an assistant always
+    # precedes its own results in a well-formed history, so `result_at[id]` is
+    # either `-1` (no result at all, which every variant rejects) or greater
+    # than the assistant's own index — the three forms cannot disagree on any
+    # history the harness can produce. The `-1` default is the load-bearing
+    # part, and the mutant that changes it IS caught.
+    #
+    # The property is about the CUT INDEX, which is all ``_is_valid_cut``
+    # governs: an assistant holding an unanswered call may never BE the cut.
+    # It deliberately does not assert that no such assistant is anywhere in the
+    # kept window, because a cut landing EARLIER than one keeps it, and that is
+    # true on `origin/main` too — an unanswered call is a property of the
+    # history the caller supplied, not something the cut point introduces.
+    # Asserting the wider claim fails on unmutated code, which is how this
+    # comment came to be here.
+    budgets = {estimate_tokens(m) for m in messages}
+    budgets |= {sum(estimate_tokens(m) for m in messages[i:]) for i in range(len(messages))}
+    answered_anywhere = {
+        m.tool_call_id for m in messages if isinstance(m, Message) and m.role == "tool"
+    }
+    checked = 0
+    for budget in sorted(b for b in budgets if b > 0):
+        candidate_cut = find_cut_point(messages, budget)
+        if candidate_cut is None:
+            continue
+        checked += 1
+        boundary = messages[candidate_cut]
+        assert boundary.role != "tool", f"budget {budget}: cut landed on a tool result"
+        if isinstance(boundary, Message) and boundary.tool_calls:
+            unresolved = [c.id for c in boundary.tool_calls if c.id not in answered_anywhere]
+            assert not unresolved, (
+                f"budget {budget}: the cut is an assistant whose calls {unresolved} "
+                "are answered nowhere, so the kept window opens with a dangling call"
+            )
+    assert checked, "no budget produced a cut, so this test asserted nothing"
 
 
 def test_empty_and_zero_budget():

@@ -1558,12 +1558,22 @@ def test_a_small_window_still_reaches_the_warm_rungs() -> None:
     assert context_semantic_color(200_000, 200_000) == "danger"
 
 
-def test_the_reading_is_never_calm_while_compaction_is_due() -> None:
+def test_the_reading_is_never_calm_while_compaction_is_due_at_the_default_trigger() -> None:
     """The property the ramp exists for, asserted against the REAL trigger.
 
     Colour meaning "how full am I" is only honest if a calm reading implies
     no pass is due. Checked against ``should_compact`` itself rather than
     against the ramp's own thresholds, so the two cannot drift apart.
+
+    Scoped to the DEFAULT ``CompactionSettings`` on purpose, and named for it,
+    because the ramp's fractions are constants while the trigger is user
+    config: someone who sets ``threshold_percent`` below 0.55, or a
+    ``threshold_tokens``/explicit ``reserve_tokens`` that resolves lower than
+    the proportional rung, moves the trigger under the ramp and gets a calm
+    reading while a pass is due. That degrades to the pre-change appearance
+    rather than to a wrong one, and banding on the resolved trigger would
+    mean plumbing ``resolve_threshold_tokens`` into the band. The claim is
+    narrowed to what is actually verified rather than left sounding absolute.
     """
     settings = CompactionSettings()
     for window in (131_072, 200_000, 1_000_000):
@@ -1635,3 +1645,37 @@ def test_the_warm_rungs_carry_weight_as_well_as_hue() -> None:
     assert weights[120_000] is False, "the calm rung must not be bold"
     assert weights[300_000] is True, "the purple rung needs a non-colour carrier"
     assert weights[700_000] is True, "the red rung needs a non-colour carrier"
+
+
+def test_weight_tracks_attention_across_every_red_in_the_band() -> None:
+    """D6: three segments may take red, and weight must not invert them.
+
+    The context reading is bold on its warm rungs as a colour-vision carrier.
+    Left alone, that made the one red the band calls self-correcting heavier
+    than the `⊙` MCP lamp, which is the state where the agent is genuinely
+    missing tools — the salience the alarm colour exists to protect. Worst on
+    a narrow terminal, where the drop ladder sheds what sits between them.
+    """
+    status = StatusLine(_dock(200))
+    status.update(
+        model_label="test/model",
+        context_tokens=700_000,
+        context_window=1_000_000,
+        mcp=McpStatus(configured=3, connected=2, failed=True),
+    )
+    row = status.render_text(200)
+    danger = theme_mod.semantic_color("danger").lower()
+
+    reds = {
+        row.plain[span.start : span.end]: span.style.bold
+        for span in row.spans
+        if isinstance(span.style, Style)
+        and span.style.color is not None
+        and span.style.color.triplet is not None
+        and span.style.color.triplet.hex.lower() == danger
+    }
+    assert reds, "expected the row to carry red marks"
+    assert all(reds.values()), (
+        f"a red mark is unweighted while another is bold, which inverts the "
+        f"band's attention order: {reds}"
+    )
