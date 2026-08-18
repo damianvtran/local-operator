@@ -638,3 +638,65 @@ async def test_a_transcript_folded_by_an_older_build_still_refuses_stale_reading
     usages = Transcript(tmp_path / "sess").usages_since_compaction()
     reported = [usage.get("context_tokens") for usage in usages]
     assert 100_000 not in reported, "the pre-prune reading must not survive a legacy fold"
+
+
+@pytest.mark.asyncio
+async def test_every_writer_of_the_cost_cell_keeps_the_floor_mark(tmp_path: Path) -> None:
+    """The `≥` is a property of the figure, not of the moment it is rendered.
+
+    Five sites write the band's cost cell — the restore, the per-call accrual,
+    turn end, the 1 Hz subagent harvest, and `/reload`'s reconciliation — and
+    when only the restore knew about the mark, the other four silently stripped
+    it. A resumed session's honest `≥$2.10` became a bare figure the moment a
+    child reported spend, which is the same defect the mark was added to fix,
+    reached by a path that never touched the restore.
+
+    Adding a real turn does NOT clear it either: a restored floor plus a real
+    turn is still a floor, just a larger one. Only a session whose spend was
+    accrued entirely in this process is exactly known.
+    """
+    session = await _session_over(
+        tmp_path / "sess",
+        [Message.user("q"), _assistant(output=1_000, context=200_000)],
+    )
+
+    async def factory() -> Session:
+        return session
+
+    app = OperatorApp(factory)
+    with _resolving():
+        # Wide enough that the cost segment is never shed by the drop ladder.
+        async with app.run_test(size=(150, 18)) as pilot:
+            await _settled(app, pilot)
+            assert app._status is not None
+            restored = app._status._cost
+            assert restored.startswith(RESTORED_COST_PREFIX), restored
+
+            # The 1 Hz band poll, which harvests subagent spend.
+            app._refresh_band()
+            await pilot.pause()
+            assert app._status._cost.startswith(RESTORED_COST_PREFIX), app._status._cost
+
+            # A live model call mid-turn, and then the turn's own end.
+            app.post_message(
+                ContextUsageReported(
+                    50_000,
+                    Usage(input_tokens=1_000, output_tokens=500, context_tokens=50_000),
+                )
+            )
+            await pilot.pause()
+            assert app._status._cost.startswith(RESTORED_COST_PREFIX), app._status._cost
+
+            app.post_message(
+                TurnEnded(
+                    False,
+                    None,
+                    context_tokens=50_000,
+                    usage=Usage(input_tokens=1_000, output_tokens=500, context_tokens=50_000),
+                )
+            )
+            await pilot.pause()
+            settled = app._status._cost
+            assert settled.startswith(RESTORED_COST_PREFIX), settled
+            # And it did move: the mark is not standing in for a frozen figure.
+            assert settled != restored

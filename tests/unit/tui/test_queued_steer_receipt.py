@@ -387,7 +387,9 @@ async def test_an_interrupt_spends_the_loud_ink_once() -> None:
     """
     session = _Streaming()
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 24)) as pilot:
+    # A NARROW frame on purpose: the settled row wraps below ~69 columns, and
+    # the property under test (one alarm row) must not depend on that.
+    async with app.run_test(size=(60, 24)) as pilot:
         await pilot.pause()
         await _submit(pilot, app, "steered into a turn about to be stopped")
 

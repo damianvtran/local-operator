@@ -185,8 +185,13 @@ PERSIST_HINT = "/model default saves this for new sessions"
 #: running total does, so without a mark a resumed session's `$0.139` is
 #: indistinguishable from a session that has genuinely spent that. `≥` rather
 #: than a word because the segment sheds early on a narrow terminal and one cell
-#: is what the distinction is worth. Dropped by the first live turn, which
-#: replaces the figure with a real total.
+#: is what the distinction is worth.
+#:
+#: It is NOT dropped by the next turn, which an earlier version claimed: a
+#: restored floor plus a real turn is still a floor, just a larger one. The
+#: figure only becomes exactly known for a session whose spend was accrued
+#: entirely in this process, so the mark is sticky for the life of the
+#: conversation and clears when the ledger it qualifies does.
 RESTORED_COST_PREFIX = "≥"
 
 #: The states of a mid-turn message, as one set so they cannot drift apart.
@@ -784,6 +789,13 @@ class OperatorApp(App[None]):
         #: retention window and a spend counter that goes DOWN when a finished
         #: child is evicted is worse than no counter at all.
         self._subagent_costs: dict[str, float] = {}
+        #: True when `_total_cost` includes money RESTORED from a resumed
+        #: conversation, which makes the band's figure a lower bound rather than
+        #: a total (see `_restore_reported_usage`). Sticky for the life of the
+        #: session: adding a real turn to a floor leaves a floor, so nothing
+        #: this session does can make the figure exactly known again. Cleared
+        #: only on a swap, where the ledger it qualifies is cleared too.
+        self._spend_is_floor: bool = False
         #: Queued-steer rows still promising a delivery that has not happened.
         #: Appended when a mid-turn submit is steered, drained when the engine
         #: reports it took them (`on_steering_delivered`). A list because several
@@ -1255,15 +1267,14 @@ class OperatorApp(App[None]):
         cost = self._cost_for(usage)
         if cost:
             self._total_cost = cost
-            # Marked `≥`, because this figure is a FLOOR and renders in the same
-            # cell a real running total does. Only the last reported turn's usage
-            # survives in a priceable form, so a ten-turn conversation restores
-            # the last turn's dollars — potentially an order of magnitude under
-            # the truth — and without the mark a reader has no way to tell.
-            # One cell buys the distinction, which is the same trade the context
-            # segment already makes with its estimate flag. The first live turn
-            # supersedes it with a real total and the mark goes.
-            self._status.update(cost=f"{RESTORED_COST_PREFIX}{format_cost(self._spend_total())}")
+            # A FLOOR from here on, and the flag rather than the formatting is
+            # what says so: every writer of the cost cell reads it through
+            # `_spend_text`, so none of them can strip the mark by rendering the
+            # same money a different way. Only the last reported turn's usage
+            # survives in a priceable form, so this can be an order of magnitude
+            # under the conversation's real lifetime spend.
+            self._spend_is_floor = True
+            self._status.update(cost=self._spend_text())
 
     def _measure_preloaded_context(self, session: Any) -> None:
         """Fill the context segment before the first turn, off the boot path.
@@ -1650,7 +1661,7 @@ class OperatorApp(App[None]):
                 self._set_welcome_visible(True)
         self._reconcile_reload(previous_id, previous_len, carried_spend, keep_context=keep_context)
 
-    def _reset_ledger_for_swap(self) -> tuple[float, dict[str, float]]:
+    def _reset_ledger_for_swap(self) -> tuple[float, dict[str, float], bool]:
         """Clear the transcript and the session-scoped band, for a swap.
 
         Returns the spend totals it just zeroed, for `_reconcile_reload` to put
@@ -1691,6 +1702,9 @@ class OperatorApp(App[None]):
         carried_spend = (self._total_cost, dict(self._subagent_costs))
         self._total_cost = 0.0
         self._subagent_costs.clear()
+        # The flag describes the totals just zeroed. `_reconcile_reload` puts
+        # both back together when the reload lands on the same conversation.
+        was_floor, self._spend_is_floor = self._spend_is_floor, False
         # The held queued-steer rows were just removed with the rest of the
         # ledger, so the references are to widgets no longer on screen. Left in
         # the list, the replacement session's first delivery would "settle"
@@ -1728,7 +1742,7 @@ class OperatorApp(App[None]):
             # first turn ended.
             cost="",
         )
-        return carried_spend
+        return (*carried_spend, was_floor)
 
     def _conversation_id(self) -> str:
         """Which conversation is open, or "" when none is."""
@@ -1749,7 +1763,7 @@ class OperatorApp(App[None]):
         self,
         previous_id: str,
         previous_len: int,
-        carried_spend: tuple[float, dict[str, float]],
+        carried_spend: tuple[float, dict[str, float], bool],
         *,
         keep_context: bool,
     ) -> None:
@@ -1770,12 +1784,16 @@ class OperatorApp(App[None]):
         every time a reload refreshes the MCP servers.
         """
         if previous_id and self._conversation_id() == previous_id:
-            total, children = carried_spend
+            total, children, was_floor = carried_spend
             self._total_cost = total
             self._subagent_costs.update(children)
+            # The provenance travels with the money. Without it a `/reload` onto
+            # the same conversation repainted the identical restored floor as a
+            # bare figure — same number, same provenance, honesty mark gone, on
+            # the one command that promises to change nothing.
+            self._spend_is_floor = was_floor
             if self._status is not None:
-                spend = self._spend_total()
-                self._status.update(cost=format_cost(spend) if spend else "")
+                self._status.update(cost=self._spend_text())
         if not keep_context:
             return
         remaining = self._history_length()
@@ -3439,7 +3457,7 @@ class OperatorApp(App[None]):
                 self._status.update(
                     subagents=agents,
                     jobs=jobs,
-                    cost=format_cost(total) if total else None,
+                    cost=self._spend_text(total) or None,
                 )
         # The band's belt to the event stream's suspenders: elapsed time and
         # job status move with no Subagent*/tool-end event at all, so the 1 Hz
@@ -6391,7 +6409,7 @@ class OperatorApp(App[None]):
             # returns None for a dead session, so without this clause the leftover
             # dict alone would repaint the dead conversation's total into a band
             # that was just emptied on purpose.
-            cost_text = format_cost(total)
+            cost_text = self._spend_text(total)
         elif message.usage is not None and getattr(message.usage, "input_tokens", 0):
             # D20: the turn billed tokens but pricing is unknown — render an
             # explicit "unavailable" so the segment's absence reads as that,
@@ -6572,6 +6590,29 @@ class OperatorApp(App[None]):
             if cost is not None:
                 self._subagent_costs[job.id] = cost
 
+    def _spend_text(self, total: float | None = None) -> str:
+        """The session's spend as the band should SPELL it, mark included.
+
+        Every writer of the cost cell goes through here, because the mark is a
+        property of the FIGURE and not of the moment one particular caller
+        happens to render it. Five sites write that cell — turn end, the per-call
+        accrual, the 1 Hz subagent harvest, `/reload`'s reconciliation and the
+        restore itself — and when only the restore knew about the mark, the
+        other four silently stripped it: a resumed session's honest `≥$2.10`
+        became a bare `$2.60` the moment a child reported spend, and `/reload`
+        repainted the identical floor unmarked, on a command whose whole
+        contract is that it changes nothing about the conversation.
+
+        The mark stays until a figure is no longer a floor, which is not the
+        same as "until something else is added to it": a restored floor plus a
+        real turn is still a floor, just a larger one. Only a session whose
+        spend was accrued entirely in this process is exactly known.
+        """
+        spend = self._spend_total() if total is None else total
+        if not spend:
+            return ""
+        return f"{RESTORED_COST_PREFIX if self._spend_is_floor else ''}{format_cost(spend)}"
+
     def _spend_total(self) -> float:
         """Everything this session has spent: its own turns plus its children's.
 
@@ -6722,7 +6763,7 @@ class OperatorApp(App[None]):
             return
         self._total_cost += cost
         self._turn_accrued_cost += cost
-        self._status.update(cost=format_cost(self._spend_total()))
+        self._status.update(cost=self._spend_text())
 
     def on_tool_composing(self, message: ToolComposing) -> None:
         """Show the call the model is still dictating (TUI-026).
