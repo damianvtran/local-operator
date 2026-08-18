@@ -1,35 +1,43 @@
-"""Do subagents actually make progress while the parent is inside a tool call?
+"""A parent talks to a genuinely busy child, through the real ``hub`` tool.
 
-The reported symptom was a parent that had to YIELD — finish its turn, or stop
-calling tools — before a child would advance, which would make ``task`` a
-sequential API wearing a concurrent one's clothes. That would be a real bug in
-the shape of the loop rather than a slow model, so it is asserted here against
-real ``Session`` objects and the real ``AsyncJobManager`` rather than argued
-from the code.
+The reported symptom was a parent that had to YIELD before a child would
+advance, and a ``hub ask`` that would not reach a child mid-work. Both were
+root-caused and fixed by #133 ("keep subagents running while the parent and
+siblings work"): the per-turn compaction ruler ran tiktoken synchronously on
+the one loop serving the parent, every child and the TUI (116 of 121 blocking
+samples, worst stall 860 ms), and ``ask`` refused a child the loop had
+scheduled but not yet entered.
 
-Two independent claims, because they fail for different reasons and only one
-of them is about the event loop:
+**Those two halves are already guarded, and not here.** The loop-stall half is
+held by ``test_the_loop_stays_responsive_while_several_subagents_run`` in
+``tests/unit/session/test_launch_subagent.py``, whose watchdog measures loop
+lateness under a calibrated multi-child workload — the only honest way to
+catch a synchronous stretch, and one this file cannot improve on. The
+``ask``-grace half is held by ``test_ask_waits_for_a_child_the_loop_has_not
+_entered_yet`` and its neighbours in ``test_comms.py``. Reverting either half
+of #133 fails four of those tests.
 
-- a child registered by ``task`` runs while the parent sits in a long
-  ``await``, which is what "background" has to mean; and
-- the parent can put a question to that child mid-tool-call and get the answer
-  back, which additionally requires the child's aside boundary to be reached
-  while the parent is blocked.
+An earlier version of this file claimed to guard both and did not: reverting
+#133 outright left it green. The tests looked right and bit nothing, because
+a two-turn fixture history never reaches ``OFFLOAD_MIN_CHARS`` (20 000) so the
+ruler stayed inline either way, and awaiting ``session_dir_of`` before asking
+meant the child was always already attached. A test that cannot fail is worse
+than no test: it advertises coverage that is not there.
 
-The parent's blocking work here is ``asyncio.sleep``, not a CPU spin: the
-harness's own tools are async or ``to_thread``-offloaded, so a sleep models
-them faithfully. A tool that blocked the loop synchronously would stall the
-child, and that is a property of THAT tool, not of the subagent machinery.
+So this file keeps only what the others do NOT cover — the full round trip
+through the real ``hub`` tool against a child that is genuinely mid tool loop.
+That path crosses the tool layer, the aside-injection boundary and the child's
+reply watcher, and it is the exact user-facing action ("check in on a working
+subagent") that was reported broken.
 
-These lock in the fix from #133 ("keep subagents running while the parent and
-siblings work"), which found the per-turn compaction ruler running tiktoken
-synchronously on the one loop that serves the parent, every child and the TUI
-— 116 of 121 blocking samples, worst stall 860 ms — and moved it to a worker
-thread. The first test was checked to genuinely discriminate: replacing its
-``await asyncio.sleep(0.5)`` with a synchronous ``time.sleep(0.5)``, which is
-what that stall looked like, fails it with the child frozen at one turn. So a
-regression that puts blocking work back on the loop is caught here rather than
-being rediscovered as "subagents only run when I yield".
+Be precise about what this does and does not prove, because the previous
+version of this file was not. It is an INTEGRATION test of the ask round trip,
+not a regression test for #133: reverting #133 leaves it green, since by the
+time it asks, the child is attached and the fixture history is far too small
+to reach the offload threshold. The #133 guards are the four tests named
+above, and they are where a loop-blocking regression is caught. What this adds
+is that the tool-layer path from ``execute_hub`` to a working child's reply
+holds together end to end — which none of those four exercise.
 """
 
 from __future__ import annotations
@@ -38,9 +46,19 @@ import asyncio
 
 import pytest
 
-from local_operator.harness.types import ChatRequest, Message, ModelSpec
+from local_operator.harness.types import (
+    ChatRequest,
+    Message,
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+    TextContent,
+    ToolContext,
+)
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
+from local_operator.tools.builtin import execute_hub
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -54,25 +72,16 @@ async def wait_for(predicate, timeout: float = 10.0) -> None:
         await asyncio.sleep(0.01)
 
 
-class CountingChild:
-    """A child provider that records every turn it is asked for.
+class BusyChild:
+    """A child that works in a tool loop forever until the parent asks it
+    something, answers with its ``hub`` tool, and then carries on working.
 
-    The turn COUNT is the evidence: a child that never advances while the
-    parent is busy produces exactly the turns it managed before the parent
-    blocked, and one that runs concurrently keeps producing them.
+    The unbounded loop is deliberate: the child must still be MID-WORK when
+    the question arrives, so the answer proves an aside reached a busy agent
+    rather than one that had already gone idle.
     """
 
-    def __init__(self) -> None:
-        self.turns = 0
-
     def __call__(self, request: ChatRequest, signal=None):
-        self.turns += 1
-        from local_operator.harness.types import (
-            StreamEndEvent,
-            StreamTextDelta,
-            StreamToolCallDelta,
-        )
-
         body = "\n".join(
             message.text
             for message in request.messages
@@ -80,116 +89,68 @@ class CountingChild:
         )
 
         async def stream(req, sig=None):
-            if "stop now" in body:
-                yield StreamTextDelta(delta="stopping")
+            if "Answer it now" in body and "answered" not in body:
+                yield StreamToolCallDelta(
+                    index=0,
+                    id="reply-1",
+                    name="hub",
+                    argument_delta='{"message": "still going, no blockers"}',
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            if "background job" in body:
+                # A settled child's result re-wakes the parent; acknowledge it
+                # so the parent's own turn can end.
+                yield StreamTextDelta(delta="ack")
                 yield StreamEndEvent(stop_reason="stop")
                 return
-            # Keep working: a short sleep per turn so the child is genuinely
-            # mid-flight rather than completing in one scheduler pass.
             yield StreamToolCallDelta(
-                index=0, id=f"call-{self.turns}", name="bash", argument_delta='{"command": "true"}'
+                index=0, id="tick", name="bash", argument_delta='{"command": "sleep 0.05"}'
             )
             yield StreamEndEvent(stop_reason="toolUse")
 
         return stream(request, signal)
 
 
-def make_session(tmp_path, provider, name: str) -> Session:
-    return Session(
+@pytest.mark.asyncio
+async def test_the_hub_tool_questions_a_busy_child_and_returns_its_answer(tmp_path, monkeypatch):
+    """The user-facing round trip: `hub op='ask'` against a working child.
+
+    Everything downstream of the tool call has to work for this to pass — the
+    question is queued as an aside, the child reaches an injection boundary
+    while still in its tool loop, answers with its own child-shaped ``hub``,
+    and the reply resolves the parent's pending future. A child that could
+    only be reached while idle, or a parent that could not be woken by the
+    answer, fails here.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = Session(
         model=MODEL,
-        stream_fn=provider,
+        stream_fn=BusyChild(),
         tools=[],
-        transcript=Transcript(tmp_path / name),
+        transcript=Transcript(tmp_path / "parent"),
         system_blocks_provider=lambda: ["parent", "env"],
         cwd=str(tmp_path),
     )
-
-
-@pytest.mark.asyncio
-async def test_a_child_advances_while_the_parent_is_inside_a_tool_call(tmp_path, monkeypatch):
-    """The core claim of ``task``: launching is not the same as blocking.
-
-    The parent registers a child and then sits in a long await, exactly as it
-    would inside a slow tool. If the loop only advanced children between
-    parent turns, the child's turn count would be frozen for the whole sleep.
-    """
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    child_provider = CountingChild()
-    parent = make_session(tmp_path, child_provider, "parent")
-    await parent.async_init()
-
-    parent._launch_subagent(label="worker", prompt="Keep working.")
-    await wait_for(lambda: child_provider.turns >= 1)
-    before = child_provider.turns
-
-    # The parent is now doing something slow and awaits it, the way every
-    # async tool in this harness does.
-    await asyncio.sleep(0.5)
-
-    assert child_provider.turns > before, (
-        "the child made no progress while the parent was awaiting; subagents are "
-        "not running concurrently with the parent's tool calls"
-    )
-    await parent.dispose()
-
-
-@pytest.mark.asyncio
-async def test_a_parent_can_question_a_busy_child_and_get_an_answer(tmp_path, monkeypatch):
-    """The round trip the hub exists for, while the child is mid tool loop.
-
-    Stronger than the test above: the answer only arrives if the child reaches
-    an aside-injection boundary and takes a turn to reply while the parent is
-    parked in ``await comms.ask`` — i.e. the parent blocking does not stop the
-    child from being scheduled.
-    """
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-
-    class Answering:
-        """Works forever until asked something, then answers with its hub tool."""
-
-        def __call__(self, request: ChatRequest, signal=None):
-            from local_operator.harness.types import (
-                StreamEndEvent,
-                StreamTextDelta,
-                StreamToolCallDelta,
-            )
-
-            body = "\n".join(
-                message.text
-                for message in request.messages
-                if isinstance(message, Message) and message.role == "user"
-            )
-
-            async def stream(req, sig=None):
-                if "Answer it now" in body and "answered" not in body:
-                    yield StreamToolCallDelta(
-                        index=0,
-                        id="reply-1",
-                        name="hub",
-                        argument_delta='{"message": "still going, no blockers"}',
-                    )
-                    yield StreamEndEvent(stop_reason="toolUse")
-                    return
-                if "background job" in body:
-                    yield StreamTextDelta(delta="ack")
-                    yield StreamEndEvent(stop_reason="stop")
-                    return
-                yield StreamToolCallDelta(
-                    index=0, id="tick", name="bash", argument_delta='{"command": "sleep 0.1"}'
-                )
-                yield StreamEndEvent(stop_reason="toolUse")
-
-            return stream(request, signal)
-
-    parent = make_session(tmp_path, Answering(), "parent")
     await parent.async_init()
     job_id = parent._launch_subagent(label="worker", prompt="Keep working.")
     comms = parent.subagent_comms
     await wait_for(lambda: comms.session_dir_of(job_id) is not None)
 
-    reply = await comms.ask(job_id, "are you stuck?", 20_000)
+    result = await execute_hub(
+        "call-1",
+        {"op": "ask", "to": ["worker"], "message": "are you stuck?", "timeout_ms": 20_000},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms),
+    )
 
-    assert reply.error is None, reply.error
-    assert reply.timed_out is False, "the busy child never answered; it was not scheduled"
-    assert "no blockers" in (reply.text or "")
+    block = result.content[0]
+    assert isinstance(block, TextContent)
+    assert not result.is_error, block.text
+    assert "no blockers" in block.text, f"the busy child never answered; got: {block.text}"
+    # The child is still working: the answer came from a mid-flight agent, not
+    # from one that had finished and gone quiet.
+    job = parent.jobs.get(job_id)
+    assert job is not None and job.status == "running"
     await parent.dispose()

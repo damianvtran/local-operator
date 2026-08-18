@@ -1237,10 +1237,15 @@ def test_the_roster_reports_a_never_started_child_as_unresumable():
 def test_the_roster_marks_a_child_whose_transcript_is_gone(tmp_path):
     """``resumable`` must agree with what ``resume`` will actually do; a row
     promising a resume that then refuses is worse than an honest refusal."""
-    comms, _jobs, _child, _parent = wire()
+    comms, jobs, _child, _parent = wire()
     comms.attach("job-1", FakeChild(), tmp_path / "missing")
     comms.record_outcome("job-1", "completed")
     comms.detach("job-1")
+    # The manager stamps the row once the runner returns. Without this the
+    # record is settled while the row still says running, which is a real
+    # (brief) state but a different one -- and it is reported as "still
+    # settling", not as the missing transcript this test is about.
+    jobs.jobs["job-1"].status = "completed"
 
     [row] = comms.roster()
 
@@ -1346,6 +1351,7 @@ async def test_the_list_op_needs_no_target_and_names_every_child(tmp_path):
     comms.attach("job-2", FakeChild(), tmp_path)
     comms.record_outcome("job-2", "failed", "boom")
     comms.detach("job-2")
+    jobs.jobs["job-2"].status = "failed"  # the manager stamps the row last
 
     result = await execute_hub(
         "call-1", {"op": "list"}, None, None, ToolContext(cwd=".", subagent_comms=comms)
@@ -1426,7 +1432,25 @@ async def test_a_paused_child_survives_its_swept_job_row_and_resumes(tmp_path, m
     job_id = parent._launch_subagent(label="docs", prompt="Update the docs.")
     comms = parent.subagent_comms
     await wait_for(lambda: comms.session_dir_of(job_id) is not None)
-    await asyncio.sleep(0.3)  # let it complete at least one tool round
+
+    # Wait on the CONDITION, not the clock: the point is that the child has
+    # actually done a round of work worth resuming, and a fixed sleep is the
+    # line that goes first on a loaded CI box. The transcript cannot be the
+    # probe here — ``Session.prompt`` persists a turn when the turn ENDS, so it
+    # stays at one entry until the pause below pre-empts it (measured: still 1
+    # after 1.5 s) — so this watches the job's live trajectory instead, which
+    # the runner appends to as the child completes tool calls.
+    # A COMPLETED turn, not merely a non-empty trajectory: the trajectory is
+    # populated at ``agent_start``, long before any tool has run, so a length
+    # probe would pass instantly and the pause would pre-empt the child before
+    # it had produced anything worth replaying.
+    def finished_a_turn() -> bool:
+        job = parent.jobs.get(job_id)
+        return any(
+            entry.get("type") == "turn_end" for entry in (getattr(job, "trajectory", None) or [])
+        )
+
+    await wait_for(finished_a_turn)
 
     paused = await comms.pause(job_id)
     assert paused.outcome == "paused"
@@ -1435,6 +1459,10 @@ async def test_a_paused_child_survives_its_swept_job_row_and_resumes(tmp_path, m
     before = Transcript(comms.session_dir_of(job_id)).build_llm_history()
 
     # Exactly what AsyncJobManager._sweep_due does once retention elapses.
+    # Reaching for the private dict rather than driving the real sweep because
+    # ``Session`` builds its own manager with no retention knob to shorten;
+    # the equivalence was verified against the real ``_sweep_due`` (row gone,
+    # signals cleared, roster unchanged).
     parent.jobs._jobs.pop(job_id)
     assert parent.jobs.get(job_id) is None
 
@@ -1475,3 +1503,93 @@ async def test_the_roster_records_a_real_childs_failure(tmp_path, monkeypatch):
     assert row.status == "failed"
     assert "provider exploded" in (row.detail or "")
     await parent.dispose()
+
+
+def test_the_roster_does_not_promise_a_resume_during_the_pause_window(tmp_path):
+    """Roster and ``resume`` must agree even mid-pause.
+
+    ``pause`` sets the flag before awaiting the cancel, and the runner's
+    teardown (including ``_persist_inflight``'s disk write) happens inside that
+    await — so the record reads paused while the job is still running. Tool
+    calls in one batch run concurrently, so a ``pause`` and a ``list`` really
+    can interleave into that window. Reporting the child resumable there
+    promises a resume that ``resume()`` refuses.
+    """
+    comms, _jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    comms._records["job-1"].paused = True  # flag set, cancel not yet landed
+
+    [row] = comms.roster()
+
+    assert row.status == "pausing"
+    assert row.resumable is False
+    # The invariant that matters: the two surfaces give the same answer.
+    assert comms.resume("job-1", "carry on")[0] is None
+
+
+def test_the_roster_does_not_promise_a_resume_during_the_settle_window(tmp_path):
+    """F1: ``resumable`` and ``resume()`` must consult the same fact.
+
+    ``record_outcome`` runs inside the runner's settle path, which then still
+    awaits ``emit(SubagentEndEvent)`` — the parent's whole handler fan-out —
+    before returning, and only then does the manager stamp the job row. For
+    that stretch the record says ``failed`` while the row says ``running``.
+    Deriving ``resumable`` from the status alone advertised "failed —
+    resumable" while ``resume()``, which reads the row via ``_is_running``,
+    refused with "still running". Measured at ~256 ms with one 250 ms handler:
+    wide enough for a concurrent ``list`` in the same tool batch to land in.
+    """
+    comms, _jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    # Exactly the window: the outcome is recorded, the row is not yet stamped.
+    comms.record_outcome("job-1", "failed", "provider 500")
+
+    [row] = comms.roster()
+
+    assert row.status == "failed"  # the status string is correct...
+    assert row.resumable is False  # ...and must not invite a resume yet
+    # The invariant: whatever the roster promises, resume() must deliver.
+    assert comms.resume("job-1", "carry on")[0] is None
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_paused_child_abandons_the_pause(tmp_path):
+    """F2: a pause must not be a one-way door.
+
+    Only ``resume`` used to clear the flag, so a parent that paused a child and
+    then decided it was wrong had no way to say so: ``cancel`` refused a job
+    that was already stopped, and the roster went on advertising a pause the
+    parent had abandoned.
+    """
+    comms, jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    await comms.pause("job-1")
+    comms.record_outcome("job-1", "cancelled")
+    comms.detach("job-1")
+    assert comms.roster()[0].status == "paused"
+
+    delivery = await comms.cancel("job-1")
+
+    assert delivery.outcome == "cancelled"
+    [row] = comms.roster()
+    assert row.status == "cancelled"  # no longer advertised as paused
+    # The transcript is untouched, so anyone holding the id can still resume.
+    assert row.resumable is True
+
+
+def test_an_unknown_status_is_not_born_resumable():
+    """F4: resumability is enumerated, not defaulted.
+
+    A status nobody has reasoned about is one the parent should not be invited
+    to resume; the old default meant any status added to ``_describe`` was
+    silently born resumable.
+    """
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].status = "some_future_state"
+
+    [row] = comms.roster()
+
+    assert row.resumable is False

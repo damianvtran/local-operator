@@ -78,11 +78,6 @@ MAX_RECORDS = 256
 
 DeliveryOutcome = Literal["injected", "queued", "cancelled", "paused", "failed"]
 
-#: Terminal job statuses a child can settle into, as recorded by
-#: :meth:`SubagentComms.record_outcome`. Kept as strings rather than an enum
-#: because they mirror ``AsyncJob.status`` values verbatim.
-TERMINAL_STATUSES = ("completed", "failed", "cancelled")
-
 
 @dataclass(frozen=True)
 class Delivery:
@@ -393,6 +388,25 @@ class SubagentComms:
         detail: str | None = None
 
         if record.paused:
+            # The flag is set BEFORE the cancel is awaited (see ``pause``), and
+            # the runner's teardown - including _persist_inflight's disk write -
+            # happens inside that await. So there is a real window in which the
+            # record reads paused while the job is still running, and tool calls
+            # in one batch run concurrently, so a ``pause`` and a ``list`` can
+            # interleave into exactly it. Reporting ``resumable`` there would
+            # promise a resume that ``resume()`` refuses ("still running"), and
+            # a row promising a resume that then refuses is worse than an honest
+            # refusal. ``pausing`` is the truthful reading, and it resolves on
+            # its own a moment later.
+            if self._is_running(record):
+                return ChildInfo(
+                    job_id=record.job_id,
+                    label=record.label,
+                    status="pausing",
+                    resumable=False,
+                    age_s=None,
+                    detail="pause is still landing; it becomes resumable in a moment",
+                )
             status = "paused"
         elif record.outcome is not None:
             status = record.outcome
@@ -417,9 +431,32 @@ class SubagentComms:
         elif record.settled_at is not None:
             age = now - record.settled_at
 
-        resumable = True
+        # Enumerated rather than defaulted to True: a status that reaches here
+        # without being listed is one nobody has reasoned about, and the safe
+        # answer for an unknown state is "not resumable" (the parent is told to
+        # wait) rather than an invitation to resume something unexamined. The
+        # old default meant any status added to the branch above was born
+        # silently resumable.
+        resumable = status in ("completed", "failed", "cancelled", "paused")
+        detail = detail if resumable else "not resumable in this state"
         if status in ("running", "queued", "starting"):
             resumable, detail = False, "still running; cancel or pause it first"
+        elif self._is_running(record):
+            # The status is settled but the JOB ROW still says running, which is
+            # the same window the precedence above exists for: the runner calls
+            # ``record_outcome`` from inside its settle path, then still awaits
+            # ``emit(SubagentEndEvent)`` — the parent's whole handler fan-out —
+            # before returning, and only then does the manager stamp the row.
+            #
+            # ``resumable`` has to ask the job row here because ``resume()``
+            # asks it (via ``_is_running``) and the two must never disagree:
+            # deriving this from the status alone advertised "failed —
+            # resumable", and the resume the parent then issued was refused with
+            # "still running". A row promising a resume that then refuses is
+            # worse than an honest refusal, and this window is measured in
+            # hundreds of milliseconds, not nanoseconds — exactly when a parent
+            # polling across the settle boundary looks.
+            resumable, detail = False, "still settling; it becomes resumable in a moment"
         elif record.session_dir is None:
             resumable, detail = False, "never started, so it has no transcript"
         elif not (record.session_dir / TRANSCRIPT_FILENAME).exists():
@@ -618,10 +655,25 @@ class SubagentComms:
         if jobs is None:
             return Delivery(job_id, label, "failed", "no job manager attached to this session")
         job = jobs.get(job_id)
-        if job is None:
+        if job is None and (record is None or not record.paused):
             return Delivery(job_id, label, "failed", f"unknown job {job_id!r}")
-        if job.status != "running":
-            return Delivery(job_id, label, "failed", f"job is already {job.status}")
+        if job is None or job.status != "running":
+            # A PAUSED child is already stopped, so there is no job to abort —
+            # but "cancel" still has a meaning here that nothing else expresses:
+            # the parent has decided it will not be coming back for it. Without
+            # this, a pause was a one-way door (only ``resume`` cleared the
+            # flag), so a parent that paused a child and then changed its mind
+            # had no way to say so and the roster went on advertising a pause it
+            # had abandoned. Dropping the flag settles it as an ordinary
+            # cancellation; the transcript is untouched, so a later resume is
+            # still possible for anyone who kept the id.
+            if record is not None and record.paused:
+                record.paused = False
+                if record.outcome is None:
+                    record.outcome = "cancelled"
+                return Delivery(job_id, label, "cancelled")
+            state = job.status if job is not None else "gone"
+            return Delivery(job_id, label, "failed", f"job is already {state}")
         await jobs.cancel(job_id)
         return Delivery(job_id, label, "cancelled")
 
