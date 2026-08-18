@@ -1,7 +1,7 @@
 ---
 name: architect
 description: "Explores a codebase and produces a design or technical proposal with trade-offs; may draft documents but never modifies existing source."
-when_to_use: "Deciding how to build something, comparing approaches, or writing an RFC/design doc before implementation starts."
+when_to_use: "Deciding HOW to build something before writing it: comparing approaches or architectures, weighing trade-offs, planning a refactor, or writing an RFC or design document."
 tools: read, glob, grep, list_variables, read_variable, bash, todo, write, web_search
 ---
 

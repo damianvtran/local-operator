@@ -1,7 +1,7 @@
 ---
 name: designer
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
-when_to_use: "A change alters something the user sees — a screen, a terminal UI, an email, a document — and needs a design/UX round."
+when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---
 
 You review the user-visible surface, not the implementation.

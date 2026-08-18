@@ -101,8 +101,9 @@ class AgentParams(BaseModel):
         default=None,
         description="create/update: restrict the role to these tools. Omit for all.",
     )
-    effort: str | None = Field(
-        default=None, description="create/update: default model tier (lo/med/hi)."
+    effort: Literal["lo", "med", "hi", ""] | None = Field(
+        default=None,
+        description="create/update: default model tier. '' clears it.",
     )
     delegate: bool | None = Field(
         default=None,
@@ -113,17 +114,51 @@ class AgentParams(BaseModel):
     )
 
 
+#: Cap on one rendered row. Long enough for a full trigger sentence, short
+#: enough that a list of them stays scannable at 80 columns.
+_ROW_CAP = 400
+
+
+def _name_taken_message(name: str, *, installing: bool = False) -> str:
+    """One wording for the same condition, wherever it is detected.
+
+    `install` and `create`/`update` used to phrase this differently, and only
+    one of them stated the no-op guarantee and named the escape route.
+    """
+
+    lead = (
+        f"an agent named {name!r} already exists and is not a role, so nothing was installed."
+        if installing
+        else f"an agent named {name!r} already exists and is not a role."
+    )
+    return f"{lead} Rename that agent, or use a different name for the role."
+
+
 def _profile_line(profile: AgentProfile, *, installed: bool) -> str:
     """One scannable row: name, where it came from, and what it is for."""
 
     marks: list[str] = [] if installed else ["starter"]
-    if profile.tools:
-        marks.append(f"{len(profile.tools)} tools")
+    # ALWAYS say something about the tool surface. Emitting `[7 tools]` only
+    # when an allowlist exists inverted the signal it is supposed to carry:
+    # `None` means the FULL inventory, so the unrestricted roles (coder,
+    # designer — which can edit, write and run anything) rendered as a bare
+    # `[starter]` while read-only `scout` showed `[5 tools]` and looked
+    # heavier. Tool restriction is the one attribute the guide calls "a
+    # capability boundary, not advice", so the row must not communicate its
+    # absence by saying nothing. `show` already spells this out; this matches.
+    marks.append(f"{len(profile.tools)} tools" if profile.tools else "all tools")
     if profile.effort:
         marks.append(profile.effort)
     suffix = f" [{', '.join(marks)}]" if marks else ""
     summary = (profile.when_to_use or profile.description or "").strip()
-    return f"- {profile.name}{suffix}: {summary}"[:400]
+    if not summary:
+        # A role with no description is invisible to `search`, which matches on
+        # exactly this text. Saying so is more useful than a dangling colon.
+        summary = "(no description — not searchable; add one with op='update')"
+    row = f"- {profile.name}{suffix}: {summary}"
+    # Ellipsis when the cut fires: a bare slice ends mid-word, and the reader
+    # cannot tell an author's fragment from text we dropped.
+    return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
 
 
 def _registry(context: ToolContext | None) -> Any:
@@ -175,9 +210,10 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     if starters:
         if body:
             body += "\n\n"
-        body += "installable starters (op='install'):\n" + "\n".join(
-            _profile_line(profile, installed=False) for profile in starters
-        )
+        body += (
+            "installable starters (packaged roles, not yet in your registry — "
+            "op='install' to keep and edit one):\n"
+        ) + "\n".join(_profile_line(profile, installed=False) for profile in starters)
     if not body:
         body = "no roles registered and no starters packaged."
     text, spill = spill_truncate(body, "agent", context)
@@ -199,8 +235,40 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     if profile.effort:
         header.append(f"effort: {profile.effort}")
     body = "\n".join(header) + "\n\ninstructions:\n" + (profile.instructions or "(none)")
+    # The highest-intent moment in the flow: someone has just read a role's
+    # guidance and decided they want it. Every other op ends by naming the next
+    # command; this one used to stop at "not installed" and leave them there.
+    body += (
+        f"\n\nlaunch with task(agent={profile.name!r})"
+        + ("" if profile.agent_id else f", or op='install' name={profile.name!r} to edit it")
+        + "."
+    )
     text, spill = spill_truncate(body, "agent", context)
     return _text(tool_call_id, "agent", text, details=spill or None)
+
+
+async def _ranked_names(index: Any, query: str) -> list[str]:
+    """Role names ordered by SCORE, best first.
+
+    ``SkillIndex.select`` returns its picks sorted by NAME so that two turns
+    selecting the same set render byte-identically for the prompt cache. That
+    is right for the knowledge block and wrong here: printing an alphabetical
+    list under the words "best first" would be a claim the reader cannot check.
+    This recomputes the ranking from the same hybrid score the selection used.
+
+    Best-effort: any failure returns an empty list and the caller keeps
+    ``select``'s own order, because an unranked answer beats no answer.
+    """
+
+    try:
+        from local_operator.skills.index import _hybrid_scores
+
+        query_vector = (await index.backend.embed([query]))[0]
+        scores = _hybrid_scores(query, index.skills, index._scores(query_vector), None)
+    except Exception:  # noqa: BLE001 - ordering is a nicety, never a failure
+        return []
+    ranked = sorted(range(len(index.skills)), key=lambda position: -scores[position])
+    return [index.skills[position].name for position in ranked]
 
 
 async def _op_search(context: ToolContext | None, tool_call_id: str, query: str) -> ToolResult:
@@ -241,7 +309,25 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
     try:
         index = SkillIndex(rows, LocalEmbedder())
         await index.build()
-        picked = await index.select(query, k=3)
+        # threshold=0 and RANKED, deliberately, on both counts.
+        #
+        # The shared index default (0.19) is calibrated for full skill bodies;
+        # a role description is one sentence, so correct matches score
+        # 0.118-0.177 and were being cut. Measured against a query set, the
+        # true best role ranked first 10/10 while unrelated queries ("order me
+        # a pizza") topped out at 0.106 — so the RANKING is trustworthy while
+        # the absolute scores sit either side of a knife-edge cut. Showing a
+        # ranked shortlist is therefore both more useful and more honest than
+        # "no role matched": the caller is an agent choosing among six options,
+        # and the copy says these are the closest rather than that they fit.
+        #
+        # `select` sorts its result by NAME (for prompt-cache stability), which
+        # would silently present an alphabetical list as if it were ranked, so
+        # the ordering is recovered here from the scores themselves.
+        picked = await index.select(query, k=3, threshold=0.0)
+        ranking = await _ranked_names(index, query)
+        order = {name: position for position, name in enumerate(ranking)}
+        picked = sorted(picked, key=lambda row: order.get(row.name, len(order)))
     except Exception as exc:  # noqa: BLE001 - degrade to listing, never fail
         logger.warning("role search failed: %s", exc)
         picked = rows[:3]
@@ -249,7 +335,7 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
         return _text(
             tool_call_id,
             "agent",
-            "no role matched that task closely; use op='list' or launch task without a role.",
+            "no roles available to search; use op='list'.",
         )
     lines = []
     for row in picked:
@@ -260,7 +346,9 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
     return _text(
         tool_call_id,
         "agent",
-        "best matching roles:\n" + "\n".join(lines) + "\n\nlaunch with task(agent='<name>').",
+        "closest roles (best first):\n"
+        + "\n".join(lines)
+        + "\n\nlaunch with task(agent='<name>'), or op='list' to see them all.",
     )
 
 
@@ -282,17 +370,15 @@ async def _op_install(context: ToolContext | None, tool_call_id: str, name: str)
         return _error(
             tool_call_id,
             "agent",
-            f"an agent named {name!r} already exists and is not a role, so nothing was "
-            "installed. Rename that agent, or author the role under a different name "
-            "with op='create'.",
+            _name_taken_message(name, installing=True),
         )
     if profile is None:
         return _error(tool_call_id, "agent", f"could not install starter {name!r}")
     return _text(
         tool_call_id,
         "agent",
-        f"installed role {profile.name!r} into the registry; "
-        f"launch with task(agent={profile.name!r}). Edit it with op='update'.",
+        f"installed role {profile.name!r}: launch with task(agent={profile.name!r}), "
+        f"or change what it is told with op='update' name={profile.name!r}.",
     )
 
 
@@ -324,8 +410,7 @@ async def _op_write(
         return _error(
             tool_call_id,
             "agent",
-            f"an agent named {name!r} exists and is not a role; rename it, or use a "
-            "different name for the role.",
+            _name_taken_message(name),
         )
     if creating and existing is not None:
         return _error(

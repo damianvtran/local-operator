@@ -1,7 +1,7 @@
 ---
 name: scout
 description: "Read-only research: investigates a question across the workspace and reports findings with file:line evidence. No side effects."
-when_to_use: "Answering a question about how something works, locating code, or gathering evidence, where nothing should be modified."
+when_to_use: "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, or gathering evidence — read-only, nothing is modified."
 tools: read, glob, grep, list_variables, read_variable
 effort: lo
 ---

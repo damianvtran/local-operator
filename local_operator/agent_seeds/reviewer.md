@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews."
-when_to_use: "Reviewing a pull request, merge request, commit range, or patch; auditing a change someone else (or another agent) wrote."
+when_to_use: "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote."
 tools: read, glob, grep, list_variables, read_variable, bash, todo
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: coder
 description: "Implements one bounded slice of work end to end with the full toolset, then reports what changed and how it was verified."
-when_to_use: "An independent, well-specified implementation slice that can proceed without further decisions from the delegator."
+when_to_use: "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions."
 ---
 
 You implement one bounded slice and report what you changed.

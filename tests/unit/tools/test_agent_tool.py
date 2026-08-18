@@ -307,3 +307,85 @@ async def test_the_tool_returns_an_error_result_instead_of_raising(context, regi
     )
     assert result.is_error
     assert "PermissionError" in result.text or "read-only" in result.text
+
+
+# ---------------------------------------------------------------------------
+# Design review round-1 regressions (copy surface).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_unrestricted_role_is_not_shown_as_the_smallest_one(context) -> None:
+    """D2: the badge was emitted only when an allowlist existed, so the roles
+    with FULL write access rendered as a bare `[starter]` while read-only
+    `scout` showed `[5 tools]` — inverting the one attribute the guide calls a
+    capability boundary."""
+    body = await call(context, op="list")
+    rows = {line.split()[1]: line for line in body.splitlines() if line.startswith("- ")}
+    assert "all tools" in rows["coder"], rows["coder"]
+    assert "all tools" in rows["designer"], rows["designer"]
+    assert "5 tools" in rows["scout"], rows["scout"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("find where this function is defined", "scout"),
+        ("write the code for this ticket", "coder"),
+        ("make the button look nicer", "designer"),
+        ("audit this diff for problems", "reviewer"),
+        ("decide between two architectures", "architect"),
+    ],
+)
+async def test_search_answers_the_phrasings_the_seeds_advertise(
+    context, query: str, expected: str
+) -> None:
+    """D1: the shared index threshold (0.19) is calibrated for full skill
+    bodies, so one-sentence role descriptions scored 0.118-0.177 and were cut —
+    `scout.md` promises "locating code" while that query returned nothing. The
+    ranking is now surfaced best-first rather than gated on an absolute score.
+    """
+    body = await call(context, op="search", query=query)
+    rows = [line for line in body.splitlines() if line.startswith("- ")]
+    assert rows, f"{query!r} matched no role"
+    assert rows[0].split()[1] == expected, f"{query!r} -> {rows[0]}"
+
+
+@pytest.mark.asyncio
+async def test_show_on_an_uninstalled_starter_names_the_next_command(context) -> None:
+    """D3: it stated "not installed" and stopped, at the moment the reader has
+    just decided they want the role."""
+    body = await call(context, op="show", name="coder")
+    assert "task(agent='coder')" in body
+    assert "op='install'" in body
+
+
+@pytest.mark.asyncio
+async def test_a_role_with_no_description_says_it_is_undiscoverable(context) -> None:
+    """D6: an empty description rendered as a dangling `- name: `, hiding that
+    `search` matches on exactly that text."""
+    await call(context, op="create", name="nodesc", instructions="does a thing")
+    row = next(line for line in (await call(context, op="list")).splitlines() if "nodesc" in line)
+    assert "not searchable" in row
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_effort_tier_is_refused(context) -> None:
+    """D5: it was accepted silently and then rendered in the badge slot as
+    though it were a real tier, teaching the reader that any token belongs
+    there."""
+    body = await call(
+        context, op="create", name="e1", description="d", instructions="i", effort="ludicrous"
+    )
+    assert "invalid arguments" in body
+    assert "effort" in body
+
+
+@pytest.mark.asyncio
+async def test_an_overlong_row_is_marked_as_truncated(context, registry) -> None:
+    """D4: a bare slice ends mid-word, so a reader cannot tell an author's
+    fragment from text the tool dropped."""
+    await call(context, op="create", name="wordy", description="x " * 400, instructions="i")
+    row = next(line for line in (await call(context, op="list")).splitlines() if "wordy" in line)
+    assert row.endswith("…")
