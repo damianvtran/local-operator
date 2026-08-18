@@ -389,3 +389,69 @@ async def test_an_overlong_row_is_marked_as_truncated(context, registry) -> None
     await call(context, op="create", name="wordy", description="x " * 400, instructions="i")
     row = next(line for line in (await call(context, op="list")).splitlines() if "wordy" in line)
     assert row.endswith("…")
+
+
+# ---------------------------------------------------------------------------
+# Design review round-2 regressions.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("check the UI looks right", "designer"),
+        ("find where this function is defined", "scout"),
+        ("write the code for this ticket", "coder"),
+        ("make the button look nicer", "designer"),
+        ("fix this bug", "coder"),
+    ],
+)
+async def test_search_still_works_after_the_roles_are_installed(
+    context, query: str, expected: str
+) -> None:
+    """D10: `install_seed` persisted `description` while the enriched trigger
+    text lived in `when_to_use`, so installing a role — the flow the list
+    header advertises — discarded exactly the text `search` matches on. Four of
+    five of the round-1 queries then resolved to the WRONG role, and because
+    the absolute threshold had been removed the failure was confident rather
+    than visible ("check the UI looks right" -> manager).
+
+    The round-1 tests only exercised packaged starters, which is why this
+    escaped; this one installs first.
+    """
+    for name in ("reviewer", "coder", "designer", "scout", "architect", "manager"):
+        await call(context, op="install", name=name)
+
+    body = await call(context, op="search", query=query)
+    rows = [line for line in body.splitlines() if line.startswith("- ")]
+    assert rows, f"{query!r} matched no role after install"
+    assert rows[0].split()[1] == expected, f"{query!r} -> {rows[0]}"
+
+
+@pytest.mark.asyncio
+async def test_the_listing_stays_scannable(context) -> None:
+    """D11: enriching the trigger text for retrieval pushed rows to 188-246
+    chars, so six roles rendered as 22 physical lines at 80 columns with no
+    indent marking where one ended. Display now prefers the short description
+    and the row cap bounds the rest."""
+    body = await call(context, op="list")
+    rows = [line for line in body.splitlines() if line.startswith("- ")]
+    assert rows
+    assert all(len(row) <= 160 for row in rows), sorted(len(row) for row in rows)
+    physical = sum(-(-len(row) // 80) for row in rows)
+    assert physical <= 14, f"{physical} physical lines at 80 columns"
+    header = next(line for line in body.splitlines() if "installable starters" in line)
+    assert len(header) <= 80, len(header)
+
+
+@pytest.mark.asyncio
+async def test_a_weak_search_result_is_worded_as_a_nearest_neighbour(context) -> None:
+    """D12: with no absolute cut, an unrelated query still returns three roles,
+    and nothing in a bare list distinguished a 0.65 hit from 0.03 noise."""
+    strong = await call(context, op="search", query="review a merge request for defects")
+    assert strong.startswith("closest roles (best first):")
+
+    weak = await call(context, op="search", query="order me a pizza")
+    assert weak.startswith("nothing scored strongly")
+    assert "- " in weak, "the shortlist is still shown, just not as a recommendation"

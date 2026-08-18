@@ -114,9 +114,16 @@ class AgentParams(BaseModel):
     )
 
 
-#: Cap on one rendered row. Long enough for a full trigger sentence, short
-#: enough that a list of them stays scannable at 80 columns.
-_ROW_CAP = 400
+#: Cap on one rendered row. Two lines at 80 columns: enough for a role to say
+#: what it is for, short enough that six of them stay scannable in a 24-row
+#: terminal. It was 400, which let the enriched retrieval text render six roles
+#: as 22 physical lines with no indent to mark where one ended.
+_ROW_CAP = 160
+
+#: Hybrid score at or above which a search result is worded as a match rather
+#: than as a nearest neighbour. Not a cut: everything is still returned, ranked.
+#: Measured true-positive floor 0.118, false-positive ceiling ~0.106.
+_STRONG_MATCH = 0.115
 
 
 def _name_taken_message(name: str, *, installing: bool = False) -> str:
@@ -150,7 +157,15 @@ def _profile_line(profile: AgentProfile, *, installed: bool) -> str:
     if profile.effort:
         marks.append(profile.effort)
     suffix = f" [{', '.join(marks)}]" if marks else ""
-    summary = (profile.when_to_use or profile.description or "").strip()
+    # DISPLAY prefers the short ``description``; RETRIEVAL (in ``_op_search``)
+    # prefers the long ``when_to_use``. The two texts exist for different
+    # readers, and drawing both from the same field is what made the list 69%
+    # taller at 80 columns once the trigger text was enriched for search. An
+    # INSTALLED role collapses to one registry column (the routing text, so
+    # search keeps working across install), which is why the row cap does the
+    # remaining work rather than this preference alone. ``show`` is where a
+    # role's full applicability is read.
+    summary = (profile.description or profile.when_to_use or "").strip()
     if not summary:
         # A role with no description is invisible to `search`, which matches on
         # exactly this text. Saying so is more useful than a dangling colon.
@@ -211,8 +226,7 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
         if body:
             body += "\n\n"
         body += (
-            "installable starters (packaged roles, not yet in your registry — "
-            "op='install' to keep and edit one):\n"
+            "installable starters (packaged, not yet in your registry — op='install'):\n"
         ) + "\n".join(_profile_line(profile, installed=False) for profile in starters)
     if not body:
         body = "no roles registered and no starters packaged."
@@ -247,14 +261,18 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     return _text(tool_call_id, "agent", text, details=spill or None)
 
 
-async def _ranked_names(index: Any, query: str) -> list[str]:
-    """Role names ordered by SCORE, best first.
+async def _ranked_names(index: Any, query: str) -> tuple[list[str], float]:
+    """Role names ordered by SCORE (best first), and the best score.
 
     ``SkillIndex.select`` returns its picks sorted by NAME so that two turns
     selecting the same set render byte-identically for the prompt cache. That
     is right for the knowledge block and wrong here: printing an alphabetical
     list under the words "best first" would be a claim the reader cannot check.
     This recomputes the ranking from the same hybrid score the selection used.
+
+    The score comes back too so the caller can HEDGE its wording: with no
+    absolute threshold, an unrelated query still returns three roles, and
+    nothing in a bare list distinguishes a 0.65 hit from 0.03 noise.
 
     Best-effort: any failure returns an empty list and the caller keeps
     ``select``'s own order, because an unranked answer beats no answer.
@@ -266,9 +284,10 @@ async def _ranked_names(index: Any, query: str) -> list[str]:
         query_vector = (await index.backend.embed([query]))[0]
         scores = _hybrid_scores(query, index.skills, index._scores(query_vector), None)
     except Exception:  # noqa: BLE001 - ordering is a nicety, never a failure
-        return []
+        return [], 0.0
     ranked = sorted(range(len(index.skills)), key=lambda position: -scores[position])
-    return [index.skills[position].name for position in ranked]
+    best = float(scores[ranked[0]]) if ranked else 0.0
+    return [index.skills[position].name for position in ranked], best
 
 
 async def _op_search(context: ToolContext | None, tool_call_id: str, query: str) -> ToolResult:
@@ -325,12 +344,13 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
         # would silently present an alphabetical list as if it were ranked, so
         # the ordering is recovered here from the scores themselves.
         picked = await index.select(query, k=3, threshold=0.0)
-        ranking = await _ranked_names(index, query)
+        ranking, best_score = await _ranked_names(index, query)
         order = {name: position for position, name in enumerate(ranking)}
         picked = sorted(picked, key=lambda row: order.get(row.name, len(order)))
     except Exception as exc:  # noqa: BLE001 - degrade to listing, never fail
         logger.warning("role search failed: %s", exc)
         picked = rows[:3]
+        best_score = 0.0
     if not picked:
         return _text(
             tool_call_id,
@@ -343,10 +363,21 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
         if profile is None:
             continue
         lines.append(_profile_line(profile, installed=bool(profile.agent_id)))
+    # Measured on a query set: true matches score 0.118 and up, while
+    # unrelated queries ("order me a pizza") top out near 0.10. The margin is
+    # too thin to CUT on (that was the old behaviour, and it hid roles whose
+    # own text promised the query), but wide enough to change the wording, so a
+    # weak result reads as a nearest neighbour rather than a recommendation.
+    header = (
+        "closest roles (best first):"
+        if best_score >= _STRONG_MATCH
+        else "nothing scored strongly; the closest roles are:"
+    )
     return _text(
         tool_call_id,
         "agent",
-        "closest roles (best first):\n"
+        header
+        + "\n"
         + "\n".join(lines)
         + "\n\nlaunch with task(agent='<name>'), or op='list' to see them all.",
     )

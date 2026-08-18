@@ -454,7 +454,16 @@ def install_seed(
         agent = registry.create_agent(
             AgentEditFields(
                 name=seed.name,
-                description=seed.description or seed.when_to_use,
+                # ``when_to_use`` FIRST, and the order is load-bearing. The
+                # registry has one description field; a profile has two texts,
+                # and this one is the ROUTING text — it is what ``search``
+                # embeds and match against. Persisting ``description`` instead
+                # silently dropped the trigger phrasings on install, so a role
+                # that was discoverable as a packaged starter became
+                # undiscoverable the moment an operator installed it, and
+                # search then recommended a confidently wrong role rather than
+                # failing visibly ("check the UI looks right" -> manager).
+                description=seed.when_to_use or seed.description,
                 tags=tags,
                 categories=["role"],
                 security_prompt=None,
