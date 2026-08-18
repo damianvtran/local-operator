@@ -244,16 +244,23 @@ def test_a_rotation_alone_still_declares_that_the_bytes_changed() -> None:
     and the same mime, so both of the old triggers went false and the clause
     vanished entirely — for the one case where the pixels were most rearranged.
     A PNG makes it exact: no format change to fall back on.
+
+    Orientation ``3`` — a 180° flip — and not ``6``, which is what makes this
+    test exercise the ``rotated`` trigger AT ALL. A quarter turn swaps the axes,
+    so the size comparison alone already catches it and the disjunct under test
+    could be deleted with every assertion still passing (review round 3, F9).
+    A half turn leaves the size identical, so nothing but ``rotated`` can fire.
     """
     buffer = io.BytesIO()
     image = Image.new("RGB", (1200, 900), (10, 60, 120))
     exif = Image.Exif()
-    exif[274] = 6
+    exif[274] = 3
     image.save(buffer, format="PNG", exif=exif)
     source = buffer.getvalue()
 
     _payload, wire_mime, summary = bound_image_for_model(source, _sniffed(source))
     assert wire_mime == "image/png", "the fixture must not change format"
+    assert "1200x900, " in summary, "the fixture must come back the same SIZE"
     assert "source 1200x900" in summary
     assert "EXIF-rotated" in summary
 
