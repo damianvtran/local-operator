@@ -2712,6 +2712,13 @@ class Session:
             await self.jobs.dispose()
             self._wake.dispose()
             self._transcript.flush()
+            # Drop the retention claim: this directory is now ordinary history
+            # and another session's sweep may reclaim it. Kept here rather than
+            # in a dispose hook so it holds for every front end, and after the
+            # flush so the claim outlives the last write it protects.
+            from local_operator.session.retention import release_session
+
+            release_session(self._transcript.directory)
         finally:
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.

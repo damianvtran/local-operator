@@ -7,6 +7,7 @@ there afterwards, on every path, including the ones that fail.
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -15,9 +16,27 @@ from local_operator.session.retention import (
     DEFAULT_MAX_AGE_DAYS,
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_SESSIONS,
+    LIVE_MARKER_NAME,
+    NEW_SESSION_GRACE_S,
+    claim_session,
+    release_session,
     sweep_from_config,
     sweep_sessions,
 )
+
+
+def _dead_pid() -> int:
+    """A process id nothing owns.
+
+    Forked and reaped, so the id is genuinely unused rather than merely large
+    — a hardcoded number could belong to a live process on a busy machine and
+    make the test flake in the direction of "nothing was evicted".
+    """
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - child exits immediately
+        os._exit(0)
+    os.waitpid(pid, 0)
+    return pid
 
 
 def _session(root, name: str, *, size: int = 1024, age_days: float = 0.0):
@@ -26,8 +45,6 @@ def _session(root, name: str, *, size: int = 1024, age_days: float = 0.0):
     (directory / "transcript.jsonl").write_text("x" * size)
     when = time.time() - age_days * 86400
     for path in (directory / "transcript.jsonl", directory):
-        import os
-
         os.utime(path, (when, when))
     return directory
 
@@ -99,17 +116,137 @@ def test_live_session_is_never_evicted(tmp_path):
     assert result.evicted == 5
 
 
-def test_empty_directories_are_always_reaped(tmp_path):
+def test_empty_directories_are_reaped_once_past_the_grace_period(tmp_path):
     """Left behind by runs that built a session and exited before writing a
-    turn; 23 of 147 directories on a real install were exactly this."""
+    turn; 23 of 147 directories on a real install were exactly this.
+
+    Aged past ``NEW_SESSION_GRACE_S``, because an empty directory younger than
+    that belongs to a session that is still starting up (see the test below).
+    """
     sessions = tmp_path / "sessions"
-    (sessions / "hollow").mkdir(parents=True)
+    hollow = sessions / "hollow"
+    hollow.mkdir(parents=True)
+    old = time.time() - NEW_SESSION_GRACE_S - 60
+    os.utime(hollow, (old, old))
     _session(sessions, "real")
 
     sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
 
-    assert not (sessions / "hollow").exists()
+    assert not hollow.exists()
     assert (sessions / "real").exists()
+
+
+def test_a_session_that_has_not_written_its_first_turn_yet_survives(tmp_path):
+    """The regression that broke real sessions.
+
+    A run creates its directory before it writes the first transcript line. A
+    concurrent session's startup sweep landing in that window used to reap the
+    directory as "empty", and the starting run then died on
+    ``FileNotFoundError: .../transcript.jsonl`` — on that turn and on every
+    turn after it, because nothing recreated the directory.
+    """
+    sessions = tmp_path / "sessions"
+    starting = sessions / "starting"
+    starting.mkdir(parents=True)
+
+    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
+
+    assert starting.exists()
+
+
+def test_a_concurrent_live_session_is_not_evicted(tmp_path):
+    """The other half of the same regression.
+
+    ``live_dir`` only names the sweeping session's OWN directory, so every
+    other running session was an ordinary candidate. Claiming is what tells
+    this sweep that a directory belongs to a run that is still writing to it.
+    """
+    sessions = tmp_path / "sessions"
+    concurrent = _session(sessions, "concurrent", size=512, age_days=9)
+    claim_session(concurrent)
+    for i in range(4):
+        _session(sessions, f"other{i}", size=512, age_days=8 - i)
+    mine = _session(sessions, "mine", size=512)
+
+    result = sweep_sessions(sessions, live_dir=mine, max_sessions=1, max_bytes=0, max_age_days=0)
+
+    assert concurrent.exists(), "a session still writing to this directory lost it"
+    assert mine.exists()
+    # The ceiling applies to evictable history only: the claimed and live
+    # directories are exempt, so one of the four ordinary ones survives.
+    assert result.evicted == 3
+    assert (sessions / "other3").exists()
+
+
+def test_a_claim_from_a_dead_process_does_not_protect_the_directory(tmp_path):
+    """Otherwise a crashed run would make its directory immortal and quietly
+    disable every ceiling."""
+    sessions = tmp_path / "sessions"
+    orphan = _session(sessions, "orphan", size=512, age_days=90)
+    claim_session(orphan, pid=_dead_pid())
+
+    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=30)
+
+    assert not orphan.exists()
+
+
+def test_a_corrupt_claim_does_not_protect_the_directory(tmp_path):
+    sessions = tmp_path / "sessions"
+    corrupt = _session(sessions, "corrupt", size=512, age_days=90)
+    (corrupt / LIVE_MARKER_NAME).write_text("not-a-pid")
+
+    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=30)
+
+    assert not corrupt.exists()
+
+
+def test_releasing_a_claim_makes_the_directory_evictable_again(tmp_path):
+    sessions = tmp_path / "sessions"
+    finished = _session(sessions, "finished", size=512, age_days=90)
+    claim_session(finished)
+
+    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=30)
+    assert finished.exists(), "still claimed"
+
+    release_session(finished)
+    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=30)
+    assert not finished.exists()
+
+
+def test_a_claim_alone_does_not_count_as_session_content(tmp_path):
+    """A directory holding only a released claim is empty history, and the
+    reap must see it that way rather than counting our own bookkeeping."""
+    sessions = tmp_path / "sessions"
+    hollow = sessions / "hollow"
+    hollow.mkdir(parents=True)
+    claim_session(hollow, pid=_dead_pid())
+    old = time.time() - NEW_SESSION_GRACE_S - 60
+    for path in (hollow / LIVE_MARKER_NAME, hollow):
+        os.utime(path, (old, old))
+
+    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
+
+    assert not hollow.exists()
+
+
+def test_eviction_ranks_by_last_activity_not_by_directory_age(tmp_path):
+    """A directory's own mtime is effectively its BIRTH time: it moves when an
+    entry is created inside it, and a session creates ``transcript.jsonl`` once
+    and then appends to it for hours. Ranking by it evicted the long-running
+    session an operator had been talking to all afternoon ahead of one-shot
+    runs that had started since and done nothing.
+    """
+    sessions = tmp_path / "sessions"
+    veteran = _session(sessions, "veteran", size=512, age_days=5)
+    # Started long ago, but written to a minute ago: the busiest session here.
+    recent = time.time() - 60
+    os.utime(veteran / "transcript.jsonl", (recent, recent))
+    for i in range(3):
+        _session(sessions, f"drive-by{i}", size=512, age_days=1)
+
+    sweep_sessions(sessions, max_sessions=2, max_bytes=0, max_age_days=0)
+
+    assert veteran.exists(), "the most active session was evicted as the oldest"
 
 
 def test_sweep_is_idempotent(tmp_path):

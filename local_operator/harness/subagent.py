@@ -674,6 +674,7 @@ async def _build_child_session(
     from local_operator.config import ConfigManager
     from local_operator.harness.types import ToolContext
     from local_operator.prompts_api import build_system_blocks
+    from local_operator.session.retention import claim_session
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
     from local_operator.session_factory import _env_details, load_user_instructions
@@ -688,6 +689,13 @@ async def _build_child_session(
         resume_dir if resume_dir is not None else config_dir() / "sessions" / uuid.uuid4().hex[:12]
     )
     transcript = Transcript(session_dir)
+    # A child writes its own session directory under the same ``sessions/``
+    # store the retention sweep reclaims, so it needs the same claim its parent
+    # has: subagents routinely outlive the sweep that another session's startup
+    # runs, and an unclaimed child directory is an eviction candidate while the
+    # child is still writing to it. The pid is the parent process's, which is
+    # exactly right — that is the process whose death makes the directory dead.
+    claim_session(session_dir)
     # The operator's standing instructions are machine-wide, so a delegated
     # slice inherits them for the same reason it inherits the goal: the parent
     # authoring a task prompt is not a reliable channel for a preference the

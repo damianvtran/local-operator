@@ -171,3 +171,34 @@ def test_entry_from_json_rejects_bad_rows():
         TranscriptEntry.from_json('{"id": "a", "type": "message"}') is not None
     )  # payload defaults
     assert TranscriptEntry.from_json('{"ts": 1, "type": "message"}') is None  # missing id
+
+
+@pytest.mark.asyncio
+async def test_append_recreates_a_directory_that_vanished_mid_session(tmp_path):
+    """A deleted session directory must cost history, not the session.
+
+    Retention sweeps this store, and an operator may clear it by hand. Before
+    the recovery path, the append raised ``FileNotFoundError`` and kept raising
+    it on every following turn, so one deleted directory left a session that
+    could not take another turn at all.
+    """
+    import shutil
+
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("before"))
+
+    shutil.rmtree(directory)
+
+    await transcript.append_message(Message.assistant("after"))
+
+    assert transcript.path.is_file()
+    lines = transcript.path.read_text().splitlines()
+    # The WHOLE history, not just the line that triggered the recovery: a file
+    # beginning part way through a conversation would replay as one.
+    assert len(lines) == 2
+    assert json.loads(lines[0])["payload"]["content"][0]["text"] == "before"
+    assert json.loads(lines[1])["payload"]["content"][0]["text"] == "after"
+
+    replayed = [m.content[0].text for m in Transcript(directory).build_llm_history()]
+    assert replayed == ["before", "after"]

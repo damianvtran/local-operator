@@ -243,10 +243,45 @@ class Transcript:
             # ``Session._offloaded`` is where the loop-responsiveness win
             # actually comes from (1360 ms -> 56 ms); this write is a few
             # hundred microseconds and is not worth a correctness hazard.
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(entry.to_json() + "\n")
-                handle.flush()
+            self._write_line(entry.to_json() + "\n")
         return entry
+
+    def _write_line(self, line: str) -> None:
+        """Append one already-encoded line, recreating the store if it is gone.
+
+        The directory is not guaranteed to survive the session: retention
+        sweeps the ephemeral store, an operator clears ``sessions/``, a
+        temporary directory is reaped. Before this, a vanished directory made
+        the append raise ``FileNotFoundError`` — and raise it again on every
+        following turn, so the session did not merely lose its history, it lost
+        the ability to take another turn. That is how one deleted directory
+        turned into a permanently dead session, with no recovery short of
+        restarting and no hint of what happened.
+
+        Recreating costs one ``mkdir`` on a path that is almost always present,
+        since the happy path is the plain append and this runs only after it
+        has already failed. The whole in-memory history is rewritten rather
+        than just this line: a file that begins part way through a conversation
+        replays as one, and a resume off it would silently drop everything said
+        before the directory went.
+        """
+        try:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+            return
+        except FileNotFoundError:
+            pass
+        self.directory.mkdir(parents=True, exist_ok=True)
+        logger.warning(
+            "transcript directory %s disappeared mid-session; recreated it and "
+            "rewrote %d entries",
+            self.directory,
+            len(self._entries),
+        )
+        with self.path.open("w", encoding="utf-8") as handle:
+            handle.write("".join(item.to_json() + "\n" for item in self._entries))
+            handle.flush()
 
     # -- replay -------------------------------------------------------------
 
