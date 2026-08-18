@@ -289,6 +289,12 @@ def bound_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str
         # when there is nothing to do — so testing identity afterwards would
         # re-encode every ordinary screenshot for nothing.
         rotated = _needs_exif_rotation(image)
+        # The size ON DISK, captured BEFORE the transpose can swap the axes.
+        # The summary's "source WxH" clause means "what a model would see from
+        # ``ls`` or a re-read", so reading it after a rotation reported
+        # 3000x4000 for a file every other tool calls 4000x3000 (review round
+        # 2, F7).
+        source_width, source_height = image.size
         if rotated:
             image = _exif_transposed(image)
         width, height = image.size
@@ -338,9 +344,19 @@ def bound_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str
         raise ValueError(f"could not decode the image data ({type(exc).__name__}: {exc})") from exc
 
     summary = f"{wire_mime}, {image.width}x{image.height}, {len(payload)} bytes"
-    if image.size != (width, height) or wire_mime != info.mime_type:
+    if image.size != (source_width, source_height) or wire_mime != info.mime_type or rotated:
         # State the source whenever what the model sees is not what is on disk.
         # Otherwise a model comparing this against `ls -l` output, or against a
         # later re-read, has no way to reconcile the two.
-        summary += f"; source {width}x{height} {info.mime_type}"
+        #
+        # ``rotated`` is its own trigger, not a redundancy. A square-ish photo
+        # can come back the same SIZE and the same MIME after a transpose, so
+        # the size/mime tests both go false and the clause would vanish for the
+        # one case where the pixels were most rearranged (review round 2, F7).
+        summary += f"; source {source_width}x{source_height} {info.mime_type}"
+        if rotated:
+            # Name the rotation rather than leaving a bare size disagreement the
+            # model has to explain to itself — it is the only clue that the axes
+            # it might derive coordinates from have been swapped.
+            summary += " (EXIF-rotated)"
     return payload, wire_mime, summary

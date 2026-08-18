@@ -459,6 +459,35 @@ async def test_the_decode_runs_off_the_event_loop_thread(tmp_path, monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_a_rotation_alone_is_not_marked_as_a_downscale(tmp_path) -> None:
+    """Review round 2, F8.
+
+    A portrait phone photo inside the bounds is EXIF-rotated on the way in, so
+    its dimensions change (900x1200 from 1200x900) while not one pixel is lost.
+    The mark is a claim about FIDELITY, so comparing the ``WxH`` strings made
+    every such photo assert a shrink that never happened.
+    """
+    path = str(tmp_path / "portrait.jpg")
+    image = Image.new("RGB", (1200, 900), (30, 30, 40))
+    exif = Image.Exif()
+    exif[274] = 6
+    image.save(path, format="JPEG", exif=exif)
+
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        assert editor.referenced_images(), "the photo was not attached"
+        assert RESIZED_MARK not in editor.text
+        # The rotated dimensions are still reported, because that IS what was
+        # attached — only the shrink claim was wrong.
+        assert editor.text == "[Image #1, 900x1200] "
+
+
+@pytest.mark.asyncio
 async def test_an_unlabelled_bound_falls_back_to_the_source_dimensions(
     tmp_path, monkeypatch
 ) -> None:

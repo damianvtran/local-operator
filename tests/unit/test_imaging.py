@@ -220,6 +220,52 @@ def test_unreadable_exif_metadata_does_not_fail_the_image() -> None:
     assert payload
 
 
+def test_the_source_clause_reports_the_size_on_disk_not_the_rotated_size() -> None:
+    """Review round 2, F7.
+
+    ``source WxH`` means "what you would see from ``ls`` or a re-read". Reading
+    it after the transpose swapped the axes reported 3000x4000 for a file every
+    other tool calls 4000x3000 — and this is the caption the MODEL reads, so a
+    model deriving crop coordinates from it gets them transposed.
+    """
+    source = _oriented_jpeg((4000, 3000), orientation=6)
+    info = _sniffed(source)
+    assert info.dimensions == "4000x3000"
+
+    _payload, _mime, summary = bound_image_for_model(source, info)
+    assert "source 4000x3000" in summary
+    assert "source 3000x4000" not in summary
+
+
+def test_a_rotation_alone_still_declares_that_the_bytes_changed() -> None:
+    """Review round 2, F7, second shape.
+
+    An in-bounds image that is only ROTATED can come back with the same size
+    and the same mime, so both of the old triggers went false and the clause
+    vanished entirely — for the one case where the pixels were most rearranged.
+    A PNG makes it exact: no format change to fall back on.
+    """
+    buffer = io.BytesIO()
+    image = Image.new("RGB", (1200, 900), (10, 60, 120))
+    exif = Image.Exif()
+    exif[274] = 6
+    image.save(buffer, format="PNG", exif=exif)
+    source = buffer.getvalue()
+
+    _payload, wire_mime, summary = bound_image_for_model(source, _sniffed(source))
+    assert wire_mime == "image/png", "the fixture must not change format"
+    assert "source 1200x900" in summary
+    assert "EXIF-rotated" in summary
+
+
+def test_an_untouched_image_still_says_nothing_about_a_source() -> None:
+    """The clause is for reconciling a difference. With nothing to reconcile it
+    must stay absent, or every caption carries noise."""
+    source = _oriented_jpeg((800, 600), orientation=None)
+    _payload, _mime, summary = bound_image_for_model(source, _sniffed(source))
+    assert "source" not in summary
+
+
 def test_a_decompression_bomb_is_refused_before_it_is_decoded() -> None:
     """A bomb is small on disk by construction, so no byte cap can see it
     coming. The refusal has to come from the header dimensions, BEFORE the

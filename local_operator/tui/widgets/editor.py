@@ -128,6 +128,21 @@ IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n\[]*)?\]")
 RESIZED_MARK = " ↓"
 
 
+def _was_downscaled(bounded: ImageInfo, source: ImageInfo) -> bool:
+    """Did the bound make the image SMALLER, as opposed to merely different?
+
+    Compares pixel counts rather than the ``WxH`` strings. A portrait phone
+    photo inside the bounds is EXIF-rotated on the way in, so its dimensions
+    change (3024x4032 from 4032x3024) while not one pixel is lost — and a naive
+    string comparison marked it ``↓``, asserting a shrink that never happened
+    (review round 2, F8). The mark is a claim about fidelity, so it has to be
+    tested as one.
+    """
+    if not source.width or not source.height or not bounded.width or not bounded.height:
+        return False
+    return bounded.width * bounded.height < source.width * source.height
+
+
 def _bounded_dimensions(payload: bytes, info: ImageInfo) -> str:
     """The marker's label: ``WxH`` of the bytes actually attached.
 
@@ -149,7 +164,7 @@ def _bounded_dimensions(payload: bytes, info: ImageInfo) -> str:
     bounded = sniff_image(payload)
     if bounded is None or not bounded.dimensions:
         return info.dimensions
-    if bounded.dimensions != info.dimensions and info.dimensions:
+    if _was_downscaled(bounded, info):
         return f"{bounded.dimensions}{RESIZED_MARK}"
     return bounded.dimensions
 
