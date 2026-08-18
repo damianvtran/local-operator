@@ -365,6 +365,32 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         base_url="https://api.z.ai/api/coding/paas/v4",
     ),
     ProviderDefinition(
+        id="zai-oauth",
+        search_aliases=(
+            "glm",
+            "zhipu",
+            "bigmodel",
+            "z-ai",
+        ),
+        name="Z.AI (GLM Coding Plan · Sign in)",
+        # Browser sign-in rather than a pasted key. The flow ends by minting a
+        # durable `id.secret` API key, which is what `access` holds and what the
+        # wire receives -- so this shares `zai`'s credential row, base URL and
+        # models, exactly as `xai-oauth` shares `xai`'s.
+        login=_lazy_login("local_operator.providers.oauth.zai", "login_zai"),
+        get_api_key=_oauth_api_key,
+        store_credentials_as="zai",
+        # Pinned by the provider's OAuth client registration; port fallback is
+        # refused, which `ZaiOAuthFlow` states again as `allow_port_fallback`.
+        callback_port=54548,
+        # Paste-the-redirect-URL fallback for when the browser cannot reach this
+        # machine (a remote or headless session), as for anthropic.
+        paste_code_flow=True,
+        base_url="https://api.z.ai/api/coding/paas/v4",
+        # No refresh_token: the minted key never expires, so there is nothing to
+        # refresh. `expires: None` stops AuthStore from ever trying.
+    ),
+    ProviderDefinition(
         id="google",
         search_aliases=(
             "gemini",

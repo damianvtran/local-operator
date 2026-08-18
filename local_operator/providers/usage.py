@@ -187,10 +187,14 @@ _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
     "xai-oauth": ("xai-oauth", None),
     "alibaba-token-plan": ("qwencloud-token-plan", None),
     "alibaba-token-plan-oauth": ("qwencloud-token-plan", None),
-    # The coding-plan key is the only credential Z.AI issues for this route, and
-    # the same raw key authenticates both inference and the quota endpoint, so
-    # the api-key slot serves it and there is no OAuth half to route.
-    "zai": (None, "zai-quota"),
+    # Both slots run the SAME fetcher, because both credential kinds are the
+    # same secret: the `zai-oauth` browser sign-in ends by minting an ordinary
+    # durable `id.secret` coding-plan key and stores it in `access`, which is
+    # exactly what the quota endpoint authenticates with. Leaving the OAuth slot
+    # empty made `/provider` advertise Z.AI usage and then report nothing at all
+    # for anyone who signed in rather than pasting a key.
+    "zai": ("zai-quota", "zai-quota"),
+    "zai-oauth": ("zai-quota", "zai-quota"),
 }
 
 #: Providers with a live quota endpoint, for callers that only need the question

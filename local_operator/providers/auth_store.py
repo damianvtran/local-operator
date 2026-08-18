@@ -282,8 +282,21 @@ class AuthStore:
         Revives soft-deleted rows for the same identity (re-login).
         ``store_credentials_as`` aliasing happens at the caller (login path).
         """
+        # An EXPLICIT type wins; the structural guess is the fallback for the
+        # callers (and stored rows) that never declared one.
+        #
+        # The guess reads "has both refresh and access", which cannot see a
+        # credential that is OAuth-issued but has no refresh token because it
+        # never expires -- Z.AI's coding-plan sign-in mints exactly that. Such a
+        # row landed as `api_key` with its secret under `data["access"]`, where
+        # nothing can read it: tiers 4 and 6 read `data["key"]`, and tier 3 only
+        # walks `oauth`-typed rows. The login reported success and every request
+        # afterwards failed with no credential at all.
+        declared = credential.get("type")
         credential_type = (
-            "oauth" if credential.get("refresh") and credential.get("access") else "api_key"
+            declared
+            if declared in ("oauth", "api_key")
+            else ("oauth" if credential.get("refresh") and credential.get("access") else "api_key")
         )
         identity = _identity_key_for(provider, credential)
         payload = dict(credential)

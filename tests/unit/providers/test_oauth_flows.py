@@ -892,14 +892,19 @@ async def test_the_loopback_completes_a_login_with_no_manual_input() -> None:
     assert credentials["email"] == "you@example.com"
 
 
-def test_only_anthropic_races_a_pasted_code_against_its_callback() -> None:
+def test_only_browser_signin_flows_race_a_pasted_code_against_their_callback() -> None:
     """`paste_code_flow` is a FALLBACK marker, and ONLY that.
 
-    It matches the reference implementation exactly: Anthropic is the one
-    loopback provider that also accepts a pasted code (for a browser on another
-    machine), raced against the callback rather than awaited. Attaching such a
-    prompt to any other loopback provider blocks the terminal on a line nobody
-    will type.
+    It marks a loopback provider that ALSO accepts a pasted code (for a browser
+    on another machine), raced against the callback rather than awaited.
+    Attaching such a prompt to any other loopback provider blocks the terminal
+    on a line nobody will type.
+
+    Two providers qualify, and both are browser sign-ins whose redirect lands on
+    a loopback port: Anthropic, and Z.AI's GLM Coding Plan sign-in (which mirrors
+    the Anthropic wiring). A provider whose login is "paste your API key" is NOT
+    one of these -- that is ``paste_prompt_required``, asserted in the companion
+    test.
 
     This test used to assert something wider and false in its name and
     docstring — that no provider REQUIRES a paste — while asserting only the
@@ -911,7 +916,7 @@ def test_only_anthropic_races_a_pasted_code_against_its_callback() -> None:
     from local_operator.providers.registry import PROVIDER_REGISTRY
 
     paste = {p.id for p in PROVIDER_REGISTRY if p.login is not None and p.paste_code_flow}
-    assert paste == {"anthropic"}, paste
+    assert paste == {"anthropic", "zai-oauth"}, paste
 
 
 def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
@@ -937,11 +942,11 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         "zai",
     }, required
 
-    # And the union a host actually gates on: required plus Anthropic's optional
-    # fallback, and nothing else. A loopback-only provider appearing here would
-    # mean a prompt racing its HTTP callback.
+    # And the union a host actually gates on: required plus the browser
+    # sign-ins' optional fallback, and nothing else. A loopback-only provider
+    # appearing here would mean a prompt racing its HTTP callback.
     accepts = {p.id for p in PROVIDER_REGISTRY if p.login is not None and p.accepts_paste_prompt}
-    assert accepts == required | {"anthropic"}, accepts
+    assert accepts == required | {"anthropic", "zai-oauth"}, accepts
 
 
 @pytest.mark.asyncio
@@ -1050,3 +1055,175 @@ async def test_qwencloud_token_plan_login_expired_device_code_is_terminal() -> N
         await login_qwencloud_token_plan(
             callbacks, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
         )
+
+
+class TestZaiSignInMintsADurableKey:
+    """Z.AI's sign-in is only useful if it ends with the key the WIRE accepts.
+
+    The short-lived OAuth token from the token exchange is rejected by the
+    inference endpoint, so a flow that stored it would log in successfully and
+    then fail every request. These tests pin the whole sequence:
+    token exchange -> business login -> org/project -> find-or-create key ->
+    read the secret from the copy endpoint.
+    """
+
+    @staticmethod
+    def _transport(calls: list[str], *, existing_key: bool) -> httpx.MockTransport:
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            calls.append(f"{request.method} {path}")
+            if path.endswith("/oauth/token"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "zai": {"access_token": "short-lived-oauth"},
+                            "user": {"email": "damian@example.com", "id": 4242},
+                        },
+                    },
+                )
+            if path.endswith("/api/auth/z/login"):
+                assert json.loads(request.content)["token"] == "short-lived-oauth"
+                return httpx.Response(200, json={"code": 200, "data": {"access_token": "biz-tok"}})
+            if path.endswith("/getCustomerInfo"):
+                assert request.headers["Authorization"] == "Bearer biz-tok"
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 200,
+                        "data": {
+                            "organizations": [
+                                {"organizationId": "org-other", "projects": []},
+                                {
+                                    "organizationId": "org-1",
+                                    "isDefault": True,
+                                    "projects": [
+                                        {"projectId": "proj-other"},
+                                        {"projectId": "proj-1", "isDefault": True},
+                                    ],
+                                },
+                            ]
+                        },
+                    },
+                )
+            if path.endswith("/api_keys") and request.method == "GET":
+                listed = [{"name": "local-operator", "apiKey": "key-id"}] if existing_key else []
+                return httpx.Response(200, json={"code": 200, "data": {"list": listed}})
+            if path.endswith("/api_keys") and request.method == "POST":
+                assert json.loads(request.content)["name"] == "local-operator"
+                return httpx.Response(200, json={"code": 200, "data": {"apiKey": "key-id"}})
+            if "/api_keys/copy/" in path:
+                return httpx.Response(200, json={"code": 200, "data": {"secretKey": "sec-ret"}})
+            raise AssertionError(f"unexpected request: {request.method} {path}")
+
+        return httpx.MockTransport(handler)
+
+    async def test_exchange_mints_and_stores_the_durable_key(self) -> None:
+        from local_operator.providers.oauth.zai import ZaiOAuthFlow
+
+        calls: list[str] = []
+        flow = ZaiOAuthFlow(
+            http_client=httpx.AsyncClient(transport=self._transport(calls, existing_key=False))
+        )
+        creds = await flow.exchange_token(
+            "the-code", "the-state", "http://localhost:54548/callback"
+        )
+
+        # The MINTED `id.secret` key, never the short-lived OAuth token.
+        assert creds["access"] == "key-id.sec-ret"
+        assert creds["email"] == "damian@example.com"
+        assert creds["account_id"] == "4242"
+        # `expires: None` is AuthStore's "static token" marker: no refresh is
+        # ever attempted, so the row persists across sessions.
+        assert creds["expires"] is None
+        # The secret always comes from the copy endpoint -- list entries mask it.
+        assert any("/api_keys/copy/" in call for call in calls), calls
+
+    async def test_an_existing_key_is_reused_rather_than_duplicated(self) -> None:
+        """Signing in twice must not litter the console with one key per login."""
+        from local_operator.providers.oauth.zai import ZaiOAuthFlow
+
+        calls: list[str] = []
+        flow = ZaiOAuthFlow(
+            http_client=httpx.AsyncClient(transport=self._transport(calls, existing_key=True))
+        )
+        creds = await flow.exchange_token("c", "s", "http://localhost:54548/callback")
+
+        assert creds["access"] == "key-id.sec-ret"
+        assert "POST /api/biz/v1/organization/org-1/projects/proj-1/api_keys" not in calls, calls
+
+    async def test_an_envelope_error_is_raised_not_stored(self) -> None:
+        """Z.AI reports failures with HTTP 200 and a `code` field, so a caller
+        that trusted the status would persist an error body as a credential."""
+        from local_operator.providers.oauth.zai import ZaiOAuthFlow
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"code": 401, "msg": "authorization expired"})
+
+        flow = ZaiOAuthFlow(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        with pytest.raises(LoginError, match="authorization expired"):
+            await flow.exchange_token("c", "s", "http://localhost:54548/callback")
+
+    async def test_the_authorize_url_carries_no_pkce(self) -> None:
+        """The provider's own client sends none and the endpoint rejects the
+        extra parameters, so adding PKCE "for safety" breaks the login."""
+        from local_operator.providers.oauth.zai import CLIENT_ID, ZaiOAuthFlow
+
+        flow = ZaiOAuthFlow()
+        url = await flow.generate_auth_url("st-1", "http://localhost:54548/callback")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+
+        assert query["client_id"] == [CLIENT_ID]
+        assert query["state"] == ["st-1"]
+        assert query["response_type"] == ["code"]
+        assert "code_challenge" not in query
+
+    async def test_the_stored_credential_is_readable_by_the_cascade(self, tmp_path: Any) -> None:
+        """R21: the join nothing tested -- sign in, then RESOLVE what was stored.
+
+        Two green tests used to sit either side of this gap: one asserted the
+        registry's `zai-oauth` fields, the other asserted the login flow's
+        return dict. Neither stored a real payload and asked the AuthStore for
+        it back, so a credential shape that no cascade tier could read shipped
+        as a working sign-in: the login reported success and every subsequent
+        request failed without one HTTP call being made.
+
+        This walks the real path end to end -- `ZaiOAuthFlow.exchange_token` ->
+        the exact `upsert_credential` call `ProviderController.login` makes ->
+        `get_api_key` / `get_oauth_access` -- because each of those three
+        components was individually correct while their composition was not.
+        """
+        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.oauth.zai import ZaiOAuthFlow
+        from local_operator.providers.registry import get_provider_definition
+
+        calls: list[str] = []
+        flow = ZaiOAuthFlow(
+            http_client=httpx.AsyncClient(transport=self._transport(calls, existing_key=False))
+        )
+        creds = await flow.exchange_token("c", "s", "http://localhost:54548/callback")
+
+        # `store_credentials_as` is what makes the sign-in and the pasted key
+        # share one row, so the test must store under the alias the controller
+        # resolves rather than under the provider id it was invoked with.
+        definition = get_provider_definition("zai-oauth")
+        assert definition is not None
+        storage = definition.store_credentials_as or "zai-oauth"
+        assert storage == "zai"
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        creds.setdefault("authorized_at", 1)
+        store.upsert_credential(storage, creds)
+
+        # The bearer the wire actually receives. `None` here is the R21 failure:
+        # a row present, typed `api_key`, secret under `access`, unreadable.
+        assert await store.get_api_key("zai") == "key-id.sec-ret"
+
+        access = await store.get_oauth_access("zai")
+        assert access is not None
+        assert access.access_token == "key-id.sec-ret"
+        # Typed `oauth` so tier 3 can see it, and so the row carries the signed-in
+        # identity that `_FETCHERS["zai-oauth"]` needs for quota reporting.
+        assert access.kind == "oauth"
+        assert access.email == "damian@example.com"
