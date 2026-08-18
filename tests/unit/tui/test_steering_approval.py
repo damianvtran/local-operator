@@ -1367,18 +1367,19 @@ async def test_a_background_jobs_approval_survives_the_parents_stop_latch() -> N
 
 @pytest.mark.asyncio
 async def test_a_prompt_never_eats_a_half_typed_prompt() -> None:
-    """A question arriving mid-sentence must not cost the user their draft.
+    """A question arriving mid-draft must not cost the user their sentence.
 
-    This is the risk the anchored prompt takes on. It grabs focus so its answer
-    keys work — the whole point of the rework — and it does so while the user
-    may be in the middle of typing, since an approval is raised by the agent
-    rather than by them. Two things therefore have to hold: the composer's text
-    survives untouched, and focus comes back to it once the question is
-    answered, so the sentence can be finished where it was left.
+    A prompt is raised by the AGENT, so it lands whenever the tool call
+    happens — often while the user is part-way through typing. Two things have
+    to hold: the composer's text survives untouched, and the CARET stays where
+    the user put it, so the sentence can be finished where it was left.
 
-    The old prompt got the first right and the second wrong in the opposite
-    direction: it handed focus AWAY on any printable key, which is what made
-    its own advertised answer keys stop working.
+    The card yields its usual focus grab to a non-empty composer for the
+    stronger reason recorded in `test_a_prompt_arriving_mid_sentence_…`: the
+    answer keys are ordinary characters, so taking the caret mid-sentence feeds
+    the rest of the sentence to the card, and on an approval `y` authorises the
+    call. Nothing is lost by yielding, because the advertised keys are routed
+    from the composer.
     """
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
@@ -1390,31 +1391,34 @@ async def test_a_prompt_never_eats_a_half_typed_prompt() -> None:
         await pilot.pause(0.1)
 
         pending = asyncio.ensure_future(ask("bash", "run: rm -rf ./build"))
-        # Waited on the CONDITION rather than a duration. A fixed
-        # `pause(0.3)` is a bet on how long the mount takes, and CI lost it on
-        # the slower of the two Python versions: the prompt had not taken focus
-        # yet and the assertion below read the composer.
         for _ in range(100):
-            if isinstance(app.screen.focused, ApprovalPrompt):
+            if app.query(ApprovalPrompt):
                 break
             await pilot.pause(0.02)
-        # The question took focus (or its keys would type into the draft)...
-        assert isinstance(app.screen.focused, ApprovalPrompt)
-        # ...and left the draft exactly as it was.
+        await pilot.pause(0.2)
+
+        # The question is up, the draft is intact, and the caret never moved.
+        assert app.query(ApprovalPrompt), "no prompt was raised"
+        assert isinstance(app.screen.focused, Editor)
         assert editor.text == "please clean up the stale rows and then"
 
+        # The draft is what makes this the interesting case: with text in the
+        # buffer the routing stands down entirely, so `y` is TYPED, not taken.
+        await pilot.press("y")
+        await pilot.pause(0.3)
+        assert not pending.done(), "a keystroke answered while a draft was open"
+        # Typed into the buffer (at the caret, which `load_text` leaves at the
+        # start) rather than taken as an answer. What matters is that the draft
+        # is intact and one character longer, not where the caret happened to be.
+        typed = app.query_one(Editor).text
+        assert "please clean up the stale rows and then" in typed, typed
+        assert typed.count("y") == "please clean up the stale rows and then".count("y") + 1
+
+        # Clearing the draft hands the keys back: the card is answerable again.
+        app.query_one(Editor).load_text("")
+        await pilot.pause(0.1)
         await pilot.press("y")
         assert await asyncio.wait_for(pending, 2) is True
-        # Same reason as above: the hand-back happens on the way out of the
-        # gate, which is a mount/unmount round trip rather than a synchronous
-        # step, so the wait is on the condition.
-        for _ in range(100):
-            if isinstance(app.screen.focused, Editor):
-                break
-            await pilot.pause(0.02)
-        # Focus is handed back, and the sentence is still there to finish.
-        assert isinstance(app.screen.focused, Editor)
-        assert app.query_one(Editor).text == "please clean up the stale rows and then"
 
 
 @pytest.mark.asyncio
@@ -1756,3 +1760,50 @@ async def test_a_held_key_never_answers_a_question_it_was_not_meant_for() -> Non
         # Nothing is left parked, and the session gate was not disarmed.
         assert app._held_answer_key is None
         assert app._approve_all is False
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_arriving_mid_sentence_does_not_take_the_caret() -> None:
+    """A question can land while the user is typing, and must not hijack it.
+
+    This is the mount-time twin of the routing hazard. A prompt is raised by
+    the AGENT, so it can arrive at any moment — including between two
+    characters of a sentence. Taking the caret then starts feeding the rest of
+    that sentence to the card, where the answer keys are ordinary letters, and
+    on an approval the first `y` AUTHORISES the call. Measured before the fix:
+    typing `please ` then `yes do it` through the mount approved
+    `rm -rf /Users/x/project/data` and left `please es do it` in the buffer
+    (D12, design round 3).
+
+    Nothing is lost by yielding: the advertised keys are routed from the
+    composer, and the footer names only the ones that work from there.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        ask = await _booted_gate(pilot, session)
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "please ":
+            await pilot.press("space" if character == " " else character)
+
+        pending = asyncio.ensure_future(ask("bash", "run: rm -rf /Users/x/project/data"))
+        for _ in range(10):
+            await pilot.pause(0.02)
+        # The question is up, and the caret has NOT moved.
+        assert app.query(ApprovalPrompt), "no prompt was raised"
+        assert isinstance(app.screen.focused, Editor)
+
+        for character in "yes do it":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.4)
+
+        assert not pending.done(), "typing through the mount answered the prompt"
+        assert app._approve_all is False
+        assert app.query_one(Editor).text == "please yes do it"
+
+        pending.cancel()
+        try:
+            await pending
+        except (asyncio.CancelledError, Exception):
+            pass

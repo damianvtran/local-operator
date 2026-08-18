@@ -17,6 +17,8 @@ its own text agrees with the clip instead of catching it.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
@@ -1102,3 +1104,91 @@ async def test_the_question_sits_above_the_dock_band_and_stays_put() -> None:
         # Ordered: question, then status, then the composer.
         assert host.region.y < shell.region.y
         assert band.region.y >= host.region.y + host.region.height
+
+
+# --- the footer tells the truth about the keyboard the caret is on ----------
+
+
+@pytest.mark.asyncio
+async def test_escape_skips_the_question_from_the_composer() -> None:
+    """The card's advertised exit has to work where the caret actually is.
+
+    The caret lives in the COMPOSER while a question is up (answer keys are
+    routed rather than focus being moved), so the card's own `escape` binding
+    never sees the key — and `esc skip`, which the footer advertises in every
+    state and which is the only stated way to leave, did nothing at all.
+    Measured on three consecutive presses: question still up, tool still
+    waiting (D11, design round 3).
+
+    Whatever was already answered is kept, which is the rule the card's own
+    Escape follows: a user who answered two of three questions has told the
+    agent something.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(
+            app.request_user_choice(
+                [
+                    _question("first", "First?", labels=("Alpha", "Beta"), descriptions=("", "")),
+                    _question(
+                        "second", "Second?", labels=("Gamma", "Delta"), descriptions=("", "")
+                    ),
+                ]
+            )
+        )
+        for _ in range(14):
+            await pilot.pause()
+
+        # Answer the first question on the card, then move to the composer.
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        await pilot.click(Editor)
+        await pilot.pause(0.1)
+        assert isinstance(app.screen.focused, Editor)
+
+        await pilot.press("escape")
+        # The question is settled, the card is gone, and the answer survived.
+        assert await asyncio.wait_for(asked, 2) == {"first": ["Alpha"]}
+        await pilot.pause(0.2)
+        assert not app.query(AskPickerScreen)
+
+
+@pytest.mark.asyncio
+async def test_the_footer_names_only_keys_that_work_where_the_caret_is() -> None:
+    """A footer describing one keyboard while the caret sits on another lies.
+
+    With focus in the composer the arrows, Enter and the printable keys are the
+    composer's; only the routed ordinals and Escape reach the card. The footer
+    said `↑↓ move · 1-9 jump · enter answer` regardless, and none of the first
+    three did anything (D13, design round 3).
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(14):
+            await pilot.pause()
+        card = app._ask_screen
+        assert card is not None
+
+        # On the card, the full keymap is real and advertised.
+        focused_footer = card.render_lines_for_test()[-1]
+        assert "↑↓" in focused_footer and "enter" in focused_footer
+
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+        composer_footer = card.render_lines_for_test()[-1]
+        # The keys that no longer reach the card are no longer claimed...
+        assert "↑↓" not in composer_footer, composer_footer
+        assert "enter" not in composer_footer, composer_footer
+        # ...and what IS claimed works: the ordinals and the exit.
+        assert "answer" in composer_footer, composer_footer
+        assert "esc" in composer_footer, composer_footer
+
+        await pilot.press("1")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}

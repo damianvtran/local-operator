@@ -1243,17 +1243,48 @@ class AskPickerScreen(Container):
             yield self._body
 
     def on_mount(self) -> None:
-        """Take focus, remembering what held it so it can be handed back.
+        """Take focus — unless the user is in the middle of typing.
 
-        Focus is not optional for this surface: the answer keys are digits,
-        letters and Space, and every one of them is a character the composer
-        would take as input. The card that does not hold focus is a question
-        whose keys type into the prompt buffer instead of answering it.
+        The card takes focus by default so its full keymap (arrows, Enter, the
+        digits) works without a click, and remembers what held it so answering
+        hands it back.
+
+        It yields to a NON-EMPTY composer, because a question is raised by the
+        AGENT and can land at any moment, including mid-sentence. Taking the
+        caret then is not merely rude: the answer keys are ordinary characters,
+        so the rest of the user's sentence starts landing on the card, and on an
+        approval the first `y` AUTHORISES the call. Measured before this guard:
+        typing `please ` and then `yes do it` through the mount approved
+        `rm -rf /Users/x/project/data` and left `please es do it` in the buffer
+        (D12, design round 3).
+
+        Nothing is lost by yielding. The keys the card advertises are ROUTED
+        from the composer (`OperatorApp.route_key_to_live_prompt`), the footer
+        names only the ones that work from there, and clicking the card takes
+        focus deliberately.
         """
         screen = self.screen
         self._restore_target = screen.focused if screen is not None else None
-        self.focus()
+        if not self._composer_has_draft():
+            self.focus()
         self._repaint()
+
+    def _composer_has_draft(self) -> bool:
+        """Whether the user has text in the composer right now.
+
+        Defensive on purpose: this decides whether to take the caret, and a
+        host with no composer (the reduced test harnesses) must fall through to
+        the ordinary "take focus" path rather than raise out of a mount.
+        """
+        from local_operator.tui.widgets.editor import Editor
+
+        screen = self.screen
+        if screen is None:
+            return False
+        try:
+            return bool(screen.query_one(Editor).text)
+        except Exception:
+            return False
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         """Re-measure: the width, the page size and the descriptions all come
@@ -1330,6 +1361,18 @@ class AskPickerScreen(Container):
         if not self.visible_rows:
             return frozenset()
         return frozenset(str(index + 1) for index in self._window() if index < 9)
+
+    def routed_hint(self) -> tuple[str, str] | None:
+        """How the footer names the keys that still work from the composer.
+
+        A range for the ordinals (`1-3 answer`), because they are contiguous
+        and a list of them would cost more width than it explains.
+        """
+        digits = sorted(key for key in self.answer_keys() if key.isdigit())
+        if not digits:
+            return None
+        span = digits[0] if len(digits) == 1 else f"{digits[0]}-{digits[-1]}"
+        return (span, "answer")
 
     def answer_from_key(self, character: str) -> None:
         """Take ``character`` as an answer routed from the composer."""
@@ -1745,6 +1788,24 @@ class AskPickerScreen(Container):
         outranks even that: it is the ONLY key that can answer the question, and
         it used to be dropped while `esc skip` survived.
         """
+        # While the CARD does not hold the caret, most of this keymap is not
+        # reachable: the composer has focus and takes the arrows, Enter and the
+        # printable keys as text. Only what the app routes still works — the
+        # row ordinals and Escape — so those are all the footer claims.
+        #
+        # A footer describing one keyboard while the caret sits on another is
+        # the same lie this row already refuses to tell about `enter` on a
+        # collapsed card. Measured from the composer: `↑↓` moved nothing and
+        # `enter` answered nothing, while both were advertised (D13, design
+        # round 3).
+        if not self.has_focus:
+            hints = []
+            routed = self.routed_hint()
+            if routed is not None:
+                hints.append(routed)
+            hints.append(self._exit_hint)
+            return hints
+
         if self.state.selected == self.other_row:
             hints = [("type", "your answer"), ("↑↓", "move"), ("enter", "accept")]
             ladder = ["↑↓", "type", "enter", "esc"]
