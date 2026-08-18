@@ -170,6 +170,14 @@ class AsyncJobManager:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._sinks: dict[str, DeliverySink] = {}
         self._queued_runners: dict[str, JobRunFn] = {}
+        # One event per job, set exactly once when the job settles. This is
+        # what lets ``wait`` sleep until there is news instead of re-checking
+        # a status field on a timer: a 50 ms poll loop wakes 6000 times over a
+        # five-minute wait, and every one of those wakeups runs on the SAME
+        # event loop that serves the parent turn, every sibling subagent, and
+        # the TUI repaint. Created lazily (most jobs are never waited on) and
+        # dropped by the retention sweep with the job row.
+        self._settled_events: dict[str, asyncio.Event] = {}
 
     # -- queries ------------------------------------------------------------
 
@@ -367,6 +375,12 @@ class AsyncJobManager:
         self._tasks.clear()
         self._sinks.clear()
         self._queued_runners.clear()
+        # Wake anything still parked on a job before dropping the events: a
+        # waiter that outlives dispose must observe "settled" (cancel() set
+        # each event on its way through) rather than sleeping to its deadline
+        # against a manager that will never run again.
+        for event in self._settled_events.values():
+            event.set()
 
     # -- internals ----------------------------------------------------------
 
@@ -451,10 +465,37 @@ class AsyncJobManager:
         if self._on_job_complete is not None:
             await self._maybe_await(self._on_job_complete(job.id, text, job))
 
+    def settled_event(self, job_id: str) -> asyncio.Event:
+        """The event set when ``job_id`` settles, created on first request.
+
+        Pre-set for a job that has ALREADY settled (including one this manager
+        has never heard of, which cannot ever settle): a waiter that arrives
+        after the transition must not block forever on news that already
+        happened. This is the race the poll loop hid by re-reading status.
+        """
+
+        event = self._settled_events.get(job_id)
+        if event is None:
+            event = asyncio.Event()
+            self._settled_events[job_id] = event
+        job = self._jobs.get(job_id)
+        if job is None or job.status != "running":
+            event.set()
+        return event
+
     def _settle(self, job: AsyncJob) -> None:
-        """Record the settle timestamp on the status transition (idempotent)."""
+        """Record the settle timestamp on the status transition (idempotent).
+
+        Also wakes every waiter. This is the ONE place a job becomes settled,
+        which is why the notification belongs here rather than beside each of
+        the three call sites: a future fourth transition would otherwise leave
+        its waiters asleep until their deadline.
+        """
         if job.settled_at is None:
             job.settled_at = time.time()
+        event = self._settled_events.get(job.id)
+        if event is not None:
+            event.set()
 
     def _sweep_due(self) -> None:
         """Drop settled jobs older than the retention window.
@@ -472,6 +513,7 @@ class AsyncJobManager:
             del self._jobs[job_id]
             self._signals.pop(job_id, None)
             self._tasks.pop(job_id, None)
+            self._settled_events.pop(job_id, None)
 
     @staticmethod
     async def _maybe_await(value: Any) -> Any:

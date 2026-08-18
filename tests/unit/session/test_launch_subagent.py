@@ -729,8 +729,15 @@ async def test_scout_preamble_reaches_the_provider_turn(tmp_path, monkeypatch):
     await wait_for(settled)
     assert stream.requests
     first_user = next(message for message in stream.requests[0].messages if message.role == "user")
-    assert "[scout mode:" in first_user.text
+    # The ROLE framing reaches the turn ahead of the task, and the task itself
+    # survives verbatim. Asserted by behaviour rather than by the seed's exact
+    # wording: the scout guidance now lives in an editable profile
+    # (``local_operator/agent_seeds/scout.md``), so pinning its prose here
+    # would make every improvement to it a test failure.
+    assert first_user.text.startswith("[role: scout]"), first_user.text[:80]
+    assert "READ-ONLY" in first_user.text
     assert "Map the repo." in first_user.text
+    assert first_user.text.index("Map the repo.") > first_user.text.index("READ-ONLY")
     await parent.dispose()
 
 

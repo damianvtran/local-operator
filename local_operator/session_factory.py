@@ -1008,6 +1008,9 @@ async def _prepare(
         has_ui=has_ui,
         request_approval=request_approval,
         variables=variable_store,
+        # Role profiles and the ``agent`` tool are backed by this registry; a
+        # host without one keeps working off the packaged starters.
+        agent_registry=agent_registry,
         web_search_settings=config_manager.get_config_value("web_search", None),
     )
     tools = create_tools(tool_context)
@@ -1087,6 +1090,7 @@ async def _prepare(
         request_approval=request_approval,
         goal_state=goal_state,
         variables=variable_store,
+        agent_registry=agent_registry,
     )
     return _SessionPlan(
         session_kwargs=session_kwargs,
