@@ -1567,3 +1567,91 @@ async def test_the_card_advertises_only_keys_that_do_something() -> None:
             await pending
         except (asyncio.CancelledError, Exception):
             pass
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_shows_no_options_cannot_approve() -> None:
+    """An affirmative answer must never come from a card that offered nothing.
+
+    On a terminal too short for the list the card shrinks to the question
+    alone — and the answer letters went on working, so `y` approved
+    `rm -rf …` from a frame that displayed no options at all. At height 13 it
+    was worse still: the card's entire content was `esc deny`, the word for
+    refusing, and `y` approved from it (D9, design round 2).
+
+    Denial stays available in every state, because it is the safe direction and
+    because Escape means stop everywhere in this app regardless of what the
+    footer says.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 13)) as pilot:
+        ask = await _booted_gate(pilot, session)
+        pending = asyncio.ensure_future(ask("bash", "run: rm -rf /Users/x/project/data"))
+        for _ in range(100):
+            if app.query(ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
+        await pilot.pause(0.2)
+
+        prompt = app.query(ApprovalPrompt).first()
+        lines = prompt.render_lines_for_test()
+        assert not prompt.visible_rows, (lines, "this size is meant to draw no options")
+        # It still names what it is asking about...
+        assert "rm -rf" in "\n".join(lines), lines
+
+        # ...and the permissive keys are refused while it cannot show them.
+        await pilot.press("y")
+        await pilot.pause(0.2)
+        assert not pending.done(), "y approved from a card showing no options"
+        await pilot.press("A")
+        await pilot.pause(0.2)
+        assert not pending.done(), "A approved from a card showing no options"
+        assert app._approve_all is False, "the session gate was disarmed invisibly"
+        # Enter is refused for the same reason: the cursor is on a preselected
+        # row the user was never shown.
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert not pending.done(), "enter committed an unseen selection"
+
+        # Denial is always available.
+        await pilot.press("n")
+        assert await asyncio.wait_for(pending, 2) is False
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_hidden_by_a_shrink_comes_back_on_re_grow() -> None:
+    """A shrink must not be a one-way door onto an unanswerable question.
+
+    A hidden widget is not laid out and so receives no resize event, so a card
+    that hid itself on a terminal too short to draw it could never learn the
+    terminal had grown back. The question stayed invisible for the rest of the
+    turn while the tool went on waiting (D10, design round 2).
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        ask = await _booted_gate(pilot, session)
+        pending = asyncio.ensure_future(ask("bash", "run: make"))
+        for _ in range(100):
+            if app.query(ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
+        await pilot.pause(0.2)
+        prompt = app.query(ApprovalPrompt).first()
+        assert prompt.render_lines_for_test(), "no card to begin with"
+
+        await pilot.resize_terminal(40, 6)
+        for _ in range(14):
+            await pilot.pause()
+        assert not prompt.render_lines_for_test(), "the card should hide when it cannot draw"
+
+        await pilot.resize_terminal(100, 30)
+        for _ in range(20):
+            await pilot.pause()
+        assert prompt.render_lines_for_test(), "the question never came back"
+        assert app.query_one("#prompt-host").display
+
+        # And it is answerable again.
+        await pilot.press("y")
+        assert await asyncio.wait_for(pending, 2) is True

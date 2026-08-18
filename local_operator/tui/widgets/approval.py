@@ -1168,7 +1168,24 @@ class ApprovalPrompt(AskPickerScreen):
         character = event.character
         if character is None:
             return
-        if character in self._ANSWER_KEYS:
-            event.stop()
-            event.prevent_default()
-            self._answer_with(character)
+        if character not in self._ANSWER_KEYS:
+            return
+        event.stop()
+        event.prevent_default()
+        # Refused while the card is drawing no options.
+        #
+        # On a terminal too short for the list, the card shrinks to the question
+        # alone — and the letters went on working, so `y` approved
+        # `rm -rf /Users/x/project/data` from a frame that showed no answers at
+        # all, and at one point from a frame whose entire content was the word
+        # for refusing (D9, design round 2). An affirmative authorisation must
+        # never be committable from a card that did not show what it was
+        # offering; this is the same rule the footer already follows when it
+        # advertises only the exit on a collapsed card.
+        #
+        # DENIAL is still allowed, because it is the safe direction and because
+        # Escape means stop everywhere in this app regardless of what any card
+        # shows. Only the permissive answers are withheld.
+        if not self.visible_rows and character != "n":
+            return
+        self._answer_with(character)
