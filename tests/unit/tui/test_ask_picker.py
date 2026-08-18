@@ -1434,6 +1434,9 @@ async def test_a_multi_select_is_reachable_by_an_explicit_gesture() -> None:
 
         # The footer NAMES it, or it is a key nobody can discover.
         assert "answer here" in _painted_footer(app), _painted_footer(app)
+        # ...and it sheds its WORD before the exit, like every other hint on
+        # this row. Asserted at full width above and at a narrow one below,
+        # because the full-width assertion passes against any truncation.
 
         await pilot.press("tab")
         await pilot.pause(0.2)
@@ -1442,6 +1445,42 @@ async def test_a_multi_select_is_reachable_by_an_explicit_gesture() -> None:
         await pilot.press("space")
         await pilot.press("enter")
         assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_the_gesture_sheds_its_word_before_the_exit() -> None:
+    """`esc skip` outranks the Tab hint on a narrow card, as it does every hint.
+
+    The composer-mode branch passed an EMPTY ladder whenever the Tab hint was
+    showing, so both shed passes iterated over nothing and the row went to
+    `_cut_row` raw — the exact case that call exists to prevent. At 18-26
+    columns the multi-select painted `⇥ answer here · esc…`, and then
+    `⇥ answer here…`: no way out stated at all, on the one surface where
+    Escape is the only alternative to the handover (D19, design round 7).
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    for width in (26, 22, 20, 18):
+        app = _baseline_app()
+        async with app.run_test(size=(width, 30)) as pilot:
+            await pilot.pause()
+            asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
+            for _ in range(16):
+                await pilot.pause()
+            await pilot.click(Editor)
+            await pilot.pause(0.25)
+
+            footer = _painted_footer(app)
+            # The exit survives WHOLE, and the Tab key is still named.
+            assert "esc skip" in footer, (width, footer)
+            assert "\u21e5" in footer or "⇥" in footer, (width, footer)
+            assert "…" not in footer, (width, footer)
+
+            asked.cancel()
+            try:
+                await asked
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 @pytest.mark.asyncio

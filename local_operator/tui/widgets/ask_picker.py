@@ -195,6 +195,12 @@ GUTTER_CELLS = 2
 #: :data:`OTHER_JUMP_KEY`.
 NUMBER_CELLS = 3
 
+#: The glyph naming Tab in the footer, for the one question the composer
+#: cannot answer (a multi-select). A glyph rather than the word, to keep the
+#: parallel with ``↑↓`` and because the row it shares is the tightest on the
+#: card; an experimental press is free, since Escape leaves.
+TAB_HINT_KEY = "⇥"
+
 #: The digit that always reaches the free-text row. ``0`` because it is the one
 #: digit the ordinals never claim, and because the row it reaches is the row a
 #: long list pushes past nine — where a blank gutter left the only answer that
@@ -1920,7 +1926,7 @@ class AskPickerScreen(Container):
                 # the way to reach it, and it has to be NAMED or it is a key
                 # nobody can discover. Inferring the handover from the buffer
                 # instead cost two rounds and two lost messages (F9, D18).
-                hints.append(("⇥", "answer here"))
+                hints.append((TAB_HINT_KEY, "answer here"))
             hints.append(self._exit_hint)
             # Through the same ladder the focused footer uses, rather than
             # returned raw for `_cut_row` to ellipsise. Returned raw, a narrow
@@ -1929,7 +1935,16 @@ class AskPickerScreen(Container):
             # a card with no stated way out is unusable (D3, and D16 in design
             # round 4). Shedding the routed hint's WORD first and then the hint
             # itself keeps `esc skip` whole down to the narrowest card.
-            return self._shed_to_fit(hints, [routed[0]] if routed else [], width)
+            # The ladder names whichever hint precedes the exit, so the exit is
+            # never in it and can never be shed. Passing an EMPTY ladder when
+            # the Tab hint is showing meant both shed passes iterated over
+            # nothing and the row went to `_cut_row` raw — which is exactly what
+            # this call exists to prevent: at 18-26 columns the multi-select
+            # painted `⇥ answer here · esc…` and then `⇥ answer here…`, stating
+            # no way out at all, on the one surface where Escape is the only
+            # alternative to the handover (D19, design round 7).
+            shed_first = [routed[0]] if routed else [TAB_HINT_KEY]
+            return self._shed_to_fit(hints, shed_first, width)
 
         if self.state.selected == self.other_row:
             hints = [("type", "your answer"), ("↑↓", "move"), ("enter", "accept")]
