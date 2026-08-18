@@ -1355,12 +1355,21 @@ class AskPickerScreen(Container):
         to the composer because it SUBMITS a prompt there, and Escape is the
         app's stop key.
 
+        The FREE-TEXT row is excluded, because a digit cannot answer it: it is
+        answered by typing into it, which needs the card to hold the caret. Left
+        in, the footer advertised `1-3 answer` on a three-row card whose third
+        row was `Other` — and pressing `3` selected it and then refused, since
+        there is nothing typed to accept. A hint that names a key which lands on
+        a dead end is the same defect as one that names a key that does nothing.
+
         Empty while the card is drawing no rows, so a key can never commit an
         answer the user was not shown (the rule :meth:`action_accept` follows).
         """
         if not self.visible_rows:
             return frozenset()
-        return frozenset(str(index + 1) for index in self._window() if index < 9)
+        return frozenset(
+            str(index + 1) for index in self._window() if index < 9 and index != self.other_row
+        )
 
     def routed_hint(self) -> tuple[str, str] | None:
         """How the footer names the keys that still work from the composer.
