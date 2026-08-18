@@ -761,3 +761,64 @@ async def test_the_band_inset_never_costs_the_subagent_list_its_screen(
             f"the band overflowed the screen at {height} rows with {children} children: "
             f"virtual={tuple(screen.virtual_size)} size={tuple(screen.size)}"
         )
+
+
+@pytest.mark.asyncio
+async def test_the_band_inset_survives_resizing_across_its_floor() -> None:
+    """Shrinking and re-growing the terminal lands on the same frame each time.
+
+    The dock's inset is gated on a SCREEN DIMENSION, and this is the property
+    that makes that gate safe where the measured ones this replaced were not: a
+    screen height cannot change between two frames of one repaint, so the answer
+    cannot flip mid-paint. It can still be wrong across a RESIZE, which is the
+    one input that does change it — and a gate with hysteresis would leave the
+    band in a different state at 14 rows depending on whether the user got there
+    by shrinking or by growing.
+
+    Walked down past the floor and back up, asserting the state is a function of
+    the height alone. The overflow assertion is deliberately paired with it: at
+    these sizes `main` overflows at six of the ten steps and this walks through
+    with one, so the floor is not buying stillness at the cost of the screen.
+    """
+    from local_operator.tools import builtin
+
+    session = FakeSession()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        assert app._session is not None, "the session never booted"
+        builtin.TODO_STORE[session.session_id] = [
+            {"text": f"step {n}", "status": "pending"} for n in range(5)
+        ]
+        try:
+            seen: dict[int, bool] = {}
+            for height in (30, 16, 14, 13, 12, 13, 14, 16, 30):
+                await pilot.resize_terminal(100, height)
+                for _ in range(3):
+                    await pilot.pause()
+                app._refresh_band()
+                for _ in range(3):
+                    await pilot.pause()
+
+                screen = app.screen
+                inset = app.query_one("#band").has_class("has-slot")
+                # Same height, same answer — whichever direction it arrived from.
+                if height in seen:
+                    assert seen[height] == inset, (
+                        f"the inset is {inset} at {height} rows going one way and "
+                        f"{seen[height]} the other: the gate has hysteresis"
+                    )
+                seen[height] = inset
+                assert tuple(screen.virtual_size) == tuple(screen.size), (
+                    f"the band overflowed the screen at {height} rows: "
+                    f"virtual={tuple(screen.virtual_size)} size={tuple(screen.size)}"
+                )
+            # And the gate did something across this walk, or the test proves
+            # nothing: tall screens take the row and short ones do not.
+            assert seen[30] is True
+            assert seen[12] is False
+        finally:
+            builtin.TODO_STORE.pop(session.session_id, None)
