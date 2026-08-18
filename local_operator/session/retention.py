@@ -75,21 +75,23 @@ LIVE_MARKER_NAME = ".session.pid"
 #: exotic platform) and one killed before it claimed.
 NEW_SESSION_GRACE_S = 300.0
 
-#: How long an unverifiable claim is trusted. Only consulted where liveness
-#: cannot be probed (Windows, see :func:`_process_alive`); on POSIX the pid
-#: probe is authoritative and a session of any length keeps its protection.
-#: Twelve hours is longer than any plausible session and far shorter than
-#: "forever", which is what the alternative amounts to.
+#: How long a claim is trusted after the session's last WRITE, where liveness
+#: cannot be probed (Windows, see :func:`_process_alive`). On POSIX the pid
+#: probe is authoritative and this is never consulted, so a session of any
+#: length keeps its protection there.
+#:
+#: Measured against activity rather than against the marker, this is not a cap
+#: on session length — a session writing every few minutes is never stale, and
+#: sessions here run for days. It is the answer to "nothing has touched this
+#: directory for half a day and we cannot ask the OS whether its owner still
+#: exists", where the alternative is trusting a leaked claim forever and
+#: silently disabling all three ceilings, one directory per crash.
 CLAIM_TRUST_S = 12 * 3600.0
 
 #: Whether this platform can actually answer "is that process alive?".
 #: Named rather than inlined because two different decisions read it and they
 #: must agree: liveness itself, and whether a claim needs an age bound.
 _LIVENESS_IS_VERIFIABLE = sys.platform != "win32"
-
-#: Written into the marker by :func:`release_session`. Never a real pid, so it
-#: reads as unclaimed on every platform without needing a liveness probe.
-RELEASED_PID = 0
 
 #: Config keys. Read through ``ConfigManager.get_config_value`` so the
 #: ceilings are editable with ``local-operator config edit`` like every other
@@ -139,6 +141,10 @@ class SweepResult:
         The figure to quote when the question is "how big is the store";
         ``bytes_remaining`` answers the narrower "how much of it is subject to
         the ceilings".
+
+        A FLOOR rather than an exact total when ``errors`` is non-zero: a
+        directory that failed to delete is counted in neither term, so a sweep
+        that could not remove what it selected under-reports by that much.
         """
         return self.bytes_remaining + self.bytes_live
 
@@ -205,6 +211,19 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
+def _is_session_store_dir(directory: Path) -> bool:
+    """Is ``directory`` one of the ephemeral session directories we sweep?
+
+    The marker belongs only under ``sessions/``. With ``--train`` (or a named
+    agent) a transcript lives in ``agents/<id>/``, which retention never
+    scans, so a marker there protects nothing — and it does not merely waste a
+    file: ``AgentRegistry.export_agent`` zips every file in an agent directory
+    and that archive is published to the Agent Hub and copied into importing
+    users' agent directories.
+    """
+    return directory.parent.name == SESSIONS_DIRNAME
+
+
 def claim_session(session_dir: Path, pid: int | None = None) -> None:
     """Mark ``session_dir`` as owned by a running process.
 
@@ -217,7 +236,13 @@ def claim_session(session_dir: Path, pid: int | None = None) -> None:
     Best-effort by design: a claim that cannot be written must not stop a
     session from starting, and the worst consequence of a missing claim is the
     pre-existing behaviour, now additionally guarded by ``NEW_SESSION_GRACE_S``.
+
+    Confined to ``sessions/`` (see :func:`_is_session_store_dir`): a marker in
+    an agent directory protects nothing and escapes into published agent
+    bundles.
     """
+    if not _is_session_store_dir(session_dir):
+        return
     try:
         session_dir.mkdir(parents=True, exist_ok=True)
         (session_dir / LIVE_MARKER_NAME).write_text(
@@ -237,34 +262,41 @@ def release_session(session_dir: Path) -> None:
     for a HOST running several sessions in one process, where the owning pid
     stays alive long after an individual session is gone.
 
-    The marker is overwritten with ``RELEASED_PID`` rather than removed, so it
-    keeps serving as an age record for a directory that holds nothing else
-    (see :func:`_activity_mtime`). Deleting it instead moved the directory's
-    own mtime to now, which made a session that wrote nothing look freshly
-    created and re-earn its startup grace period on every sweep — the exact
-    population the empty-directory reap is meant to collect. ``0`` is never a
-    real pid, so this reads as unclaimed everywhere.
+    Gated on the directory being under ``sessions/``, for the same reason
+    :func:`claim_session` is: an agent directory must never receive this file,
+    because ``AgentRegistry.export_agent`` zips every file it finds there and
+    publishes the result. The gate lives INSIDE both functions rather than at
+    the call sites so the two sides cannot drift apart — they did once, when
+    only the claim was gated and dispose still wrote the marker into
+    ``agents/<id>/`` on every clean exit.
     """
+    if not _is_session_store_dir(session_dir):
+        return
     try:
-        (session_dir / LIVE_MARKER_NAME).write_text(str(RELEASED_PID), encoding="utf-8")
+        (session_dir / LIVE_MARKER_NAME).unlink()
     except OSError:
         pass
 
 
-def _is_claimed(directory: Path, now: float | None = None) -> bool:
+def _is_claimed(directory: Path, now: float) -> bool:
     """Does a live process still own ``directory``?
 
     A marker holding an unparseable value is treated as NOT claimed: it is
     corrupt bookkeeping, and honouring it forever would make the directory
     immortal and quietly disable the ceilings.
 
-    The same reasoning bounds a claim this platform cannot verify. Where
-    :func:`_process_alive` can actually probe, its answer is authoritative and
-    a long-running session stays protected for as long as it runs. Where it
-    cannot (Windows), an unrefreshed claim is only trusted for
-    ``CLAIM_TRUST_S``; past that the directory returns to the ordinary
-    ceilings. Without that bound a single crash on such a platform would
-    exempt a directory from all three ceilings permanently.
+    Where :func:`_process_alive` can actually probe, its answer is
+    authoritative: a session stays protected for as long as it runs, however
+    long that is. Where it cannot (Windows), the claim is bounded by
+    ``CLAIM_TRUST_S`` — but measured against the directory's last WRITE, not
+    against the marker, which is stamped once at startup and never refreshed.
+    That distinction is the whole point: an unrefreshed marker measures how
+    long the session has been running, so bounding by it would delete the
+    transcript of a session that is alive and actively writing — this module's
+    original bug, reintroduced on one platform with a timer on it. Measured
+    against activity, the bound means what it should: a claim stops being
+    trusted only once nothing has written for ``CLAIM_TRUST_S``, which a live
+    session never satisfies and an abandoned one always does.
     """
     marker = directory / LIVE_MARKER_NAME
     try:
@@ -280,10 +312,10 @@ def _is_claimed(directory: Path, now: float | None = None) -> bool:
     if _LIVENESS_IS_VERIFIABLE:
         return True
     try:
-        age = (time.time() if now is None else now) - marker.stat().st_mtime
+        stamp = _activity_mtime(directory, marker.stat().st_mtime)
     except OSError:
         return False
-    return age < CLAIM_TRUST_S
+    return now - stamp < CLAIM_TRUST_S
 
 
 def _activity_mtime(directory: Path, fallback: float) -> float:
@@ -299,41 +331,37 @@ def _activity_mtime(directory: Path, fallback: float) -> float:
 
     The content's mtime REPLACES the directory's rather than being maxed with
     it, and the claim marker is ignored entirely. Both exclusions are the same
-    point: writing or removing the marker moves the directory's mtime to now,
-    so folding either one in would refresh the age of every session this module
-    touches and silently exempt old history from the age ceiling.
+    point: the marker is written once at startup and would otherwise peg a
+    long-running session's "activity" to its birth time, and folding the
+    directory's own mtime in would let claim/release churn refresh the age of
+    real history and exempt it from the age ceiling.
 
-    For a directory with NO content the fallback is the marker's own mtime when
-    one is present, and the directory's otherwise. The directory's mtime cannot
-    be used on its own there: claiming and releasing both bump it, so a session
-    that started, wrote nothing and exited looked freshly created afterwards
-    and kept re-earning ``NEW_SESSION_GRACE_S`` — which is precisely the
-    population the empty-directory reap exists to collect. The marker records
-    when the run actually began, which is the honest age for a directory whose
-    only event was a session opening and closing.
+    A directory with NO content falls back to its own mtime, and there that
+    genuinely is the best signal available. Note the consequence, because it
+    is deliberate rather than overlooked: claiming and releasing both touch the
+    directory, so a session that started, wrote nothing and exited looks
+    freshly created and keeps its ``NEW_SESSION_GRACE_S`` for one more sweep
+    cycle than its age warrants. Making that exact would mean preserving the
+    claim time across the release, which is a second timestamp to keep honest
+    in return for reaping an empty directory a few minutes sooner — the
+    tradeoff is not worth it, and the reap still collects it on the next pass.
     """
     newest: float | None = None
-    marker_stamp: float | None = None
     try:
         for entry in directory.rglob("*"):
             try:
-                if not entry.is_file():
+                if entry.name == LIVE_MARKER_NAME or not entry.is_file():
                     continue
                 stamp = entry.stat().st_mtime
             except OSError:
                 continue
-            if entry.name == LIVE_MARKER_NAME:
-                marker_stamp = stamp
-                continue
             newest = stamp if newest is None else max(newest, stamp)
     except OSError:
         return fallback
-    if newest is not None:
-        return newest
-    return marker_stamp if marker_stamp is not None else fallback
+    return fallback if newest is None else newest
 
 
-def _candidates(sessions_dir: Path, live: Path | None) -> tuple[list[_Candidate], int]:
+def _candidates(sessions_dir: Path, live: Path | None, now: float) -> tuple[list[_Candidate], int]:
     """Evictable session directories, least-recently-active first.
 
     Two kinds of directory are never candidates, and both exclusions exist
@@ -356,7 +384,7 @@ def _candidates(sessions_dir: Path, live: Path | None) -> tuple[list[_Candidate]
             if not child.is_dir():
                 continue
             exempt = live_resolved is not None and child.resolve() == live_resolved
-            if exempt or _is_claimed(child):
+            if exempt or _is_claimed(child, now):
                 live_bytes += _dir_size(child)
                 continue
             stat = child.stat()
@@ -405,7 +433,7 @@ def sweep_sessions(
     moment = now if now is not None else time.time()
     horizon = moment - max_age_days * 86400
     try:
-        candidates, live_bytes = _candidates(sessions_dir, live_dir)
+        candidates, live_bytes = _candidates(sessions_dir, live_dir, moment)
     except OSError as exc:
         logger.warning("session retention: cannot scan %s: %s", sessions_dir, exc)
         return SweepResult(errors=1)
@@ -479,13 +507,21 @@ def sweep_sessions(
     # (never delete a transcript in use) but it must not be SILENT: this is the
     # only signal that the configured bound is not currently being honoured,
     # and without it the failure mode is a full volume with a clean sweep log.
-    if max_bytes > 0 and live_bytes > max_bytes:
+    #
+    # Tested against the TOTAL, not against the live bytes alone. Eviction has
+    # already run by this point and taken everything it was allowed to take, so
+    # a total still over the ceiling means the ceiling is not holding — whether
+    # that is live sessions by themselves or live sessions plus history the
+    # ceilings chose to keep. Gating on the live figure alone stayed quiet at
+    # 1.8x over budget, which is precisely the case worth hearing about.
+    if max_bytes > 0 and result.bytes_on_disk > max_bytes:
         logger.warning(
-            "session retention: live sessions hold %.1f MB, above the %.1f MB ceiling; "
-            "they are exempt from eviction, so the store will stay over budget until "
-            "they end",
-            live_bytes / 1024 / 1024,
+            "session retention: %.1f MB on disk against a %.1f MB ceiling (%.1f MB held by "
+            "live sessions, which are exempt from eviction); everything evictable has "
+            "already been reclaimed, so the store stays over budget until those sessions end",
+            result.bytes_on_disk / 1024 / 1024,
             max_bytes / 1024 / 1024,
+            live_bytes / 1024 / 1024,
         )
     return result
 

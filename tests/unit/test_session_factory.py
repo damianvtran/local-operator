@@ -1733,14 +1733,24 @@ async def test_an_unreadable_profile_says_so_in_the_log(
 
 
 def test_only_ephemeral_session_dirs_are_claimed_for_retention(tmp_path: Path) -> None:
-    """The claim marker must not be written into an agent directory.
+    """The claim marker must never be written into an agent directory.
 
-    Retention only scans ``sessions/``, so a claim under ``agents/<id>/`` buys
-    nothing — and it does not merely waste a file: ``export_agent`` zips every
-    file in the agent directory, so the marker would ship to the Agent Hub and
-    be imported into other users' agent directories.
+    Retention only scans ``sessions/``, so a marker under ``agents/<id>/`` buys
+    nothing \u2014 and it does not merely waste a file: ``export_agent`` zips every
+    file in the agent directory, so it would ship to the Agent Hub and be
+    imported into other users' agent directories.
+
+    Asserts on the marker actually landing (or not), through BOTH sides. An
+    earlier version compared the two directory shapes instead, which was a test
+    of ``pathlib``: it stayed green when the gate was deleted, and it missed a
+    release path that wrote the marker into agent directories on every clean
+    dispose.
     """
-    from local_operator.session.retention import SESSIONS_DIRNAME
+    from local_operator.session.retention import (
+        LIVE_MARKER_NAME,
+        claim_session,
+        release_session,
+    )
 
     registry = FakeRegistry(tmp_path)
     agent = cast("AgentData", SimpleNamespace(id="a1"))
@@ -1751,7 +1761,16 @@ def test_only_ephemeral_session_dirs_are_claimed_for_retention(tmp_path: Path) -
     trained, _ = _transcript_dir_and_agent_id(
         agent, _args(train=True), cast("AgentRegistry", registry)
     )
+    trained.mkdir(parents=True, exist_ok=True)
 
-    # The condition `_prepare` gates the claim on.
-    assert ephemeral.parent.name == SESSIONS_DIRNAME
-    assert trained.parent.name != SESSIONS_DIRNAME
+    claim_session(ephemeral)
+    claim_session(trained)
+    assert (ephemeral / LIVE_MARKER_NAME).exists(), "a session directory must be claimed"
+    assert not (trained / LIVE_MARKER_NAME).exists(), "an agent directory must never be"
+
+    # Release is gated too: it used to WRITE the marker, so an ungated release
+    # put the file into the agent directory that the claim had just refused.
+    release_session(ephemeral)
+    release_session(trained)
+    assert not (ephemeral / LIVE_MARKER_NAME).exists()
+    assert not (trained / LIVE_MARKER_NAME).exists(), "release leaked a marker into agents/"

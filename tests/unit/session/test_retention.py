@@ -397,65 +397,109 @@ def test_live_sessions_over_the_byte_ceiling_are_logged(tmp_path, caplog):
     running = _session(sessions, "running", size=200_000)
     claim_session(running)
 
+    # Retained history too, so the total is over budget without the live bytes
+    # exceeding the ceiling by themselves — the shape an earlier version of
+    # this warning stayed silent for.
+    _session(sessions, "history", size=200_000, age_days=1)
+
     with caplog.at_level(logging.WARNING, logger="local_operator.session.retention"):
-        result = sweep_sessions(sessions, max_sessions=0, max_bytes=1_000, max_age_days=0)
+        result = sweep_sessions(sessions, max_sessions=0, max_bytes=300_000, max_age_days=0)
 
     assert running.exists()
     assert result.bytes_live == 200_000
-    assert any("above the" in record.message for record in caplog.records)
+    assert result.bytes_on_disk > 300_000
+    assert any("against a" in record.message for record in caplog.records)
 
 
-def test_a_released_claim_does_not_refresh_an_empty_directory(tmp_path):
-    """Claim churn used to bump the directory's mtime, so a session that
-    started, wrote nothing and exited looked freshly created and re-earned the
-    startup grace period on every sweep — exempting exactly the population the
-    empty-directory reap exists to collect."""
+def test_a_hollow_run_leaves_nothing_behind_once_it_is_past_the_grace_period(tmp_path):
+    """A session that started, wrote nothing and exited must be reaped, marker
+    and all — that population is 23 of 147 directories on a real install.
+
+    Claim/release churn touches the directory, so such a directory keeps its
+    grace period for one sweep cycle longer than its age warrants; the reap
+    collects it on the next pass, which is the tradeoff ``_activity_mtime``
+    documents.
+    """
     sessions = tmp_path / "sessions"
     hollow = sessions / "hollow"
     hollow.mkdir(parents=True)
     claim_session(hollow)
     release_session(hollow)
-    # The run happened well before the grace window; only the marker records it.
+    assert not (hollow / LIVE_MARKER_NAME).exists(), "release must remove the marker"
     old = time.time() - NEW_SESSION_GRACE_S - 600
-    os.utime(hollow / LIVE_MARKER_NAME, (old, old))
+    os.utime(hollow, (old, old))
 
     sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
 
     assert not hollow.exists()
 
 
-def test_a_released_claim_reads_as_unclaimed_without_a_liveness_probe(tmp_path):
-    """``release_session`` overwrites rather than unlinks (to preserve the age
-    record), so the released marker must not read as a live claim — including
-    where the pid probe is unavailable."""
+def test_a_released_claim_reads_as_unclaimed_on_every_platform(tmp_path, monkeypatch):
+    """Release must stop protecting the directory even where the pid probe is
+    unavailable, since there nothing else can disprove a stale claim."""
+    monkeypatch.setattr("local_operator.session.retention._LIVENESS_IS_VERIFIABLE", False)
+
     sessions = tmp_path / "sessions"
     finished = _session(sessions, "finished", size=512, age_days=90)
     claim_session(finished)
     release_session(finished)
 
-    assert not _is_claimed(finished)
+    assert not _is_claimed(finished, time.time())
 
     sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=30)
     assert not finished.exists()
 
 
-def test_an_unverifiable_claim_expires_instead_of_lasting_forever(tmp_path, monkeypatch):
+def test_an_unverifiable_claim_expires_once_the_session_stops_writing(tmp_path, monkeypatch):
     """Where liveness cannot be probed (Windows), an unbounded claim would
     exempt a directory from all three ceilings permanently, so every crash
-    would switch the module off one directory at a time."""
+    would switch the module off one directory at a time.
+
+    ``sys.platform`` is patched rather than ``_process_alive``, so the real
+    branch runs — including the ``pid <= 0`` guard ahead of it, which is what
+    makes a bogus pid read as unclaimed everywhere.
+    """
+    monkeypatch.setattr("local_operator.session.retention.sys.platform", "win32")
     monkeypatch.setattr("local_operator.session.retention._LIVENESS_IS_VERIFIABLE", False)
-    monkeypatch.setattr("local_operator.session.retention._process_alive", lambda pid: True)
 
     sessions = tmp_path / "sessions"
-    stale = _session(sessions, "stale", size=512, age_days=90)
-    claim_session(stale)
-    ancient = time.time() - CLAIM_TRUST_S - 60
-    os.utime(stale / LIVE_MARKER_NAME, (ancient, ancient))
-
-    fresh = _session(sessions, "fresh", size=512, age_days=90)
-    claim_session(fresh)
+    # Claimed, and nothing has written for far longer than the trust window
+    # (90 days, so the age ceiling has something to act on once the claim
+    # stops protecting it).
+    abandoned = _session(sessions, "abandoned", size=512, age_days=90)
+    claim_session(abandoned)
+    ancient = time.time() - 90 * 86400
+    os.utime(abandoned / LIVE_MARKER_NAME, (ancient, ancient))
+    assert time.time() - ancient > CLAIM_TRUST_S
 
     sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=30)
 
-    assert not stale.exists(), "an unverifiable claim protected a directory forever"
-    assert fresh.exists(), "a recent claim must still protect a running session"
+    assert not abandoned.exists(), "an unverifiable claim protected a directory forever"
+
+
+def test_an_unverifiable_claim_survives_while_the_session_is_still_writing(tmp_path, monkeypatch):
+    """The regression guard for the trust bound itself.
+
+    Measuring the bound against the MARKER would delete the transcript of a
+    session that is alive and actively writing, once it had simply been
+    running longer than the window — this module's original bug, on a timer.
+    It is measured against the last write instead, which a live session keeps
+    moving.
+    """
+    monkeypatch.setattr("local_operator.session.retention.sys.platform", "win32")
+    monkeypatch.setattr("local_operator.session.retention._LIVENESS_IS_VERIFIABLE", False)
+
+    sessions = tmp_path / "sessions"
+    long_running = _session(sessions, "long-running", size=512)
+    claim_session(long_running)
+    # Started long ago — the marker is never refreshed — but writing right now.
+    ancient = time.time() - CLAIM_TRUST_S * 3
+    os.utime(long_running / LIVE_MARKER_NAME, (ancient, ancient))
+    now = time.time()
+    os.utime(long_running / "transcript.jsonl", (now, now))
+
+    # A byte ceiling nothing can satisfy: every CANDIDATE is evicted, so the
+    # directory survives only if the claim still exempts it from the sweep.
+    sweep_sessions(sessions, max_sessions=0, max_bytes=1, max_age_days=0)
+
+    assert long_running.exists(), "a live, actively-writing session was evicted"
