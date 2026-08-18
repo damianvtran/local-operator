@@ -1532,3 +1532,43 @@ async def test_the_card_repaints_itself_when_its_inputs_move_untriggered() -> No
             await asked
         except (asyncio.CancelledError, Exception):
             pass
+
+
+def test_the_footer_fingerprint_covers_everything_the_footer_says() -> None:
+    """A fingerprint that misses an input is the bug wearing the fix's clothes.
+
+    `repaint_if_stale` is only as good as the fingerprint it compares: any
+    input the footer reads but the fingerprint does not is a state where the
+    card believes it is current while showing something else. The first
+    version tracked focus, the draft, the drawn window and the question index —
+    and missed the refused-Enter complaint and the answer state a multi-select's
+    complaint is derived from, both of which REPLACE the key hints entirely.
+
+    Exhaustive rather than sampled, over every combination of the state the
+    footer reads: two equal fingerprints must produce the same footer. The
+    incomplete version has 14 collisions against this; the current one has none.
+    """
+    from rich.style import Style
+
+    for multi in (False, True):
+        question = _question(multi=multi, labels=("A", "B", "C"), descriptions=("", "", ""))
+        card = AskPickerScreen([question])
+        seen: dict[tuple[object, ...], str] = {}
+        for selected in range(card.row_count):
+            for rejected in (False, True):
+                for checked in ((), (0,), (0, 1)):
+                    for typed in ("", "abc"):
+                        card.state.selected = selected
+                        card._rejected = rejected
+                        card.state.checked = set(checked)
+                        card.state.typed = typed
+                        fingerprint = card.footer_fingerprint()
+                        footer = card._footer_row(60, Style(), Style()).plain
+                        if fingerprint in seen:
+                            assert seen[fingerprint] == footer, (
+                                multi,
+                                fingerprint,
+                                seen[fingerprint],
+                                footer,
+                            )
+                        seen[fingerprint] = footer
