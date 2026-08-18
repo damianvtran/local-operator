@@ -3717,6 +3717,23 @@ class OperatorApp(App[None]):
         # input into it. `sync_layout` is a no-op when the measurement has not
         # moved.
         self.call_after_refresh(self._sync_overlay_layout)
+        # A live prompt rides it too, as a BACKSTOP rather than as its primary
+        # trigger. The card's footer is derived from state the card does not
+        # own — whether it holds focus, and whether the composer holds a draft —
+        # and neither emits anything the card hears, so "correct in the model,
+        # stale on screen" arrived three review rounds running on three
+        # different inputs. Each was fixed by adding one more explicit trigger,
+        # which is a fix per input and leaves the next one to be found by a
+        # reviewer. This asks the card whether what it is showing is still what
+        # it would draw, so a missed trigger is a frame late instead of
+        # permanently wrong. It is a no-op on every tick where nothing moved.
+        prompt = self._live_prompt()
+        repaint_if_stale = getattr(prompt, "repaint_if_stale", None)
+        if callable(repaint_if_stale):
+            try:
+                repaint_if_stale()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not re-check the live prompt", exc_info=True)
 
     def _sync_overlay_layout(self, *, force: bool = False) -> None:
         """Re-measure the floating cards against the live screen and dock.
