@@ -91,11 +91,27 @@ async def _session_over(directory: Path, messages: list[Message]) -> Session:
     )
 
 
-async def _settled(app: OperatorApp, pilot: Any, ticks: int = 8) -> None:
-    """Let the boot worker's measurement land before reading the band."""
+async def _settled(app: OperatorApp, pilot: Any, ticks: int = 80) -> None:
+    """Wait for the session to be ADOPTED, then let its measurement land.
+
+    The app paints before its session exists — the factory is awaited in a boot
+    worker — and everything these tests assert is installed by `_adopt_session`.
+    Waiting on that condition rather than on a fixed tick count is what keeps
+    them from racing the boot on a loaded machine: the same number of frames is
+    plenty in isolation and not enough under a full suite, which is a test that
+    fails for a reason unrelated to what it is about.
+    """
     for _ in range(ticks):
         await pilot.pause()
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.01)
+        if app._session is not None:
+            break
+    assert app._session is not None, "the session never booted"
+    # The preload measurement runs in its own worker after adoption; give it a
+    # few frames so the estimate-vs-exact interaction is settled when read.
+    for _ in range(6):
+        await pilot.pause()
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
