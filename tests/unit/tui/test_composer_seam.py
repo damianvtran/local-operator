@@ -55,9 +55,23 @@ from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_aside import AsideSession
 
-#: The two frames the seam was measured in: the everyday wide terminal and the
-#: narrow one where the conversation reaches the dock soonest.
-SIZES = [(120, 40), (60, 40)]
+#: The frames the seam is measured in: the everyday wide terminal, the narrow
+#: one where the conversation reaches the dock soonest, and a SHORT one.
+#:
+#: The height was missing entirely: every seam test ran at 40 rows, where the
+#: column has rows to spare. 24 is the standard short terminal and leaves the
+#: transcript a handful of rows once a panel is docked, so the seam is measured
+#: somewhere the dock is under pressure rather than only where it is roomy.
+#:
+#: Honest about what this does NOT buy, because the comment is what a future
+#: reader will trust: it does not catch the dock spending a row the transcript
+#: needed. That was checked rather than assumed — the whole suite passes at this
+#: size against the head where that defect was live, because no seam test docks
+#: the subagent panel with enough children to overflow, and 24 rows is not tight
+#: enough for the todo panel to. The property is pinned by
+#: `test_band_panels.py::test_the_band_inset_never_costs_the_subagent_list_its_screen`,
+#: which does fail against that head. This size is broader coverage, not that.
+SIZES = [(120, 40), (60, 40), (100, 24)]
 
 PROSE = (
     "Rebuilt the parser and re-ran the suite; both tails are green now, and the "
@@ -362,14 +376,31 @@ async def test_the_boot_splash_gains_no_row(size: tuple[int, int]) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", SIZES)
 async def test_the_band_join_does_not_double(size: tuple[int, int]) -> None:
-    """With a panel in the dock band, every join in the column is one row.
+    """A docked panel's slab is inset one row above and one row below.
 
-    The band's slot used to carry its own row ABOVE itself, which stacked with
-    the transcript's trailing row into a two-row interval — the widest on
-    screen, and the exact "both halves pushed a padding row into the join"
-    failure the aside card's missing bottom row was fixed for. Each slot now
-    owns the ground BELOW it instead, so the transcript's row is the band's air
-    and the band's row is the composer's.
+    The history here is a correction, not a reversal. The slot ORIGINALLY
+    carried its own row above itself, which stacked with the transcript's
+    trailing ground row into a two-row interval — the widest on screen, and the
+    "both halves pushed a padding row into the join" failure the aside card's
+    missing bottom row was fixed for. The flip moved each slot's row BELOW it,
+    which fixed the doubling and left the opposite asymmetry: the panel's
+    caption sat directly on the conversation's ground row while two surface rows
+    separated its last row from the composer. Reported from the field as the
+    band looking "a bit tight" above the todo and subagent lists.
+
+    The inset row that fixes it belongs to ``#band``, not to the slot, so it is
+    spent ONCE for the whole band however many slots are docked — the join
+    between two stacked panels stays the single row it should be. It is the
+    dock's own ``$lo-surface`` rather than the transparent row the flip removed,
+    which is what keeps it an inset within the dock instead of a trench between
+    two slabs; ``test_the_row_under_each_panel_survives_as_the_dock_s_own_fill``
+    pins the same property for the row below.
+
+    So the interval above the body is TWO rows — the transcript's ground row,
+    then the band's surface inset — and they are different surfaces doing
+    different jobs. The blank-row count and the fill are both asserted, because
+    a regression that merges them into one row of either colour is exactly what
+    this is here to catch.
     """
     from local_operator.tools import builtin
 
@@ -390,7 +421,21 @@ async def test_the_band_join_does_not_double(size: tuple[int, int]) -> None:
 
         try:
             assert app.query_one("#todo-panel").display, "the band has to be up to measure it"
-            assert _blank_rows_above(app, "#todo-body") == 1, _frame(app)[-12:]
+            # The transcript's ground row plus the band's own surface inset.
+            assert _blank_rows_above(app, "#todo-body") == 2, _frame(app)[-12:]
+            band = app.query_one("#band")
+            shell = app.query_one("#input-shell")
+            x = shell.region.x + 1
+            # The inset is the DOCK's row: same fill as the composer below it,
+            # and not the screen ground the transcript's row above it carries.
+            # A row that is merely blank proves nothing here — the trench this
+            # replaced was blank too.
+            assert _fill_at(app, band.region.y, x) == _fill_at(app, shell.region.y, x), _frame(app)[
+                -12:
+            ]
+            assert _fill_at(app, band.region.y, x) != _fill_at(app, band.region.y - 1, x), _frame(
+                app
+            )[-12:]
             assert _seam(app) == 1, _frame(app)[-12:]
         finally:
             builtin.TODO_STORE.pop(session.session_id, None)
@@ -462,10 +507,18 @@ async def test_the_aside_rests_on_whatever_the_dock_puts_first(size: tuple[int, 
             assert card.is_open
             todo = app.query_one("#todo-panel")
             assert todo.display
-            # The card rests ON the band: no ground between the two regions, so
-            # the one blank row above the band is the card's own last row.
-            assert card.region.bottom == todo.region.y, (card.region, todo.region)
-            assert _blank_rows_above(app, "#todo-panel") == 1, _frame(app)[-12:]
+            # The card rests ON the band: no ground between the two regions.
+            # Measured against the BAND's top edge rather than the todo slot's,
+            # because that is where the rule actually lives — the card is placed
+            # on the dock (`overlay.stack_on_dock`, gap 0) and takes whatever the
+            # dock puts at its top. That is now the band's own inset row, so the
+            # card meets a row of dock surface instead of the panel's caption:
+            # still flush, still one elevation step, and the panel keeps the
+            # breathing space above its slab that it has below it.
+            band = app.query_one("#band")
+            assert card.region.bottom == band.region.y, (card.region, band.region)
+            # The card's own bottom padding row, then the band's inset.
+            assert _blank_rows_above(app, "#todo-panel") == 2, _frame(app)[-12:]
             # And the band still ends in its own row before the composer.
             assert _seam(app) == 1, _frame(app)[-12:]
             # The band is the composer's panel, not the transcript's ground …
