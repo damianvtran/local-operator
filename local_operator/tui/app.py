@@ -38,7 +38,14 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.css.query import NoMatches
-from textual.events import DescendantBlur, DescendantFocus, Resize, TextSelected
+from textual.events import (
+    AppBlur,
+    AppFocus,
+    DescendantBlur,
+    DescendantFocus,
+    Resize,
+    TextSelected,
+)
 from textual.geometry import Size
 
 # Aliased: `Message` in this module is the harness's conversation message.
@@ -102,7 +109,12 @@ from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
 )
-from local_operator.tui.terminal_title import TerminalTitle, terminal_title_enabled
+from local_operator.tui.notify import Notifier, notifications_enabled
+from local_operator.tui.terminal_title import (
+    TerminalTitle,
+    cwd_label,
+    terminal_title_enabled,
+)
 from local_operator.tui.widgets.approval import ApprovalBlock
 from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
@@ -680,6 +692,23 @@ class OperatorApp(App[None]):
         #: which owns the terminal, and lent to the band, which owns the state
         #: it displays — see :meth:`_start_terminal_title`.
         self._terminal_title: TerminalTitle | None = None
+        #: Desktop notifications for the user who is looking at another app —
+        #: the surface one step beyond the window title (see `tui/notify.py`).
+        #: Held by the app rather than by the band because, unlike the title,
+        #: this is an EDGE and not a state: it is fired from the specific
+        #: handlers that know a turn settled or parked on the user, and the band
+        #: sees neither of those as distinct events. ``None`` when there is no
+        #: terminal to write to (headless) or the user turned it off.
+        self._notifier: Notifier | None = None
+        #: Whether the turn is currently parked on the user, as of the last
+        #: `_refresh_working_activity`. The EDGE into this state is what gets
+        #: notified; the state itself is what the title and the working line
+        #: show. Kept here rather than read back off the title because the two
+        #: differ in exactly the way that matters: the title is re-asserted
+        #: continuously and coalesces on the rendered string, while a
+        #: notification has no equivalent of "already on screen" and would fire
+        #: once per repaint.
+        self._waiting_on_user: bool = False
         self._streaming_block: AssistantBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
@@ -1011,6 +1040,10 @@ class OperatorApp(App[None]):
         # is unnamed. Attaching first would leave a bare `lo ›` on screen for
         # as long as the boot takes.
         self._start_terminal_title()
+        # Same driver, same gating, one line later: the notifier is the title's
+        # out-of-app counterpart (state vs edge — see `tui/notify.py`), and both
+        # want the terminal available and the app non-headless.
+        self._start_notifier()
         # Straight after the band exists and before the session is asked for:
         # the saved mode has to be in force by the time the first tool can ask,
         # and the band has to say so on the boot frame rather than on whichever
@@ -3184,6 +3217,82 @@ class OperatorApp(App[None]):
         """
         self.workers.cancel_all()
         await super()._shutdown()
+
+    def _start_notifier(self) -> None:
+        """Build the desktop notifier, on the same terms as the title writer.
+
+        The sink is ``driver.write`` for the identical reason
+        (:meth:`_start_terminal_title`): an in-band OSC written straight to
+        ``sys.stdout`` lands in the middle of a frame Textual's writer thread
+        is painting.
+
+        Gated on a real driver, which is what keeps this feature OFF everywhere
+        it would be wrong. ``local-operator serve`` \u2014 the backend behind
+        local-operator-ui \u2014 never constructs this app at all, so it cannot
+        notify: the UI owns its own notification surface, and a backend that
+        also notified would both duplicate every alert and raise it on whichever
+        machine the server happens to run on. The headless REPL and ``exec``
+        reach here with no driver for the same reason and get the same answer.
+        """
+        driver = self._driver
+        if driver is None or self.is_headless or not notifications_enabled():
+            return
+        self._notifier = Notifier(driver.write)
+
+    def _notify_label(self) -> str:
+        """The session name a toast carries \u2014 the band's label, or the cwd.
+
+        Same fallback chain the window title uses, and for the same reason: a
+        conversation is named off its first substantive prompt, so a session
+        spends its opening minutes unnamed, and three identically-titled toasts
+        from three sessions identify none of them.
+        """
+        session = self._session
+        name = getattr(session, "conversation_name", "") if session is not None else ""
+        return name or cwd_label(os.getcwd())
+
+    def _notify(self, kind: str, *, running_children: int | None = None) -> None:
+        """Fire one notification, if this app has a notifier and the event qualifies.
+
+        The single funnel for every call site, so the label is refreshed in one
+        place (a conversation is renamed mid-session, and a toast naming the
+        session by its old name is worse than one naming it by none) and so no
+        handler has to hold an ``if self._notifier is not None`` of its own.
+
+        Never raises: a notification is chrome. The delivery paths already
+        swallow their own failures, but the resolution above them (a session
+        being torn down under a late event) is this method's to absorb \u2014 a
+        toast must not be able to take down a turn.
+        """
+        notifier = self._notifier
+        if notifier is None:
+            return
+        try:
+            notifier.set_label(self._notify_label())
+            if kind == "complete":
+                notifier.notify_turn_complete(running_children=running_children or 0)
+            elif kind == "error":
+                notifier.notify_error()
+            elif kind in ("approval", "ask"):
+                notifier.notify_waiting(kind)
+        except Exception:  # pragma: no cover - defensive; chrome must not raise
+            logger.debug("notification delivery failed", exc_info=True)
+
+    def on_app_focus(self, event: AppFocus) -> None:
+        """The terminal regained OS focus \u2014 stop notifying.
+
+        Textual reports focus only on a CHANGE, which is why the notifier
+        starts out focused: the app is launched from the terminal the user is
+        typing in, and assuming otherwise would notify on the very first turn
+        of every session.
+        """
+        if self._notifier is not None:
+            self._notifier.set_focused(True)
+
+    def on_app_blur(self, event: AppBlur) -> None:
+        """The terminal lost OS focus \u2014 notifications become deliverable."""
+        if self._notifier is not None:
+            self._notifier.set_focused(False)
 
     async def on_unmount(self) -> None:
         # Before disposing the session: dispose awaits teardown, and a turn
@@ -6540,6 +6649,22 @@ class OperatorApp(App[None]):
             # N+1 rows when several tools were running.
             self._append_block(NoticeBlock("interrupted", "warning"))
         self._interrupted_cards = 0
+        # LAST, and only after the turn's outcome is known, because the outcome
+        # decides which of the three notifications this is:
+        #
+        # - aborted → none. The user pressed Ctrl+C or Esc, so they were at the
+        #   keyboard a moment ago and already know; telling them their own stop
+        #   worked is the definition of a notification nobody wants.
+        # - error → "stopped with an error", which is exactly the case a user
+        #   who walked away needs pulled to their attention.
+        # - otherwise → "task complete", suppressed while children are still
+        #   running (see `Notifier.notify_turn_complete`).
+        if message.aborted:
+            pass
+        elif message.error:
+            self._notify("error")
+        else:
+            self._notify("complete", running_children=self._job_count("task"))
 
     def _start_working_block(self, *, ends_empty_state: bool = True) -> None:
         """Mount the turn's working line, pinned to the foot of the transcript.
@@ -6582,8 +6707,25 @@ class OperatorApp(App[None]):
         label, phase = self._current_activity()
         if self._working_block is not None:
             self._working_block.set_activity(label, phase)
+        waiting = phase == ACTIVITY_APPROVAL
         if self._status is not None:
-            self._status.set_attention(phase == ACTIVITY_APPROVAL)
+            self._status.set_attention(waiting)
+        # And the notification, from the same phase for the same reason, one
+        # surface further out again. It is derived here rather than fired at the
+        # approval/ask call sites because those are two call sites for one fact
+        # and this hook already runs for both — but a notification is an EDGE
+        # where the title is a state, so it fires only on the TRANSITION into
+        # waiting. Without the latch every repaint during a parked turn (a tool
+        # card settling behind the prompt, a `/clear`, the working line's own
+        # re-derivation) would send another toast for the same unanswered
+        # question.
+        if waiting and not self._waiting_on_user:
+            # `ask` outranks approval here exactly as it does in
+            # `_current_activity`: the picker is modal and drawn over the card,
+            # so it is what the user is actually being asked for.
+            asking = self._ask_pending is not None and not self._ask_pending.done()
+            self._notify("ask" if asking else "approval")
+        self._waiting_on_user = waiting
 
     def _current_activity(self) -> tuple[str, str]:
         """What the agent is doing right now: ``(label, phase)``.
