@@ -6608,13 +6608,22 @@ class OperatorApp(App[None]):
         real turn is still a floor, just a larger one. Only a session whose
         spend was accrued entirely in this process is exactly known.
 
-        Zero spends NO segment, which also settles a disagreement the five
-        callers used to have among themselves: three emptied the cell at zero
-        and the turn-end site printed `$0.0000`. Empty is the spelling that
-        matches this codebase's stated position on a confident zero — see
-        :func:`~local_operator.tui.costs.turn_cost`, where `$0.0000` over real
-        tokens is called the more expensive lie — and an unpriced model reaching
-        the band as `0.0` is exactly the case that would print it.
+        Zero spends NO segment, and picking that spelling settled a genuine
+        disagreement rather than ratifying a majority. Before this helper the
+        five callers had four different zero behaviours: `/reload`'s
+        reconciliation wrote `""` (the only explicit empty), the 1 Hz subagent
+        harvest passed `None` — which
+        :meth:`~local_operator.tui.widgets.status_line.StatusLine.update` reads
+        as "do not write this segment", leaving whatever was there standing, NOT
+        as an empty — turn end reached `format_cost(0.0)` and printed `$0.0000`,
+        and the restore and per-call accrual could not reach zero at all because
+        a truthiness guard returned first, so they expressed no opinion.
+
+        Only one site had a considered zero policy, and this follows it, because
+        it is the one this codebase argues for in its own words: see
+        :func:`~local_operator.tui.costs.turn_cost`, where a confident `$0.0000`
+        over billed tokens is called the more expensive lie. An unpriced model
+        reaching the band as `0.0` is exactly the case that would print it.
         """
         spend = self._spend_total() if total is None else total
         if not spend:

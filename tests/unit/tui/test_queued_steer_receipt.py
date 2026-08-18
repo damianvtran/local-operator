@@ -388,10 +388,15 @@ async def test_an_interrupt_spends_the_loud_ink_once() -> None:
     session = _Streaming()
     app = OperatorApp(lambda: _factory(session))
     # A NARROW frame on purpose: the property under test (exactly one alarm
-    # row) must hold at a width where the settled row is under pressure. 60 is
-    # four columns above where that row starts wrapping onto its hanging indent
-    # (measured: 56), so the frame exercises a narrow terminal while keeping the
+    # row) must hold at a width where the settled row is under pressure. The
+    # settled row fits on one line down to 53 columns and wraps onto its hanging
+    # indent at 52, so 60 exercises a narrow terminal while keeping the
     # settled-row assertion below readable as a single string.
+    #
+    # The alarm-count assertion does NOT depend on that threshold — it has been
+    # verified to hold from 30 to 120 columns — so a copy change that moves the
+    # wrap point costs at most the substring assertion, not the property this
+    # test exists for.
     async with app.run_test(size=(60, 24)) as pilot:
         await pilot.pause()
         await _submit(pilot, app, "steered into a turn about to be stopped")
