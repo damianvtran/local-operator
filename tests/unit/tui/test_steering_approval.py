@@ -1654,3 +1654,105 @@ async def test_a_prompt_hidden_by_a_shrink_comes_back_on_re_grow() -> None:
         # And it is answerable again.
         await pilot.press("y")
         assert await asyncio.wait_for(pending, 2) is True
+
+
+@pytest.mark.asyncio
+async def test_a_held_answer_key_resolves_cleanly_on_every_second_key() -> None:
+    """The hold has three endings, and each has to leave a coherent state.
+
+    A routed answer key is parked for one keystroke so that typing a word
+    beginning with `y` cannot authorise anything. That parking window is new
+    machinery, and what arrives next decides what the keystroke MEANT:
+
+    - a printable key: the user was typing, so both characters land in the
+      composer and nothing is answered;
+    - Enter: the answer was deliberate, so it is taken. Releasing into the
+      buffer first would submit a prompt the user never finished, and letting
+      Enter through afterwards dropped the character entirely — measured as an
+      empty submit and a lost `y`;
+    - Escape: stop. The prompt settles as a denial and the composer is left
+      EMPTY, rather than holding a stray `y` for a question that has gone.
+    """
+
+    async def _live(pilot, app, session):
+        ask = await _booted_gate(pilot, session)
+        pending = asyncio.ensure_future(ask("bash", "run: rm -rf ./build"))
+        for _ in range(100):
+            if app.query(ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
+        await pilot.pause(0.2)
+        await pilot.click(Editor)
+        await pilot.pause(0.1)
+        return pending
+
+    # Enter takes the answer.
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        pending = await _live(pilot, app, session)
+        await pilot.press("y")
+        await pilot.press("enter")
+        assert await asyncio.wait_for(pending, 2) is True
+        assert app.query_one(Editor).text == "", "the held key was typed as well as taken"
+
+    # Escape denies and leaves nothing behind.
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        pending = await _live(pilot, app, session)
+        await pilot.press("y")
+        await pilot.press("escape")
+        assert await asyncio.wait_for(pending, 2) is False
+        await pilot.pause(0.2)
+        assert app.query_one(Editor).text == "", "a stray character outlived the question"
+
+    # A printable key means it was typing all along.
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        pending = await _live(pilot, app, session)
+        await pilot.press("y")
+        await pilot.press("e")
+        await pilot.pause(0.4)
+        assert not pending.done(), "typing answered the prompt"
+        assert app.query_one(Editor).text == "ye"
+        pending.cancel()
+        try:
+            await pending
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_a_held_key_never_answers_a_question_it_was_not_meant_for() -> None:
+    """A key parked against a question that then settles must not answer another.
+
+    The window is short, but a stop, a `/clear` or a teardown can land inside
+    it — and the next tool of the same turn may raise its own prompt. A hold
+    that survived would authorise a call the user never saw.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        ask = await _booted_gate(pilot, session)
+        first = asyncio.ensure_future(ask("bash", "run: one"))
+        for _ in range(100):
+            if app.query(ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
+        await pilot.pause(0.2)
+        await pilot.click(Editor)
+        await pilot.pause(0.1)
+
+        await pilot.press("y")
+        assert app._held_answer_key is not None, "the key was not held"
+        # The question settles from somewhere else entirely, mid-hold.
+        assert app._approval is not None
+        app._approval.resolve(False, answer="n")
+        assert await asyncio.wait_for(first, 2) is False
+        await pilot.pause(0.4)
+
+        # Nothing is left parked, and the session gate was not disarmed.
+        assert app._held_answer_key is None
+        assert app._approve_all is False

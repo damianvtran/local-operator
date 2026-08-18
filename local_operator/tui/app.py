@@ -2308,11 +2308,30 @@ class OperatorApp(App[None]):
         character = getattr(event, "character", None)
 
         # A key arriving while one is held ends the ambiguity: this was typing.
-        # Both characters go to the composer, in order, and the question is
-        # left alone.
+        # The held character goes into the composer and the new key then takes
+        # its normal course, so `y` + `e` types `ye` and answers nothing.
+        #
+        # Two keys need the character restored but must NOT then act on the
+        # buffer they have just changed:
+        #
+        # - ENTER submits the composer. Releasing into it first would send a
+        #   prompt the user never finished typing — and releasing after it (as
+        #   the plain path does) drops the character entirely, which is what
+        #   `y` then Enter measured before this branch: an empty submit and a
+        #   lost `y`. Neither is right, so Enter CANCELS the hold instead: the
+        #   character was a deliberate answer, and the answer is taken.
+        # - ESCAPE means stop, and it also settles the prompt. Restoring the
+        #   character would leave a stray `y` sitting in the composer after the
+        #   question had gone, which is exactly what it did.
         held = self._held_answer_key
         if held is not None:
             self._cancel_held_answer_key()
+            key = getattr(event, "key", None)
+            if key == "enter":
+                held.prompt.answer_from_key(held.character)
+                return True
+            if key == "escape":
+                return False
             editor.insert(held.character)
             return False
 
@@ -2837,6 +2856,13 @@ class OperatorApp(App[None]):
         # anything needs to move at all: a card that never had focus must not
         # yank it from wherever the user put it.
         held_focus = bool(getattr(card, "has_focus", False))
+        # A key held for THIS card can never answer anything now. The commit
+        # path already refuses to answer a prompt that is no longer live, so
+        # this is not the correctness guard — it is the timer not outliving the
+        # question it belonged to.
+        held = self._held_answer_key
+        if held is not None and held.prompt is card:
+            self._cancel_held_answer_key()
         restore = getattr(card, "restore_focus", None)
         if callable(restore):
             try:
