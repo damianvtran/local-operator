@@ -214,6 +214,10 @@ async def test_an_interrupted_turn_retires_the_promise_it_can_no_longer_keep() -
         assert QUEUED_STEER_NOTICE not in texts
         assert SENT_STEER_NOTICE not in texts, "nothing was delivered"
         assert app._queued_steer_notices == []
+        # The message is still in the engine's queue, so the row must not claim
+        # it was lost — the user would retype and the agent would get it twice.
+        assert "not sent" not in STOPPED_STEER_NOTICE
+        assert "still queued" in STOPPED_STEER_NOTICE
 
 
 @pytest.mark.asyncio
@@ -363,3 +367,43 @@ async def test_the_session_announces_the_drain_that_actually_took_messages(
     # Persisted before the receipt: the row claims the message is in the
     # conversation, which is only true once it is on disk.
     assert [entry.payload.get("content") for entry in session._transcript.entries()]
+
+
+@pytest.mark.asyncio
+async def test_an_interrupt_spends_the_loud_ink_once() -> None:
+    """Ctrl+C prints ONE amber row, not two saying nearly the same thing.
+
+    The standalone `interrupted` notice already fires on this path whenever no
+    tool was in flight, which is the common case. A settled queued row in the
+    same weight put two amber `!` rows next to each other, one almost a
+    substring of the other, which reads as the app stuttering — and spends the
+    loudest ink in the palette twice on one event. This codebase already fought
+    that battle from the other side: `on_turn_ended` suppresses the standalone
+    notice when tool cards carry the interrupt mark.
+
+    The queued row stays at `note`, which is also the honest weight: the state
+    did not get worse. The message is still queued and still going, so the row
+    has no business getting louder.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "steered into a turn about to be stopped")
+
+        app.post_message(TurnEnded(True, None))
+        await pilot.pause()
+
+        rows = [
+            strip.text.rstrip()
+            for strip in app.screen._compositor.render_strips()
+            if strip.text.strip()
+        ]
+        alarms = [row for row in rows if row.lstrip().startswith("!")]
+        # The band's `! auto-approve always` lives on the status line and is not
+        # a transcript row; the interrupt notice is the only one in the ledger.
+        transcript_alarms = [row for row in alarms if "auto-approve" not in row]
+        assert len(transcript_alarms) == 1, transcript_alarms
+        assert "interrupted" in transcript_alarms[0]
+        # And the settled row is present, quiet, and says the message survives.
+        assert any(STOPPED_STEER_NOTICE in row for row in rows), rows

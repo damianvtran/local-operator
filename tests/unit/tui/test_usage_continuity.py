@@ -41,7 +41,7 @@ from local_operator.harness.types import (
 from local_operator.model.registry import ModelInfo
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import RESTORED_COST_PREFIX, OperatorApp
 from local_operator.tui.events import ContextUsageReported, TurnEnded
 
 #: $10 in / $100 out per MTok, so a million tokens is a round dollar figure and
@@ -192,6 +192,12 @@ async def test_a_resumed_session_opens_with_the_spend_it_already_has(tmp_path: P
             # back to the input price), plus 1000 output at $100/MTok.
             assert app._total_cost == pytest.approx(0.0002 + 1.9998 + 0.1)
             assert app._status._cost, "a resumed conversation with spend must not read as free"
+            # Marked as a FLOOR. Only the last reported turn's usage survives in
+            # a priceable form, so this can be well under the conversation's real
+            # lifetime spend — and it renders in the same cell a real total does,
+            # where an unmarked figure is indistinguishable from one this session
+            # actually accrued.
+            assert app._status._cost.startswith(RESTORED_COST_PREFIX), app._status._cost
 
 
 @pytest.mark.asyncio

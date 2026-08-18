@@ -179,31 +179,50 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: the article the clipped phrase lacked.
 PERSIST_HINT = "/model default saves this for new sessions"
 
-#: The two states of a mid-turn message, as one pair so they cannot drift apart.
+#: Marks a cost figure RESTORED from a resumed conversation rather than accrued
+#: this session. The restored number is a floor — only the last reported turn's
+#: usage survives in a priceable form — and it lands in the same cell a real
+#: running total does, so without a mark a resumed session's `$0.139` is
+#: indistinguishable from a session that has genuinely spent that. `≥` rather
+#: than a word because the segment sheds early on a narrow terminal and one cell
+#: is what the distinction is worth. Dropped by the first live turn, which
+#: replaces the figure with a real total.
+RESTORED_COST_PREFIX = "≥"
+
+#: The states of a mid-turn message, as one set so they cannot drift apart.
 #:
 #: The queued line is a promise about the future in the future tense, and the
-#: sent line is the same fact in the past tense — the row is UPDATED IN PLACE
-#: from one to the other (`NoticeBlock.restate`) when the engine actually takes
-#: the message, so the transcript ends up holding one statement that came true
-#: rather than a stale promise with a correction underneath it.
+#: settled lines are the same fact in the past tense — the row is UPDATED IN
+#: PLACE (`NoticeBlock.restate`) rather than corrected by a second row, so the
+#: transcript ends up holding one statement that came true instead of a stale
+#: promise with a retraction under it. That matters more than it looks: a reader
+#: who scrolled away never sees the transition, only the settled row, so each of
+#: these has to stand alone with no memory of the one before it.
 #:
-#: The settled line deliberately reads as a receipt, not an alarm: `sent` is the
-#: word the user is waiting for, and `✓` at `success` weight is the app's
-#: existing mark for a completed action. The queued line stays `note` — mid
-#: weight, readable at a glance, not shouting — because it answers a question
-#: the user is actively asking ("did my text just get thrown away?").
+#: There are two ways a turn can end without delivering, and BOTH leave the
+#: message in the engine's queue — `abort()` sets its flag and stops the run, it
+#: does not drain `_steering_queue` (verified: queued=1 before the abort,
+#: queued=1 after, and the next turn's first boundary takes it). So neither says
+#: "not sent", which an earlier draft did: a user who reads that retypes their
+#: message, the original arrives anyway, and the agent gets the instruction
+#: twice. The distinction that IS real is why the wait is happening, so that is
+#: what the two lines say.
+#:
+#: One noun for the boundary, deliberately. "step" and "turn" are different
+#: things internally — a turn contains several steps, which is exactly why the
+#: deferred case exists — and the UI teaches neither, so a pair that used both
+#: made the reader translate. All four now describe what the user observes.
 QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
-SENT_STEER_NOTICE = "sent — delivered to the agent mid-turn"
-#: The third outcome, and the one a promise about the future always needs: the
-#: turn ended before the engine reached a boundary to take the message at, so
-#: the delivery this row promised never happened on the turn the user was
-#: steering. `warning`, not `error` — an interrupt is something they did.
-STOPPED_STEER_NOTICE = "not sent — the turn was interrupted"
-#: And the fourth: the turn ended cleanly without ever reaching a boundary to
-#: drain at (the model answered with no further tool calls). The message is
-#: still queued and really will go — at the NEXT turn's first boundary — so the
-#: row says that rather than claiming a delivery or a loss.
-DEFERRED_STEER_NOTICE = "still queued — goes to the next turn"
+SENT_STEER_NOTICE = "sent — the agent has it now"
+#: The turn was interrupted before a boundary. `note`, NOT `warning`: nothing
+#: failed and nothing was lost, the message is simply still waiting — and the
+#: standalone `interrupted` notice is already on screen in amber for the same
+#: event, so a second amber row spends the loudest ink in the palette twice and
+#: reads as a stutter.
+STOPPED_STEER_NOTICE = "still queued — the turn was stopped, sends with your next message"
+#: The turn ended cleanly without ever reaching a boundary to drain at (the
+#: model answered with no further tool calls). Same state, different reason.
+DEFERRED_STEER_NOTICE = "still queued — sends with your next message"
 
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
@@ -1229,7 +1248,15 @@ class OperatorApp(App[None]):
         cost = self._cost_for(usage)
         if cost:
             self._total_cost = cost
-            self._status.update(cost=format_cost(self._spend_total()))
+            # Marked `≥`, because this figure is a FLOOR and renders in the same
+            # cell a real running total does. Only the last reported turn's usage
+            # survives in a priceable form, so a ten-turn conversation restores
+            # the last turn's dollars — potentially an order of magnitude under
+            # the truth — and without the mark a reader has no way to tell.
+            # One cell buys the distinction, which is the same trade the context
+            # segment already makes with its estimate flag. The first live turn
+            # supersedes it with a real total and the mark goes.
+            self._status.update(cost=f"{RESTORED_COST_PREFIX}{format_cost(self._spend_total())}")
 
     def _measure_preloaded_context(self, session: Any) -> None:
         """Fill the context segment before the first turn, off the boot path.
@@ -6819,7 +6846,11 @@ class OperatorApp(App[None]):
         text = STOPPED_STEER_NOTICE if interrupted else DEFERRED_STEER_NOTICE
         for block in self._queued_steer_notices:
             try:
-                block.restate(text, "warning")
+                # `note`, the same weight the row already had. The state has not
+                # got worse — the message is still queued and still going — so
+                # the row has no business getting louder, and the interrupt path
+                # already has an amber `interrupted` notice of its own.
+                block.restate(text, "note")
             except Exception:  # a receipt must never take the app down
                 logger.debug("queued-steer notice could not be retired", exc_info=True)
         self._queued_steer_notices.clear()
