@@ -1517,6 +1517,13 @@ class OperatorApp(App[None]):
         # first aborted turn would suppress its notice on the strength of cards
         # that belonged to a conversation the user cannot see any more.
         self._interrupted_cards = 0
+        # And a deferred completion belongs to the dying conversation too. Left
+        # set, the replacement session's first settling background job would
+        # announce "task complete" for a turn the user can no longer see — the
+        # same class of cross-session leak the resets above exist to prevent.
+        # (The waiting latch needs no line here: `_refresh_working_activity`
+        # runs just above, after `_approval` is cleared, and clears it.)
+        self._completion_deferred = False
         if self._controller is not None:
             # BEFORE disposal, always: the ledger is being rebuilt from the
             # replacement session, so the dying session's terminal events have
@@ -6682,6 +6689,13 @@ class OperatorApp(App[None]):
         # asker woke, so the stopped turn's write/exec tool got a fresh question.
         # An epoch bump cannot arrive early for an asker that captured the old one.
         self._turn_epoch += 1
+        # A deferred completion belongs to the turn that finished, and a NEW
+        # turn supersedes it: the session is working again, so "task complete"
+        # would announce a finish while the agent is mid-stream — and the new
+        # turn will raise its own completion when it settles. Dropped rather
+        # than flushed for the same reason the notification is suppressed while
+        # children run: the user is told when the work is actually over.
+        self._completion_deferred = False
         # D25: the ONE aggregate working line appears for the turn.
         self._working_fallback = DEFAULT_ACTIVITY
         self._start_working_block()

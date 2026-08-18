@@ -442,3 +442,70 @@ async def test_an_ask_raised_over_a_live_approval_is_still_announced() -> None:
         await pilot.pause()
         app._ask_pending.set_result(None)
     assert notifier.kinds == ["approval", "ask"]
+
+
+# -- self-review: the remediation's own hazards ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_new_turn_drops_a_deferred_completion() -> None:
+    """Found while probing my own round-1 remediation.
+
+    A completion suppressed because children were running is owned by the turn
+    that finished. If a NEW turn starts before the last child settles, the
+    child's settle announced "task complete" while the agent was mid-stream —
+    a finish reported for a session that is visibly working. The new turn will
+    raise its own completion when it settles, so the stale one is dropped.
+    """
+    from local_operator.tui.events import SubagentEnded, TurnStarted
+
+    session = JobsSession(running_tasks=1)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        assert app._completion_deferred is True
+        app.on_turn_started(TurnStarted())
+        assert app._completion_deferred is False
+        before = len(notifier.calls)
+        session.running_tasks = 0
+        app.on_subagent_ended(SubagentEnded(job_id="j", label="c", status="completed"))
+        await pilot.pause()
+    assert len(notifier.calls) == before  # nothing stale fired
+
+
+@pytest.mark.asyncio
+async def test_blurring_twice_does_not_announce_one_question_twice() -> None:
+    """`_flush_pending_question` runs on every blur, and a user alt-tabbing
+    back and forth must not be told about the same unanswered question each
+    time — the latch is what makes the flush idempotent."""
+    from textual.events import AppBlur, AppFocus
+
+    session = JobsSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app._approval = ApprovalBlock("bash", "x", on_answer=lambda _: None)
+        app._refresh_working_activity()
+        for _ in range(3):
+            app.on_app_blur(AppBlur())
+            app.on_app_focus(AppFocus())
+        await pilot.pause()
+    assert notifier.kinds == ["approval"]
+
+
+@pytest.mark.asyncio
+async def test_blurring_an_idle_session_announces_nothing() -> None:
+    """The flush must fire only for a turn actually parked on the user."""
+    from textual.events import AppBlur
+
+    session = JobsSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_app_blur(AppBlur())
+        await pilot.pause()
+    assert notifier.kinds == []
