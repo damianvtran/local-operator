@@ -1004,6 +1004,12 @@ class PoisonedThenFine:
     request until something stops sending it.
     """
 
+    #: Overridable so a subclass can pin a DIFFERENT provider wording against
+    #: the same end-to-end path. The predicate's own tests cover the strings;
+    #: what this class covers is the session actually recovering, which is the
+    #: part that was broken.
+    refusal = "Could not process image"
+
     def __init__(self) -> None:
         self.requests: list[ChatRequest] = []
         self.calls = 0
@@ -1012,14 +1018,30 @@ class PoisonedThenFine:
         self.requests.append(request)
         self.calls += 1
         first = self.calls == 1
+        refusal = self.refusal
 
         async def gen():
             if first:
-                raise ProviderError(400, "Could not process image")
+                raise ProviderError(400, refusal)
             yield StreamTextDelta(delta="ok")
             yield StreamEndEvent(stop_reason="endTurn")
 
         return gen()
+
+
+class RefusedForTooManyImages(PoisonedThenFine):
+    """The many-image dimension refusal, which is the one seen in the wild.
+
+    Distinct from a malformed block in how it ARRIVES: nothing about the image
+    changed and no request was malformed. The conversation simply grew past
+    twenty images, at which point the provider applies a stricter 2000-pixel
+    per-image limit and refuses a frame it had accepted for a hundred turns.
+    """
+
+    refusal = (
+        "messages.0.content.2.image.source.base64.data: At least one of the image "
+        "dimensions exceed max allowed size for many-image requests: 2000 pixels"
+    )
 
 
 def _image_blocks(request: ChatRequest) -> int:
@@ -1069,6 +1091,38 @@ async def test_an_image_the_provider_refuses_does_not_brick_the_session(tmp_path
     ]
     assert "look at this" in sent, "the surrounding turn was dropped along with the image"
     assert IMAGE_DROPPED_NOTICE in sent, "the model was left with a silent hole"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_many_image_dimension_refusal_also_unbricks_the_session(tmp_path):
+    """The refusal that wedged a real session on 2026-08-18.
+
+    The degrade recognised several provider wordings and not this one, so the
+    session answered every prompt — and every ``/compact``, which has to send
+    the history in order to summarise it — with the same 400 until it was
+    abandoned. The composer no longer attaches an image that can trip the
+    2000-pixel many-image limit, but this backstop still has to hold: history
+    written by an OLDER build already contains such blocks, and a resumed
+    session replays them.
+    """
+    stream = RefusedForTooManyImages()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[TextContent(text="look at this"), ImageContent(data="Zm9v")],
+            )
+        ]
+    )
+
+    await session.prompt("does it work")
+    assert session._images_rejected, "the many-image refusal was not recognised"
+
+    await session.prompt("try again")
+    assert stream.calls == 2
+    assert _image_blocks(stream.requests[1]) == 0, "the session is still sending the bad image"
     await session.dispose()
 
 

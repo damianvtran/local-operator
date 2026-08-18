@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 from PIL import Image
 
+from local_operator import imaging
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -611,7 +612,7 @@ async def test_read_image_without_pillow_is_forwarded_verbatim(
     # no resize and no validation, but a screenshot the model can look at
     # still beats a paragraph explaining why it cannot.
     source = _write_png(tmp_path / "shot.png", (320, 200))
-    monkeypatch.setattr(builtin, "pillow_image_module", lambda: None)
+    monkeypatch.setattr(imaging, "pillow_image_module", lambda: None)
     result = await _call(tools, "read", {"path": "shot.png"}, context)
 
     assert result.is_error is False
@@ -628,7 +629,7 @@ async def test_read_large_image_without_pillow_is_refused(
     # becomes the line. Forwarding an unbounded unvalidated blob is how a
     # session ends up wedged behind a provider that refuses it.
     _write_png(tmp_path / "fat.png", (2400, 1800), noise="smooth")
-    monkeypatch.setattr(builtin, "pillow_image_module", lambda: None)
+    monkeypatch.setattr(imaging, "pillow_image_module", lambda: None)
     result = await _call(tools, "read", {"path": "fat.png"}, context)
 
     assert result.is_error is True
@@ -644,7 +645,7 @@ async def test_read_heic_without_pillow_heif_refuses_rather_than_forwarding(
     # refusal rather than risk it. Transcoding is the only way to send one,
     # and transcoding is exactly what is unavailable here.
     (tmp_path / "pic.heic").write_bytes(b"\x00\x00\x00\x1cftypheic" + b"\x00" * 64)
-    monkeypatch.setattr(builtin, "heif_image_module", lambda: None)
+    monkeypatch.setattr(imaging, "heif_image_module", lambda: None)
     result = await _call(tools, "read", {"path": "pic.heic"}, context)
 
     assert result.is_error is True
