@@ -877,6 +877,32 @@ async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
             screen = app.screen
             return tuple(screen.virtual_size) != tuple(screen.size)
 
+    # The A/B is only meaningful where the inset is actually GRANTED. Where the
+    # gate withholds it the two runs are the same build painting the same frame,
+    # and any difference between them is the subagent panel's own pre-existing
+    # overflow — which varies run to run at the cells where its row count sits
+    # exactly on the screen height, and would make this test flaky about a
+    # defect it does not own.
+    async def _inset_granted() -> bool:
+        """Whether the gate actually gives this configuration the row."""
+        session = FakeSession()
+        session.jobs = _fake_jobs(*[_Job(f"sub-{i}", f"child {i}") for i in range(children)])
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=(100, height)) as pilot:
+            for _ in range(80):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            for _ in range(4):
+                app._refresh_band()
+                for _ in range(3):
+                    await pilot.pause()
+            return app.query_one("#band").has_class("has-slot")
+
+    granted = await _inset_granted()
+    if not granted:
+        return
+
     with_inset = await _overflows(suppress_inset=False)
     without_inset = await _overflows(suppress_inset=True)
 

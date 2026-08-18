@@ -30,7 +30,13 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.harness.types import Message, ModelSpec, TextContent, Usage
+from local_operator.harness.types import (
+    Message,
+    ModelSpec,
+    TextContent,
+    ToolCall,
+    Usage,
+)
 from local_operator.model.registry import ModelInfo
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -355,8 +361,11 @@ async def test_a_pruned_reading_is_refused_like_a_compacted_one(tmp_path: Path) 
 
     assert _session_over_dir().restored_usage() is None, "the pre-prune reading must be refused"
 
-    # And after the journal has been FOLDED INTO the rows, where the prune entry
-    # no longer exists and only the flag on the tool row remains.
+    # And after the journal has been FOLDED INTO the rows. `compact_file` drops
+    # the prune entry, so the POSITION it held has to survive some other way —
+    # folding is meant to be semantically invisible, and for this boundary it
+    # was not: the flag on the target row says which row was blanked, not when,
+    # and the target can be far older than the prune. See `_shrink_marked`.
     await transcript.compact_file(min_reclaim_bytes=1)
     folded = Transcript(tmp_path / "sess")
     assert not any(entry.type == "prune" for entry in folded.entries()), "the fold did not happen"
@@ -367,6 +376,53 @@ async def test_a_pruned_reading_is_refused_like_a_compacted_one(tmp_path: Path) 
     await folded.append_message(_assistant(output=20, context=15_000))
     restored = _session_over_dir().restored_usage()
     assert restored is not None and restored.context_tokens == 15_000
+
+
+@pytest.mark.asyncio
+async def test_folding_the_prune_journal_keeps_the_boundary_where_it_was(
+    tmp_path: Path,
+) -> None:
+    """`compact_file` must not promote pre-prune readings back to current.
+
+    The case the target-row flag cannot express: a tool result read EARLY, many
+    turns on top of it, and only then the prune that blanks it. The blanked row
+    sits near the start of the file and the prune near the end, so "the boundary
+    is the pruned row" puts every reading in between on the restorable side —
+    measured as three stale figures (200k, 400k, 640k) restored from a folded
+    transcript that correctly reported none before the fold.
+
+    Both forms of the same file are asserted, because the whole property is that
+    folding is semantically invisible: it reclaims bytes and changes nothing a
+    reader can observe.
+    """
+    transcript = Transcript(tmp_path / "sess")
+    call = ToolCall(name="read", arguments={"path": "big.py"})
+    await transcript.append_message(Message.user("read it"))
+    await transcript.append_message(_assistant(output=20, context=100_000))
+    early_tool = Message(
+        role="tool",
+        tool_call_id=call.id,
+        tool_name="read",
+        content=[TextContent(text="X" * 30_000)],
+        provider_payload={"details": {"path": "big.py"}},
+    )
+    await transcript.append_message(early_tool)
+    for context in (200_000, 400_000, 640_000):
+        await transcript.append_message(Message.user("q"))
+        await transcript.append_message(_assistant(output=20, context=context))
+    # The prune lands LAST, long after the row it blanks.
+    await transcript.append_prune(early_tool.id, "[pruned]")
+
+    unfolded = Transcript(tmp_path / "sess").usages_since_compaction()
+    assert unfolded == [], "every reading predates the prune"
+
+    reclaimed = await transcript.compact_file(min_reclaim_bytes=1)
+    assert reclaimed > 0, "the fold did not happen, so it is not under test"
+    folded = Transcript(tmp_path / "sess")
+    assert not any(entry.type == "prune" for entry in folded.entries())
+    assert (
+        folded.usages_since_compaction() == []
+    ), "folding the journal away restored readings the prune had invalidated"
 
 
 @pytest.mark.asyncio

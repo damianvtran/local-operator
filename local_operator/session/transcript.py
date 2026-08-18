@@ -72,6 +72,12 @@ ENTRY_PRUNE = "prune"
 #: the rewrite amortized-free while still bounding a long session's file.
 COMPACT_FILE_THRESHOLD_BYTES = 256 * 1024
 
+#: Marks the entry that sat at or before a prune whose journal entry has since
+#: been folded away. Read by :meth:`Transcript.usages_since_compaction` as the
+#: surviving evidence of WHERE the blanking happened; see :func:`_shrink_marked`.
+#: Lives under ``provider_payload`` so an older build simply ignores it.
+SHRUNK_KEY = "context_shrunk_here"
+
 
 @dataclass
 class TranscriptEntry:
@@ -307,14 +313,18 @@ class Transcript:
                 # target's position instead restored two stale readings.
                 start = index + 1
                 break
-            if entry.type == ENTRY_MESSAGE and (entry.payload.get("provider_payload") or {}).get(
-                "pruned"
-            ):
-                # The FOLDED form of the same thing: `compact_file` materializes
-                # the journal into the row and drops the entry, so after a fold
-                # the flag on the row is the only evidence left. The row is a
-                # tool result and carries no usage itself, so the boundary is
-                # after it.
+            if (entry.payload.get("provider_payload") or {}).get(SHRUNK_KEY):
+                # The FOLDED form: `compact_file` drops the journal entry and
+                # leaves this mark on the last entry that sat at or before it
+                # (see `_shrink_marked`), so the boundary lands where the prune
+                # actually was.
+                #
+                # Deliberately NOT the ``pruned`` flag on the target row. That
+                # says which row was blanked, not WHEN — and the target can be
+                # hundreds of entries older than the prune that blanked it, so
+                # every reading in between would be promoted back to "current".
+                # Measured on a folded transcript: three stale readings restored
+                # where the same file before the fold correctly reported none.
                 start = index + 1
                 break
         return [
@@ -411,19 +421,32 @@ class Transcript:
 
         The dead weight is the difference between each pruned row as written
         and the one-line notice that replaces it, plus the journal entries
-        themselves.
+        themselves — MINUS the few bytes the fold adds back, which is the
+        boundary mark it leaves in place of the journal entry's position (see
+        :func:`_shrink_marked`). Small, but this figure is compared for equality
+        against what :meth:`compact_file` actually reclaims, and an estimate
+        that ignores a cost the fold really pays is simply wrong.
         """
         prunes = self.pending_prunes()
         if not prunes:
             return 0
         total = 0
-        for entry in self._entries:
+        boundary: TranscriptEntry | None = None
+        newest_prune = max(
+            (index for index, entry in enumerate(self._entries) if entry.type == ENTRY_PRUNE),
+            default=-1,
+        )
+        for index, entry in enumerate(self._entries):
             if entry.type == ENTRY_PRUNE:
                 total += len(entry.to_json()) + 1
-            elif entry.type == ENTRY_MESSAGE and entry.id in prunes:
-                total += len(entry.to_json()) - len(
-                    _pruned_entry(entry, prunes[entry.id]).to_json()
-                )
+                continue
+            if entry.type == ENTRY_MESSAGE and entry.id in prunes:
+                entry = _pruned_entry(entry, prunes[entry.id])
+                total += len(self._entries[index].to_json()) - len(entry.to_json())
+            if index <= newest_prune:
+                boundary = entry
+        if boundary is not None:
+            total -= len(_shrink_marked(boundary).to_json()) - len(boundary.to_json())
         return max(total, 0)
 
     async def compact_file(self, min_reclaim_bytes: int = COMPACT_FILE_THRESHOLD_BYTES) -> int:
@@ -449,13 +472,36 @@ class Transcript:
             if not prunes:
                 return 0
             before = self.path.stat().st_size if self.path.exists() else 0
+            # WHERE the newest prune sat, before the entries carrying that fact
+            # are dropped. Folding is meant to be semantically invisible, and
+            # without this it is not: a prune's position is what tells a reader
+            # which usage readings predate the blanking, and the target row it
+            # points at can be hundreds of entries older than the prune itself.
+            # Discarding it silently promoted every reading in between back to
+            # "current" — measured as three stale figures restored on a folded
+            # transcript that correctly reported none before the fold.
+            newest_prune = max(
+                (index for index, entry in enumerate(self._entries) if entry.type == ENTRY_PRUNE),
+                default=-1,
+            )
             folded: list[TranscriptEntry] = []
-            for entry in self._entries:
+            boundary = -1
+            for index, entry in enumerate(self._entries):
                 if entry.type == ENTRY_PRUNE:
                     continue
                 if entry.type == ENTRY_MESSAGE and entry.id in prunes:
                     entry = _pruned_entry(entry, prunes[entry.id])
                 folded.append(entry)
+                # Remember which SURVIVING entry is the last one at or before
+                # the newest prune. Marked after the loop rather than inside it,
+                # because only the final such entry is the boundary — marking
+                # every one of them puts the mark on the newest row in the file
+                # and a backward scan then stops at the end, refusing the whole
+                # history instead of the part that predates the blanking.
+                if index <= newest_prune:
+                    boundary = len(folded) - 1
+            if boundary >= 0:
+                folded[boundary] = _shrink_marked(folded[boundary])
             payload = "".join(entry.to_json() + "\n" for entry in folded)
             reclaimed = before - len(payload.encode("utf-8"))
             if reclaimed < min_reclaim_bytes:
@@ -484,6 +530,30 @@ def _pruned_entry(entry: TranscriptEntry, notice: str) -> TranscriptEntry:
     payload["content"] = [TextContent(text=notice).model_dump()]
     provider_payload = dict(payload.get("provider_payload") or {})
     provider_payload["pruned"] = True
+    payload["provider_payload"] = provider_payload
+    return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=payload)
+
+
+def _shrink_marked(entry: TranscriptEntry) -> TranscriptEntry:
+    """``entry`` marked as sitting at or before a prune that has been folded away.
+
+    :meth:`Transcript.compact_file` materializes the prune journal into the rows
+    it targets and drops the journal entries, which is semantically invisible for
+    replay — and was NOT invisible for the usage boundary, because a prune's
+    POSITION is what says which readings predate the blanking. The target row is
+    no substitute: it can be hundreds of entries older than the prune that
+    blanked it.
+
+    So the position is preserved as a flag on the last entry that sat at or
+    before it. ``provider_payload`` rather than a new entry type, because a new
+    type would have to be understood by every reader of the file including older
+    builds, where an unknown key on a payload is ignored by construction.
+    """
+    payload = dict(entry.payload)
+    provider_payload = dict(payload.get("provider_payload") or {})
+    if provider_payload.get(SHRUNK_KEY):
+        return entry
+    provider_payload[SHRUNK_KEY] = True
     payload["provider_payload"] = provider_payload
     return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=payload)
 
