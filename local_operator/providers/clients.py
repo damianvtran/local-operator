@@ -42,6 +42,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
+    ToolCall,
     Usage,
 )
 from local_operator.providers.failover import ProviderError
@@ -405,6 +406,88 @@ def _reasoning_effort(request: ChatRequest) -> str | None:
     return level
 
 
+def _replayable_tool_arguments(call: ToolCall) -> dict[str, Any]:
+    """The argument OBJECT to replay for ``call``, never a parse failure.
+
+    ``raw_arguments`` is the provider's verbatim argument string and is
+    normally replayed byte-for-byte, because a model that emitted
+    non-canonical JSON must see its own bytes back. But the string is NOT
+    guaranteed to be valid JSON: :meth:`AgentLoop._assemble_tool_call` builds
+    it by concatenating the streamed argument deltas, so a turn that ends
+    mid-call — an abort, a dropped stream, a provider 5xx between deltas —
+    stores a truncated fragment like ``{"path": "/tmp/x.py"`` and leaves
+    ``arguments`` empty because it could not parse it either.
+
+    That fragment is then permanent: it is written to the transcript and
+    replayed on EVERY later request in the session. Parsing it here without a
+    guard raised ``JSONDecodeError`` out of body construction, which
+    :func:`~local_operator.providers.failover.wrap_transport_error` could only
+    read as a transient provider fault — so the harness retried, rebuilt the
+    same body, failed identically, and reported the session's own corrupt row
+    as the provider being unwell. Every subsequent turn died the same way and
+    the session could not be continued at all.
+
+    A fragment carries no recoverable intent, so the fallback is
+    ``call.arguments`` (``{}`` for a call the loop could not parse). The pairing
+    tool result already tells the model the call did not complete, which is the
+    truth the next turn needs; replaying an unparseable argument list buys
+    nothing and costs the session.
+    """
+    # Empty joins `None` rather than being read as `{}`: an empty string is not
+    # a call the model made, it is the absence of one, and `call.arguments`
+    # is the better answer for it whenever the loop managed to fill it.
+    if not call.raw_arguments:
+        return call.arguments
+    try:
+        parsed = json.loads(call.raw_arguments)
+    except json.JSONDecodeError:
+        logger.warning(
+            "tool call %s (%s) carries unparseable raw arguments; "
+            "replaying parsed arguments instead",
+            call.id,
+            call.name,
+        )
+        return call.arguments
+    # A non-object parse (a bare string or list from a confused model) is just
+    # as unusable as a fragment: the wire shape here is an object.
+    return parsed if isinstance(parsed, dict) else call.arguments
+
+
+def _replayable_tool_arguments_json(call: ToolCall) -> str:
+    """The argument STRING to replay, for the providers that take one.
+
+    Verbatim when ``raw_arguments`` is valid JSON — byte fidelity matters for a
+    model reading back its own call — and a re-encode of the salvaged object
+    otherwise. See :func:`_replayable_tool_arguments` for why the raw string
+    cannot be trusted. OpenAI-shaped providers did not crash on the fragment
+    the way Anthropic did; they were handed invalid JSON on the wire and
+    rejected the request instead, which is the same dead session by a longer
+    route.
+    """
+    raw = call.raw_arguments
+    # Parse the raw value ITSELF, never `raw or "{}"`: that spelling validates
+    # the placeholder and then returns `raw`, so an empty string passed the
+    # check and went out as an empty body — invalid JSON on the wire, the exact
+    # failure this function exists to prevent. Today's assembler normalizes
+    # empty to None (`loop.py`, `raw or None`), but the field is typed `str |
+    # None` and transcripts are external input, so the guard cannot lean on it.
+    #
+    # The `startswith` pre-check skips the parse for strings that CANNOT be an
+    # object. It does not speed up the common path — a valid object starts with
+    # `{` and is still parsed in full — so the win is confined to the
+    # non-object case, where a large string is otherwise decoded in its
+    # entirety only to be thrown away. Worth keeping because this runs for
+    # every tool call in the whole history on every request, and `lstrip` on a
+    # string with nothing to strip returns the same object.
+    if raw is not None and raw.lstrip().startswith("{"):
+        try:
+            if isinstance(json.loads(raw), dict):
+                return raw
+        except json.JSONDecodeError:
+            pass
+    return json.dumps(_replayable_tool_arguments(call))
+
+
 def _message_to_openai(message: Message) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
@@ -418,11 +501,7 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
                 "type": "function",
                 "function": {
                     "name": call.name,
-                    "arguments": (
-                        call.raw_arguments
-                        if call.raw_arguments is not None
-                        else json.dumps(call.arguments)
-                    ),
+                    "arguments": _replayable_tool_arguments_json(call),
                 },
             }
             for call in message.tool_calls
@@ -491,11 +570,7 @@ def _messages_to_openai_responses(messages: Sequence[Message]) -> list[dict[str,
                         "type": "function_call",
                         "call_id": call.id,
                         "name": call.name,
-                        "arguments": (
-                            call.raw_arguments
-                            if call.raw_arguments is not None
-                            else json.dumps(call.arguments)
-                        ),
+                        "arguments": _replayable_tool_arguments_json(call),
                     }
                 )
             continue
@@ -1309,11 +1384,7 @@ class AnthropicClient:
                         "type": "tool_use",
                         "id": call.id,
                         "name": call.name,
-                        "input": (
-                            call.arguments
-                            if call.raw_arguments is None
-                            else json.loads(call.raw_arguments or "{}")
-                        ),
+                        "input": _replayable_tool_arguments(call),
                     }
                     for call in message.tool_calls
                 )
