@@ -47,10 +47,7 @@ from collections.abc import (
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
-from local_operator.compaction.tokens import (
-    IMAGE_TOKEN_ESTIMATE,
-    approx_text_tokens,
-)
+from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
 from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJobManager
