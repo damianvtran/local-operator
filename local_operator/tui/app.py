@@ -3746,6 +3746,22 @@ class OperatorApp(App[None]):
         """
         if self._aside_is_open():
             self.call_after_refresh(self._sync_overlay_layout)
+        # A live prompt's footer names a DIFFERENT set of keys depending on
+        # whether the composer holds a draft, because the routing stands down
+        # on a non-empty buffer — and nothing else repaints on a keystroke.
+        # `_repaint` fires on focus, resize, answer and advance; typing is none
+        # of those, so the card went on advertising `1-2 answer` while `1` was
+        # being typed into the buffer, and `y/n/A answer` on a live `rm -rf`
+        # gate at a moment when `y` is a text character (F7, agent review round
+        # 5). Same shape as D13 one axis over: the model was right and the
+        # pixels were stale.
+        prompt = self._live_prompt()
+        remeasure = getattr(prompt, "remeasure", None)
+        if callable(remeasure):
+            try:
+                remeasure()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not repaint the live prompt", exc_info=True)
 
     def _open_subagent_view(self, job_id: str) -> None:
         """Enter the full-page subagent view for one task job.
