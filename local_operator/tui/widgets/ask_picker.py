@@ -1914,6 +1914,13 @@ class AskPickerScreen(Container):
             routed = None if self._composer_has_draft() else self.routed_hint()
             if routed is not None:
                 hints.append(routed)
+            elif self.visible_rows and not self.answer_keys():
+                # A question the composer cannot answer at all — a multi-select,
+                # answered by Space and Enter, which the composer owns. Tab is
+                # the way to reach it, and it has to be NAMED or it is a key
+                # nobody can discover. Inferring the handover from the buffer
+                # instead cost two rounds and two lost messages (F9, D18).
+                hints.append(("⇥", "answer here"))
             hints.append(self._exit_hint)
             # Through the same ladder the focused footer uses, rather than
             # returned raw for `_cut_row` to ellipsise. Returned raw, a narrow

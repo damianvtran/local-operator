@@ -2320,6 +2320,34 @@ class OperatorApp(App[None]):
             return False
         if not editor.has_focus:
             return False
+
+        # Tab is the EXPLICIT way to put the keyboard on the question.
+        #
+        # It exists because inferring the moment the user has finished typing
+        # cannot be done from the buffer: both attempts (empty, then
+        # deleted-to-empty) moved focus at a moment the user had not chosen and
+        # cost them a message (F9, D18). A named gesture cannot. It is offered
+        # only while the card actually needs it — a multi-select is answered by
+        # Space and Enter, which the composer owns, so it is the one question
+        # the routed keys cannot reach — and only while the card is drawing
+        # rows to move a cursor through.
+        #
+        # Taken before the buffer check, because a user with a half-typed
+        # message is exactly who needs it: their draft is preserved and waiting
+        # when they come back with `esc` or a click.
+        if getattr(event, "key", None) == "tab":
+            if self._prompt_wants_the_keyboard(prompt):
+                prompt.focus()
+                return True
+            # Swallowed even where it does not hand over, because the
+            # alternative is worse than doing nothing: Tab inserts whitespace,
+            # which makes the buffer non-empty, which stands the routing down —
+            # so a stray Tab silently disabled the very keys the footer is
+            # advertising, and the next `1` typed `    1` instead of answering.
+            # While a question is live, Tab means "the question" and nothing
+            # else; where the question does not want it, it means nothing.
+            return True
+
         character = getattr(event, "character", None)
 
         # A key arriving while one is held ends the ambiguity: this was typing.
@@ -2394,6 +2422,19 @@ class OperatorApp(App[None]):
             # must never answer another.
             return
         held.prompt.answer_from_key(held.character)
+
+    def _prompt_wants_the_keyboard(self, prompt) -> bool:  # type: ignore[no-untyped-def]
+        """Whether ``prompt`` has answers the composer cannot route to it.
+
+        True only for a card that is drawing rows AND offers no routed keys —
+        in practice a multi-select, which is answered by Space and Enter. Every
+        other prompt is fully answerable from the composer, so pulling focus to
+        it would cost the user their caret for nothing.
+        """
+        try:
+            return bool(prompt.visible_rows) and not prompt.answer_keys()
+        except Exception:  # pragma: no cover - defensive
+            return False
 
     def _live_prompt(self):  # type: ignore[no-untyped-def]
         """The prompt currently awaiting an answer, or ``None``.
@@ -3795,52 +3836,25 @@ class OperatorApp(App[None]):
         # a regression from anchoring the card, which was a `ModalScreen` and
         # simply held the keyboard.
         #
-        # Clearing the draft is the user saying they are done typing, so the
-        # question takes the caret back. Scoped to a card that cannot be
-        # answered any other way, because for every other prompt the routed
-        # keys already work from the composer and stealing focus would undo
-        # D12's whole point.
+        # NOTE: focus is NOT handed to the card here, on any buffer state.
         #
-        # Keyed on the user DELETING their way to empty, not on the buffer
-        # being empty. `on_text_area_changed` fires for any document change,
-        # including the ones the app makes itself: SENDING a message empties
-        # the buffer, and so do `/btw` stashing a draft and a slash command
-        # clearing it. Keyed on emptiness, sending a message therefore handed
-        # the keyboard to the card — and the user's NEXT message was then typed
-        # into a question they had stopped looking at, with the space ticking a
-        # row and Enter answering it. Measured end to end: `please check the
-        # schema` sent, `ok next` typed, Enter, and the ask resolved
-        # `{'s': ['next']}` from a line the user meant for the agent (F9, agent
-        # review round 6).
+        # Two rounds of trying to infer the moment the user is "done typing"
+        # produced two data-loss defects, because every candidate signal is
+        # ambiguous. Keyed on the buffer being EMPTY, sending a message handed
+        # the caret over and the user's next message answered the question
+        # (F9). Keyed on the user DELETING to empty, REWORDING did the same:
+        # clear the line to retype it, and the next `space` ticks an option
+        # while the retyped message goes nowhere — measured as
+        # `{'rollout': ['Backfill from the audit log']}`, an answer never
+        # chosen, with the message lost (D18, design round 6).
         #
-        # A shrinking buffer is the tell. Only a deletion moves from non-empty
-        # to empty one character at a time; a send, a stash and a clear all
-        # replace the document wholesale.
-        # `not answer_keys()` is true for two different reasons, and only one
-        # of them wants the keyboard: a MULTI-SELECT, which has answers the
-        # composer cannot reach, and a COLLAPSED card, which is drawing no
-        # options at all. Focus on a collapsed card buys nothing — there is
-        # nothing to move a cursor through and the permissive keys are refused
-        # there anyway (D9) — so it would be a pure theft (F9, agent review
-        # round 6). Asking for drawn rows separates the two.
-        if prompt is not None and not prompt.answer_keys() and prompt.visible_rows:
-            try:
-                editor = self._editor()
-            except Exception:  # pragma: no cover - hosts with no composer
-                return
-            emptied_by_hand = (
-                not editor.text
-                and self._composer_text_before
-                and len(self._composer_text_before) == 1
-            )
-            self._composer_text_before = editor.text
-            if emptied_by_hand and not prompt.has_focus:
-                prompt.focus()
-        else:
-            try:
-                self._composer_text_before = self._editor().text
-            except Exception:  # pragma: no cover - hosts with no composer
-                self._composer_text_before = ""
+        # Both had the same shape: a focus change the user did not ask for,
+        # arriving at the moment they were least likely to be watching, with a
+        # destructive next keystroke. There is no better signal to find — the
+        # gesture for "I have finished typing and want to answer" is not
+        # distinguishable from "I am mid-edit" by looking at the buffer. So the
+        # card asks for the keyboard explicitly instead (Tab, advertised in the
+        # footer), which cannot arrive at a moment the user did not choose.
 
     def _open_subagent_view(self, job_id: str) -> None:
         """Enter the full-page subagent view for one task job.
