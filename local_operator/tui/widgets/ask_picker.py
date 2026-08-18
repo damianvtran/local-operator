@@ -1286,6 +1286,34 @@ class AskPickerScreen(Container):
         except Exception:
             return False
 
+    def on_focus(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Repaint: the footer describes a different keyboard on each side.
+
+        Deferred like the blur, and for the mirror reason: the widget is told
+        it is GAINING focus before `has_focus` reports it.
+
+        `_footer_hints` branches on `has_focus`, and `has_focus` is not a
+        reactive on this widget — nothing schedules a refresh when it changes.
+        Without these two handlers the branch was correct in the model and
+        INVISIBLE on screen: the card went on painting whatever `_repaint` last
+        pushed into its body, so with the caret in the composer it still
+        advertised `↑↓ move` and `enter answer`, both dead (D13, design round
+        4). The test that pinned the fix read `render_lines_for_test`, which
+        re-derives the text and therefore could not see the staleness — it was
+        measuring the intent, not the pixels.
+        """
+        self.call_after_refresh(self._repaint)
+
+    def on_blur(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Repaint for the same reason, in the other direction.
+
+        Deferred by one frame: on the blur event `has_focus` is still True (the
+        widget is told it is LOSING focus, not that it has lost it), so a
+        repaint here re-derives the focused footer and paints exactly the stale
+        text this handler exists to replace.
+        """
+        self.call_after_refresh(self._repaint)
+
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         """Re-measure: the width, the page size and the descriptions all come
         from the screen."""
@@ -1362,10 +1390,16 @@ class AskPickerScreen(Container):
         there is nothing typed to accept. A hint that names a key which lands on
         a dead end is the same defect as one that names a key that does nothing.
 
+        Empty on a MULTI-SELECT, which no single key can answer: it is answered
+        by ticking rows with Space and confirming with Enter, and both of those
+        belong to the composer while the caret is there. Advertised as
+        `1-2 answer`, a digit only moved the cursor and left the question
+        unanswered with `nothing ticked — space toggles` (D15b, design round 4).
+
         Empty while the card is drawing no rows, so a key can never commit an
         answer the user was not shown (the rule :meth:`action_accept` follows).
         """
-        if not self.visible_rows:
+        if self.question.multi or not self.visible_rows:
             return frozenset()
         return frozenset(
             str(index + 1) for index in self._window() if index < 9 and index != self.other_row
@@ -1819,7 +1853,14 @@ class AskPickerScreen(Container):
             if routed is not None:
                 hints.append(routed)
             hints.append(self._exit_hint)
-            return hints
+            # Through the same ladder the focused footer uses, rather than
+            # returned raw for `_cut_row` to ellipsise. Returned raw, a narrow
+            # card cut the exit mid-word — `1 answer · esc sk…` at 22 columns —
+            # and `skip` is the one word this row ranks as unsheddable, because
+            # a card with no stated way out is unusable (D3, and D16 in design
+            # round 4). Shedding the routed hint's WORD first and then the hint
+            # itself keeps `esc skip` whole down to the narrowest card.
+            return self._shed_to_fit(hints, [routed[0]] if routed else [], width)
 
         if self.state.selected == self.other_row:
             hints = [("type", "your answer"), ("↑↓", "move"), ("enter", "accept")]
@@ -1862,6 +1903,19 @@ class AskPickerScreen(Container):
                 ladder = [key for key in ladder if key != jump]
         hints.append(self._exit_hint)
 
+        return self._shed_to_fit(hints, ladder, width)
+
+    def _shed_to_fit(
+        self, hints: list[tuple[str, str]], ladder: list[str], width: int
+    ) -> list[tuple[str, str]]:
+        """Fit ``hints`` into ``width``, shedding WORDS before whole KEYS.
+
+        ``ladder`` is ordered LEAST defended first and drives both passes, so
+        the last word standing and the last key standing belong to the same
+        hint. Keys not named in it are never shed — which is how the exit
+        survives to the narrowest card.
+        """
+
         def cells(pairs: list[tuple[str, str]]) -> int:
             return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(
                 0, len(pairs) - 1
@@ -1874,7 +1928,7 @@ class AskPickerScreen(Container):
             shown = [(name, "" if name == key else what) for name, what in shown]
             if cells(shown) <= width:
                 return shown
-        for key in ladder[:-1]:
+        for key in ladder[:-1] if len(ladder) > 1 else ladder:
             shown = [pair for pair in shown if pair[0] != key]
             if cells(shown) <= width:
                 return shown

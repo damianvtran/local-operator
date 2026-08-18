@@ -629,6 +629,19 @@ async def _show(app, pilot, card) -> None:  # type: ignore[no-untyped-def]
     await _settle(app, pilot)
 
 
+def _painted_footer(app) -> str:  # type: ignore[no-untyped-def]
+    """The card's key-hint row AS PAINTED, from the compositor.
+
+    Deliberately not `render_lines_for_test()`: that re-derives the text, so it
+    cannot see a card whose model changed and whose body was never repainted —
+    which is exactly the defect it once hid (D13, design round 4).
+    """
+    for row in reversed(_painted_rows(app)):
+        if "esc" in row:
+            return row
+    return ""
+
+
 def _painted_rows(app) -> list[str]:  # type: ignore[no-untyped-def]
     """The rows the SCREEN is showing, blank ones dropped.
 
@@ -1177,12 +1190,21 @@ async def test_the_footer_names_only_keys_that_work_where_the_caret_is() -> None
         assert card is not None
 
         # On the card, the full keymap is real and advertised.
-        focused_footer = card.render_lines_for_test()[-1]
+        focused_footer = _painted_footer(app)
         assert "↑↓" in focused_footer and "enter" in focused_footer
 
         await pilot.click(Editor)
         await pilot.pause(0.2)
-        composer_footer = card.render_lines_for_test()[-1]
+        # Read what was PAINTED, not what a fresh render would produce.
+        #
+        # This is the assertion the first version of this test got wrong.
+        # `render_lines_for_test` re-derives the card's text on every call, so
+        # it reports the intended footer whether or not anything repainted —
+        # and nothing did, because `has_focus` is not a reactive. The model was
+        # right, the screen still showed `↑↓ move · 1-9 jump · enter answer`,
+        # and this test passed anyway (D13, design round 4). A footer claim is
+        # a claim about pixels, so it has to be read from the compositor.
+        composer_footer = _painted_footer(app)
         # The keys that no longer reach the card are no longer claimed...
         assert "↑↓" not in composer_footer, composer_footer
         assert "enter" not in composer_footer, composer_footer
@@ -1257,3 +1279,74 @@ async def test_a_held_key_never_answers_a_question_the_card_moved_on_from() -> N
             await asked
         except (asyncio.CancelledError, Exception):
             pass
+
+
+@pytest.mark.asyncio
+async def test_a_multi_select_advertises_no_key_it_cannot_be_answered_by() -> None:
+    """A multi-select cannot be answered by one key, so none is offered.
+
+    It is answered by ticking rows with Space and confirming with Enter, and
+    both belong to the composer while the caret is there. Advertised as
+    `1-2 answer`, pressing a digit only moved the cursor and left the question
+    unanswered with `nothing ticked — space toggles` (D15b, design round 4).
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
+        for _ in range(16):
+            await pilot.pause()
+
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+        footer = _painted_footer(app)
+        # No ordinal range is claimed...
+        assert "answer" not in footer, footer
+        assert "esc" in footer, footer
+        # ...and the digit that would have been claimed indeed answers nothing.
+        await pilot.press("1")
+        await pilot.pause(0.3)
+        assert not asked.done(), "a digit answered a multi-select"
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_the_composer_footer_keeps_its_exit_on_a_narrow_card() -> None:
+    """`esc skip` is the last thing the footer gives up, in BOTH focus states.
+
+    The composer-mode branch returned its hints raw, so `_cut_row` ellipsised
+    them and the exit was cut mid-word — `1 answer · esc sk…` at 22 columns.
+    `skip` is the one word this row ranks as unsheddable, because a card with
+    no stated way out is unusable (D3, and D16 in design round 4). The branch
+    now runs through the same ladder, shedding the routed hint's word and then
+    the hint itself.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    for width in (26, 22, 20, 18):
+        app = _baseline_app()
+        async with app.run_test(size=(width, 30)) as pilot:
+            await pilot.pause()
+            asked = asyncio.create_task(app.request_user_choice([_question()]))
+            for _ in range(16):
+                await pilot.pause()
+            await pilot.click(Editor)
+            await pilot.pause(0.2)
+
+            footer = _painted_footer(app)
+            # The exit survives WHOLE — not truncated, not ellipsised.
+            assert "esc skip" in footer, (width, footer)
+            assert "…" not in footer, (width, footer)
+
+            asked.cancel()
+            try:
+                await asked
+            except (asyncio.CancelledError, Exception):
+                pass
