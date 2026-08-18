@@ -16,3 +16,7 @@ actually log in". Captured from the real `OperatorApp` (the host that loads
 - `shots/r2_typed.png` — typed, masked, label no longer duplicated
 - `shots/r2_submitted.png` — submitted receipt with the ✓ glyph
 - `shots/r2_cancel.png` — cancelled receipt with the ✗ glyph
+
+## Follow-up PR frames
+
+- `shots/r4_dedup.png` — registry instruction no longer repeats the prompt row
