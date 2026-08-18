@@ -1378,11 +1378,27 @@ async def test_the_two_hazards_spell_out_different_sentences() -> None:
         async with app.run_test(size=(96, 20)) as pilot:
             await _boot(pilot, app)
             app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
-            await pilot.pause(0.1)
-            row = next(
-                (s.text for s in app.screen._compositor.render_strips() if "write_file" in s.text),
-                "",
-            )
+            # Settled read, for the reason its two neighbours document: a
+            # mid-reflow frame is non-empty and carries the WRONG clause, which
+            # is precisely what this test distinguishes. Measured here at
+            # 163-169ms against the `pause(0.1)` this replaced — the same
+            # overdraft as the threshold test below, found by measuring rather
+            # than by waiting for it to fail in CI.
+            row = ""
+            for _ in range(400):
+                await pilot.pause()
+                current = next(
+                    (
+                        strip.text
+                        for strip in app.screen._compositor.render_strips()
+                        if "write_file" in strip.text
+                    ),
+                    "",
+                )
+                if current and current == row:
+                    break
+                row = current
+            assert row, f"the approval row never painted for {label}"
         assert expected in row, (label, row)
         # The parser's own bracket token must never reach the sentence.
         assert "[" not in row, (label, row)
@@ -1413,11 +1429,37 @@ async def test_the_verbose_threshold_measures_this_row_s_own_clause() -> None:
         async with app.run_test(size=(width, 20)) as pilot:
             await _boot(pilot, app)
             app.query_one(TranscriptView).append_block(ApprovalBlock("write_file", detail))
-            await pilot.pause(0.05)
-            row = next(
-                (s.text for s in app.screen._compositor.render_strips() if "write_file" in s.text),
-                "",
-            )
+            # Read the SETTLED row, not the row after a fixed pause. This is the
+            # same rule the hazard-ladder test three functions up already
+            # follows, and for the identical reason it documents: the defect is
+            # never emptiness, it is reading a frame that has not finished
+            # reflowing. A mid-reflow frame is non-empty and sheds `allow`
+            # exactly as a genuine threshold regression would, so the flat pause
+            # cannot tell the two apart.
+            #
+            # The pause it replaced was `0.05`. Measured on this machine the row
+            # settles at 160-210ms across this width band, so the test was
+            # passing on a 3-4x overdraft that nothing enforced: it survived only
+            # because the branch's old `pause(0.25)` boot happened to leave that
+            # much slack behind it, and main's `_boot` (~67ms, condition-based)
+            # correctly stopped donating it. Polling removes the bet rather than
+            # re-tuning it. The ceiling is a deadlock guard, not a timing
+            # assumption.
+            row = ""
+            for _ in range(400):
+                await pilot.pause()
+                current = next(
+                    (
+                        strip.text
+                        for strip in app.screen._compositor.render_strips()
+                        if "write_file" in strip.text
+                    ),
+                    "",
+                )
+                if current and current == row:
+                    break
+                row = current
+            assert row, f"the approval row never painted at width {width}"
         if "allow" in row:
             kept.append(width)
         # Whatever the verb does, the clause the row measured is the one it paints.
