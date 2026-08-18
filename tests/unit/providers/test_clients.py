@@ -28,6 +28,7 @@ from local_operator.providers.clients import (
     MockClient,
     OpenAICompatClient,
     _anthropic_stream_error,
+    _message_to_openai,
     client_for_spec,
     raise_for_status,
 )
@@ -1692,3 +1693,93 @@ def test_responses_tool_image_output_stays_native_image_content() -> None:
         {"type": "input_text", "text": "screenshot"},
         {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
     ]
+
+
+def _truncated_call() -> ToolCall:
+    """A tool call as the loop stores it when a turn dies mid-stream.
+
+    The argument deltas are concatenated verbatim, so an aborted call leaves a
+    JSON fragment in ``raw_arguments`` and an empty ``arguments`` (the loop
+    could not parse it either). Copied from a real session transcript.
+    """
+    return ToolCall(id="t1", name="write", arguments={}, raw_arguments='{"path": "/tmp/x.py"')
+
+
+def _assistant_with(calls: list[ToolCall]) -> Message:
+    return Message(role="assistant", content=[TextContent(text="ok")], tool_calls=calls)
+
+
+def test_anthropic_body_survives_truncated_tool_arguments() -> None:
+    """A mid-stream abort must not brick every later turn in the session.
+
+    The fragment is written to the transcript and replayed on EVERY subsequent
+    request, so parsing it unguarded raised JSONDecodeError out of body
+    construction. Failover could only read that as a transient provider fault,
+    retried, and rebuilt the identical body — the session became unusable and
+    blamed the provider for its own corrupt row.
+    """
+    request = ChatRequest(
+        model=_spec(provider="anthropic"),
+        messages=[
+            Message.user("hi"),
+            _assistant_with([_truncated_call()]),
+            Message(
+                role="tool",
+                tool_call_id="t1",
+                tool_name="write",
+                content=[TextContent(text="aborted")],
+                is_error=True,
+            ),
+        ],
+    )
+    body = AnthropicClient()._build_body(request)
+    tool_use = [b for b in body["messages"][1]["content"] if b.get("type") == "tool_use"]
+    assert tool_use[0]["input"] == {}
+
+
+def test_openai_replays_valid_json_for_truncated_tool_arguments() -> None:
+    """The OpenAI shapes send the argument STRING, so a fragment goes on the
+    wire as invalid JSON and the provider rejects the request — the same dead
+    session by a longer route."""
+    from local_operator.providers.clients import _messages_to_openai_responses
+
+    message = _assistant_with([_truncated_call()])
+    arguments = _message_to_openai(message)["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(arguments) == {}
+
+    calls = [
+        i for i in _messages_to_openai_responses([message]) if i.get("type") == "function_call"
+    ]
+    assert json.loads(calls[0]["arguments"]) == {}
+
+
+def test_wire_clients_replay_well_formed_raw_arguments_verbatim() -> None:
+    """Byte fidelity is the reason raw_arguments exists: a model reading back
+    its own call must see its own bytes, non-canonical spacing included. Only
+    unparseable strings are salvaged."""
+    from local_operator.providers.clients import _messages_to_openai_responses
+
+    raw = '{"command":  "ls"}'
+    call = ToolCall(id="t2", name="bash", arguments={"command": "ls"}, raw_arguments=raw)
+    message = _assistant_with([call])
+
+    assert _message_to_openai(message)["tool_calls"][0]["function"]["arguments"] == raw
+    calls = [
+        i for i in _messages_to_openai_responses([message]) if i.get("type") == "function_call"
+    ]
+    assert calls[0]["arguments"] == raw
+
+    request = ChatRequest(model=_spec(provider="anthropic"), messages=[message])
+    body = AnthropicClient()._build_body(request)
+    tool_use = [b for b in body["messages"][0]["content"] if b.get("type") == "tool_use"]
+    assert tool_use[0]["input"] == {"command": "ls"}
+
+
+def test_non_object_raw_arguments_fall_back_to_parsed_arguments() -> None:
+    """A bare string or list parses cleanly but is not a legal argument object;
+    it is as unusable on the wire as a fragment."""
+    call = ToolCall(id="t4", name="x", arguments={"a": 1}, raw_arguments='"hello"')
+    arguments = _message_to_openai(_assistant_with([call]))["tool_calls"][0]["function"][
+        "arguments"
+    ]
+    assert json.loads(arguments) == {"a": 1}
