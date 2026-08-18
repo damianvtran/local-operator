@@ -20,6 +20,7 @@ import base64
 import io
 import os
 import signal
+import threading
 import time
 from pathlib import Path
 
@@ -31,6 +32,8 @@ from textual.widgets import TextArea
 from textual.widgets.text_area import Selection
 
 from local_operator.harness.types import ImageContent
+from local_operator.imaging import IMAGE_MAX_EDGE
+from local_operator.tui.widgets import editor as editor_module
 from local_operator.tui.widgets.editor import (
     IMAGE_MARKER,
     MAX_ATTACHMENT_BYTES,
@@ -291,6 +294,130 @@ async def test_an_oversized_image_is_refused_here_not_by_the_provider(tmp_path) 
         await _paste(app, pilot, str(big))
         assert editor.referenced_images() == []
         assert editor.text == str(big)
+
+
+# -- bounding what gets attached ----------------------------------------------
+@pytest.mark.asyncio
+async def test_a_pasted_screenshot_is_bounded_before_it_is_attached(tmp_path) -> None:
+    """The session-wedging bug, reproduced at its source.
+
+    A provider refuses an image over 2000 pixels on its long edge as soon as a
+    request carries more than twenty images. The composer used to attach
+    whatever the screen produced, so a 2206x266 paste sat harmlessly in the
+    history until the twenty-first screenshot arrived and then wedged the
+    session PERMANENTLY: the block is in the history, so every later request —
+    including the ``/compact`` that is supposed to be the escape hatch — re-sent
+    it and earned the same 400.
+
+    2206x266 is the real screenshot that did it, not a round number.
+    """
+    path = _png(tmp_path / "wide.png", 2206, 266)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        (image,) = editor.referenced_images()
+        width, height = Image.open(io.BytesIO(base64.b64decode(image.data))).size
+        assert max(width, height) <= IMAGE_MAX_EDGE
+        # Below the strict many-image ceiling with room to spare, which is the
+        # property that actually keeps the session alive.
+        assert max(width, height) < 2000
+        # Aspect ratio survives the resize; a squashed screenshot is unreadable.
+        assert width / height == pytest.approx(2206 / 266, rel=0.01)
+
+
+@pytest.mark.asyncio
+async def test_the_marker_reports_what_was_attached_not_what_is_on_disk(tmp_path) -> None:
+    """The marker's dimensions are the user's only receipt for an attachment.
+
+    Once the paste path started resizing, carrying the SOURCE dimensions into
+    the marker would print ``[Image #1, 2560x1440]`` beside a 1568x882
+    attachment — a receipt for something that was never sent.
+    """
+    path = _png(tmp_path / "retina.png", 2560, 1440)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        (image,) = editor.referenced_images()
+        delivered = Image.open(io.BytesIO(base64.b64decode(image.data))).size
+        assert editor.text == f"[Image #1, {delivered[0]}x{delivered[1]}] "
+
+
+@pytest.mark.asyncio
+async def test_an_image_already_inside_the_bounds_is_attached_verbatim(tmp_path) -> None:
+    """No re-encode can improve an image the model sees at its original size,
+    and PNG round-tripping routinely makes files BIGGER. The common case — a
+    small crop, an already-bounded frame — must stay lossless and cheap."""
+    path = _png(tmp_path / "small.png", 800, 600)
+    source = Path(path).read_bytes()
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        (image,) = editor.referenced_images()
+        assert base64.b64decode(image.data) == source
+        assert editor.text == "[Image #1, 800x600] "
+
+
+@pytest.mark.asyncio
+async def test_a_decompression_bomb_is_pasted_as_text_not_attached(tmp_path) -> None:
+    """A bomb is small on disk by construction, so the 4 MB cap cannot see it
+    coming — only the dimensions can. The paste stays TEXT so the user can see
+    what happened; a silently dropped attachment is the shape nobody notices
+    until the model answers about nothing."""
+    path = _png(tmp_path / "bomb.png", 9000, 9000)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        assert editor.referenced_images() == []
+        assert editor.text == path
+
+
+@pytest.mark.asyncio
+async def test_the_decode_runs_off_the_event_loop_thread(tmp_path, monkeypatch) -> None:
+    """The bound runs on the keystroke that pasted it, and a 20 MP screenshot
+    measures ~315 ms on an M3 Max — a visibly frozen composer if it runs inline.
+
+    Asserted as a THREAD IDENTITY rather than as elapsed time or loop progress.
+    Both of those pass trivially on the blocking implementation: a synchronous
+    handler that never awaits also never lets the loop fall behind, so the
+    obvious 'did the loop keep ticking' test is green both ways and pins
+    nothing. Where the work runs is the actual invariant, and it is the thing
+    that breaks if someone later drops the ``to_thread``.
+    """
+    path = _png(tmp_path / "big.png", 2600, 1400)
+    seen: list[str] = []
+    real = editor_module.bound_image_for_model
+
+    def spy(data, info):
+        seen.append(threading.current_thread().name)
+        return real(data, info)
+
+    monkeypatch.setattr(editor_module, "bound_image_for_model", spy)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, path)
+
+        assert editor.referenced_images(), "the image was not attached at all"
+        assert seen, "the paste never bounded the image"
+        assert seen[0] != threading.main_thread().name
 
 
 # -- submitting ---------------------------------------------------------------
