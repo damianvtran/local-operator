@@ -47,6 +47,19 @@ ORIGIN_NAME = "origin.json"
 #: scheduled run, a server-side session) is a new value and not a second file.
 ORIGIN_SUBAGENT = "subagent"
 
+#: The two openings only the subagent runner can produce, used ONLY by the
+#: one-time backfill for directories that predate the marker.
+#:
+#: ``[role: <name>]`` is built by ``AgentProfile.preamble`` and ``[scout mode:``
+#: is a literal constant in the subagent module; both are stamped in FRONT of
+#: the caller's prompt, so they can only appear at offset 0 of a child's first
+#: user message. Anchored and exact for that reason: the cost of a false
+#: positive is hiding one of the user's own conversations, which is the very
+#: failure the absence-means-user default exists to avoid, so these match what
+#: the machine writes and nothing that merely resembles it.
+_ROLE_PREAMBLE = re.compile(r"\[role: [a-z0-9_-]+\]\n")
+_SCOUT_PREAMBLE = "[scout mode:"
+
 #: How much of the opening message a session name may keep. Long enough to tell
 #: two days' work apart, short enough that a column of them still scans.
 NAME_MAX_CHARS = 64
@@ -122,9 +135,17 @@ def session_origin(session_dir: Path) -> str:
     Tolerant for the same reason :func:`session_name` is: this runs over every
     session directory to paint a picker, so a truncated or hand-edited marker
     yields ``""`` (treated as the user's) rather than taking the picker down.
+
+    ``errors="replace"`` is load-bearing, not decoration. :func:`mark_session_origin`
+    writes non-atomically, so a child killed mid-write (SIGKILL, sleep, a full
+    volume) leaves the file cut INSIDE a multi-byte character — and a strict
+    decode raises ``UnicodeDecodeError``, which is a ``ValueError`` and would
+    sail past an ``except OSError``. One such sidecar took down the whole
+    picker and every ``--resume`` with no id, for every session, until the
+    user found and deleted the file by hand.
     """
     try:
-        raw = (session_dir / ORIGIN_NAME).read_text(encoding="utf-8")
+        raw = (session_dir / ORIGIN_NAME).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
     try:
@@ -137,8 +158,65 @@ def session_origin(session_dir: Path) -> str:
     return origin if isinstance(origin, str) else ""
 
 
+def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
+    """Stamp pre-existing subagent directories once, and return how many.
+
+    Without this the fix only applies to sessions created after the upgrade,
+    so the person who reported a picker full of ``[role: reviewer]`` rows
+    would upgrade, look, and see the same 40 rows — the change would be
+    correct and appear to do nothing until natural churn cleared the store.
+
+    Identification is by the openings only the subagent runner can produce
+    (:data:`_ROLE_PREAMBLE`, :data:`_SCOUT_PREAMBLE`), matched at offset 0 of
+    the first user message because both are stamped in FRONT of the caller's
+    prompt. This deliberately under-claims: a delegated run launched with no
+    role profile is indistinguishable from a user's own session and stays
+    listed. That is the right direction — an unmarked child costs one stale
+    row, while a false positive hides the user's real work, and the whole
+    point of a one-time sweep is that a row it misses is one the user can
+    still reach.
+
+    Best-effort and bounded like every other function here: it runs at
+    startup, so an unreadable directory is skipped rather than raised, and
+    ``limit`` caps the work on a store that has grown large.
+    """
+    stamped = 0
+    sessions = config_dir / "sessions"
+    try:
+        directories = sorted(sessions.iterdir())
+    except OSError:
+        return 0
+    for directory in directories[:limit]:
+        if stamped >= limit:
+            break
+        try:
+            if not (directory / TRANSCRIPT_NAME).is_file():
+                continue
+            # Already answered: never re-stamp, so a marker a user removed by
+            # hand to un-hide a session is not silently written back.
+            if (directory / ORIGIN_NAME).exists():
+                continue
+        except OSError:
+            continue
+        opening = session_name(directory, max_chars=NAME_MAX_CHARS, condense=False)
+        if not opening:
+            continue
+        if _ROLE_PREAMBLE.match(opening) or opening.startswith(_SCOUT_PREAMBLE):
+            mark_session_origin(directory, ORIGIN_SUBAGENT, backfilled=True)
+            stamped += 1
+    return stamped
+
+
 def is_user_session(session_dir: Path) -> bool:
-    """True when a human started this session, so a picker may offer it."""
+    """True when a human started this session, so a picker may offer it.
+
+    EVERY non-empty origin is hidden, not a listed set of them: a new value
+    added later (a scheduled run, a server-side session) is therefore opt-OUT
+    of the picker by default, and an author who wants a new origin to remain
+    listable has to say so here. That default is the safe direction — a value
+    is minted by whichever code path creates the directory, and the paths that
+    do so are the machine's own.
+    """
     return not session_origin(session_dir)
 
 
@@ -273,7 +351,9 @@ class SessionRow(NamedTuple):
     name: str
 
 
-def session_name(session_dir: Path, *, max_chars: int = NAME_MAX_CHARS) -> str:
+def session_name(
+    session_dir: Path, *, max_chars: int = NAME_MAX_CHARS, condense: bool = True
+) -> str:
     """A conversation's display name: its opening user message, on one line.
 
     Read from the TRANSCRIPT rather than from a stored title because there is
@@ -337,7 +417,11 @@ def session_name(session_dir: Path, *, max_chars: int = NAME_MAX_CHARS) -> str:
             continue
         text = _first_text(payload.get("content"))
         if text:
-            return _condense(text, max_chars)
+            # ``condense=False`` returns the opening text with its line
+            # breaks intact, which the backfill needs: the role preamble it
+            # matches is ``[role: <name>]\n``, and condensing flattens that
+            # newline into a space before the pattern could ever see it.
+            return _condense(text, max_chars) if condense else text
     # The window held no COMPLETE line, so the opener is a fragment. Dropping
     # it (which is all this used to do) left every session that begins with a
     # pasted screenshot permanently nameless: one base64 image puts the first

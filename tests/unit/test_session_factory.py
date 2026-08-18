@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import os
 import sqlite3
 from collections.abc import Awaitable, Callable
@@ -1807,3 +1808,72 @@ async def test_an_unreadable_profile_says_so_in_the_log(
         and "OSError" in record.getMessage()
         for record in caplog.records
     ), [record.getMessage() for record in caplog.records]
+
+
+def test_a_marker_truncated_mid_character_does_not_take_the_picker_down(tmp_path: Path) -> None:
+    """`mark_session_origin` writes non-atomically, so a child killed mid-write
+    leaves the file cut INSIDE a multi-byte character.
+
+    A strict decode raises `UnicodeDecodeError`, which is a `ValueError` and
+    sails past `except OSError` — so one truncated sidecar took down the whole
+    picker, and `--resume` with no id, for every session on the machine until
+    the user found and deleted the file by hand.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "cut").mkdir(parents=True)
+    (sessions / "cut" / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    # 0xc3 opens a two-byte sequence that never arrives.
+    (sessions / "cut" / resume_mod.ORIGIN_NAME).write_bytes(b'{"origin": "subagent", "l": "caf\xc3')
+
+    assert resume_mod.session_origin(sessions / "cut") == ""
+    assert resume_mod.recent_sessions(tmp_path) == [
+        ("cut", (sessions / "cut" / resume_mod.TRANSCRIPT_NAME).stat().st_mtime)
+    ]
+    # The `@latest` resolver reads the same marker and must survive it too.
+    assert resume_mod.resume_dir(tmp_path, resume_mod.RESUME_LATEST).name == "cut"
+
+
+def test_the_backfill_stamps_only_what_the_machine_itself_wrote(tmp_path: Path) -> None:
+    """Sessions predating the marker are classified once, at startup.
+
+    Without this the fix applies only to sessions created after the upgrade,
+    so the person who reported a picker full of `[role: reviewer]` rows would
+    upgrade, run `/resume`, and see the same wall.
+
+    The direction of the risk decides the strictness: a false positive HIDES
+    one of the user's own conversations, so only the two openings the subagent
+    runner itself writes are matched, anchored at offset 0.
+    """
+    sessions = tmp_path / "sessions"
+
+    def seed(name: str, opening: str) -> None:
+        directory = sessions / name
+        directory.mkdir(parents=True)
+        entry = {
+            "id": "e1",
+            "ts": 0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": opening}]},
+        }
+        (directory / resume_mod.TRANSCRIPT_NAME).write_text(
+            json.dumps(entry) + "\n", encoding="utf-8"
+        )
+
+    seed("child_role", "[role: reviewer]\nYou are an INDEPENDENT reviewer.")
+    seed("child_scout", "[scout mode: you are a READ-ONLY research agent.]\n\nfind it")
+    seed("mine_plain", "fix the resume picker")
+    # The user QUOTING a preamble mid-message is not a delegated run: the
+    # machine's preambles are stamped in front, so matching is anchored.
+    seed("mine_quoting", "why does my subagent say [role: reviewer] in its prompt?")
+
+    assert resume_mod.backfill_session_origins(tmp_path) == 2
+    assert not resume_mod.is_user_session(sessions / "child_role")
+    assert not resume_mod.is_user_session(sessions / "child_scout")
+    assert resume_mod.is_user_session(sessions / "mine_plain")
+    assert resume_mod.is_user_session(sessions / "mine_quoting")
+
+    # Idempotent: a second startup stamps nothing, so a marker the user
+    # deleted by hand to un-hide a session is not silently written back.
+    assert resume_mod.backfill_session_origins(tmp_path) == 0
+    (sessions / "child_role" / resume_mod.ORIGIN_NAME).unlink()
+    assert resume_mod.backfill_session_origins(tmp_path) == 1

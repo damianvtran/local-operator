@@ -6261,6 +6261,14 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
         lines.append(f"- {row.label} ({row.job_id}): {row.status}{age} — {extras}")
         if row.resumable and row.detail:
             lines.append(f"    {row.detail}")
+        # The session id only where it can be acted on. It is the id
+        # ``--resume`` takes (NOT the job id on the line above), and this
+        # roster is the only surface that shows it now that children are kept
+        # out of the ``/resume`` picker. Printed for resumable rows alone: on a
+        # row that cannot be resumed it is a string to mistake for the job id
+        # rather than something to type.
+        if row.resumable and row.session_id:
+            lines.append(f"    transcript session id: {row.session_id}")
     if any(row.resumable for row in rows):
         lines.append("")
         lines.append("Resume one with hub op='resume' and an instruction for what to do next.")
@@ -6277,6 +6285,7 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
                     "label": row.label,
                     "status": row.status,
                     "resumable": row.resumable,
+                    "session_id": row.session_id,
                 }
                 for row in rows
             ],

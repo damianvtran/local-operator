@@ -72,6 +72,18 @@ PICKER_PADDING_CELLS = 2
 #: the thing being looked up.
 NAME_MIN_CELLS = 16
 
+#: What both empty surfaces say when the picker has nothing to offer: the
+#: card's own body, and the notice ``/resume`` prints instead of opening it.
+#: ONE string because the two are the same statement made in two places, and
+#: they contradicted each other the moment either was edited alone.
+#:
+#: It names WHOSE sessions rather than claiming none exist. Delegated subagent
+#: runs share the directory and are deliberately unlisted, so on a machine
+#: whose only surviving sessions are children — reachable through retention,
+#: which evicts the older parent before its newer children — "no previous
+#: sessions" was false and told the user nothing about why.
+RESUME_EMPTY_NOTICE = "no conversations of yours to resume — delegated subagent runs are not listed"
+
 #: Rows of sessions shown before the list scrolls, when the terminal has room.
 #: A page that fills the screen makes the modal feel like a mode switch rather
 #: than a popup; ten is enough to scan. A CEILING, not the page size — see
@@ -584,7 +596,11 @@ class SessionPickerScreen(ModalScreen[str | None]):
             else:
                 header.append(truncate_cells(self._query, width), style=label)
         else:
-            tally = f"  {len(self._all)} sessions"
+            # Singular when there is one. Pre-existing, but filtering makes a
+            # one-row list the common case rather than the rare one: a machine
+            # whose delegated fan-out dominates now lands there routinely.
+            count = len(self._all)
+            tally = f"  {count} session" if count == 1 else f"  {count} sessions"
             if cell_len(title) + cell_len(tally) > width:
                 header.append(truncate_cells(title, width), style=Style(color=fg_colour))
             else:
@@ -602,7 +618,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         page = self._page_rows()
         counter: tuple[int, int, int] | None = None
         if not self._all:
-            out.append("no previous sessions to resume", style=dim)
+            out.append(RESUME_EMPTY_NOTICE, style=dim)
         elif not rows:
             # The header already echoes the query; repeating it here — and via
             # ``repr``, whose quoting flips on an apostrophe — said it twice in

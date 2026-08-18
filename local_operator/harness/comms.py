@@ -138,6 +138,15 @@ class ChildInfo:
     age_s: float | None = None
     #: Why ``resumable`` is False, when it is False for an interesting reason.
     detail: str | None = None
+    #: The child's TRANSCRIPT directory name — the id ``--resume`` takes, which
+    #: is not the ``job_id`` above. Carried because this roster is now the only
+    #: surface that can show it: children were dropped from the ``/resume``
+    #: picker (they are the machine's own runs, not the user's conversations),
+    #: and the job row that carries ``job_id`` is swept minutes after a child
+    #: settles. Without it, an operator investigating a subagent that crashed
+    #: an hour ago had no in-product path to its transcript at all — exactly
+    #: the case this class's docstring says it exists to cover.
+    session_id: str | None = None
 
 
 class ChildSession(Protocol):
@@ -486,6 +495,7 @@ class SubagentComms:
             resumable=resumable,
             age_s=age,
             detail=detail,
+            session_id=record.session_dir.name if record.session_dir is not None else None,
         )
 
     def _live_twin(self, record: _ChildRecord) -> _ChildRecord | None:

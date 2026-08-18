@@ -890,3 +890,37 @@ def test_a_right_click_never_resumes_a_session() -> None:
 
     screen.on_click(_RightClick())
     assert resumed == []
+
+
+def test_the_empty_card_says_whose_sessions_are_missing() -> None:
+    """ "no previous sessions to resume" was false when only children exist.
+
+    Delegated runs share the sessions directory and are deliberately unlisted,
+    and retention evicts an older parent before its newer children — so a
+    machine can reach a state with resumable directories on disk and nothing
+    the picker will offer. The old sentence stated a fact about the disk that
+    was untrue, and named no way forward.
+    """
+    from local_operator.tui.widgets.session_picker import RESUME_EMPTY_NOTICE
+
+    screen = SessionPickerScreen([], NOW)
+    card = "\n".join(screen.render_lines_for_test())
+    assert RESUME_EMPTY_NOTICE in card
+    assert "delegated subagent runs are not listed" in card
+
+
+def test_one_session_is_not_announced_as_1_sessions() -> None:
+    """Filtering makes a one-row list the common case rather than the rare
+    one, so the header's plural now shows up routinely."""
+    single = "\n".join(
+        SessionPickerScreen([_row("aabbcc", "the only one")], NOW).render_lines_for_test()
+    )
+    assert "1 session" in single
+    assert "1 sessions" not in single
+
+    plural = "\n".join(
+        SessionPickerScreen(
+            [_row("aabbcc", "one"), _row("ddeeff", "two")], NOW
+        ).render_lines_for_test()
+    )
+    assert "2 sessions" in plural

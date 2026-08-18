@@ -134,7 +134,10 @@ from local_operator.tui.widgets.editor import (
     resolve_markers,
 )
 from local_operator.tui.widgets.model_picker import ModelRow
-from local_operator.tui.widgets.session_picker import SessionPickerScreen
+from local_operator.tui.widgets.session_picker import (
+    RESUME_EMPTY_NOTICE,
+    SessionPickerScreen,
+)
 from local_operator.tui.widgets.status_line import (
     McpStatus,
     StatusLine,
@@ -1852,7 +1855,13 @@ class OperatorApp(App[None]):
         if not arg:
             rows = recent_session_rows(config_dir(), limit=RESUME_PICKER_LIMIT)
             if not rows:
-                self._system_notice("no previous sessions to resume", "warning")
+                # Says whose sessions, not that the disk is empty. Delegated
+                # subagent runs live in the same directory and are deliberately
+                # not listed, so on a machine whose only surviving sessions are
+                # children (retention evicts the older parent first) the flat
+                # "none exist" was simply false — and a dead end for a user who
+                # knows work is there.
+                self._system_notice(RESUME_EMPTY_NOTICE, "warning")
                 return
 
             def _resume_choice(session_id: str | None) -> None:
