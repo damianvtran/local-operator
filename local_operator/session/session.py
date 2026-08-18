@@ -353,6 +353,38 @@ def _is_todo_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
     return isinstance(message, CustomMessage) and message.custom_type == TODO_REMINDER_MESSAGE_TYPE
 
 
+#: ``CustomMessage`` types that belong in the transcript as message entries.
+#:
+#: An ALLOW-LIST, because the cost of the two mistakes is asymmetric. Omitting a
+#: type that should persist loses one replayed message; persisting one that
+#: should not corrupts the session's history for good, and the compaction
+#: summary marker is the proof: it is minted by ``_run_compaction`` and stored
+#: through ``append_compaction`` as its OWN entry type, so writing it a second
+#: time as a message replays a superseded summary back into context beside the
+#: live one. A deny-list enumerating the ephemeral types cannot see a type that
+#: does not exist yet; this one excludes it by default.
+_PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset({SESSION_INCIDENT_MESSAGE_TYPE})
+
+
+def _is_persistable_message(message: AgentMessage) -> bool:
+    """Whether ``message`` may be written to the transcript as a message entry.
+
+    Plain ``Message``s always may. A ``CustomMessage`` may only when its type is
+    in :data:`_PERSISTABLE_CUSTOM_TYPES` — todo reminders are ephemeral by
+    design (a stored reminder replays as a user message the user never sent and
+    goes on asserting that finished items are open), and a compaction summary
+    marker is already persisted as a compaction entry.
+
+    This matters because the mid-turn gate flushes from the LIVE loop context,
+    which is exactly where both of those live: after a pass the context is
+    ``[marker, *kept]``, so the very next boundary would otherwise persist the
+    marker.
+    """
+    if isinstance(message, CustomMessage):
+        return message.custom_type in _PERSISTABLE_CUSTOM_TYPES
+    return True
+
+
 def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
     """The todo fingerprint a reminder was built from, normalized for compare.
 
@@ -1480,11 +1512,12 @@ class Session:
             self._last_provider_request_ms = int(time.time() * 1000)
 
             # Persist everything the turn produced (initial messages were
-            # written before the run).
-            for message in new_messages:
-                if message in initial:
-                    continue
-                await self._transcript.append_message(message)
+            # written before the run). Deduplicated by id rather than by
+            # identity against ``initial``, because the mid-turn compaction
+            # gate may already have flushed part of this run to get a
+            # replayable cut target; re-appending those would resurrect
+            # messages after the compaction entry that superseded them.
+            await self._persist_new_messages(new_messages)
 
             pending_incident = self._pending_incident
             self._pending_incident = None
@@ -1844,6 +1877,23 @@ class Session:
         except OSError as exc:
             logger.warning("could not journal pruned tool outputs: %s", exc)
 
+    async def _persist_new_messages(self, messages: Sequence[AgentMessage]) -> None:
+        """Append every message not already in the transcript, in order.
+
+        Idempotent by message id, which is what lets the mid-turn compaction
+        gate flush a run's messages early (it needs a persisted cut target)
+        without the post-run persistence pass writing them a second time. The
+        transcript stores a message under its OWN id, so "already stored" is
+        an exact check rather than a heuristic.
+        """
+        stored = {entry.id for entry in self._transcript.entries()}
+        for message in messages:
+            if not _is_persistable_message(message):
+                continue
+            if getattr(message, "id", None) in stored:
+                continue
+            await self._transcript.append_message(message)
+
     async def _on_turn_end(self, messages: list[AgentMessage]) -> list[AgentMessage] | None:
         """Mid-turn compaction gate — runs INSIDE the tool loop, at the safe
         boundary after each tool batch lands and before the next model call.
@@ -1903,6 +1953,23 @@ class Session:
                 provider_reported, self._model.context_window, settings
             ):
                 return None
+        # Persist what the run has produced SO FAR before planning a cut.
+        #
+        # The post-run path writes the whole run at once (see the persistence
+        # block in ``prompt``), which is too late for a mid-run pass: the cut
+        # has to land on an already-persisted entry or ``_plan_compaction``
+        # refuses it as ``cut_not_replayable``, and mid-run the tail of the
+        # history is exactly the part the run just made. That refusal fired at
+        # every boundary of a long tool run, so the gate correctly decided to
+        # compact and was then blocked from doing it, and the context kept
+        # growing until the run ended.
+        #
+        # Appending early is safe because the transcript is append-only and
+        # keyed by message id: the post-run loop re-appends nothing that is
+        # already stored (``_persist_new_messages`` skips known ids), and a
+        # crash mid-run leaves a transcript that replays to what actually
+        # happened rather than losing the run outright.
+        await self._persist_new_messages(messages)
         planned = await self._plan_compaction(respect_threshold=True)
         if isinstance(planned, CompactionOutcome):
             return None

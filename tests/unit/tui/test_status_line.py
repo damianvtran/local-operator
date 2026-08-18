@@ -18,8 +18,10 @@ import re
 from typing import Any, NotRequired, TypedDict, cast
 
 from rich.cells import cell_len
+from rich.style import Style
 from textual.widgets import Static
 
+from local_operator.compaction.thresholds import CompactionSettings, should_compact
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import (
     _DROP_LADDER,
@@ -42,6 +44,7 @@ from local_operator.tui.widgets.status_line import (
     NAME_CELLS_FLOOR,
     McpStatus,
     StatusLine,
+    context_semantic_color,
     drop_ladder,
     format_agents,
     format_context_usage,
@@ -1504,3 +1507,175 @@ def test_every_segment_icon_stays_in_the_block_the_terminal_font_covers() -> Non
     # The jobs and context icons sit side by side in the right group, so they
     # have to be tellable apart at a glance and not merely unequal as strings.
     assert ICON_JOBS != ICON_CONTEXT
+
+
+# ---------------------------------------------------------------------------
+# The context reading's colour ramp
+# ---------------------------------------------------------------------------
+
+
+def test_the_context_colour_warms_as_the_context_fills() -> None:
+    """Blue below 200k, purple above it, red above 500k.
+
+    The reading is the one number in the band whose colour carries
+    information: a session heading for compaction should be visible without
+    being read. This is the ABSOLUTE half of the ramp, which is what keeps a
+    very large window legible; an unknown window (0) isolates it, since the
+    proportional half needs a denominator.
+    """
+    assert context_semantic_color(0, 0) == "signal"
+    assert context_semantic_color(199_999, 0) == "signal"
+    assert context_semantic_color(200_001, 0) == "label"
+    assert context_semantic_color(499_999, 0) == "label"
+    assert context_semantic_color(500_001, 0) == "danger"
+
+
+def test_a_reading_exactly_on_a_boundary_keeps_the_calmer_colour() -> None:
+    """Strictly greater-than on both ladders, so a context parked on a
+    boundary does not flicker between two hues as the estimate wobbles by a
+    token."""
+    assert context_semantic_color(200_000, 0) == "signal"
+    assert context_semantic_color(500_000, 0) == "label"
+    # The proportional ladder on its own boundaries, isolated by a 200k window
+    # where the absolute rungs are unreachable and cannot mask the result:
+    # 55% is 110,000 and 80% is 160,000.
+    assert context_semantic_color(110_000, 200_000) == "signal"
+    assert context_semantic_color(110_001, 200_000) == "label"
+    assert context_semantic_color(160_000, 200_000) == "label"
+    assert context_semantic_color(160_001, 200_000) == "danger"
+
+
+def test_a_small_window_still_reaches_the_warm_rungs() -> None:
+    """D1: the absolute rungs are unreachable on most models.
+
+    70% of the registry's windowed models are 200k or smaller, so an
+    absolute-only ramp left them calm blue at 100% full with compaction
+    already overdue. The proportional half is what fires there.
+    """
+    assert context_semantic_color(100_000, 200_000) == "signal"
+    assert context_semantic_color(150_000, 200_000) == "label"
+    assert context_semantic_color(199_000, 200_000) == "danger"
+    assert context_semantic_color(200_000, 200_000) == "danger"
+
+
+def test_the_reading_is_never_calm_while_compaction_is_due_at_the_default_trigger() -> None:
+    """The property the ramp exists for, asserted against the REAL trigger.
+
+    Colour meaning "how full am I" is only honest if a calm reading implies
+    no pass is due. Checked against ``should_compact`` itself rather than
+    against the ramp's own thresholds, so the two cannot drift apart.
+
+    Scoped to the DEFAULT ``CompactionSettings`` on purpose, and named for it,
+    because the ramp's fractions are constants while the trigger is user
+    config: someone who sets ``threshold_percent`` below 0.55, or a
+    ``threshold_tokens``/explicit ``reserve_tokens`` that resolves lower than
+    the proportional rung, moves the trigger under the ramp and gets a calm
+    reading while a pass is due. That degrades to the pre-change appearance
+    rather than to a wrong one, and banding on the resolved trigger would
+    mean plumbing ``resolve_threshold_tokens`` into the band. The claim is
+    narrowed to what is actually verified rather than left sounding absolute.
+    """
+    settings = CompactionSettings()
+    for window in (131_072, 200_000, 1_000_000):
+        for numerator in range(1, 21):
+            tokens = int(window * numerator / 20)
+            if should_compact(tokens, window, settings):
+                assert context_semantic_color(tokens, window) != "signal", (
+                    f"{tokens:,}/{window:,} is past its compaction trigger "
+                    "but still paints the calm base colour"
+                )
+
+
+def test_the_band_paints_the_context_segment_in_its_band_colour() -> None:
+    """The ramp reaches the rendered row, not just the helper.
+
+    Asserted on a 1M window at each band, because the window is exactly what
+    the colour must NOT depend on — 300k of 1M is only 30% full and still
+    warrants the warmer hue, since re-sending 300k tokens is expensive
+    whatever the window.
+    """
+    for tokens, semantic in ((120_000, "signal"), (300_000, "label"), (700_000, "danger")):
+        status = StatusLine(_dock(200))
+        status.update(model_label="test/model", context_tokens=tokens, context_window=1_000_000)
+        row = status.render_text(200)
+        reading = format_context_usage(tokens, 1_000_000)
+        assert reading in row.plain
+        fills = _fills(row)
+        painted = {text: fill for text, fill in fills.items() if reading in text}
+        assert painted, f"the context segment was not painted for {tokens}"
+        expected = theme_mod.semantic_color(semantic).lower()
+        assert set(painted.values()) == {
+            expected
+        }, f"{tokens} tokens should paint {semantic} ({expected}), got {painted}"
+
+
+def test_the_three_context_bands_are_visually_distinct() -> None:
+    """A ramp nobody can tell apart is not a ramp. The three hues must be
+    separated in both themes, since the palette differs between them."""
+    for theme in ("dark", "light"):
+        hexes = [theme_mod.semantic_color(name, theme) for name in ("signal", "label", "danger")]
+        assert len(set(hexes)) == 3, f"{theme} reuses a hue across the context bands"
+
+
+def test_the_warm_rungs_carry_weight_as_well_as_hue() -> None:
+    """D3: hue alone cannot carry this signal.
+
+    `signal` and `label` are ~35 dE apart in normal vision and 1.7 under
+    deuteranopia, so for the commonest colour-vision deficiency the middle
+    rung would not exist at all. Weight is orthogonal to hue and costs no
+    cells. The base rung stays regular, so warm is the marked state.
+    """
+    weights: dict[int, bool] = {}
+    for tokens in (120_000, 300_000, 700_000):
+        status = StatusLine(_dock(200))
+        status.update(model_label="test/model", context_tokens=tokens, context_window=1_000_000)
+        row = status.render_text(200)
+        reading = format_context_usage(tokens, 1_000_000)
+        # ``Span.style`` is ``str | Style``; only the Style spans carry the
+        # paint, and narrowing keeps this honest rather than casting.
+        bolds = {
+            span.style.bold
+            for span in row.spans
+            if isinstance(span.style, Style)
+            and span.style.color is not None
+            and reading in row.plain[span.start : span.end]
+        }
+        assert len(bolds) == 1, f"the reading was painted inconsistently at {tokens}"
+        weights[tokens] = bool(bolds.pop())
+    assert weights[120_000] is False, "the calm rung must not be bold"
+    assert weights[300_000] is True, "the purple rung needs a non-colour carrier"
+    assert weights[700_000] is True, "the red rung needs a non-colour carrier"
+
+
+def test_weight_tracks_attention_across_every_red_in_the_band() -> None:
+    """D6: three segments may take red, and weight must not invert them.
+
+    The context reading is bold on its warm rungs as a colour-vision carrier.
+    Left alone, that made the one red the band calls self-correcting heavier
+    than the `⊙` MCP lamp, which is the state where the agent is genuinely
+    missing tools — the salience the alarm colour exists to protect. Worst on
+    a narrow terminal, where the drop ladder sheds what sits between them.
+    """
+    status = StatusLine(_dock(200))
+    status.update(
+        model_label="test/model",
+        context_tokens=700_000,
+        context_window=1_000_000,
+        mcp=McpStatus(configured=3, connected=2, failed=True),
+    )
+    row = status.render_text(200)
+    danger = theme_mod.semantic_color("danger").lower()
+
+    reds = {
+        row.plain[span.start : span.end]: span.style.bold
+        for span in row.spans
+        if isinstance(span.style, Style)
+        and span.style.color is not None
+        and span.style.color.triplet is not None
+        and span.style.color.triplet.hex.lower() == danger
+    }
+    assert reds, "expected the row to carry red marks"
+    assert all(reds.values()), (
+        f"a red mark is unweighted while another is bold, which inverts the "
+        f"band's attention order: {reds}"
+    )

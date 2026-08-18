@@ -397,8 +397,22 @@ async def _persist_inflight(child: "Session") -> None:
     """
 
     async def _write() -> None:
+        # Imported here rather than at module scope: ``session.session`` imports
+        # this module, so a top-level import is a cycle (the TYPE_CHECKING block
+        # above imports ``Session`` the same way).
+        from local_operator.session.session import _is_persistable_message
+
         known = {entry.id for entry in child._transcript.entries()}
         for message in _answered_prefix(list(child._context.messages)):
+            # The SAME allow-list the session's own flush uses. This writes the
+            # child's LIVE context, which after a compaction pass begins with
+            # the summary marker and may carry a todo reminder — neither of
+            # which may be persisted as a message: the marker is already stored
+            # as its own compaction entry, so writing it again replays a
+            # superseded summary beside the live one, and a stored reminder
+            # comes back as a user message the user never sent.
+            if not _is_persistable_message(message):
+                continue
             if message.id not in known:
                 await child._transcript.append_message(message)
 
