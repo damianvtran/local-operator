@@ -1418,79 +1418,78 @@ async def test_a_prompt_never_eats_a_half_typed_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_answer_keys_survive_a_click_into_the_composer() -> None:
-    """The reported defect, reproduced with the gesture that actually causes it.
+async def test_the_answer_keys_work_from_the_composer() -> None:
+    """The reported defect: keys the card advertises must actually answer it.
 
-    A prompt takes focus so its keys reach it. The user then clicks the
-    composer — the single most likely thing to do while thinking — and from
-    that moment every key the card still advertises is typed into the draft as
-    text while the tool goes on waiting. Pressing `y` put a `y` in the composer
-    and left the question up.
-
-    Focus bounces back while the composer is EMPTY, which is the state in which
-    the advertised keys would otherwise be silently dead. A user who is drafting
-    keeps the caret; see the next test.
+    A prompt is raised while the user is looking at the composer, they press
+    the key the card is showing them, and it lands in the draft as text while
+    the tool goes on waiting. The keys are ROUTED to the live prompt now, with
+    the caret left where it is — see `route_key_to_live_prompt` for why moving
+    focus instead was worse than the bug.
     """
-    session = SteerableSession()
-    app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        ask = await _booted_gate(pilot, session)
-        pending = asyncio.ensure_future(ask("bash", "run: rm -rf ./build"))
-        for _ in range(100):
-            if isinstance(app.screen.focused, ApprovalPrompt):
-                break
-            await pilot.pause(0.02)
+    for key, expected in (("y", True), ("n", False), ("A", True)):
+        session = SteerableSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            ask = await _booted_gate(pilot, session)
+            pending = asyncio.ensure_future(ask("bash", "run: rm -rf ./build"))
+            for _ in range(100):
+                if app.query(ApprovalPrompt):
+                    break
+                await pilot.pause(0.02)
+            await pilot.pause(0.2)
 
-        await pilot.click(Editor)
-        await pilot.pause(0.2)
-        # The empty composer does not get to hold the keys hostage.
-        assert isinstance(app.screen.focused, ApprovalPrompt)
-
-        await pilot.press("y")
-        assert await asyncio.wait_for(pending, 2) is True
-        # …and the keystroke answered rather than landing in the draft.
-        assert app.query_one(Editor).text == ""
+            await pilot.click(Editor)
+            await pilot.pause(0.1)
+            await pilot.press(key)
+            assert await asyncio.wait_for(pending, 2) is expected, key
+            # The key answered instead of being typed.
+            assert app.query_one(Editor).text == "", key
 
 
 @pytest.mark.asyncio
-async def test_a_draft_in_progress_keeps_the_caret() -> None:
-    """The other half of the rule: a deliberate draft is not interrupted.
+async def test_typing_a_steer_at_a_live_prompt_never_answers_it() -> None:
+    """A sentence typed at a question is a steer, not an authorisation.
 
-    The bounce above is scoped to an EMPTY composer on purpose. A user typing
-    while a question is up is doing something intentional — composing a steer,
-    or writing out the thing they are about to decide — and yanking the caret
-    out of a half-typed sentence would be its own defect.
+    This is the hazard the routing takes on, and it is the reason a routed key
+    is held for one keystroke rather than acted on immediately. An earlier
+    revision moved FOCUS to the prompt whenever the composer was empty — which
+    is exactly when a user is about to start typing — so the first character of
+    `yes do it` authorised a pending `rm -rf` and left `es do it` in the buffer.
+
+    Every phrase here begins with a character that WOULD answer if it stood
+    alone, which is the whole point: the ambiguity is real and is resolved by
+    what follows.
     """
-    session = SteerableSession()
-    app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        ask = await _booted_gate(pilot, session)
-        editor = app.query_one(Editor)
-        editor.focus()
-        editor.load_text("let me look this up first")
-        await pilot.pause(0.1)
+    for phrase in ("yes do it", "no wait", "and also drop the index"):
+        session = SteerableSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            ask = await _booted_gate(pilot, session)
+            pending = asyncio.ensure_future(ask("bash", "run: rm -rf /Users/x/project/data"))
+            for _ in range(100):
+                if app.query(ApprovalPrompt):
+                    break
+                await pilot.pause(0.02)
+            await pilot.pause(0.2)
 
-        pending = asyncio.ensure_future(ask("bash", "run: rm -rf ./build"))
-        for _ in range(100):
-            if isinstance(app.screen.focused, ApprovalPrompt):
-                break
-            await pilot.pause(0.02)
+            await pilot.click(Editor)
+            await pilot.pause(0.1)
+            for character in phrase:
+                await pilot.press("space" if character == " " else character)
+            await pilot.pause(0.4)
 
-        # Clicking back into a NON-EMPTY draft keeps the caret there...
-        await pilot.click(Editor)
-        await pilot.pause(0.2)
-        assert isinstance(app.screen.focused, Editor)
-        # ...and typing continues into the draft rather than answering.
-        await pilot.press("!")
-        await pilot.pause(0.1)
-        assert "!" in app.query_one(Editor).text
-        assert not pending.done()
+            # Nothing was authorised...
+            assert not pending.done(), (phrase, "typing a steer answered the prompt")
+            assert app._approve_all is False, phrase
+            # ...and the whole sentence survived, including its first character.
+            assert app.query_one(Editor).text == phrase, phrase
 
-        pending.cancel()
-        try:
-            await pending
-        except (asyncio.CancelledError, Exception):
-            pass
+            pending.cancel()
+            try:
+                await pending
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 @pytest.mark.asyncio

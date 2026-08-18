@@ -1313,6 +1313,30 @@ class AskPickerScreen(Container):
         if was_drawable != drawable and self.is_attached:
             self.post_message(self.DrawableChanged(self))
 
+    def answer_keys(self) -> frozenset[str]:
+        """Keys that answer this card directly from the COMPOSER.
+
+        Deliberately narrow. The card holds focus in the ordinary case and its
+        full keymap works there; this is only the set worth intercepting while
+        the caret is in the composer, where every character is otherwise the
+        user's text. On the ``ask`` picker that is the row ordinals — a digit
+        with an empty composer is unambiguous — and nothing else: Enter is left
+        to the composer because it SUBMITS a prompt there, and Escape is the
+        app's stop key.
+
+        Empty while the card is drawing no rows, so a key can never commit an
+        answer the user was not shown (the rule :meth:`action_accept` follows).
+        """
+        if not self.visible_rows:
+            return frozenset()
+        return frozenset(str(index + 1) for index in self._window() if index < 9)
+
+    def answer_from_key(self, character: str) -> None:
+        """Take ``character`` as an answer routed from the composer."""
+        if character.isdigit():
+            self.action_jump(int(character))
+            self.action_accept()
+
     @property
     def is_drawable(self) -> bool:
         """Whether the card has any line to paint at this terminal size.

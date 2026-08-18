@@ -27,6 +27,7 @@ import logging
 import os
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
 
 from rich.console import Group
@@ -41,6 +42,7 @@ from textual.css.query import NoMatches
 from textual.events import DescendantBlur, DescendantFocus, TextSelected
 from textual.geometry import Size
 from textual.screen import Screen
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -410,6 +412,37 @@ COMPOSER_FOCUSED_CLASS = "-composer-focused"
 #: the pre-resize composer width. 50 ms is past the arrange on every size the
 #: tests sweep and is also the debounce a drag-resize wants: one re-measure per
 #: settled size rather than one per intermediate column.
+#: How long an answer key routed from the COMPOSER is held before it counts as
+#: an answer. Released early by any second keystroke, which proves the user was
+#: typing a word rather than answering.
+#:
+#: It exists because the two intents are indistinguishable at the first
+#: character: `y` on an empty composer with a question up may be "yes", or it
+#: may be the start of `yes do it` typed as a steer. Acting immediately took
+#: the second reading as the first and AUTHORISED a pending `rm -rf` from a
+#: keystroke meant as text (F3, agent review round 2).
+#:
+#: 180 ms is under the ~200 ms floor for deliberate single keypresses and well
+#: over the inter-key interval of even fast typing (60 wpm is ~200 ms/char, and
+#: the burst within a word is far shorter), so a deliberate answer feels
+#: immediate and a typed word never commits one. It only ever delays an answer;
+#: it can never turn typing into one.
+ANSWER_KEY_HOLD_S = 0.18
+
+
+@dataclass
+class _HeldAnswerKey:
+    """An answer key routed from the composer, parked until it is disambiguated.
+
+    Holds the prompt it was routed to as well as the character, so a key held
+    across a question settling cannot answer whatever replaced it.
+    """
+
+    prompt: "AskPickerScreen"
+    character: str
+    timer: Timer
+
+
 RESIZE_REFIT_DELAY_S = 0.05
 
 #: Class the Screen carries, on top of ``BOOT_LAYOUT_CLASS``, while the terminal
@@ -754,6 +787,10 @@ class OperatorApp(App[None]):
         # stopped (a queued asker wakes when the front prompt settles, and
         # without the latch it would mount a fresh question for a dead turn).
         self._approval: ApprovalPrompt | None = None
+        #: An answer key routed from the composer and parked for one keystroke,
+        #: so a key that turns out to be the first character of a word never
+        #: commits an answer. See `route_key_to_live_prompt`.
+        self._held_answer_key: _HeldAnswerKey | None = None
         # The one live `ask` picker and the future the tool call is parked on.
         # Held as a PAIR because settling one without the other is the failure
         # both halves exist to prevent: a dismissed screen whose future is still
@@ -2215,52 +2252,100 @@ class OperatorApp(App[None]):
         because the usage panel lit up".
         """
         self._sync_composer_focus()
-        # Only while a question is actually waiting. Cheap and, more to the
-        # point, SCOPED: this handler sees every focus change in the app, and
-        # the guard has no business running — or querying the DOM — for the
-        # subagent page closing, a picker opening, or any other focus move that
-        # has nothing to do with an unanswered prompt.
-        if self._approval is not None or self._ask_screen is not None:
-            self._keep_prompt_answerable()
 
     def on_descendant_blur(self, event: DescendantBlur) -> None:
         self._sync_composer_focus()
 
-    def _keep_prompt_answerable(self) -> None:
-        """Hand focus back to a live prompt when the composer has nothing typed.
+    def route_key_to_live_prompt(self, event) -> bool:  # type: ignore[no-untyped-def]
+        """Send an ADVERTISED ANSWER KEY to a live prompt. True if it was taken.
 
-        The defect this closes: a prompt takes focus so its answer keys reach
-        it, the user clicks into the composer (or Tab lands there), and from
-        that moment every key the card still advertises is typed into the prompt
-        buffer as text while the tool goes on waiting. Reproduced with the most
-        likely gesture there is — click the composer, press `y`, watch a `y`
-        appear in the draft and the question stay up (D5, design round 1). It is
-        the exact defect this whole rework exists to remove, surviving in the
-        one path that does not go through the card's own key handling.
+        This is what makes an anchored question answerable while the composer
+        holds the caret, and it deliberately routes the KEY rather than moving
+        FOCUS. The difference is the whole finding: an earlier revision bounced
+        focus onto the prompt whenever the composer was empty, and the composer
+        is empty *exactly* when the user is about to start typing — so the first
+        character of an intended steer landed on the card, where `y` is an
+        answer. Measured through the real gate: typing `yes do it` at a live
+        `rm -rf /Users/damian/project/data` prompt AUTHORISED the call and left
+        `es do it` in the buffer (F3, agent review round 2). That is strictly
+        worse than the defect it was written to fix, which merely lost a
+        keystroke; and it made drafting impossible while a question was up,
+        because focus was taken before the first character could be typed.
 
-        The rule is EMPTINESS, not "never leave the prompt". A user with a draft
-        in progress is doing something deliberate and must keep the caret: they
-        may be composing a steer, or looking something up to answer with. An
-        empty composer is not deliberate, though — it is a stray click or a Tab
-        — and it is the state in which the advertised keys are silently dead.
-        So focus bounces back only while the buffer holds nothing, which leaves
-        the drafting case untouched and makes `y` mean `y` in the common one.
+        Routing instead means the composer keeps focus and keeps every key it
+        would normally take. Only the small set the card ADVERTISES is
+        intercepted, and only while the buffer is EMPTY:
 
-        The escape hatch stays open in both directions: typing anything at all
-        into the composer keeps focus there (the guard only fires on an empty
-        buffer, and the first character makes it non-empty), and clicking the
-        card takes focus back deliberately.
+        - empty buffer, `y`/`n`/`A` (or the picker's digits/Enter): the user is
+          answering the question in front of them, which is the common case and
+          the one D5 was about;
+        - anything else, or any buffer with text in it: the composer takes it,
+          so a steer starting with any character — including `y` — is typed
+          normally the moment a second character follows.
+
+        One more rule closes the last gap, and it is the one that makes this
+        safe for an APPROVAL: a routed key is held for one keystroke rather
+        than acted on immediately. `y` alone answers; `y` followed by another
+        character was the start of a word, so both characters are handed to the
+        composer and nothing is authorised. Without it, typing `yes do it` as a
+        steer approved a pending `rm -rf` on its first character and left
+        `es do it` in the buffer — an irreversible action taken from a
+        keystroke the user meant as text.
+
+        The hold is released by the next key or by the deadline below, so a
+        deliberate `y` still answers within a fraction of a second and the
+        common case is unchanged.
         """
         prompt = self._live_prompt()
         if prompt is None:
-            return
+            return False
         try:
             editor = self._editor()
         except Exception:  # pragma: no cover - hosts with no composer
+            return False
+        if not editor.has_focus:
+            return False
+        character = getattr(event, "character", None)
+
+        # A key arriving while one is held ends the ambiguity: this was typing.
+        # Both characters go to the composer, in order, and the question is
+        # left alone.
+        held = self._held_answer_key
+        if held is not None:
+            self._cancel_held_answer_key()
+            editor.insert(held.character)
+            return False
+
+        if editor.text or character is None or character not in prompt.answer_keys():
+            return False
+        self._hold_answer_key(prompt, character)
+        return True
+
+    def _hold_answer_key(self, prompt, character: str) -> None:  # type: ignore[no-untyped-def]
+        """Park a routed answer key until it is confirmed as an answer.
+
+        Confirmed by the deadline expiring with no second keystroke. Cancelled
+        by any further key, which proves the user was typing a word.
+        """
+        timer = self.set_timer(ANSWER_KEY_HOLD_S, self._commit_held_answer_key)
+        self._held_answer_key = _HeldAnswerKey(prompt=prompt, character=character, timer=timer)
+
+    def _cancel_held_answer_key(self) -> None:
+        """Drop a parked key without answering."""
+        held = self._held_answer_key
+        self._held_answer_key = None
+        if held is not None:
+            held.timer.stop()
+
+    def _commit_held_answer_key(self) -> None:
+        """The hold expired with no second keystroke, so it really was an answer."""
+        held = self._held_answer_key
+        self._held_answer_key = None
+        if held is None:
             return
-        if not editor.has_focus or editor.text.strip():
-            return
-        prompt.focus()
+        if self._live_prompt() is not held.prompt:
+            return  # the question settled or changed while the key was held
+        held.prompt.answer_from_key(held.character)
 
     def _live_prompt(self):  # type: ignore[no-untyped-def]
         """The prompt currently awaiting an answer, or ``None``.
@@ -2547,7 +2632,7 @@ class OperatorApp(App[None]):
         finally:
             # Clear the registration BEFORE unmounting. `_unmount_prompt` hands
             # focus back to the composer, and the focus guard
-            # (`_keep_prompt_answerable`) asks `_live_prompt()` whether anything
+            # (`route_key_to_live_prompt`) asks `_live_prompt()` whether anything
             # is still owed an answer — so with `self._approval` still pointing
             # at this card, the guard bounced focus straight back onto the
             # prompt it was being taken off, leaving the composer unfocusable
