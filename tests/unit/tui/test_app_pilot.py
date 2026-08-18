@@ -31,7 +31,7 @@ from local_operator.tui.app import (
 )
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.events import TurnEnded, TurnStarted
-from local_operator.tui.widgets.approval import ApprovalBlock
+from local_operator.tui.widgets.approval import ApprovalPrompt
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import ASIDE_PLACEHOLDER, Editor
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
@@ -4020,7 +4020,10 @@ async def test_session_swap_clears_a_parked_approval_title(
         await pilot.pause()
         assert app._status is not None
         cwd_label = Path(app._status._cwd).name
-        approval = ApprovalBlock("bash", "run a command")
+        # The LIVE prompt, which is what `_approval` holds: the transcript's
+        # `ApprovalBlock` is the receipt written after the answer, and the
+        # title's "owes an answer" state is derived from the live one.
+        approval = ApprovalPrompt("bash", "run a command")
         app._approval = approval
         app._refresh_working_activity()
         await pilot.pause()
