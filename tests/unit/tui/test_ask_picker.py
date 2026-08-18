@@ -536,6 +536,31 @@ def _baseline_app():  # type: ignore[no-untyped-def]
     return OperatorApp(lambda: _factory(FakeSession()))
 
 
+async def _seed_conversation(app, pilot, turns: int = 6) -> None:  # type: ignore[no-untyped-def]
+    """Put a real conversation in the transcript before measuring anything.
+
+    Load-bearing, not scene-setting. An app with an EMPTY transcript is still
+    in the BOOT layout, and `Screen.boot TranscriptView` drops the transcript's
+    padding from `1 0 1 1` to `0 0 0 1` — one vertical row instead of two. Every
+    geometry assertion in this file used to run in that state, so a card that
+    under-reserved the transcript by exactly one row measured clean at every
+    size, and the error only appeared once a user had said anything at all
+    (F2, agent review round 1).
+
+    A prompt over an empty transcript is also not a state worth pinning: the
+    agent asks because it is in the middle of something.
+    """
+    from local_operator.tui.widgets.assistant import AssistantBlock
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    for turn in range(turns):
+        app._append_block(UserBlock(f"turn {turn}: what should happen to the stale rows?"))
+        prose = AssistantBlock()
+        prose.update_text(f"answer {turn}: the audit log still has every row, so a backfill works.")
+        app._append_block(prose)
+    await pilot.pause()
+
+
 async def _settle(app, pilot) -> None:  # type: ignore[no-untyped-def]
     """Pump until the screen's geometry stops moving.
 
@@ -585,7 +610,13 @@ async def _show(app, pilot, card) -> None:  # type: ignore[no-untyped-def]
     resolved through ``call_after_refresh`` plus the card's own repaint, so a
     caller that paused twice read a half-settled dock and measured an overflow
     that does not survive the next frame.
+
+    Seeding the conversation belongs here for a stronger reason: measured
+    against an empty transcript, this whole file was blind to a one-row
+    under-reservation, because the boot layout's transcript padding cancelled
+    it exactly. See :func:`_seed_conversation`.
     """
+    await _seed_conversation(app, pilot)
     app._mount_prompt(card)
     # Settle until the screen stops moving, rather than for a fixed number of
     # pauses. Mounting the card takes two frames to reach its final height (the
@@ -617,6 +648,16 @@ async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() 
     parked on. Chrome the card cannot do without is paid for FIRST now, so a
     short terminal abbreviates the list instead of amputating the footer."""
     for size in SHORT_SIZES:
+        # What the dock measures with a conversation but NO prompt. At the
+        # shortest of these the composer already exceeds the screen on its own,
+        # so "nothing overflows" is not true of this app there and never was;
+        # what must be true is that raising a question does not make it worse.
+        baseline_app = _baseline_app()
+        async with baseline_app.run_test(size=size) as pilot:
+            await _seed_conversation(baseline_app, pilot)
+            await _settle(baseline_app, pilot)
+            baseline = tuple(baseline_app.screen.virtual_size)
+
         app, screen = await _real_app_card(size, [_long_question()])
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
@@ -628,7 +669,7 @@ async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() 
                 # skipped: a host still reserving space for a prompt painting
                 # nothing is what pushed the dock past the screen at 20x8.
                 assert not app.query_one("#prompt-host").display, size
-                assert tuple(app.screen.size) == tuple(app.screen.virtual_size), size
+                assert tuple(app.screen.virtual_size) == baseline, (size, baseline)
                 continue
             card = screen.query_one(".ask-picker")
             # Every line the card lays out is a line the SCREEN actually drew.
@@ -663,10 +704,10 @@ async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() 
             # The anchoring guarantee itself: the dock never grows past the
             # screen, so the transcript is never scrolled out from under the
             # question the user is being asked.
-            assert tuple(app.screen.size) == tuple(app.screen.virtual_size), (
+            assert tuple(app.screen.virtual_size) == baseline, (
                 size,
-                tuple(app.screen.size),
                 tuple(app.screen.virtual_size),
+                baseline,
             )
 
 
@@ -699,10 +740,12 @@ async def test_the_footer_is_the_last_line_the_card_gives_up() -> None:
             # worse. Captured per size so the comparison below is like-for-like.
             baseline_app = _baseline_app()
             async with baseline_app.run_test(size=size) as pilot:
-                # Settled by the SAME rule the measured app is, so the two
-                # numbers are taken at the same point in the layout's life. A
-                # fixed-count baseline read the dock mid-arrange and compared an
-                # unsettled height against a settled one.
+                # Seeded and settled by the SAME rules the measured app is, so
+                # the two numbers describe the same layout with and without a
+                # prompt. An unseeded baseline is in the BOOT layout, whose
+                # transcript padding differs — comparing against it measures the
+                # boot/conversation difference as if it were the prompt's cost.
+                await _seed_conversation(baseline_app, pilot)
                 await _settle(baseline_app, pilot)
                 baseline = tuple(baseline_app.screen.virtual_size)
 
@@ -768,6 +811,7 @@ async def test_the_footer_is_the_last_line_the_card_gives_up() -> None:
     for size in ((40, 4), (40, 3), (30, 2), (20, 1)):
         base_app = _baseline_app()
         async with base_app.run_test(size=size) as pilot:
+            await _seed_conversation(base_app, pilot)
             await _settle(base_app, pilot)
             baseline = tuple(base_app.screen.virtual_size)
 
@@ -793,16 +837,26 @@ async def test_a_recommended_option_never_widens_the_card_past_the_screen() -> N
     minimum rather than dropped, which bought two cells of overflow at 30x12 —
     and only with a recommendation, which is how it was found."""
     for size in SHORT_SIZES:
+        # The no-prompt baseline for this size, seeded and settled identically:
+        # the smallest of these terminals cannot fit the composer alone, so the
+        # question is whether the RECOMMENDATION costs anything, not whether the
+        # app fits.
+        baseline_app = _baseline_app()
+        async with baseline_app.run_test(size=size) as pilot:
+            await _seed_conversation(baseline_app, pilot)
+            await _settle(baseline_app, pilot)
+            baseline = tuple(baseline_app.screen.virtual_size)
+
         for recommended in (0, None):
             app, screen = await _real_app_card(size, [_long_question(recommended)])
             async with app.run_test(size=size) as pilot:
                 await pilot.pause()
                 await _show(app, pilot, screen)
-                assert tuple(app.screen.size) == tuple(app.screen.virtual_size), (
+                assert tuple(app.screen.virtual_size) == baseline, (
                     size,
                     recommended,
-                    tuple(app.screen.size),
                     tuple(app.screen.virtual_size),
+                    baseline,
                 )
 
 
@@ -998,21 +1052,15 @@ async def test_the_conversation_stays_readable_behind_a_question() -> None:
     is that conversation text is painted on the terminal at the same time as the
     question, which is exactly what the modal made impossible.
     """
-    from local_operator.tui.widgets.assistant import AssistantBlock
-    from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
+    from local_operator.tui.widgets.transcript import TranscriptView
 
     app = _baseline_app()
     card = AskPickerScreen([_long_question()])
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        # A conversation with a distinctive line in it, so the assertion cannot
-        # pass on chrome that merely looks like transcript.
-        for turn in range(6):
-            app._append_block(UserBlock(f"turn {turn}: what about the stale rows?"))
-            prose = AssistantBlock()
-            prose.update_text(f"answer {turn}: the audit log still has every row.")
-            app._append_block(prose)
-        await pilot.pause()
+        # `_show` seeds the conversation (see `_seed_conversation`), so the
+        # assertions below read the same text every other test in this file
+        # measures against rather than a second, divergent fixture.
         await _show(app, pilot, card)
 
         painted = "\n".join(_painted_rows(app))
@@ -1020,7 +1068,7 @@ async def test_the_conversation_stays_readable_behind_a_question() -> None:
         assert "the agent needs your decision" in painted
         # ...and so is the conversation it is about. The last exchange is the
         # one a user would be reading to answer, so it is the one pinned.
-        assert "answer 5: the audit log still has every row." in painted
+        assert "answer 5: the audit log still has every row" in painted
         # The transcript keeps a real share of the screen. Asserted as a
         # PROPORTION of the rows the two actually divide, not as "more than the
         # card": a question with four options and a description each is
