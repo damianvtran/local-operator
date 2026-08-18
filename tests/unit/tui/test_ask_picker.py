@@ -1350,3 +1350,53 @@ async def test_the_composer_footer_keeps_its_exit_on_a_narrow_card() -> None:
                 await asked
             except (asyncio.CancelledError, Exception):
                 pass
+
+
+@pytest.mark.asyncio
+async def test_the_footer_follows_the_draft_as_it_is_typed() -> None:
+    """The footer has to repaint when the BUFFER changes, not just on focus.
+
+    The routed keys stand down on a non-empty composer, so the footer's answer
+    changes with every keystroke that opens or closes a draft — and nothing
+    else repaints on a keystroke: `_repaint` fires on focus, resize, answer and
+    advance, and typing is none of those. So the card went on advertising
+    `1-2 answer` while `1` was being typed into the buffer (F7, agent review
+    round 5). Same shape as D13 one axis over: the model right, the pixels
+    stale.
+
+    Asserted on PAINTED text, because that is the only reader that can see the
+    difference — which is the lesson D13 taught this file.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(16):
+            await pilot.pause()
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+        assert "answer" in _painted_footer(app), "the routed keys were never offered"
+
+        # Opening a draft withdraws the offer, on the frame the user sees.
+        for character in "drop":
+            await pilot.press(character)
+        await pilot.pause(0.3)
+        withdrawn = _painted_footer(app)
+        assert "answer" not in withdrawn, withdrawn
+        assert "esc" in withdrawn, withdrawn
+        # ...and the key it stopped advertising really is a text character now.
+        await pilot.press("1")
+        await pilot.pause(0.2)
+        assert not asked.done(), "a routed key answered while a draft was open"
+        assert app.query_one(Editor).text == "drop1"
+
+        # Clearing the draft brings the offer back, and it works.
+        for _ in range(len("drop1")):
+            await pilot.press("backspace")
+        await pilot.pause(0.3)
+        restored = _painted_footer(app)
+        assert "answer" in restored, restored
+        await pilot.press("1")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
