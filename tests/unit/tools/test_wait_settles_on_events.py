@@ -290,12 +290,23 @@ async def test_waiting_on_only_vanished_ids_does_not_raise() -> None:
 
     manager = AsyncJobManager(retention_ms=0)
     job_id = manager.register("task", "A", _runner(0.01, "a"))
-    await asyncio.sleep(0.1)
+
+    # POLL for the eviction rather than sleeping a fixed budget. Measured over
+    # 40 samples the register->evicted interval averages 18ms but reached 51ms
+    # under load, so any fixed budget is a wall-clock bet against scheduler
+    # jitter — the same defect as the `test_loop_liveness` threshold, and it
+    # cost this test 2 failures in 47 runs on the SETUP assertion rather than
+    # on the behaviour it exists to pin.
+    deadline = time.perf_counter() + 5.0
+    while manager.get(job_id) is not None and time.perf_counter() < deadline:
+        await asyncio.sleep(0.01)
     assert manager.get(job_id) is None, "the retention sweep should have evicted it"
 
     # Must return cleanly rather than raising, and must not return instantly
-    # (that is the busy spin C12 fixed).
+    # (that is the busy spin C12 fixed). The lower bound is checked against the
+    # budget actually requested, so it cannot drift from the argument above.
+    budget = 0.2
     started = time.perf_counter()
-    await asyncio.wait_for(_await_any_settled(manager, [job_id], 0.2, None), timeout=5.0)
-    assert time.perf_counter() - started >= 0.1
+    await asyncio.wait_for(_await_any_settled(manager, [job_id], budget, None), timeout=5.0)
+    assert time.perf_counter() - started >= budget / 2
     await manager.dispose()
