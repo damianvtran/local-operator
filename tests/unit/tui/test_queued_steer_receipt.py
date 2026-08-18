@@ -387,8 +387,11 @@ async def test_an_interrupt_spends_the_loud_ink_once() -> None:
     """
     session = _Streaming()
     app = OperatorApp(lambda: _factory(session))
-    # A NARROW frame on purpose: the settled row wraps below ~69 columns, and
-    # the property under test (one alarm row) must not depend on that.
+    # A NARROW frame on purpose: the property under test (exactly one alarm
+    # row) must hold at a width where the settled row is under pressure. 60 is
+    # four columns above where that row starts wrapping onto its hanging indent
+    # (measured: 56), so the frame exercises a narrow terminal while keeping the
+    # settled-row assertion below readable as a single string.
     async with app.run_test(size=(60, 24)) as pilot:
         await pilot.pause()
         await _submit(pilot, app, "steered into a turn about to be stopped")
@@ -401,11 +404,15 @@ async def test_an_interrupt_spends_the_loud_ink_once() -> None:
             for strip in app.screen._compositor.render_strips()
             if strip.text.strip()
         ]
+        # The whole point of the fix: ONE amber row for one interrupt, not two.
+        # No filtering of the status band is needed here — the band's own
+        # `! auto-approve always` is rendered inside the band's chrome and does
+        # not begin a strip with `!`, so this already sees transcript rows only.
+        # (An earlier version filtered it out defensively; the filter never
+        # removed anything at any width, so it only made the test look like it
+        # was guarding something it was not.)
         alarms = [row for row in rows if row.lstrip().startswith("!")]
-        # The band's `! auto-approve always` lives on the status line and is not
-        # a transcript row; the interrupt notice is the only one in the ledger.
-        transcript_alarms = [row for row in alarms if "auto-approve" not in row]
-        assert len(transcript_alarms) == 1, transcript_alarms
-        assert "interrupted" in transcript_alarms[0]
+        assert len(alarms) == 1, alarms
+        assert "interrupted" in alarms[0]
         # And the settled row is present, quiet, and says the message survives.
         assert any(DEFERRED_STEER_NOTICE in row for row in rows), rows

@@ -6607,6 +6607,14 @@ class OperatorApp(App[None]):
         same as "until something else is added to it": a restored floor plus a
         real turn is still a floor, just a larger one. Only a session whose
         spend was accrued entirely in this process is exactly known.
+
+        Zero spends NO segment, which also settles a disagreement the five
+        callers used to have among themselves: three emptied the cell at zero
+        and the turn-end site printed `$0.0000`. Empty is the spelling that
+        matches this codebase's stated position on a confident zero — see
+        :func:`~local_operator.tui.costs.turn_cost`, where `$0.0000` over real
+        tokens is called the more expensive lie — and an unpriced model reaching
+        the band as `0.0` is exactly the case that would print it.
         """
         spend = self._spend_total() if total is None else total
         if not spend:
