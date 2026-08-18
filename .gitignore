@@ -2,10 +2,10 @@
 *.pyc
 __pycache__/
 .env
-# Both spellings on purpose: the trailing slash matches only a directory, so a
-# `.venv` SYMLINK into a shared venv (how throwaway worktrees borrow one) is
-# not matched by it and can be committed by a `git add -A`.
-.venv/
+# No trailing slash on purpose: `.venv/` matches only a directory, so a `.venv`
+# SYMLINK into a shared venv (how a throwaway worktree borrows one) slipped
+# past it and was committed by a `git add -A`. The slash-less spelling matches
+# a file, a symlink and a directory alike, so it is the one that covers this.
 .venv
 .DS_Store
 dist/

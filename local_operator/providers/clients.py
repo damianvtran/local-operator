@@ -472,12 +472,13 @@ def _replayable_tool_arguments_json(call: ToolCall) -> str:
     # empty to None (`loop.py`, `raw or None`), but the field is typed `str |
     # None` and transcripts are external input, so the guard cannot lean on it.
     #
-    # The `startswith` pre-check keeps the common path cheap. This runs for
-    # every tool call in the whole history on every request, and a full
-    # `json.loads` purely to answer "is this well-formed" costs ~70 us on a
-    # large `write` argument against ~0.02 us for the prefix test. Anything
-    # that does not start with `{` cannot be the object the wire shape needs,
-    # so it goes straight to the salvage path without being parsed.
+    # The `startswith` pre-check skips the parse for strings that CANNOT be an
+    # object. It does not speed up the common path — a valid object starts with
+    # `{` and is still parsed in full — so the win is confined to the
+    # non-object case, where a large string is otherwise decoded in its
+    # entirety only to be thrown away. Worth keeping because this runs for
+    # every tool call in the whole history on every request, and `lstrip` on a
+    # string with nothing to strip returns the same object.
     if raw is not None and raw.lstrip().startswith("{"):
         try:
             if isinstance(json.loads(raw), dict):
