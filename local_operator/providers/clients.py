@@ -433,10 +433,13 @@ def _replayable_tool_arguments(call: ToolCall) -> dict[str, Any]:
     truth the next turn needs; replaying an unparseable argument list buys
     nothing and costs the session.
     """
-    if call.raw_arguments is None:
+    # Empty joins `None` rather than being read as `{}`: an empty string is not
+    # a call the model made, it is the absence of one, and `call.arguments`
+    # is the better answer for it whenever the loop managed to fill it.
+    if not call.raw_arguments:
         return call.arguments
     try:
-        parsed = json.loads(call.raw_arguments or "{}")
+        parsed = json.loads(call.raw_arguments)
     except json.JSONDecodeError:
         logger.warning(
             "tool call %s (%s) carries unparseable raw arguments; "
@@ -461,10 +464,24 @@ def _replayable_tool_arguments_json(call: ToolCall) -> str:
     rejected the request instead, which is the same dead session by a longer
     route.
     """
-    if call.raw_arguments is not None:
+    raw = call.raw_arguments
+    # Parse the raw value ITSELF, never `raw or "{}"`: that spelling validates
+    # the placeholder and then returns `raw`, so an empty string passed the
+    # check and went out as an empty body — invalid JSON on the wire, the exact
+    # failure this function exists to prevent. Today's assembler normalizes
+    # empty to None (`loop.py`, `raw or None`), but the field is typed `str |
+    # None` and transcripts are external input, so the guard cannot lean on it.
+    #
+    # The `startswith` pre-check keeps the common path cheap. This runs for
+    # every tool call in the whole history on every request, and a full
+    # `json.loads` purely to answer "is this well-formed" costs ~70 us on a
+    # large `write` argument against ~0.02 us for the prefix test. Anything
+    # that does not start with `{` cannot be the object the wire shape needs,
+    # so it goes straight to the salvage path without being parsed.
+    if raw is not None and raw.lstrip().startswith("{"):
         try:
-            if isinstance(json.loads(call.raw_arguments or "{}"), dict):
-                return call.raw_arguments
+            if isinstance(json.loads(raw), dict):
+                return raw
         except json.JSONDecodeError:
             pass
     return json.dumps(_replayable_tool_arguments(call))

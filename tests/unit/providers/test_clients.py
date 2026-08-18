@@ -1775,6 +1775,34 @@ def test_wire_clients_replay_well_formed_raw_arguments_verbatim() -> None:
     assert tool_use[0]["input"] == {"command": "ls"}
 
 
+def test_empty_raw_arguments_never_reach_the_wire_as_an_empty_body() -> None:
+    """An empty string is not valid JSON and must not be replayed as one.
+
+    Guards the salvage against the failure it exists to prevent: a check
+    written as ``json.loads(raw or "{}")`` validates the placeholder and then
+    returns ``raw``, so an empty string passes and goes out as an empty body.
+    The assembler normalizes empty to None today, but the field is typed
+    ``str | None`` and transcripts are external input.
+    """
+    from local_operator.providers.clients import _messages_to_openai_responses
+
+    call = ToolCall(id="t5", name="bash", arguments={"command": "ls"}, raw_arguments="")
+    message = _assistant_with([call])
+
+    arguments = _message_to_openai(message)["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(arguments) == {"command": "ls"}
+
+    calls = [
+        i for i in _messages_to_openai_responses([message]) if i.get("type") == "function_call"
+    ]
+    assert json.loads(calls[0]["arguments"]) == {"command": "ls"}
+
+    request = ChatRequest(model=_spec(provider="anthropic"), messages=[message])
+    body = AnthropicClient()._build_body(request)
+    tool_use = [b for b in body["messages"][0]["content"] if b.get("type") == "tool_use"]
+    assert tool_use[0]["input"] == {"command": "ls"}
+
+
 def test_non_object_raw_arguments_fall_back_to_parsed_arguments() -> None:
     """A bare string or list parses cleanly but is not a legal argument object;
     it is as unusable on the wire as a fragment."""
