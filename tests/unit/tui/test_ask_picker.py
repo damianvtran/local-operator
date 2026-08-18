@@ -1302,8 +1302,11 @@ async def test_a_multi_select_advertises_no_key_it_cannot_be_answered_by() -> No
         await pilot.click(Editor)
         await pilot.pause(0.2)
         footer = _painted_footer(app)
-        # No ordinal range is claimed...
-        assert "answer" not in footer, footer
+        # No ORDINAL range is claimed — a digit cannot answer a multi-select.
+        # What is offered instead is the explicit gesture that reaches the card
+        # (D18), which is a different promise: "answer here", not "1-2 answer".
+        assert "1-" not in footer, footer
+        assert "answer here" in footer, footer
         assert "esc" in footer, footer
         # ...and the digit that would have been claimed indeed answers nothing.
         await pilot.press("1")
@@ -1403,43 +1406,37 @@ async def test_the_footer_follows_the_draft_as_it_is_typed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_multi_select_over_a_draft_is_answerable_by_keyboard() -> None:
-    """A question with no routed keys must not be mouse-only.
+async def test_a_multi_select_is_reachable_by_an_explicit_gesture() -> None:
+    """A question the composer cannot answer needs a NAMED way to reach it.
 
-    The card yields focus to a draft on mount (D12), which costs nothing for
-    most questions because their answer keys are routed from the composer. A
-    MULTI-SELECT has none — it is answered by Space and Enter, which the
-    composer owns — so one arriving over a draft was answerable only by mouse
-    or by abandoning it: `space`, the digits, `enter`, the arrows and `tab` all
-    went to the composer, and `shift+tab` is bound to `cycle_effort` (D17,
-    design round 5). It is a regression from anchoring the card, which as a
-    `ModalScreen` simply held the keyboard.
+    A multi-select is answered by Space and Enter, both of which the composer
+    owns, so it is the one question the routed keys cannot reach. As a
+    `ModalScreen` at the merge base it simply held the keyboard; anchored, it
+    was answerable only by mouse (D17).
 
-    Emptying the composer is the user saying they are done typing, so the
-    question takes the caret back — and only for a card that cannot be answered
-    any other way, which the companion assertion below pins.
+    Two attempts to infer the handover from the buffer both cost the user a
+    message — keyed on empty, sending handed over (F9); keyed on
+    deleted-to-empty, REWORDING did (D18). There is no better signal: "I have
+    finished typing" is not distinguishable from "I am mid-edit" by looking at
+    the text. So the gesture is explicit, advertised in the footer, and cannot
+    arrive at a moment the user did not choose.
     """
     from local_operator.tui.widgets.editor import Editor
 
     app = _baseline_app()
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        editor = app.query_one(Editor)
-        editor.focus()
-        for character in "hmm":
-            await pilot.press(character)
-        await pilot.pause(0.1)
-
         asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
         for _ in range(16):
             await pilot.pause()
-        # The draft keeps the caret while it has text (D12).
-        assert isinstance(app.screen.focused, Editor)
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
 
-        for _ in range(len("hmm")):
-            await pilot.press("backspace")
-        await pilot.pause(0.3)
-        # ...and gives it back once empty, because nothing else can answer this.
+        # The footer NAMES it, or it is a key nobody can discover.
+        assert "answer here" in _painted_footer(app), _painted_footer(app)
+
+        await pilot.press("tab")
+        await pilot.pause(0.2)
         assert isinstance(app.screen.focused, AskPickerScreen)
 
         await pilot.press("space")
@@ -1448,13 +1445,64 @@ async def test_a_multi_select_over_a_draft_is_answerable_by_keyboard() -> None:
 
 
 @pytest.mark.asyncio
-async def test_clearing_a_draft_does_not_steal_the_caret_from_a_routable_card() -> None:
-    """The focus hand-back is scoped to cards that need it, and no others.
+async def test_the_gesture_preserves_a_draft_and_leaves_routable_cards_alone() -> None:
+    """Tab is offered only where it is needed, and never costs the draft.
 
-    A single-select IS answerable from the composer (its ordinals are routed),
-    so emptying the buffer must leave the caret where the user put it —
-    otherwise the hand-back would undo D12, which exists to stop the card
-    taking the keyboard from someone who is typing.
+    A single-select IS answerable from the composer, so pulling focus there
+    would take the caret for nothing — and a user with a half-typed message is
+    exactly who needs the gesture, so their text has to survive it.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    # A draft survives the handover.
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "hold that":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.1)
+        asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
+        for _ in range(16):
+            await pilot.pause()
+
+        await pilot.press("tab")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen.focused, AskPickerScreen)
+        assert app.query_one(Editor).text == "hold that", "the gesture ate the draft"
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # A routable card does not take the caret.
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(16):
+            await pilot.pause()
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+        await pilot.press("tab")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen.focused, Editor)
+        # ...because it is answerable from where the caret already is.
+        await pilot.press("1")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_rewording_a_draft_never_moves_the_keyboard() -> None:
+    """Clearing a line to retype it is mid-edit, not "I am done typing".
+
+    Keyed on the user deleting to empty, the handover fired here: the next
+    `space` ticked an option, the retyped message went nowhere, and Enter
+    submitted `{'rollout': ['Backfill from the audit log']}` — an answer never
+    chosen, with the message lost (D18, design round 6).
     """
     from local_operator.tui.widgets.editor import Editor
 
@@ -1466,18 +1514,31 @@ async def test_clearing_a_draft_does_not_steal_the_caret_from_a_routable_card() 
         for character in "hmm":
             await pilot.press(character)
         await pilot.pause(0.1)
-
-        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
         for _ in range(16):
             await pilot.pause()
+
+        # Delete the line to reword it...
         for _ in range(len("hmm")):
             await pilot.press("backspace")
         await pilot.pause(0.3)
+        assert isinstance(app.screen.focused, Editor), "rewording moved the keyboard"
 
-        assert isinstance(app.screen.focused, Editor)
-        # And it is answerable from there, which is why the caret can stay.
-        await pilot.press("1")
-        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+        # ...and the retyped message lands in the composer, answering nothing.
+        for character in "just checking":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.3)
+        assert app.query_one(Editor).text == "just checking"
+        assert not asked.done()
+        card = app._ask_screen
+        assert card is not None
+        assert not card.state.checked, "a keystroke ticked an option"
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 @pytest.mark.asyncio
