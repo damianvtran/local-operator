@@ -1327,12 +1327,6 @@ async def stream_with_failover(
         current_token: str | None = None
         transport_retries = 0
         retry_same_key = False
-        # Whether a server-fault retry budget spent here will be spent AGAIN on
-        # a sibling. Only then does the per-account cap earn its keep; with one
-        # credential it would just remove retries the user asked for. Computed
-        # once per target rather than per attempt: the pool does not change
-        # mid-turn, and this must not add a query to the retry hot path.
-        pool_size = _credential_pool_size(auth, provider)
 
         while state.attempts <= AUTH_RETRY_MAX_ATTEMPTS:
             if signal is not None and signal.aborted:
@@ -1390,7 +1384,13 @@ async def stream_with_failover(
                 # the outage for the life of the process, contradicting the
                 # "lasts seconds" reasoning it is justified by and leaving a
                 # perfectly good account permanently last in the pool.
-                _clear_demotion(auth, provider, access)
+                #
+                # Skipped for an isolated request, which is the same rule the
+                # cascade applies (`read_only`): a decorative call running beside
+                # a user's turn must not move that turn's routing, and restoring
+                # priority is as much a routing decision as removing it.
+                if not request.isolated:
+                    _clear_demotion(auth, provider, access)
                 if buffered is None:
                     return  # clean completion; a buffered stream flushes below
             except asyncio.CancelledError:
@@ -1402,7 +1402,17 @@ async def stream_with_failover(
                 if not retry.enabled:
                     raise
                 if _same_credential_retry_allowed(
-                    exc, transport_retries, retry, rotates_across_pool=pool_size > 1
+                    exc,
+                    transport_retries,
+                    retry,
+                    # Asked at the moment of the DECISION, not cached per target.
+                    # Blocking happens mid-turn (a sibling hits its quota during
+                    # the same storm), so a value computed once goes stale in the
+                    # direction that hurts: it keeps claiming a pool after the
+                    # pool is gone, and caps the last healthy credential.
+                    rotates_across_pool=_has_rotatable_sibling(
+                        auth, provider, access.kind if access else None
+                    ),
                 ):
                     # 5xx/network-style failures use the configured budget.
                     # Rate limits retry once only when the advertised delay is
@@ -1444,7 +1454,12 @@ async def stream_with_failover(
                 # these `kind="timeout"`, so the shared predicate already
                 # classifies them correctly; the branch just was not asking.
                 if _same_credential_retry_allowed(
-                    wrapped, transport_retries, retry, rotates_across_pool=pool_size > 1
+                    wrapped,
+                    transport_retries,
+                    retry,
+                    rotates_across_pool=_has_rotatable_sibling(
+                        auth, provider, access.kind if access else None
+                    ),
                 ):
                     transport_retries += 1
                     await _abortable_sleep(
@@ -1565,21 +1580,56 @@ def _clear_demotion(auth: FailoverAuthStore, provider: str, access: "OAuthAccess
         logger.debug("could not clear demotion for %s/%s", provider, access.credential_id)
 
 
-def _credential_pool_size(auth: FailoverAuthStore, provider: str) -> int:
-    """How many usable credentials this provider has, for the retry cap.
+def _has_rotatable_sibling(
+    auth: FailoverAuthStore, provider: str, current_type: str | None
+) -> bool:
+    """Is there another credential this turn could ACTUALLY rotate onto?
 
-    Only the "is there more than one?" question matters, so a store that cannot
-    enumerate (the structural protocol promises only ``get_api_key``) answers
-    ``1``: without evidence of a pool, the honest default is the UNCAPPED
-    budget the user configured, since capping is only justified by the
-    multiplication a pool causes.
+    The retry cap is justified by one thing only: the same budget being spent
+    again on a sibling, multiplying the requests aimed at a struggling provider.
+    So the question has to be asked exactly as rotation would answer it, not as
+    a count of rows that happen to exist. Counting raw rows claimed a pool in
+    two configurations where rotation reaches nothing, and the cap then took
+    away retries with nowhere to spend them:
+
+    - **Blocked siblings.** A quota-exhausted account is skipped by
+      ``rotate_sibling`` and by the cascade. Four accounts with three blocked is
+      this PR's own headline scenario -- several accounts spent mid-degradation,
+      one healthy -- where a raw count said "pool of 4" and the survivor lost 8
+      of its 10 retries.
+    - **Mixed credential types.** ``rotate_sibling`` only walks siblings of the
+      SAME ``credential_type``, so an OAuth sign-in plus a pasted API key is two
+      rows and zero rotation.
+
+    A store that cannot enumerate (the structural protocol promises only
+    ``get_api_key``) answers ``False``: without evidence of a reachable sibling
+    the honest default is the UNCAPPED budget the user configured.
     """
     if not isinstance(auth, CredentialLister):
-        return 1
+        return False
     try:
-        return sum(1 for row in auth.list_credentials(provider) if row.disabled_cause is None)
+        usable = [
+            row
+            for row in auth.list_credentials(provider)
+            if row.disabled_cause is None and not _is_blocked(auth, row, provider)
+        ]
     except Exception:  # noqa: BLE001 - a retry decision must never raise
-        return 1
+        return False
+    if current_type is None:
+        return len(usable) > 1
+    return sum(1 for row in usable if row.credential_type == current_type) > 1
+
+
+def _is_blocked(auth: FailoverAuthStore, row: "StoredCredential", provider: str) -> bool:
+    """Whether the store considers ``row`` blocked, tolerating stores without
+    the notion (test doubles, embedder-supplied credential sources)."""
+    is_blocked = getattr(auth, "is_blocked", None)
+    if not callable(is_blocked):
+        return False
+    try:
+        return bool(is_blocked(row.id, provider))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:

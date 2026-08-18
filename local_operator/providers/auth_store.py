@@ -55,6 +55,14 @@ logger = logging.getLogger("local_operator.providers.auth_store")
 OAUTH_REFRESH_SKEW_MS = 60_000  # pre-emptive refresh trigger
 DEFAULT_BLOCK_MS = 60_000  # rate-limit / 401 backoff
 
+#: How long a provider-fault demotion keeps a credential at the back of the pool
+#: (see ``AuthStore.deprioritize_credential``). Deliberately short: the mark says
+#: "this account was failing a moment ago", which stops being useful information
+#: quickly, and it cannot expire by being USED -- a demoted row sorts last, so it
+#: is not selected, so it never earns the success that would clear it. Two
+#: minutes outlives a burst of 529s without outliving the outage that caused it.
+DEPRIORITIZE_TTL_MS = 120_000
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS auth_credentials (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -196,7 +204,7 @@ class AuthStore:
         # the discovery instead of paying to repeat it. Nothing here can make a
         # credential unusable, so the worst a stale mark can do is reorder a
         # pool whose members are all equally valid.
-        self._deprioritized: dict[str, set[int]] = {}
+        self._deprioritized: dict[str, dict[int, int]] = {}
         self._refresh_locks: dict[int, asyncio.Lock] = {}
         self._conn = self._connect()
 
@@ -524,8 +532,17 @@ class AuthStore:
         rather than the credential: a 529 storm must move the next attempt onto
         another account, but blocking would strand a healthy account (and,
         repeated across the pool, strand every one of them).
+
+        The mark EXPIRES on its own after :data:`DEPRIORITIZE_TTL_MS`. Clearing
+        it on a successful request is not sufficient by itself, and the reason is
+        circular: a demoted credential sorts last, so it is not selected, so it
+        never gets the success that would clear it. Without a TTL a single 529
+        left an account bottom-of-pool for the life of the process -- the same
+        "healthy account effectively out of rotation" outcome this whole change
+        exists to prevent, arrived at the slow way.
         """
-        self._deprioritized.setdefault(provider, set()).add(credential_id)
+        marks = self._deprioritized.setdefault(provider, {})
+        marks[credential_id] = self._now_ms() + DEPRIORITIZE_TTL_MS
 
     def clear_deprioritized(
         self, provider: str, credential_id: int | Iterable[int] | None = None
@@ -544,9 +561,28 @@ class AuthStore:
             self._deprioritized.pop(provider, None)
             return
         ids = {credential_id} if isinstance(credential_id, int) else {int(i) for i in credential_id}
-        marks -= ids
+        for one in ids:
+            marks.pop(one, None)
         if not marks:
             self._deprioritized.pop(provider, None)
+
+    def _active_demotions(self, provider: str) -> set[int]:
+        """Ids still demoted, dropping any whose TTL has passed.
+
+        Expiry is evaluated on READ rather than by a timer: the marks are only
+        consulted here, so a lazy sweep is both sufficient and free of a
+        background task that would have to be owned and cancelled.
+        """
+        marks = self._deprioritized.get(provider)
+        if not marks:
+            return set()
+        now = self._now_ms()
+        for cid in [cid for cid, until in marks.items() if until <= now]:
+            marks.pop(cid, None)
+        if not marks:
+            self._deprioritized.pop(provider, None)
+            return set()
+        return set(marks)
 
     def _selection_order(
         self,
@@ -569,7 +605,7 @@ class AuthStore:
         # the demotion exists to fix. Applying it here cannot be undone by a
         # later step, and because the partition is stable the relative order the
         # sticky/hash/round-robin choice produced is otherwise preserved.
-        demoted = self._deprioritized.get(provider)
+        demoted = self._active_demotions(provider)
         if not demoted:
             return ordered
         preferred = [r for r in ordered if r.id not in demoted]

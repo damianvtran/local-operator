@@ -698,7 +698,7 @@ class TestDemotionLifecycle:
 
         # Every row demoted is the branch that clears; under read_only it must not.
         store._selection_order(rows, "anthropic", "s1", read_only=True)
-        assert store._deprioritized.get("anthropic") == {rows[0].id, rows[1].id}
+        assert set(store._deprioritized.get("anthropic", {})) == {rows[0].id, rows[1].id}
 
         store._selection_order(rows, "anthropic", "s1")
         assert not store._deprioritized.get("anthropic")
@@ -732,3 +732,44 @@ class TestDemotionLifecycle:
 
         # The row that served the request is no longer demoted.
         assert rows[1].id not in store._deprioritized.get("anthropic", set())
+
+
+class TestADemotionEndsOnItsOwn:
+    """R18: clearing on success cannot be the only exit.
+
+    A demoted credential sorts LAST, so it is not selected, so it never earns
+    the success that would clear it. Without an expiry a single 529 left an
+    account at the back of the pool for the life of the process -- the same
+    "healthy account out of rotation" outcome the demotion exists to prevent.
+    """
+
+    def test_a_mark_expires_after_its_ttl(self, tmp_path: Any) -> None:
+        from local_operator.providers import auth_store as auth_store_mod
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        rows = [
+            store.upsert_credential(
+                "anthropic",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+            for i in range(2)
+        ]
+        store.deprioritize_credential("anthropic", rows[0].id)
+        assert store._active_demotions("anthropic") == {rows[0].id}
+
+        # Travel past the TTL rather than sleeping through it.
+        real_now = store._now_ms()
+        store._now_ms = staticmethod(  # type: ignore[method-assign]
+            lambda: real_now + auth_store_mod.DEPRIORITIZE_TTL_MS + 1
+        )
+
+        assert store._active_demotions("anthropic") == set()
+        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", "s1")
+        assert [r.id for r in order] == [r.id for r in store.list_credentials("anthropic")]

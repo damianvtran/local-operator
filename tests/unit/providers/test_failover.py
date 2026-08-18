@@ -2118,3 +2118,82 @@ class TestAnOverloadedProviderIsNotFloodedWhileRotating:
 
         # The 4th attempt has to be REACHED; a cap of 2 would have stopped at 3.
         assert attempts[0] == 4, attempts[0]
+
+
+class TestTheRetryCapAsksWhatRotationWouldAnswer:
+    """R16: the cap is justified by a sibling the turn can ACTUALLY rotate onto.
+
+    Counting raw credential rows claimed a pool in two configurations where
+    rotation reaches nothing, and the cap then removed retries with nowhere to
+    spend them -- R11's symptom through a different door.
+    """
+
+    @staticmethod
+    def _blip_client(attempts: list[int]) -> Any:
+        def blip_then_recover(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts[0] += 1
+            if attempts[0] < 4:
+                raise ProviderError(500, "blip", retryable=True)
+            return _clean_stream()
+
+        return blip_then_recover
+
+    async def _recovers(self, store: Any) -> int:
+        attempts = [0]
+        client = self._blip_client(attempts)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(client)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request(), store, {"retry": {"enabled": True}}, client_for, session_id="s"
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+        return attempts[0]
+
+    async def test_a_blocked_sibling_is_not_a_pool(self, tmp_path: Any) -> None:
+        """This PR's own headline shape: several accounts spent during a
+        degradation, one healthy. The survivor must keep its full budget."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        rows = [
+            store.upsert_credential(
+                "openai",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+            for i in range(4)
+        ]
+        for row in rows[1:]:
+            store.block_credential(row.id, "openai", block_ms=600_000)
+
+        assert await self._recovers(store) == 4
+
+    async def test_a_different_credential_type_is_not_a_sibling(self, tmp_path: Any) -> None:
+        """`rotate_sibling` only walks rows of the SAME credential_type, so an
+        OAuth sign-in beside a pasted API key is two rows and zero rotation."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        store.upsert_credential(
+            "openai", {"type": "oauth", "access": "o1", "refresh": "r", "expires": None}
+        )
+        store.upsert_credential("openai", {"type": "api_key", "key": "sk-1", "source": "login"})
+
+        assert await self._recovers(store) == 4
