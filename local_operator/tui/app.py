@@ -912,6 +912,19 @@ class OperatorApp(App[None]):
         #: them together; cleared on a session swap, where the rows belong to a
         #: conversation that is no longer on screen.
         self._queued_steer_notices: list[NoticeBlock] = []
+        #: Rows whose turn ended before any boundary drained them: they now read
+        #: `still queued — sends with your next message`, and the message really
+        #: is still in the engine's queue, so the NEXT turn's first drain is the
+        #: delivery they were promising. Held for exactly that reason — a row
+        #: dropped here is one that goes on saying `still queued` after the user
+        #: has watched the agent act on the instruction (issue #151).
+        #:
+        #: SEPARATE from `_queued_steer_notices` rather than left in it so a
+        #: turn end restates each row once, instead of rewriting every still
+        #: waiting row at every later turn end for the rest of the session.
+        #: The two together are the FIFO the engine drains: these rows were
+        #: queued first, so they settle first (see `on_steering_delivered`).
+        self._deferred_steer_notices: list[NoticeBlock] = []
         #: What the CURRENT turn has already been billed for, per model call, by
         #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
         #: whole and is the authoritative figure, so it adds only the difference
@@ -1894,7 +1907,18 @@ class OperatorApp(App[None]):
         # ledger, so the references are to widgets no longer on screen. Left in
         # the list, the replacement session's first delivery would "settle"
         # rows the user cannot see and the rows it CAN see would keep promising.
+        #
+        # The DEFERRED rows go with them, and here the reason is stronger than
+        # "the widget is gone": their messages sit in the OLD session's steering
+        # queue, which is being torn down with it. The replacement session's
+        # first delivery is a different conversation's message entirely, so
+        # settling these against it would be a receipt for something that never
+        # happened. This is the distinction the holding in
+        # `_settle_queued_steer_notices_unsent` has to preserve: a turn that
+        # ended keeps its rows (the message is still coming), a SWAP drops them
+        # (the message left with the session).
         self._queued_steer_notices.clear()
+        self._deferred_steer_notices.clear()
         # The per-call accrual belongs to a turn on the session being replaced.
         # Left standing, the NEXT session's first `agent_end` would subtract the
         # dead conversation's already-billed calls from its own turn total and
@@ -3296,8 +3320,10 @@ class OperatorApp(App[None]):
         # try to settle widgets that are no longer in the transcript. The
         # messages themselves are unaffected — `/clear` empties the screen, not
         # the engine's queue — so the delivery still happens, it just has no row
-        # left to report it on.
+        # left to report it on. The rows still WAITING for a later turn's
+        # delivery are removed by the same clear and go for the same reason.
         self._queued_steer_notices.clear()
+        self._deferred_steer_notices.clear()
         # ``ends_empty_state=False``: the receipt reports on the CLEAR, so the
         # session has not started talking and the splash the clear just restored
         # must survive it. Going through ``_append_block`` rather than straight to
@@ -7766,6 +7792,13 @@ class OperatorApp(App[None]):
         ``note``, the weight the row already had: the state has not got worse,
         so the row has no business getting louder — and the loud ink is already
         spent, once, on the notice that explains why the turn ended.
+
+        The rows are HANDED ON rather than dropped. `still queued — sends with
+        your next message` is still a promise about the future, and it is the
+        one promise in the set that used to be kept off screen: the message goes
+        at the next turn's first boundary, the engine says so, and a row nothing
+        holds cannot hear it. The user then watched the agent act on the
+        instruction with the row above still reading `still queued` (issue #151).
         """
         if not self._queued_steer_notices:
             return
@@ -7774,6 +7807,12 @@ class OperatorApp(App[None]):
                 block.restate(DEFERRED_STEER_NOTICE, "note")
             except Exception:  # a receipt must never take the app down
                 logger.debug("queued-steer notice could not be retired", exc_info=True)
+        # Order matters and is the queue's own: these rows were steered before
+        # anything queued against a LATER turn, and the engine drains FIFO. They
+        # are appended (not prepended) because a turn cannot end with rows
+        # queued against a turn that has not started — `_queued_steer_notices`
+        # is empty of anything newer at this point, by construction.
+        self._deferred_steer_notices.extend(self._queued_steer_notices)
         self._queued_steer_notices.clear()
 
     def on_steering_delivered(self, message: SteeringDelivered) -> None:
@@ -7791,8 +7830,15 @@ class OperatorApp(App[None]):
         boundary, so settling its row here would claim a delivery that has not
         happened. FIFO matches the queue's own order, so "the first ``count``
         rows" and "the messages that went" are the same set.
+
+        DEFERRED rows come first in that order. A row whose turn ended before
+        any boundary is older than anything steered into the turn now running,
+        and the engine's queue never reordered them — it was never drained. So
+        the two lists concatenate into the one FIFO the engine is working
+        through, and this delivery may well settle a row painted several turns
+        ago: that is the point of holding them (issue #151).
         """
-        if not self._queued_steer_notices:
+        if not self._deferred_steer_notices and not self._queued_steer_notices:
             return  # a delivery for rows this app is no longer holding
         # Defensive bounds: a producer that omits `count` (or sends a nonsense
         # one) must not settle nothing, and must not settle more rows than are
@@ -7815,11 +7861,21 @@ class OperatorApp(App[None]):
             # message went.
             logger.debug("steering delivery reported an unusable count", exc_info=True)
             count = 1
-        taken = max(1, min(count, len(self._queued_steer_notices)))
-        settled, self._queued_steer_notices = (
-            self._queued_steer_notices[:taken],
-            self._queued_steer_notices[taken:],
-        )
+        held = self._deferred_steer_notices + self._queued_steer_notices
+        taken = max(1, min(count, len(held)))
+        settled, remaining = held[:taken], held[taken:]
+        # Split back apart by identity rather than by arithmetic on `taken`:
+        # the lists were concatenated for ordering only, and each row goes back
+        # to whichever list it came from so a row that survives this delivery
+        # keeps its meaning (deferred rows are already restated; queued rows are
+        # still promising the current turn).
+        surviving = {id(block) for block in remaining}
+        self._deferred_steer_notices = [
+            block for block in self._deferred_steer_notices if id(block) in surviving
+        ]
+        self._queued_steer_notices = [
+            block for block in self._queued_steer_notices if id(block) in surviving
+        ]
         for block in settled:
             try:
                 block.restate(SENT_STEER_NOTICE, "success")

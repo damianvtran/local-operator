@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any, Sequence
+from unittest.mock import patch
 
 import pytest
 
@@ -56,13 +57,22 @@ class _Streaming(FakeSession):
         self.steers.append(text)
 
 
+def _notice_blocks(app: OperatorApp) -> list[NoticeBlock]:
+    """Every notice row, in transcript order.
+
+    The BLOCKS, not their text, for the tests that have to follow one specific
+    row across several deliveries: two rows can carry the same string, and
+    #151's whole failure is a row that never changes — which a text list cannot
+    attribute to the row it belongs to.
+    """
+    return [
+        block for block in app.query_one(TranscriptView).blocks() if isinstance(block, NoticeBlock)
+    ]
+
+
 def _notice_texts(app: OperatorApp) -> list[str]:
     """Every notice row's text, in transcript order."""
-    return [
-        block._text
-        for block in app.query_one(TranscriptView).blocks()
-        if isinstance(block, NoticeBlock)
-    ]
+    return [block._text for block in _notice_blocks(app)]
 
 
 async def _submit(pilot: Any, app: OperatorApp, text: str) -> None:
@@ -213,6 +223,10 @@ async def test_an_interrupted_turn_retires_the_promise_it_can_no_longer_keep() -
         assert QUEUED_STEER_NOTICE not in texts
         assert SENT_STEER_NOTICE not in texts, "nothing was delivered"
         assert app._queued_steer_notices == []
+        # Retired from the CURRENT turn's list, but still held: the message is
+        # genuinely still in the engine's queue, so the row is still waiting on
+        # a delivery that has not happened yet (issue #151).
+        assert len(app._deferred_steer_notices) == 1
         # The message is still in the engine's queue, so the row must not claim
         # it was lost — the user would retype and the agent would get it twice.
         assert "not sent" not in DEFERRED_STEER_NOTICE
@@ -252,6 +266,168 @@ async def test_a_clean_turn_that_never_drained_says_the_message_is_still_queued(
         # message) and the action they take is identical.
         assert SENT_STEER_NOTICE not in texts
         assert app._queued_steer_notices == []
+        assert len(app._deferred_steer_notices) == 1, "the row still awaits its delivery"
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_row_is_settled_by_the_delivery_it_was_waiting_for() -> None:
+    """Issue #151: the one promise in the set that was never kept on screen.
+
+    `still queued — sends with your next message` is TRUE when it is painted and
+    the delivery really does happen — at the next turn's first boundary. The app
+    used to drop its reference to the row at the moment it painted that text, so
+    the delivery arrived with nothing left to settle: the user sent their next
+    message, watched the agent act on the steered instruction, and the row above
+    still read `still queued`.
+
+    Driven end to end through the transition the user actually makes: steer,
+    turn ends undelivered, next turn's boundary drains the queue.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "and use the staging credentials")
+
+        app.post_message(TurnEnded(True, None))
+        await pilot.pause()
+        assert DEFERRED_STEER_NOTICE in _notice_texts(app)
+
+        # The next turn reaches its first boundary and the engine takes the
+        # message that has been waiting since before the interrupt.
+        app.post_message(SteeringDelivered(1))
+        await pilot.pause()
+
+        texts = _notice_texts(app)
+        assert texts.count(SENT_STEER_NOTICE) == 1
+        assert DEFERRED_STEER_NOTICE not in texts, "the kept promise still reads as waiting"
+        assert QUEUED_STEER_NOTICE not in texts
+        assert app._deferred_steer_notices == []
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_row_settles_before_one_queued_against_the_new_turn() -> None:
+    """The two holders are one FIFO, because the engine's queue is one FIFO.
+
+    A row carried over from an ended turn is OLDER than anything steered into
+    the turn now running, and nothing reordered the engine's queue — it was
+    never drained. So a delivery that takes one message takes the carried-over
+    one, and settling the newer row instead would claim a delivery for a message
+    still sitting behind it.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "the older instruction")
+        app.post_message(TurnEnded(True, None))
+        await pilot.pause()
+        await _submit(pilot, app, "the newer instruction")
+
+        blocks = _notice_blocks(app)
+        older = next(block for block in blocks if block._text == DEFERRED_STEER_NOTICE)
+        newer = next(block for block in blocks if block._text == QUEUED_STEER_NOTICE)
+
+        # The boundary took ONE message.
+        app.post_message(SteeringDelivered(1))
+        await pilot.pause()
+
+        assert older._text == SENT_STEER_NOTICE, "the older message was the one that went"
+        assert newer._text == QUEUED_STEER_NOTICE, "the newer row must keep promising"
+        assert app._deferred_steer_notices == []
+        assert app._queued_steer_notices == [newer]
+
+
+@pytest.mark.asyncio
+async def test_a_second_turn_end_does_not_restate_a_row_it_already_retired() -> None:
+    """Rows move OUT of the queued list when they are retired, once.
+
+    Holding them in the same list would make every later turn end rewrite every
+    row still waiting — N rebuilds and N gap re-measurements per turn, for text
+    that does not change, for the rest of the session.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "waiting on a later turn")
+
+        app.post_message(TurnEnded(True, None))
+        await pilot.pause()
+        row = next(block for block in _notice_blocks(app) if block._text == DEFERRED_STEER_NOTICE)
+        restatements: list[str] = []
+        original = type(row).restate
+
+        def _record(self: NoticeBlock, text: str, kind: str) -> None:
+            if self is row:
+                restatements.append(text)
+            original(self, text, kind)  # type: ignore[arg-type]
+
+        with patch.object(type(row), "restate", _record):
+            for _ in range(3):
+                app.post_message(TurnEnded(False, None))
+                await pilot.pause()
+
+        assert restatements == [], "a retired row was rewritten by a later turn end"
+        assert row._text == DEFERRED_STEER_NOTICE
+
+
+@pytest.mark.asyncio
+async def test_a_session_swap_drops_the_rows_waiting_on_the_old_queue() -> None:
+    """The distinction the holding must preserve: swap vs turn ended.
+
+    A carried-over row is waiting on a message in THIS session's steering queue.
+    A swap tears that session down and empties the transcript, so the message is
+    gone with it and the row is off screen — the replacement session's first
+    delivery is a different conversation's message, and settling these rows
+    against it would be a receipt for something that never happened.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "queued before the swap")
+        app.post_message(TurnEnded(True, None))
+        await pilot.pause()
+        assert app._deferred_steer_notices, "the row should be held before the swap"
+
+        app._session_factory = lambda: _factory(_Streaming())  # type: ignore[assignment]
+        await app._reload_session()
+        for _ in range(4):
+            await pilot.pause()
+
+        assert app._deferred_steer_notices == []
+        assert app._queued_steer_notices == []
+        app.post_message(SteeringDelivered(1))
+        await pilot.pause()
+        assert SENT_STEER_NOTICE not in _notice_texts(app)
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_transcript_drops_the_rows_waiting_on_a_later_turn() -> None:
+    """`/clear` removes carried-over rows for the same reason it removes queued ones.
+
+    The widgets are no longer in the transcript, so a later delivery would
+    "settle" rows nobody can see. The message itself is unaffected — `/clear`
+    empties the screen, not the engine's queue — so it still arrives, it just
+    has no row left to report it on.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "queued before the clear")
+        app.post_message(TurnEnded(True, None))
+        await pilot.pause()
+        assert app._deferred_steer_notices
+
+        app._clear_transcript()
+        await pilot.pause()
+
+        assert app._deferred_steer_notices == []
+        app.post_message(SteeringDelivered(1))
+        await pilot.pause()
+        assert SENT_STEER_NOTICE not in _notice_texts(app)
 
 
 @pytest.mark.asyncio
