@@ -80,7 +80,22 @@ ICON_MODEL = "◆"
 ICON_EFFORT = "▴"
 ICON_CWD = "⌂"
 ICON_AGENTS = "◍"
-ICON_JOBS = "⊞"
+#: Background jobs. Kept inside **Geometric Shapes (U+25xx)** like every other
+#: segment icon above, and that block is a hard constraint rather than a
+#: stylistic preference. This was `⊞` (U+229E SQUARED PLUS, Mathematical
+#: Operators) and it rendered as TOFU — an empty replacement box — in the
+#: operator's terminal, while every U+25xx glyph beside it on the same row
+#: painted correctly. One band screenshot showed `◆ ◍ ▦ ◈ ◷` all fine and the
+#: single U+22xx glyph among them broken, which is what identifies the block
+#: rather than the individual codepoint as the problem: terminal fonts that
+#: cover Geometric Shapes routinely stop short of Mathematical Operators.
+#: `▣` also stays visually distinct from `▦` (U+25A6), which sits directly
+#: beside it in the right group — a filled-square icon that reads as a
+#: crosshatched one at a glance would make two adjacent readings look alike.
+#: **Any new icon here belongs in U+25xx unless it has been checked in a real
+#: terminal**, because `cell_len` cannot see this: tofu still measures one cell,
+#: so the band's width arithmetic stays correct while the glyph is invisible.
+ICON_JOBS = "▣"
 ICON_CONTEXT = "▦"
 ICON_COST = "◈"
 ICON_DURATION = "◷"
@@ -88,6 +103,13 @@ ICON_DURATION = "◷"
 #: in ``rich.cells.cell_len``, so it satisfies the single-cell rule above; it
 #: was checked rather than assumed, because the band's arithmetic is exact and
 #: a two-cell glyph would drift the right group's edge by one column.
+#:
+#: NOTE: this is now the ONLY U+22xx (Mathematical Operators) glyph left in the
+#: palette, and so carries the same latent tofu risk that took `ICON_JOBS` above
+#: out of that block. It is deliberately left alone: it has not been observed
+#: broken, and swapping a working glyph on suspicion would trade a known state
+#: for an unknown one. Recorded so that a future report of an empty box next to
+#: the MCP count is diagnosed in one step instead of rediscovered.
 ICON_MCP = "⊙"
 #: Disarmed-gate alarm. Deliberately NOT one of the geometric segment icons
 #: above: this one is an ALARM, not a reading, and it reuses the app-wide
@@ -1519,6 +1541,32 @@ class StatusLine:
         padded to the cells :meth:`_walk` reserved (:data:`NAME_CELLS`), so this
         arithmetic is the same at every title length and a short title leaves its
         leftover at the band's edge rather than shunting the group right.
+
+        That leftover is then CUT from the painted row, and the order of those
+        two steps is the whole point — it is NOT the same thing as aligning the
+        group by its ink. The gap above is still computed from the PADDED box, so
+        every column up to and including the name's first cell remains a function
+        of the row's geometry alone and nothing to the LEFT of the name can see
+        this cut. Aligning by ink instead was tried and reintroduces the exact
+        defect the reserve exists for: the alarm glyph goes back to moving with
+        the title, measured at 120/150/160 columns across the four titles in
+        ``_NAMES`` as columns 91/90/85/108, 121/120/115/138 and 122/117/125/148.
+        Here the only cells removed are the run of blanks BETWEEN the name's last
+        inked cell and the band's right edge, and nothing is ever painted there:
+        the name is the row's last segment by construction.
+
+        Worth removing because those blanks are not nothing. They are ordinary
+        cells carrying the band's own style, so anything that READS the row
+        rather than looking at it carries them: the SVG export writes 35 trailing
+        spaces after a `short` title at a 160-column terminal (0 after the cut),
+        and a reflow or a copy would take them the same way. A row whose right
+        edge is flush for a long title and 35 cells short for a brief one reads
+        as a rendering fault rather than as a band with less to say.
+
+        ``rstrip`` mutates, so it is applied to the freshly built row and never
+        to ``right``: trimming the caller's group in place would leave the fit
+        arithmetic in :meth:`_walk` measuring a different string than the box it
+        reserved, which is the bug this method exists to avoid.
         """
         if not right.plain:
             return left
@@ -1527,6 +1575,7 @@ class StatusLine:
         row.append_text(left)
         row.append(" " * gap, style=dim)
         row.append_text(right)
+        row.rstrip()
         return row
 
     def render_text(self, width: int) -> Text:
