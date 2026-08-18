@@ -455,3 +455,25 @@ async def test_a_weak_search_result_is_worded_as_a_nearest_neighbour(context) ->
     weak = await call(context, op="search", query="order me a pizza")
     assert weak.startswith("nothing scored strongly")
     assert "- " in weak, "the shortlist is still shown, just not as a recommendation"
+
+
+@pytest.mark.asyncio
+async def test_search_only_claims_best_first_when_it_ranked(context, monkeypatch) -> None:
+    """C20: `_ranked_names`' fallback returns [], which leaves the rows in
+    `select`'s NAME order — so the header claimed "best first" over an
+    alphabetical list, the exact hazard the helper's docstring names. The
+    header is honest exactly when the helper works and wrong when it does not.
+    """
+    import local_operator.skills.index as index_module
+
+    healthy = await call(context, op="search", query="review a merge request for defects")
+    assert healthy.startswith("closest roles (best first):")
+
+    def boom(*args: Any, **kwargs: Any):
+        raise TypeError("signature drifted")
+
+    monkeypatch.setattr(index_module, "_hybrid_scores", boom)
+    degraded = await call(context, op="search", query="review a merge request for defects")
+    assert degraded.startswith("closest roles:")
+    assert "best first" not in degraded
+    assert "- " in degraded, "the shortlist is still returned, just unordered"

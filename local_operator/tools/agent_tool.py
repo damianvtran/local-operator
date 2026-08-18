@@ -275,7 +275,19 @@ async def _ranked_names(index: Any, query: str) -> tuple[list[str], float]:
     nothing in a bare list distinguishes a 0.65 hit from 0.03 noise.
 
     Best-effort: any failure returns an empty list and the caller keeps
-    ``select``'s own order, because an unranked answer beats no answer.
+    ``select``'s own order AND drops its "best first" claim, because an
+    unranked answer beats no answer but a false claim about it does not.
+
+    KNOWN COUPLING (accepted, not overlooked): this reaches two private names,
+    ``skills.index._hybrid_scores`` and ``index._scores``, to recompute a
+    ranking ``_select_with_backend`` already computes and then discards by
+    sorting on name. It also passes ``cwd=None``, opting out of the glob boosts
+    ``select`` applies — inert today because agent-profile rows carry no globs,
+    but it is the seam where the two rankings could diverge. The clean fix is
+    for ``select`` to grow an ordering option (or return scores) so the ranking
+    has ONE owner; that is a change to shared knowledge-routing code and does
+    not belong in this PR. The fallback above is what bounds the blast radius
+    until then.
     """
 
     try:
@@ -284,6 +296,11 @@ async def _ranked_names(index: Any, query: str) -> tuple[list[str], float]:
         query_vector = (await index.backend.embed([query]))[0]
         scores = _hybrid_scores(query, index.skills, index._scores(query_vector), None)
     except Exception:  # noqa: BLE001 - ordering is a nicety, never a failure
+        # LOGGED, unlike a bare degrade: the caller cannot tell a working
+        # ranking from a broken one by looking at the output, so silence here
+        # would make a signature drift in the private helpers below invisible
+        # in both the result and the logs.
+        logger.warning("role ranking unavailable; falling back to unordered", exc_info=True)
         return [], 0.0
     ranked = sorted(range(len(index.skills)), key=lambda position: -scores[position])
     best = float(scores[ranked[0]]) if ranked else 0.0
@@ -351,6 +368,7 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
         logger.warning("role search failed: %s", exc)
         picked = rows[:3]
         best_score = 0.0
+        ranking = []
     if not picked:
         return _text(
             tool_call_id,
@@ -368,11 +386,16 @@ async def _op_search(context: ToolContext | None, tool_call_id: str, query: str)
     # too thin to CUT on (that was the old behaviour, and it hid roles whose
     # own text promised the query), but wide enough to change the wording, so a
     # weak result reads as a nearest neighbour rather than a recommendation.
-    header = (
-        "closest roles (best first):"
-        if best_score >= _STRONG_MATCH
-        else "nothing scored strongly; the closest roles are:"
-    )
+    # "(best first)" is claimed ONLY when the ranking actually succeeded. With
+    # `ranking` empty the rows keep `select`'s NAME order, so the phrase would
+    # be a claim the reader cannot check — the exact hazard `_ranked_names`'
+    # docstring names, reintroduced by its own fallback.
+    if not ranking:
+        header = "closest roles:"
+    elif best_score >= _STRONG_MATCH:
+        header = "closest roles (best first):"
+    else:
+        header = "nothing scored strongly; the closest roles are:"
     return _text(
         tool_call_id,
         "agent",
