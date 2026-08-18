@@ -32,27 +32,41 @@ whatever size the screen produced, which is exactly how a 2206x266 paste wedged
 a session permanently — the read tool had been bounded since it was written, so
 the hole was only visible from the path that had no bound at all.
 
-TWO KNOWING EXCEPTIONS, so a reader does not conclude the invariant is total:
+Bounding on the way in has one structural limit, and it is the reason
+:func:`rebound_oversize_image` exists below. It can only protect blocks created
+AFTER it shipped. A transcript is replayed verbatim on every resume, so history
+written by an older build stays oversized on disk and goes on being refused by a
+build whose composer can no longer produce such a block — observed as a 2206x266
+paste that answered every prompt with the many-image refusal long after the
+paste path was fixed. The repair therefore runs on the rendered history, where
+every request converges, rather than at the two creation sites.
+
+TWO KNOWING EXCEPTIONS to the creation-time bound, so a reader does not conclude
+the invariant is total:
 
 - ``compaction/snapcompact.py`` renders its own frames and does not come
-  through here. Their geometry is a per-provider billing decision rather than a
-  paste, and under the Google shape they are 2048x2046 — over the many-image
-  ceiling. That is reachable on another provider, since ``session.set_model``
-  can swap mid-session and a Gemini-shaped archive then replays to whatever is
-  current (review round 1, F4). It is left alone here because changing it means
-  re-deciding that billing trade, not because it is safe by construction; the
-  ``is_image_rejection`` degrade is the net under it.
+  through :func:`bound_image_for_model`. Their geometry is a per-provider
+  billing decision rather than a paste, and under the Google shape they are
+  2048x2046 — over the many-image ceiling. That is reachable on another
+  provider, since ``session.set_model`` can swap mid-session and a
+  Gemini-shaped archive then replays to whatever is current (review round 1,
+  F4). The billing trade is still not re-decided here; those frames are now
+  caught by the render-time repair like any other oversized block, so the
+  archive is rendered for the provider it was measured against and shrunk only
+  when it would actually be refused.
 - ``_forward_undecoded`` cannot resize at all, because on that host there is no
   decoder. See its own docstring for what it does enforce.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 from typing import Any
 
 from local_operator.helpers import heif_image_module, pillow_image_module
-from local_operator.media import ImageInfo
+from local_operator.media import ImageInfo, sniff_image
 from local_operator.optional import missing_extra_error
 
 #: Long-edge ceiling in pixels for an image handed to a provider.
@@ -360,3 +374,94 @@ def bound_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str
             # it might derive coordinates from have been swapped.
             summary += " (EXIF-rotated)"
     return payload, wire_mime, summary
+
+
+#: Memo for :func:`rebound_oversize_image`, keyed by a digest of the block's
+#: base64 text. The repair runs on the RENDERED history, which is rebuilt from
+#: the transcript on every single turn (and again for every token count), so an
+#: oversized block would otherwise be decoded, resized and re-encoded from
+#: scratch several times a turn for the rest of the session — ~315 ms of CPU per
+#: 20 MP frame, on the loop, forever. The digest is the key rather than the
+#: payload so the cache holds hashes and results instead of a second copy of
+#: every image in the conversation.
+#:
+#: ``None`` results are memoized too, and that is the case that matters most for
+#: cost: it is the answer for every in-bounds block, so this also buys the
+#: ordinary session out of re-hashing... nothing. In-bounds blocks are settled by
+#: a header read before they reach here, so only decisions that cost a decode
+#: are stored.
+_REBOUND_CACHE: dict[str, tuple[str, str]] = {}
+
+#: Cap on :data:`_REBOUND_CACHE` entries. A session that legitimately holds this
+#: many DISTINCT oversized images has bigger problems than a cache miss, and an
+#: unbounded dict keyed by content would otherwise grow for the life of the
+#: process. Cleared wholesale rather than evicted by age: the entries are
+#: equally valuable, the map is tiny, and a correct-but-cold cache costs one
+#: resize while a subtle LRU here would cost a reader's afternoon.
+_REBOUND_CACHE_MAX = 64
+
+
+def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
+    """Re-bound an ALREADY-ENCODED image block whose long edge is too big.
+
+    ``None`` means "leave this block exactly as it is", which is the answer for
+    the overwhelming majority of blocks and must stay cheap: the dimensions come
+    from :func:`~local_operator.media.sniff_image`, a header read, so an
+    in-bounds block costs one base64 decode and no Pillow decode at all.
+
+    This is the REPAIR path, and it exists because bounding on the way in
+    (:func:`bound_image_for_model`) can only ever protect blocks created after
+    that code shipped. History written by an older build is already on disk and
+    already oversized, and a transcript is replayed verbatim on every resume —
+    so a session poisoned before the fix stays poisoned after it, which is
+    precisely what was observed: a 2206x266 paste from an unbounded build kept
+    earning ``At least one of the image dimensions exceed max allowed size for
+    many-image requests: 2000 pixels`` on every prompt, on a build whose
+    composer could no longer produce such a block.
+
+    Deliberately keyed on the DIMENSION alone, not on bytes and not on the
+    provider's complaint. The many-image ceiling is the only limit that can be
+    breached by a block that was legal when it was written — the conversation
+    grows past twenty frames and a block that was fine for a hundred turns
+    starts being refused — so the repair has to be able to run BEFORE any
+    refusal has happened, which rules out driving it from the error text.
+
+    A block this cannot decode is returned unchanged rather than dropped. It may
+    be perfectly acceptable to the provider (a HEIF whose dimensions this cannot
+    read, a host with no Pillow), and the ``is_image_rejection`` degrade in the
+    session is still underneath as the net for the genuinely bad ones. Repairing
+    history must never be able to destroy context on its own.
+    """
+    try:
+        raw = base64.b64decode(data_b64, validate=True)
+    except Exception:  # noqa: BLE001 — a malformed block is the degrade's problem, not ours
+        return None
+    info = sniff_image(raw)
+    if info is None or info.width is None or info.height is None:
+        # Unreadable header: cannot prove it is oversized, so do not touch it.
+        return None
+    if max(info.width, info.height) <= IMAGE_MAX_EDGE:
+        return None
+    # Only oversized blocks reach the cache, so the common path never pays for
+    # it. The digest covers the bytes alone, which is the whole key: the result
+    # is derived from the DECODED image, and identical bytes cannot decode two
+    # ways. The block's declared mime type is deliberately not consulted
+    # anywhere here — ``sniff_image`` decides format by CONTENT, because a block
+    # labelled ``image/png`` that is really a JPEG must be resized as what it
+    # actually is.
+    key = hashlib.sha256(raw).hexdigest()
+    cached = _REBOUND_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        payload, wire_mime, _ = bound_image_for_model(raw, info)
+    except ValueError:
+        # Corrupt or bomb-sized. Leaving it is strictly better than dropping it:
+        # the block may still be one the provider accepts, and if it is not, the
+        # session's image-rejection degrade removes it on the refusal.
+        return None
+    result = (base64.b64encode(payload).decode("ascii"), wire_mime)
+    if len(_REBOUND_CACHE) >= _REBOUND_CACHE_MAX:
+        _REBOUND_CACHE.clear()
+    _REBOUND_CACHE[key] = result
+    return result

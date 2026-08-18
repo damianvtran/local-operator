@@ -424,6 +424,58 @@ def _replayed_user_message(content: list[Content], entry_id: str | None) -> Mess
 IMAGE_DROPPED_NOTICE = "[image omitted: the provider rejected it and it has been dropped]"
 
 
+def _rebound_history_images(messages: list[Message]) -> list[Message]:
+    """Shrink any image block in the rendered history that is over the cap.
+
+    The composer and the ``read`` tool both bound images on the way in, so on a
+    current build nothing reaching here is oversized and this walk is a cheap
+    header check that changes nothing. It exists for the blocks those bounds
+    cannot reach:
+
+    - History written by an OLDER build, which is on disk and is replayed
+      verbatim on every resume. This is the observed failure: a 2206x266 paste
+      from an unbounded build kept earning ``...max allowed size for many-image
+      requests: 2000 pixels`` on every single prompt, on a build whose composer
+      could no longer create such a block. Bounding on the way in fixed the
+      cause and could not fix the sessions already poisoned by it.
+    - Snapcompact archive frames, which are rendered to a per-provider geometry
+      rather than through :func:`~local_operator.imaging.bound_image_for_model`
+      and reach 2048px wide under the Google shape. ``set_model`` can swap
+      providers mid-session, so a Gemini-shaped archive can replay to Anthropic
+      and breach a ceiling it was never measured against.
+
+    Applied to the RENDERED history and never to the transcript, exactly like
+    :func:`_without_images`: the stored frames keep their original resolution,
+    so ``/export`` is unaffected and a provider with laxer limits still gets the
+    full-size image on a later session.
+
+    This is a REPAIR, not a replacement for the ``is_image_rejection`` degrade.
+    It fixes the one cause that is mechanically knowable in advance (the block
+    is too big); the degrade stays underneath for every refusal that is not —
+    corrupt bytes, a format the provider dislikes, or the same bytes being
+    accepted for hours and then refused.
+    """
+    from local_operator.imaging import rebound_oversize_image
+
+    out: list[Message] = []
+    for message in messages:
+        if not any(isinstance(block, ImageContent) for block in message.content):
+            out.append(message)
+            continue
+        content: list[Content] = []
+        changed = False
+        for block in message.content:
+            if isinstance(block, ImageContent):
+                rebound = rebound_oversize_image(block.data)
+                if rebound is not None:
+                    data, mime_type = rebound
+                    block = block.model_copy(update={"data": data, "mime_type": mime_type})
+                    changed = True
+            content.append(block)
+        out.append(message.model_copy(update={"content": content}) if changed else message)
+    return out
+
+
 def _without_images(messages: list[Message]) -> list[Message]:
     """Every message with its image blocks replaced by a one-line notice.
 
@@ -809,7 +861,12 @@ class Session:
         that reaches a provider has to be free of them.
         """
         rendered = self._convert_to_llm(self._live_todo_reminders(messages))
-        return _without_images(rendered) if self._images_rejected else rendered
+        if self._images_rejected:
+            # Nothing to rebound once images are being dropped outright, and
+            # dropping first saves decoding a block that is about to become a
+            # one-line notice.
+            return _without_images(rendered)
+        return _rebound_history_images(rendered)
 
     def _live_todo_reminders(self, messages: list[AgentMessage]) -> list[AgentMessage]:
         """``messages`` without todo reminders the list has since outrun.

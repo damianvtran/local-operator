@@ -16,15 +16,19 @@ supposed to be the escape hatch.
 
 from __future__ import annotations
 
+import base64
 import io
 
 import pytest
 from PIL import Image
 
 from local_operator.imaging import (
+    _REBOUND_CACHE,
+    _REBOUND_CACHE_MAX,
     IMAGE_MAX_EDGE,
     IMAGE_MAX_PIXELS,
     bound_image_for_model,
+    rebound_oversize_image,
 )
 from local_operator.media import ImageInfo, sniff_image
 
@@ -299,3 +303,79 @@ def test_undecodable_bytes_raise_rather_than_becoming_an_image_block() -> None:
     # The header still parses; only the body is gone.
     with pytest.raises(ValueError):
         bound_image_for_model(truncated, _sniffed(truncated))
+
+
+# ---------------------------------------------------------------------------
+# Repairing history that an older build already poisoned
+# ---------------------------------------------------------------------------
+
+
+def test_an_oversized_block_from_an_older_build_is_rebound() -> None:
+    """The reported bug, at the unit level.
+
+    Bounding on the way in cannot reach a block that was written before it
+    shipped, and a transcript is replayed verbatim on every resume — so the
+    2206x266 paste that wedged a real session kept earning the many-image
+    refusal on a build whose composer could no longer produce it.
+    """
+    source = _png((2206, 266))
+    rebound = rebound_oversize_image(base64.b64encode(source).decode("ascii"))
+    assert rebound is not None, "the oversized block was left as it was"
+    data, mime = rebound
+    width, height = Image.open(io.BytesIO(base64.b64decode(data))).size
+    assert max(width, height) <= IMAGE_MAX_EDGE
+    assert max(width, height) < MANY_IMAGE_PIXEL_LIMIT
+    assert width / height == pytest.approx(2206 / 266, rel=0.01), "aspect ratio was not preserved"
+    assert mime == "image/png"
+
+
+def test_an_in_bounds_block_is_left_completely_alone() -> None:
+    """``None`` means "do not touch it", and it is the answer for almost every
+    block in every conversation. Re-encoding an image the provider already
+    accepts would spend CPU on every turn to make the picture worse."""
+    source = _png((800, 600))
+    assert rebound_oversize_image(base64.b64encode(source).decode("ascii")) is None
+
+
+def test_a_block_that_cannot_be_decoded_is_kept_rather_than_dropped() -> None:
+    """A repair pass must never be able to destroy context on its own.
+
+    Bytes this cannot read may still be perfectly acceptable to the provider,
+    and the ``is_image_rejection`` degrade is the net for the ones that are not.
+    """
+    assert rebound_oversize_image("not base64 at all!!") is None
+
+    truncated = _png((3000, 400))[:60]  # header parses, body is gone
+    assert rebound_oversize_image(base64.b64encode(truncated).decode("ascii")) is None
+
+
+def test_the_repair_is_memoized_so_a_resize_is_not_paid_every_turn() -> None:
+    """The rendered history is rebuilt on every turn and again for every token
+    count, so an uncached repair would re-decode and re-resize the same frame
+    several times a turn for the life of the session."""
+    source = _png((2206, 266))
+    encoded = base64.b64encode(source).decode("ascii")
+    _REBOUND_CACHE.clear()
+
+    first = rebound_oversize_image(encoded)
+    assert len(_REBOUND_CACHE) == 1, "an oversized block was not memoized"
+    second = rebound_oversize_image(encoded)
+    assert first == second, "the memo returned a different image than the resize did"
+
+    # In-bounds blocks are settled by a header read, so they must not consume
+    # cache entries: a long session of ordinary screenshots would otherwise
+    # evict the one entry that actually costs something to recompute.
+    small = base64.b64encode(_png((800, 600))).decode("ascii")
+    rebound_oversize_image(small)
+    assert len(_REBOUND_CACHE) == 1
+
+
+def test_the_memo_cannot_grow_without_bound() -> None:
+    """Keyed by content, so an unbounded map would grow for the life of the
+    process on a session that pastes many distinct oversized frames."""
+    _REBOUND_CACHE.clear()
+    for index in range(_REBOUND_CACHE_MAX + 2):
+        # Distinct sizes, so every one is a distinct cache key.
+        source = _png((2100 + index, 300))
+        rebound_oversize_image(base64.b64encode(source).decode("ascii"))
+    assert len(_REBOUND_CACHE) <= _REBOUND_CACHE_MAX

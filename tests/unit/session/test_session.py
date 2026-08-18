@@ -4,6 +4,8 @@ compaction hook, dispose."""
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import sys
 import types
 from collections.abc import Awaitable, Callable, Sequence
@@ -1817,3 +1819,97 @@ async def test_a_cancelled_subagent_never_persists_a_marker_or_reminder(tmp_path
     ), "the cancelled child's actual turn was dropped"
 
     await child.dispose()
+
+
+def _sized_png_b64(size: tuple[int, int]) -> str:
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, (10, 60, 120)).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _rendered_image_sizes(request: ChatRequest) -> list[tuple[int, int]]:
+    from PIL import Image
+
+    return [
+        Image.open(io.BytesIO(base64.b64decode(block.data))).size
+        for message in request.messages
+        for block in message.content
+        if isinstance(block, ImageContent)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_history_written_by_an_older_build_is_rebound_not_refused(tmp_path):
+    """The reported bug, end to end: a resumed session was permanently wedged.
+
+    Bounding images on the way in fixed the CAUSE but could not fix the sessions
+    already poisoned by it. The oversized block is on disk, a transcript is
+    replayed verbatim, and the ``images_rejected`` degrade is in-memory only —
+    so every resume started clean, re-sent the same 2206x266 block, took the
+    same 400, and did it again on the next prompt, forever.
+
+    What makes this the right fix rather than "let the degrade catch it": the
+    degrade costs the model EVERY image in the conversation, and here nothing
+    was wrong with any of them except one that is merely too wide. Shrinking
+    that one keeps the other screenshots the session was reviewing.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="review these"),
+                    ImageContent(data=_sized_png_b64((2206, 266)), mime_type="image/png"),
+                    ImageContent(data=_sized_png_b64((1184, 624)), mime_type="image/png"),
+                ],
+            )
+        ]
+    )
+
+    await session.prompt("continue")
+
+    sizes = _rendered_image_sizes(stream.requests[0])
+    assert sizes[0] == (1568, 189), "the oversized block was sent as it was"
+    assert sizes[1] == (1184, 624), "an in-bounds block was resized for no reason"
+    assert not session._images_rejected, "the repair should make the degrade unnecessary"
+    sent = [
+        block.text
+        for message in stream.requests[0].messages
+        for block in message.content
+        if isinstance(block, TextContent)
+    ]
+    assert "review these" in sent
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_repair_does_not_resurrect_images_after_a_refusal(tmp_path):
+    """The two mechanisms must compose in one direction only.
+
+    Once a provider has refused an image the session stops sending images at
+    all, and a repair pass that ran afterwards would put a (smaller) block back
+    into the very request the degrade exists to clear.
+    """
+    stream = PoisonedThenFine()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="look"),
+                    ImageContent(data=_sized_png_b64((2206, 266)), mime_type="image/png"),
+                ],
+            )
+        ]
+    )
+
+    await session.prompt("go")
+    assert session._images_rejected
+    await session.prompt("again")
+    assert _image_blocks(stream.requests[1]) == 0, "the degrade was undone by the repair"
+    await session.dispose()
