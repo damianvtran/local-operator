@@ -1310,22 +1310,33 @@ def test_a_brief_title_leaves_no_dead_run_at_the_bands_right_edge(monkeypatch) -
     The reserve is what holds every sibling's column still while a model rewrites
     the title (D2), so it stays — but it used to be painted out to the band's
     right edge as well, which left a brief title trailed by a long run of blank
-    cells that no segment would ever occupy. Measured before this fix on a band
-    carrying model, agents, jobs, context and cost: 39 cells after `a` and 35
-    after `short`, at 100, 120 and 160 columns.
+    cells that no segment would ever occupy.
 
-    The run's SIZE is not a constant, and an earlier version of this docstring
-    said it was. It tracks the name's box, which is itself elastic — on a fully
-    populated band (cwd and the alarm both present) the same measurement gives
-    29/35/39 for `a` and 25/31/35 for `short`, because the box only reaches the
-    full ``NAME_CELLS`` once the row is wide enough to spare it. The invariance
-    above is a property of one band shape, not of the defect.
+    The run's SIZE is not a constant. Two earlier versions of this docstring
+    implied otherwise, and the second was written to fix the first — which is
+    the more useful half of the story, because a correction carries more
+    authority than an original and nobody re-checks a sentence whose commit
+    message says it is the fix.
 
-    What identifies the padding is therefore not a constant width but the
-    RELATIONSHIP: the run is exactly the box minus the ink, so it grows as the
-    box grows and vanishes when the title fills it. That is what this test pins,
-    by asserting the row ends on the title's last inked cell at every width
-    rather than by asserting any particular number of dead cells.
+    The first version said the run was "identical at every width". The second
+    retracted that and then quoted a second illustrative triple, which reproduces
+    only under a band shape it did not name: the width-100 figure moves with the
+    cwd's length and with whether the alarm is armed, so the same measurement
+    yields a different first entry on a shorter path or a disarmed gate. A
+    figure quoted without the conditions that produce it is the same unenforced
+    universal in a narrower costume.
+
+    So no illustrative numbers are quoted here at all. What identifies the
+    padding is the RELATIONSHIP, which needs none: the run is exactly the box
+    minus the ink, so it grows as the box grows and vanishes when the title
+    fills it — while a layout gap would not track the title's length. The box is
+    itself elastic and only reaches the full ``NAME_CELLS`` once the row can
+    spare it, which is why any single measurement of the run is a fact about one
+    band shape rather than about the defect.
+
+    That relationship is what this test pins, by asserting the row ends on the
+    title's last inked cell at every width rather than by asserting any
+    particular number of dead cells.
 
     Those cells are ordinary styled cells, so everything that reads the row
     rather than looking at it carried them — the app's own SVG export wrote 35
