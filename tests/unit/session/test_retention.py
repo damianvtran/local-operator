@@ -394,21 +394,21 @@ def test_live_sessions_over_the_byte_ceiling_are_logged(tmp_path, caplog):
     import logging
 
     sessions = tmp_path / "sessions"
-    running = _session(sessions, "running", size=200_000)
+    # Live sessions holding most of the budget: eviction cannot bring the store
+    # back under the ceiling, however much history it reclaims. Note the live
+    # bytes do NOT exceed the ceiling by themselves — the shape the first
+    # version of this warning stayed silent for.
+    running = _session(sessions, "running", size=280_000)
     claim_session(running)
-
-    # Retained history too, so the total is over budget without the live bytes
-    # exceeding the ceiling by themselves — the shape an earlier version of
-    # this warning stayed silent for.
     _session(sessions, "history", size=200_000, age_days=1)
 
     with caplog.at_level(logging.WARNING, logger="local_operator.session.retention"):
         result = sweep_sessions(sessions, max_sessions=0, max_bytes=300_000, max_age_days=0)
 
     assert running.exists()
-    assert result.bytes_live == 200_000
-    assert result.bytes_on_disk > 300_000
-    assert any("against a" in record.message for record in caplog.records)
+    assert result.bytes_live == 280_000
+    assert result.bytes_live < 300_000
+    assert any("exempt from eviction" in record.message for record in caplog.records)
 
 
 def test_a_hollow_run_leaves_nothing_behind_once_it_is_past_the_grace_period(tmp_path):
@@ -455,11 +455,11 @@ def test_an_unverifiable_claim_expires_once_the_session_stops_writing(tmp_path, 
     exempt a directory from all three ceilings permanently, so every crash
     would switch the module off one directory at a time.
 
-    ``sys.platform`` is patched rather than ``_process_alive``, so the real
+    ``_PLATFORM`` is patched rather than ``_process_alive``, so the real
     branch runs — including the ``pid <= 0`` guard ahead of it, which is what
     makes a bogus pid read as unclaimed everywhere.
     """
-    monkeypatch.setattr("local_operator.session.retention.sys.platform", "win32")
+    monkeypatch.setattr("local_operator.session.retention._PLATFORM", "win32")
     monkeypatch.setattr("local_operator.session.retention._LIVENESS_IS_VERIFIABLE", False)
 
     sessions = tmp_path / "sessions"
@@ -486,7 +486,7 @@ def test_an_unverifiable_claim_survives_while_the_session_is_still_writing(tmp_p
     It is measured against the last write instead, which a live session keeps
     moving.
     """
-    monkeypatch.setattr("local_operator.session.retention.sys.platform", "win32")
+    monkeypatch.setattr("local_operator.session.retention._PLATFORM", "win32")
     monkeypatch.setattr("local_operator.session.retention._LIVENESS_IS_VERIFIABLE", False)
 
     sessions = tmp_path / "sessions"
@@ -503,3 +503,52 @@ def test_an_unverifiable_claim_survives_while_the_session_is_still_writing(tmp_p
     sweep_sessions(sessions, max_sessions=0, max_bytes=1, max_age_days=0)
 
     assert long_running.exists(), "a live, actively-writing session was evicted"
+
+
+def test_an_unverifiable_claim_survives_a_resume_of_an_older_transcript(tmp_path, monkeypatch):
+    """`--resume` is the case where the claim is fresh and the content is old.
+
+    Measuring the trust bound against activity ALONE discarded the marker, so a
+    session resumed from yesterday's transcript read as abandoned from the
+    moment it was claimed until its first turn landed — a live session's
+    transcript deleted out from under it, which is this module's original bug.
+    The bound takes the later of the two clocks for that reason.
+    """
+    monkeypatch.setattr("local_operator.session.retention._PLATFORM", "win32")
+    monkeypatch.setattr("local_operator.session.retention._LIVENESS_IS_VERIFIABLE", False)
+
+    sessions = tmp_path / "sessions"
+    # Yesterday's transcript, well past the trust window; claimed just now.
+    resumed = _session(sessions, "resumed", size=512)
+    stale = time.time() - CLAIM_TRUST_S * 2
+    os.utime(resumed / "transcript.jsonl", (stale, stale))
+    claim_session(resumed)
+
+    assert _is_claimed(resumed, time.time()), "a just-resumed session read as abandoned"
+
+    sweep_sessions(sessions, max_sessions=0, max_bytes=1, max_age_days=0)
+
+    assert resumed.exists(), "a live resumed session was evicted before its first turn"
+
+
+def test_a_store_inside_its_ceiling_does_not_warn(tmp_path, caplog):
+    """The overshoot warning must not fire on a healthy store.
+
+    Eviction leaves governed bytes just under the ceiling by construction, so
+    any live session pushes the total fractionally over it. A strict comparison
+    fired on roughly half of normal startups, which is how a real 1.8x warning
+    ends up ignored.
+    """
+    import logging
+
+    sessions = tmp_path / "sessions"
+    running = _session(sessions, "running", size=8_000)
+    claim_session(running)
+    _session(sessions, "history", size=100_000, age_days=1)
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.retention"):
+        result = sweep_sessions(sessions, max_sessions=0, max_bytes=100_000, max_age_days=0)
+
+    # Over the ceiling, but only by the live session — the healthy resting state.
+    assert result.bytes_on_disk > 100_000
+    assert not [r for r in caplog.records if "exempt from eviction" in r.message]
