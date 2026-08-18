@@ -44,6 +44,7 @@ never sees the difference.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import re
 import shlex
@@ -68,7 +69,8 @@ from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult, Selection
 
 from local_operator.harness.types import ImageContent
-from local_operator.media import sniff_image_file
+from local_operator.imaging import bound_image_for_model
+from local_operator.media import ImageInfo, sniff_image, sniff_image_file
 from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 from local_operator.tui.widgets.command_picker import (
     CommandPicker,
@@ -109,6 +111,62 @@ _PATH_SEGMENT = re.compile(r"^(?:~|\.{0,2}/|/)")
 #: It also states the assumption `cite`'s ``str.find`` already relies on: a
 #: marker cannot contain another marker.
 IMAGE_MARKER = re.compile(r"\[Image #([1-9]\d*)(?:,[^\]\n\[]*)?\]")
+
+
+#: Appended to a marker whose image was downscaled on the way in. One glyph,
+#: two cells, and it buys back most of what the honest label costs: every 16:9
+#: screenshot now bounds to the same 1568x882, so three different captures
+#: pasted together would otherwise read as three identical markers where the
+#: source dimensions had told them apart (design round 1, D1). It also answers
+#: the question the number itself provokes — "why is this not the size I
+#: pasted?" — which no bare figure can.
+#:
+#: Chosen over spending width on both sizes: the marker sits inline in the
+#: user's prompt text and is an atomic editing unit, so it has to stay short.
+#: ``IMAGE_MARKER`` already matches it, since the tail is matched loosely for
+#: exactly this kind of later change.
+RESIZED_MARK = " ↓"
+
+
+def _was_downscaled(bounded: ImageInfo, source: ImageInfo) -> bool:
+    """Did the bound make the image SMALLER, as opposed to merely different?
+
+    Compares pixel counts rather than the ``WxH`` strings. A portrait phone
+    photo inside the bounds is EXIF-rotated on the way in, so its dimensions
+    change (3024x4032 from 4032x3024) while not one pixel is lost — and a naive
+    string comparison marked it ``↓``, asserting a shrink that never happened
+    (review round 2, F8). The mark is a claim about fidelity, so it has to be
+    tested as one.
+    """
+    if not source.width or not source.height or not bounded.width or not bounded.height:
+        return False
+    return bounded.width * bounded.height < source.width * source.height
+
+
+def _bounded_dimensions(payload: bytes, info: ImageInfo) -> str:
+    """The marker's label: ``WxH`` of the bytes actually attached.
+
+    Read back from the BOUNDED payload rather than carried over from ``info``,
+    which describes the file on disk. Once the paste path started resizing,
+    reusing the source dimensions would print a marker claiming 2560x1440 next
+    to a 1568x882 attachment — a receipt for something that was never sent.
+
+    Carries :data:`RESIZED_MARK` when the two differ, so the label still
+    distinguishes one paste from another and says why the number moved.
+
+    A header sniff and not a decode: :func:`sniff_image` reads a fixed prefix,
+    so this costs microseconds and cannot be made expensive by the payload. It
+    is also applied to bytes this process just produced, so failure is not
+    expected — but it stays best-effort anyway, degrading to the source label
+    and then to no label at all, because a marker is a convenience and must
+    never be the reason an attachment is lost.
+    """
+    bounded = sniff_image(payload)
+    if bounded is None or not bounded.dimensions:
+        return info.dimensions
+    if _was_downscaled(bounded, info):
+        return f"{bounded.dimensions}{RESIZED_MARK}"
+    return bounded.dimensions
 
 
 def _marker_indices(text: str) -> list[int]:
@@ -1350,15 +1408,23 @@ class Editor(TextArea):
         it, it runs it a second time, and an ordinary text paste came out
         duplicated. Suppressing the base is ``prevent_default``; letting it run
         is doing nothing.
+
+        The ``await`` below is safe against that rule even though it lands
+        BEFORE ``prevent_default``. ``MessagePump._get_dispatch_methods`` is a
+        generator that re-checks ``_no_default_action`` at the top of each MRO
+        step, and the pump fully awaits one handler before resuming it, so the
+        base handler cannot start while this one is suspended. The same
+        sequencing is why two fast pastes cannot interleave: the pump dispatches
+        one message at a time, so marker issuance stays in paste order.
         """
-        attached = self._attach_pasted_images(event.text)
+        attached = await self._attach_pasted_images(event.text)
         if attached is None:
             return
         event.prevent_default()
         event.stop()
         self.insert(attached)
 
-    def _attach_pasted_images(self, pasted: str) -> str | None:
+    async def _attach_pasted_images(self, pasted: str) -> str | None:
         """Load every path in ``pasted`` as an attachment; return the markers.
 
         ``None`` means "this was not an image paste" — the caller then lets
@@ -1369,6 +1435,23 @@ class Editor(TextArea):
         PDF becomes a plain text paste of every path, rather than silently
         attaching two of three and leaving the user to notice which. Mixed
         results are the shape a user cannot see and cannot correct.
+
+        Async because the bytes are BOUNDED before they are attached, and
+        bounding means decoding — see :func:`~local_operator.imaging.
+        bound_image_for_model`. This is a keystroke handler, so a
+        multi-hundred-millisecond decode inline would freeze the whole app: a
+        20 MP screenshot measures ~315 ms.
+
+        Be precise about what the thread buys, because it is not everything
+        (review round 1, F3). The LOOP keeps running — the transcript still
+        paints, other widgets still respond, a running turn still streams. This
+        WIDGET's own input does not: the pump awaits one handler before
+        dispatching the next message to the same widget, so keystrokes typed
+        during the decode are queued and flush when it ends. Nothing is lost and
+        the order is preserved, but the composer does go quiet for the duration,
+        which it did not before this bound existed. Accepted rather than hidden
+        behind a worker + late marker insertion, because a marker that appears
+        after the user has typed past its position is a worse bug than a pause.
         """
         candidates = _pasted_paths(pasted)
         if not candidates:
@@ -1411,13 +1494,42 @@ class Editor(TextArea):
                 # The stat above is the real gate; this catches a file that grew
                 # between the two calls.
                 return None
+            # BOUND before attaching, in a thread. The bytes on disk are
+            # whatever the screen produced, and a provider refuses an image over
+            # 2000 pixels on its long edge as soon as the request carries more
+            # than twenty of them (see local_operator.imaging). Forwarding
+            # verbatim was therefore not "lossless", it was a delayed fault: a
+            # 2206x266 paste sat harmlessly in the history for a hundred turns
+            # and then wedged the session permanently the moment the twenty
+            # first screenshot arrived, because the block is in the HISTORY and
+            # every later request — including the compaction that is supposed to
+            # be the escape hatch — re-sends it and earns the same 400.
+            #
+            # `to_thread` and not an inline call: this runs on the keystroke
+            # that pasted, and a 20 MP screenshot decodes in ~315 ms.
+            try:
+                payload, wire_mime, _summary = await asyncio.to_thread(
+                    bound_image_for_model, data, info
+                )
+            except ValueError:
+                # Undecodable, a decompression bomb, or too large to send with
+                # no decoder available. A text paste of the path is the honest
+                # outcome: the user keeps what they pasted and can see it was
+                # not attached, where a silently dropped attachment is the shape
+                # nobody notices until the model answers about nothing.
+                return None
             loaded.append(
                 (
                     ImageContent(
-                        data=base64.b64encode(data).decode("ascii"),
-                        mime_type=info.mime_type,
+                        data=base64.b64encode(payload).decode("ascii"),
+                        mime_type=wire_mime,
                     ),
-                    info.dimensions,
+                    # The marker reports what was ATTACHED, not what is on disk.
+                    # A marker reading 2560x1440 beside a 1568x882 attachment is
+                    # a receipt for something that was never sent, and the whole
+                    # point of the dimensions is that the user can check them at
+                    # a glance.
+                    _bounded_dimensions(payload, info),
                 )
             )
 
