@@ -38,7 +38,14 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.css.query import NoMatches
-from textual.events import DescendantBlur, DescendantFocus, Resize, TextSelected
+from textual.events import (
+    AppBlur,
+    AppFocus,
+    DescendantBlur,
+    DescendantFocus,
+    Resize,
+    TextSelected,
+)
 from textual.geometry import Size
 
 # Aliased: `Message` in this module is the harness's conversation message.
@@ -102,7 +109,12 @@ from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
 )
-from local_operator.tui.terminal_title import TerminalTitle, terminal_title_enabled
+from local_operator.tui.notify import Notifier, notifications_enabled
+from local_operator.tui.terminal_title import (
+    TerminalTitle,
+    cwd_label,
+    terminal_title_enabled,
+)
 from local_operator.tui.widgets.approval import ApprovalBlock
 from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
@@ -680,6 +692,54 @@ class OperatorApp(App[None]):
         #: which owns the terminal, and lent to the band, which owns the state
         #: it displays — see :meth:`_start_terminal_title`.
         self._terminal_title: TerminalTitle | None = None
+        #: Desktop notifications for the user who is looking at another app —
+        #: the surface one step beyond the window title (see `tui/notify.py`).
+        #: Held by the app rather than by the band because, unlike the title,
+        #: this is an EDGE and not a state: it is fired from the specific
+        #: handlers that know a turn settled or parked on the user, and the band
+        #: sees neither of those as distinct events. ``None`` when there is no
+        #: terminal to write to (headless) or the user turned it off.
+        self._notifier: Notifier | None = None
+        #: WHICH question the user is parked on (``"approval"``/``"ask"``), or
+        #: ``None``. The EDGE into this state is what gets notified; the state
+        #: itself is what the title and the working line show. Kept here rather
+        #: than read back off the title because the two differ in exactly the
+        #: way that matters: the title is re-asserted continuously and coalesces
+        #: on the rendered string, while a notification has no equivalent of
+        #: "already on screen" and would fire once per repaint.
+        #:
+        #: The KIND rather than a bool, because `ask` and approval share one
+        #: activity phase: with a bool, an `ask` raised over a live approval is
+        #: not a transition and was never announced — and the two are worth
+        #: distinguishing, since "waiting for approval" over a question the
+        #: model asked sends the user hunting for a tool prompt that is not
+        #: there.
+        #:
+        #: Only ever set to a kind that was actually DELIVERED. Latching on the
+        #: derived state instead consumed the edge on a toast the focus gate had
+        #: suppressed, so a question raised while the user was watching was
+        #: never announced after they tabbed away — indefinitely, since the
+        #: latch re-arms only by answering the question they do not know exists.
+        self._waiting_kind: str | None = None
+        #: Whether a turn completion was suppressed because delegated work was
+        #: still outstanding, and therefore still owes the user a toast. The
+        #: docstring's original claim — that silence costs nothing because a
+        #: settled job re-enters as a fresh notifiable turn — is only true on
+        #: the happy path: `Session._on_job_completed` returns early for a
+        #: cancelled, `consumed`, nested or mid-stream job, and the job
+        #: manager's cancel branch never delivers at all. Left to that, a
+        #: parent that finished while a child was later CANCELLED was never
+        #: announced. This flag is what lets the last child's settle deliver it.
+        self._completion_deferred: bool = False
+        #: Job ids whose ``SubagentEnded`` this app has already handled but
+        #: which the job manager may not have marked settled yet. A SET, not a
+        #: single id, because a `task` batch settles its children inside one
+        #: another's teardown windows: each end event arrives while every one of
+        #: those rows still reads ``running``, so a handler that excluded only
+        #: ITSELF saw its siblings as outstanding and returned early. Nobody was
+        #: last, so nobody delivered the completion — and the deferred flag then
+        #: latched, swallowing every later completion in the session.
+        self._settled_child_ids: set[str] = set()
         self._streaming_block: AssistantBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
@@ -1011,6 +1071,10 @@ class OperatorApp(App[None]):
         # is unnamed. Attaching first would leave a bare `lo ›` on screen for
         # as long as the boot takes.
         self._start_terminal_title()
+        # Same driver, same gating, one line later: the notifier is the title's
+        # out-of-app counterpart (state vs edge — see `tui/notify.py`), and both
+        # want the terminal available and the app non-headless.
+        self._start_notifier()
         # Straight after the band exists and before the session is asked for:
         # the saved mode has to be in force by the time the first tool can ask,
         # and the band has to say so on the boot frame rather than on whichever
@@ -1462,6 +1526,14 @@ class OperatorApp(App[None]):
         # first aborted turn would suppress its notice on the strength of cards
         # that belonged to a conversation the user cannot see any more.
         self._interrupted_cards = 0
+        # And a deferred completion belongs to the dying conversation too. Left
+        # set, the replacement session's first settling background job would
+        # announce "task complete" for a turn the user can no longer see — the
+        # same class of cross-session leak the resets above exist to prevent.
+        # (The waiting latch needs no line here: `_refresh_working_activity`
+        # runs just above, after `_approval` is cleared, and clears it.)
+        self._completion_deferred = False
+        self._settled_child_ids.clear()
         if self._controller is not None:
             # BEFORE disposal, always: the ledger is being rebuilt from the
             # replacement session, so the dying session's terminal events have
@@ -3185,6 +3257,113 @@ class OperatorApp(App[None]):
         self.workers.cancel_all()
         await super()._shutdown()
 
+    def _start_notifier(self) -> None:
+        """Build the desktop notifier, on the same terms as the title writer.
+
+        The sink is ``driver.write`` for the identical reason
+        (:meth:`_start_terminal_title`): an in-band OSC written straight to
+        ``sys.stdout`` lands in the middle of a frame Textual's writer thread
+        is painting.
+
+        Gated on a real driver, which is what keeps this feature OFF everywhere
+        it would be wrong. ``local-operator serve`` \u2014 the backend behind
+        local-operator-ui \u2014 never constructs this app at all, so it cannot
+        notify: the UI owns its own notification surface, and a backend that
+        also notified would both duplicate every alert and raise it on whichever
+        machine the server happens to run on. The headless REPL and ``exec``
+        reach here with no driver for the same reason and get the same answer.
+        """
+        driver = self._driver
+        if driver is None or self.is_headless or not notifications_enabled():
+            return
+        self._notifier = Notifier(driver.write)
+
+    def _notify_label(self) -> str:
+        """The session name a toast carries \u2014 the band's label, or the cwd.
+
+        Same fallback chain the window title uses, and for the same reason: a
+        conversation is named off its first substantive prompt, so a session
+        spends its opening minutes unnamed, and three identically-titled toasts
+        from three sessions identify none of them.
+        """
+        session = self._session
+        name = getattr(session, "conversation_name", "") if session is not None else ""
+        return name or cwd_label(os.getcwd())
+
+    def _notify(self, kind: str, *, running_children: int | None = None) -> bool:
+        """Fire one notification, if this app has a notifier and the event qualifies.
+
+        The single funnel for every call site, so the label is refreshed in one
+        place (a conversation is renamed mid-session, and a toast naming the
+        session by its old name is worse than one naming it by none) and so no
+        handler has to hold an ``if self._notifier is not None`` of its own.
+
+        Never raises: a notification is chrome. The delivery paths already
+        swallow their own failures, but the resolution above them (a session
+        being torn down under a late event) is this method's to absorb \u2014 a
+        toast must not be able to take down a turn.
+
+        Returns whether a toast was actually DELIVERED, which the waiting latch
+        depends on: a notification the focus gate suppressed must leave the edge
+        armed rather than consuming it.
+        """
+        notifier = self._notifier
+        if notifier is None:
+            return False
+        try:
+            notifier.set_label(self._notify_label())
+            if kind == "complete":
+                return notifier.notify_turn_complete(running_children=running_children or 0)
+            if kind == "error":
+                return notifier.notify_error()
+            if kind in ("approval", "ask"):
+                return notifier.notify_waiting(kind)
+        except Exception:  # pragma: no cover - defensive; chrome must not raise
+            logger.debug("notification delivery failed", exc_info=True)
+        return False
+
+    def on_app_focus(self, event: AppFocus) -> None:
+        """The terminal regained OS focus \u2014 stop notifying.
+
+        Textual reports focus only on a CHANGE, which is why the notifier
+        starts out focused: the app is launched from the terminal the user is
+        typing in, and assuming otherwise would notify on the very first turn
+        of every session.
+        """
+        if self._notifier is not None:
+            self._notifier.set_focused(True)
+
+    def on_app_blur(self, event: AppBlur) -> None:
+        """The terminal lost OS focus \u2014 notifications become deliverable."""
+        if self._notifier is None:
+            return
+        self._notifier.set_focused(False)
+        self._flush_pending_question()
+
+    def _flush_pending_question(self) -> None:
+        """Announce an unanswered question raised while the terminal was focused.
+
+        The ordinary sequence is: start a turn, watch it for a few seconds, tab
+        away — which raises the approval WHILE focused, where the toast is
+        deliberately suppressed. Waiting for a later repaint to re-derive the
+        state would leave the user unnotified for as long as the turn stays
+        parked, and a parked turn by definition produces no further events. So
+        the blur itself flushes it, which is what makes "you are being waited
+        on" reach the user at the moment they look away.
+
+        Asks the SAME deriver the working line and the title use, so the three
+        cannot disagree about whether a turn is parked.
+        """
+        _, phase = self._current_activity()
+        if phase != ACTIVITY_APPROVAL:
+            return
+        asking = self._ask_pending is not None and not self._ask_pending.done()
+        kind = "ask" if asking else "approval"
+        if kind == self._waiting_kind:
+            return  # already announced for this question
+        if self._notify(kind):
+            self._waiting_kind = kind
+
     async def on_unmount(self) -> None:
         # Before disposing the session: dispose awaits teardown, and a turn
         # parked on an unanswered approval would never reach it.
@@ -3934,6 +4113,67 @@ class OperatorApp(App[None]):
                 if job.status == "running"
                 and job.type == kind
                 and not getattr(job, "queued", False)
+            )
+        except Exception:
+            return 0
+
+    def _outstanding_delegated_jobs(self, excluding: set[str] | None = None) -> int:
+        """Subagents that have not settled \u2014 including children still QUEUED.
+
+        A different question from :meth:`_job_count`, which answers "how many
+        children are actively running" for the status band and deliberately
+        excludes jobs parked behind the capacity gate. The completion
+        notification needs "is any delegated work outstanding", and the two
+        diverge exactly where it matters: ``run_subagent`` registers a child
+        with ``queued=True`` when the manager is at capacity
+        (``harness/subagent.py``), so a delegated child that has not merely
+        failed to finish but has not STARTED is invisible to the running count.
+        Gating on that number fired "task complete" over a child that had yet
+        to run \u2014 the precise false finish the notification exists to prevent.
+
+        ``task`` ONLY, and that exclusion is the interesting half. Counting
+        backgrounded ``bash`` jobs here looks symmetrical (both types re-enter
+        the conversation when they settle) and breaks the feature outright in
+        two ways. A long-lived background job (``npm run dev``, a tail, a
+        watch) never settles, so every later completion in the session is
+        suppressed and the user is silently never notified again. And a
+        ``bash`` job emits no ``SubagentEnded``, so it can CAUSE a deferral
+        that nothing is able to flush, losing the completion for good.
+
+        The asymmetry is real rather than a compromise: a subagent is the
+        parent's own delegated reasoning, so the turn is not finished until it
+        is. A backgrounded command is a side effect the user started
+        deliberately and can watch in its own tool card; the turn that spawned
+        it genuinely is over, and the later turn that reacts to its output is a
+        separate completion worth its own notification.
+
+        ``excluding`` drops already-handled job ids from the tally, and it
+        exists for a real ordering hazard rather than for tidiness.
+        ``SubagentEndEvent`` is emitted from INSIDE the job coroutine
+        (``harness/subagent.py``), while the manager flips ``job.status`` to
+        settled only once that coroutine RETURNS — with an awaited transcript
+        flush and task-group close in between. A handler that drains the event
+        inside that window counts children that have in fact finished.
+
+        A SET rather than the single id being handled, because a ``task`` batch
+        settles its children inside one another's windows: every end event
+        arrives while every one of those rows still reads ``running``. Excluding
+        only the current job left each handler seeing its siblings as
+        outstanding, so none of them was last and the completion was never
+        delivered.
+
+        Never raises: a notification must not be able to take the app down.
+        """
+        manager = getattr(self._session, "jobs", None)
+        if manager is None:
+            return 0
+        try:
+            return sum(
+                1
+                for job in manager.list()
+                if job.status == "running"
+                and job.type == "task"
+                and (excluding is None or str(getattr(job, "id", "")) not in excluding)
             )
         except Exception:
             return 0
@@ -6332,10 +6572,30 @@ class OperatorApp(App[None]):
             "`lo ›` idle, `lo ⣾` running, `lo !` waiting for approval",
             style=dim,
         )
+        # The notification note sits beside the title's for a reason: they are
+        # the same feature one surface apart (the title is the persistent state,
+        # the toast the one-shot edge), and the kill switch is exactly what a
+        # user interrupted by a default-on feature goes looking for.
+        notify_note = Text()
+        notify_note.append("notifications".ljust(name_width), style=muted)
+        notify_note.append(
+            "desktop toast when a turn finishes or needs you; shell: "
+            "`lop config edit display.notifications false`",
+            style=dim,
+        )
+        notify_note_more = Text()
+        notify_note_more.append("".ljust(name_width), style=muted)
+        notify_note_more.append(
+            "or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; "
+            "sent only while the terminal is unfocused",
+            style=dim,
+        )
         if not lines or lines[-1].plain:
             lines.append(Text())
         lines.append(title_note)
         lines.append(title_note_more)
+        lines.append(notify_note)
+        lines.append(notify_note_more)
         return RichBlock(Group(*lines))
 
     def _skills_block(self) -> RichBlock | None:
@@ -6467,6 +6727,22 @@ class OperatorApp(App[None]):
         # asker woke, so the stopped turn's write/exec tool got a fresh question.
         # An epoch bump cannot arrive early for an asker that captured the old one.
         self._turn_epoch += 1
+        # A deferred completion belongs to the turn that finished, and a NEW
+        # turn supersedes it: the session is working again, so "task complete"
+        # would announce a finish while the agent is mid-stream — and the new
+        # turn will raise its own completion when it settles. Dropped rather
+        # than flushed for the same reason the notification is suppressed while
+        # children run: the user is told when the work is actually over.
+        self._completion_deferred = False
+        self._settled_child_ids.clear()
+        # The waiting latch is turn-scoped too, and clearing it HERE is what
+        # keeps it from going stale. `_refresh_working_activity` clears it when
+        # a question is answered, but an ABORTED turn does not go through that
+        # transition: Esc denies the parked approval and ends the turn with the
+        # latch still reading `approval`, so the NEXT turn's question was not a
+        # change and was silently never announced. A turn boundary is the one
+        # point at which no question can still be outstanding.
+        self._waiting_kind = None
         # D25: the ONE aggregate working line appears for the turn.
         self._working_fallback = DEFAULT_ACTIVITY
         self._start_working_block()
@@ -6540,6 +6816,39 @@ class OperatorApp(App[None]):
             # N+1 rows when several tools were running.
             self._append_block(NoticeBlock("interrupted", "warning"))
         self._interrupted_cards = 0
+        # LAST, and only after the turn's outcome is known, because the outcome
+        # decides which of the three notifications this is:
+        #
+        # - aborted → none. The user pressed Ctrl+C or Esc, so they were at the
+        #   keyboard a moment ago and already know; telling them their own stop
+        #   worked is the definition of a notification nobody wants.
+        # - error → "stopped with an error", which is exactly the case a user
+        #   who walked away needs pulled to their attention.
+        # - otherwise → "task complete", suppressed while children are still
+        #   running (see `Notifier.notify_turn_complete`).
+        if message.aborted:
+            pass
+        elif message.error:
+            self._notify("error")
+        else:
+            # Counts QUEUED and backgrounded work too (see
+            # `_outstanding_delegated_jobs`): a child parked at the capacity
+            # gate has not started at all, and a backgrounded bash job also
+            # re-enters the conversation when it settles.
+            outstanding = self._outstanding_delegated_jobs()
+            if self._notify("complete", running_children=outstanding):
+                self._completion_deferred = False
+            elif outstanding:
+                # A fresh deferral starts with an empty handled-set, or ids
+                # from the previous one would mask children of this turn.
+                self._settled_child_ids.clear()
+                # Remember that a finish went unannounced, so it can be told
+                # when the delegated work actually settles. `_on_job_completed`
+                # is NOT a reliable second chance: it returns early for a
+                # cancelled, consumed, nested or mid-stream job, and the
+                # manager's cancel path never delivers at all — so a suppressed
+                # completion would otherwise be lost for good.
+                self._completion_deferred = True
 
     def _start_working_block(self, *, ends_empty_state: bool = True) -> None:
         """Mount the turn's working line, pinned to the foot of the transcript.
@@ -6582,8 +6891,39 @@ class OperatorApp(App[None]):
         label, phase = self._current_activity()
         if self._working_block is not None:
             self._working_block.set_activity(label, phase)
+        waiting = phase == ACTIVITY_APPROVAL
         if self._status is not None:
-            self._status.set_attention(phase == ACTIVITY_APPROVAL)
+            self._status.set_attention(waiting)
+        # And the notification, from the same phase for the same reason, one
+        # surface further out again. It is derived here rather than fired at the
+        # approval/ask call sites because those are two call sites for one fact
+        # and this hook already runs for both — but a notification is an EDGE
+        # where the title is a state, so it fires only on the TRANSITION into
+        # waiting. Without the latch every repaint during a parked turn (a tool
+        # card settling behind the prompt, a `/clear`, the working line's own
+        # re-derivation) would send another toast for the same unanswered
+        # question.
+        #
+        # `ask` outranks approval here exactly as it does in
+        # `_current_activity`: the picker is modal and drawn over the card, so
+        # it is what the user is actually being asked for.
+        kind: str | None = None
+        if waiting:
+            asking = self._ask_pending is not None and not self._ask_pending.done()
+            kind = "ask" if asking else "approval"
+        if kind is not None and kind != self._waiting_kind:
+            # Latch only what was DELIVERED. The notifier suppresses a toast
+            # while the terminal has focus, and recording the derived state
+            # regardless spent the edge on a notification nobody received — so
+            # a question raised while the user was watching stayed unannounced
+            # forever once they looked away. Returning the delivery outcome
+            # leaves the edge armed, and the next repaint after the blur (the
+            # working line re-derives on every event that moves the turn) is
+            # what finally announces it.
+            if self._notify(kind):
+                self._waiting_kind = kind
+        elif not waiting:
+            self._waiting_kind = None
 
     def _current_activity(self) -> tuple[str, str]:
         """What the agent is doing right now: ``(label, phase)``.
@@ -7004,6 +7344,37 @@ class OperatorApp(App[None]):
 
     def on_subagent_ended(self, message: SubagentEnded) -> None:
         self._refresh_band()
+        # The last child settling is the moment a deferred completion becomes
+        # true: the parent stopped talking earlier, and now the delegated work
+        # it was waiting on is done. Fires HERE rather than trusting the
+        # re-entering turn, because a child that was cancelled (or whose result
+        # the `wait` tool already consumed) produces no such turn — see
+        # `_completion_deferred`. Any status counts: the work is over either
+        # way, and "finished" is the fact the user is waiting to hear.
+        if not self._completion_deferred:
+            return
+        # Every child whose end we have already handled is excluded, not just
+        # this one: their rows can all still read `running` (see
+        # `_outstanding_delegated_jobs`), and a batch settles inside one
+        # another's windows, so excluding only the current job left each
+        # handler blocked by its siblings and nobody delivered.
+        self._settled_child_ids.add(message.job_id)
+        if self._outstanding_delegated_jobs(excluding=self._settled_child_ids):
+            return  # siblings still working; the last one to settle tells them
+        # Cleared whether or not the toast was DELIVERED, and that asymmetry
+        # with the waiting latch is the point. A question outlives the moment
+        # it was asked — it is still unanswered later, so a suppressed one must
+        # stay owed. A completion is an INSTANT: once the work has finished in
+        # front of the user, there is nothing left to tell them, and retaining
+        # the debt meant the only toast this could ever deliver was one whose
+        # user had already watched it land — announced whenever they next
+        # alt-tabbed away, unboundedly later.
+        self._notify("complete", running_children=0)
+        self._completion_deferred = False
+        # Bounded: the set only has to outlive ONE deferred completion, and
+        # holding ids past it would let a later batch's guard skip a child that
+        # really is running. Cleared wherever the flag it serves is cleared.
+        self._settled_child_ids.clear()
 
 
 def _model_spec(session) -> Any | None:
