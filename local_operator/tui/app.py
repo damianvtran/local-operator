@@ -199,6 +199,11 @@ SENT_STEER_NOTICE = "sent — delivered to the agent mid-turn"
 #: the delivery this row promised never happened on the turn the user was
 #: steering. `warning`, not `error` — an interrupt is something they did.
 STOPPED_STEER_NOTICE = "not sent — the turn was interrupted"
+#: And the fourth: the turn ended cleanly without ever reaching a boundary to
+#: drain at (the model answered with no further tool calls). The message is
+#: still queued and really will go — at the NEXT turn's first boundary — so the
+#: row says that rather than claiming a delivery or a loss.
+DEFERRED_STEER_NOTICE = "still queued — goes to the next turn"
 
 #: Shortest SCREEN (not terminal — two rows go to the app's own outer padding)
 #: that can afford the dock band's top inset row, ``#band.has-slot``.
@@ -6322,8 +6327,14 @@ class OperatorApp(App[None]):
             # N+1 rows when several tools were running.
             self._append_block(NoticeBlock("interrupted", "warning"))
         self._interrupted_cards = 0
-        if message.aborted or message.error:
-            self._settle_queued_steer_notices_unsent()
+        # EVERY turn end reconciles its queued rows, because the invariant is
+        # simply stated: a row still held when a turn ends is one this turn did
+        # not deliver. A clean end can leave one — the model answers with no
+        # further tool calls, so the loop reaches no boundary and never drains
+        # the queue — and that row would otherwise go on promising until some
+        # later turn's first boundary settled it, minutes away and unrelated to
+        # anything on screen.
+        self._settle_queued_steer_notices_unsent(interrupted=message.aborted or bool(message.error))
 
     def _start_working_block(self, *, ends_empty_state: bool = True) -> None:
         """Mount the turn's working line, pinned to the foot of the transcript.
@@ -6724,28 +6735,35 @@ class OperatorApp(App[None]):
     def on_notice_posted(self, message: NoticePosted) -> None:
         self._append_block(NoticeBlock(message.text, message.kind))
 
-    def _settle_queued_steer_notices_unsent(self) -> None:
-        """Retire queued-steer rows whose turn died before the engine took them.
+    def _settle_queued_steer_notices_unsent(self, *, interrupted: bool) -> None:
+        """Retire queued-steer rows the turn that just ended did not deliver.
 
         The delivery receipt only fires when ``_drain_steering`` actually takes
-        messages. A turn that is INTERRUPTED (Ctrl+C) or fails never reaches a
-        boundary, so those rows would go on promising a delivery for the rest of
-        the session — the same defect the receipt was added to fix, reached by
-        the abort path instead. Worse than leaving it alone: the message is
-        genuinely still queued, so the NEXT turn drains it and settles a row the
-        user stopped caring about minutes earlier.
+        messages, and two ordinary paths end a turn without one:
 
-        What the row is restated to is deliberately not ``sent``: from the
-        user's point of view the turn they were steering is over. ``warning``
-        rather than ``error`` because nothing failed — they stopped it — and the
-        text says where the words went, since they are still in the composer's
-        world rather than lost.
+        - The turn was INTERRUPTED (Ctrl+C) or failed, so it never reached a
+          boundary. That message never goes at all.
+        - The turn ended CLEANLY without a boundary — the model answered with no
+          further tool calls after the steer landed. The message is still queued
+          and will go at the next turn's first boundary.
+
+        Both leave a row promising a delivery the app has no receipt for, which
+        is the defect the receipt exists to prevent, reached by the two paths
+        that are not the delivery path. The second is milder (it really will be
+        sent) but not harmless: left alone, it settles minutes later against
+        whatever the user is looking at by then.
+
+        The two get DIFFERENT words because they are different facts, and a
+        single message would have to be wrong about one of them. Both are
+        ``warning`` weight rather than ``error``: nothing failed, and in the
+        clean case nothing is even lost.
         """
         if not self._queued_steer_notices:
             return
+        text = STOPPED_STEER_NOTICE if interrupted else DEFERRED_STEER_NOTICE
         for block in self._queued_steer_notices:
             try:
-                block.restate(STOPPED_STEER_NOTICE, "warning")
+                block.restate(text, "warning")
             except Exception:  # a receipt must never take the app down
                 logger.debug("queued-steer notice could not be retired", exc_info=True)
         self._queued_steer_notices.clear()
@@ -6772,7 +6790,17 @@ class OperatorApp(App[None]):
         # one) must not settle nothing, and must not settle more rows than are
         # held. One is the floor because a delivery event means at least one
         # message went.
-        taken = max(1, min(int(getattr(message, "count", 1) or 1), len(self._queued_steer_notices)))
+        try:
+            count = int(getattr(message, "count", 1) or 1)
+        except (TypeError, ValueError):
+            # A receipt must never take the app down, and this handler is one
+            # `int()` away from being the exception to that: the field crosses a
+            # thread boundary from a producer this app does not own. One
+            # delivery is the safe reading — the event means at least one
+            # message went.
+            logger.debug("steering delivery reported an unusable count", exc_info=True)
+            count = 1
+        taken = max(1, min(count, len(self._queued_steer_notices)))
         settled, self._queued_steer_notices = (
             self._queued_steer_notices[:taken],
             self._queued_steer_notices[taken:],

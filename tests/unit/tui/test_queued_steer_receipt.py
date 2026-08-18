@@ -19,6 +19,7 @@ a UI test alone would pass against an event nothing emits).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -28,6 +29,7 @@ from local_operator.harness.types import ImageContent, ModelSpec, SteeringDelive
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import (
+    DEFERRED_STEER_NOTICE,
     QUEUED_STEER_NOTICE,
     SENT_STEER_NOTICE,
     STOPPED_STEER_NOTICE,
@@ -65,7 +67,29 @@ def _notice_texts(app: OperatorApp) -> list[str]:
 
 
 async def _submit(pilot: Any, app: OperatorApp, text: str) -> None:
-    app.query_one(Editor).text = text
+    """Type ``text`` into the composer and send it, once the app can accept it.
+
+    Waits for the SESSION first. The app paints before its session exists (the
+    factory is awaited in a boot worker), and a submit that lands in that window
+    is answered with "session is still starting…" and never reaches `steer` — so
+    a test that pressed enter on a fixed frame count was racing the boot rather
+    than testing anything. Waiting on the condition instead of on a sleep keeps
+    it deterministic on a loaded machine; the same race is what costs
+    `test_app_pilot`'s first test on `main`.
+
+    Focus is then set explicitly, because `enter` goes to whatever holds it.
+    """
+    for _ in range(200):
+        if app._session is not None:
+            break
+        await pilot.pause()
+        await asyncio.sleep(0.01)
+    assert app._session is not None, "the session never booted"
+    editor = app.query_one(Editor)
+    editor.focus()
+    await pilot.pause()
+    editor.text = text
+    await pilot.pause()
     await pilot.press("enter")
     await pilot.pause()
 
@@ -190,6 +214,67 @@ async def test_an_interrupted_turn_retires_the_promise_it_can_no_longer_keep() -
         assert QUEUED_STEER_NOTICE not in texts
         assert SENT_STEER_NOTICE not in texts, "nothing was delivered"
         assert app._queued_steer_notices == []
+
+
+@pytest.mark.asyncio
+async def test_a_clean_turn_that_never_drained_says_the_message_is_still_queued() -> None:
+    """A turn can end cleanly without ever reaching a boundary to drain at.
+
+    The model answers with no further tool calls after the steer lands, so no
+    injection boundary runs, `agent_end` arrives with `aborted=False` and no
+    error, and the queue is untouched. The message really will go — at the next
+    turn's first boundary — so the row must claim neither a delivery nor a loss.
+
+    Left alone it would settle minutes later against whatever the user is
+    looking at by then, which is the same disconnect the interrupted case has.
+    Every turn end reconciles its held rows: a row still held when a turn ends
+    is by definition one that turn did not deliver.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "a steer the model answers without tools")
+        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+
+        app.post_message(TurnEnded(False, None))
+        await pilot.pause()
+
+        texts = _notice_texts(app)
+        assert DEFERRED_STEER_NOTICE in texts
+        assert QUEUED_STEER_NOTICE not in texts
+        # Neither of the other two outcomes: nothing was delivered, and nothing
+        # was lost either.
+        assert SENT_STEER_NOTICE not in texts
+        assert STOPPED_STEER_NOTICE not in texts
+        assert app._queued_steer_notices == []
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_delivery_count_does_not_take_the_app_down() -> None:
+    """`count` crosses a thread boundary from a producer this app does not own.
+
+    "A receipt must never take the app down" is the posture the whole handler is
+    written to, and a bare `int()` on a field from elsewhere was the one line
+    that could break it. A nonsense value degrades to the safe reading — one
+    delivery, because the event means at least one message went.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "one")
+        await _submit(pilot, app, "two")
+
+        message = SteeringDelivered(1)
+        message.count = "not a number"  # type: ignore[assignment]
+        app.post_message(message)
+        await pilot.pause()
+
+        texts = _notice_texts(app)
+        assert texts.count(SENT_STEER_NOTICE) == 1, "degraded to one delivery"
+        assert texts.count(QUEUED_STEER_NOTICE) == 1
+        assert app.is_running, "the app survived the unusable count"
 
 
 @pytest.mark.asyncio

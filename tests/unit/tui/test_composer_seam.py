@@ -58,13 +58,19 @@ from tests.unit.tui.test_aside import AsideSession
 #: The frames the seam is measured in: the everyday wide terminal, the narrow
 #: one where the conversation reaches the dock soonest, and a SHORT one.
 #:
-#: The height matters as much as the width and was missing. Every seam test ran
-#: at 40 rows, where the column has rows to spare, so a whole class of defect —
-#: the dock spending a row the transcript needed — could not be seen here at
-#: all: the band's top inset overflowed the screen at mid heights while this
-#: suite stayed green. 24 rows is the standard short terminal and leaves the
-#: transcript a handful of rows once a panel is docked, which is where that
-#: kind of regression shows up first.
+#: The height was missing entirely: every seam test ran at 40 rows, where the
+#: column has rows to spare. 24 is the standard short terminal and leaves the
+#: transcript a handful of rows once a panel is docked, so the seam is measured
+#: somewhere the dock is under pressure rather than only where it is roomy.
+#:
+#: Honest about what this does NOT buy, because the comment is what a future
+#: reader will trust: it does not catch the dock spending a row the transcript
+#: needed. That was checked rather than assumed — the whole suite passes at this
+#: size against the head where that defect was live, because no seam test docks
+#: the subagent panel with enough children to overflow, and 24 rows is not tight
+#: enough for the todo panel to. The property is pinned by
+#: `test_band_panels.py::test_the_band_inset_never_costs_the_subagent_list_its_screen`,
+#: which does fail against that head. This size is broader coverage, not that.
 SIZES = [(120, 40), (60, 40), (100, 24)]
 
 PROSE = (
