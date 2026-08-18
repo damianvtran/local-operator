@@ -47,24 +47,31 @@ class RecordingNotifier:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.labels: list[str] = []
+        #: Mirrors the real notifier's focus gate, which is what makes the
+        #: DELIVERY-vs-derivation distinction observable here: a suppressed
+        #: toast must return False so the app leaves its edge armed.
+        self.focused = False
 
     def set_label(self, label: str) -> None:
         self.labels.append(label)
 
     def set_focused(self, focused: bool) -> None:
+        self.focused = focused
         self.calls.append(("focus", focused))
 
     def notify_turn_complete(self, *, running_children: int) -> bool:
         self.calls.append(("complete", running_children))
-        return running_children == 0
+        return running_children == 0 and not self.focused
 
     def notify_waiting(self, kind: str) -> bool:
+        if self.focused:
+            return False
         self.calls.append((kind, None))
         return True
 
     def notify_error(self) -> bool:
         self.calls.append(("error", None))
-        return True
+        return not self.focused
 
     @property
     def kinds(self) -> list[str]:
@@ -73,24 +80,46 @@ class RecordingNotifier:
 
 
 class JobsSession(FakeSession):
-    """A fake whose ``jobs`` manager reports a settable set of live children."""
+    """A fake whose ``jobs`` manager reports a settable set of live children.
 
-    def __init__(self, running_tasks: int = 0) -> None:
+    ``queued_tasks`` and ``running_bash`` exist because the completion gate has
+    to see work the STATUS BAND deliberately hides: a child parked at the
+    capacity gate is registered ``status="running", queued=True`` and has not
+    started at all, and a backgrounded bash job also re-enters the conversation
+    when it settles.
+    """
+
+    def __init__(
+        self,
+        running_tasks: int = 0,
+        queued_tasks: int = 0,
+        running_bash: int = 0,
+    ) -> None:
         super().__init__()
         self.running_tasks = running_tasks
+        self.queued_tasks = queued_tasks
+        self.running_bash = running_bash
         session = self
 
         class _Manager:
             def list(self) -> list[Any]:
-                # Shaped exactly like `AsyncJob` where `_job_count` reads it:
-                # a queued job carries status "running" and has not started, so
-                # the count must exclude it (see `harness/jobs.py`).
+                # Shaped exactly like `AsyncJob` where the counts read it (see
+                # `harness/jobs.py`).
                 from types import SimpleNamespace
 
-                return [
+                jobs = [
                     SimpleNamespace(status="running", type="task", queued=False)
                     for _ in range(session.running_tasks)
                 ]
+                jobs += [
+                    SimpleNamespace(status="running", type="task", queued=True)
+                    for _ in range(session.queued_tasks)
+                ]
+                jobs += [
+                    SimpleNamespace(status="running", type="bash", queued=False)
+                    for _ in range(session.running_bash)
+                ]
+                return jobs
 
         self.jobs = _Manager()
 
@@ -282,3 +311,134 @@ async def test_an_app_without_a_notifier_still_ends_turns() -> None:
         app.on_turn_ended(TurnEnded(aborted=False, error=None))
         app._refresh_working_activity()
         await pilot.pause()
+
+
+# -- round 1 review: the wiring fixes ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_question_raised_while_focused_is_told_when_the_user_looks_away() -> None:
+    """The feature's primary use case, and it was inverted.
+
+    The ordinary sequence is: start a turn, watch it for a few seconds, tab
+    away. That raises the approval WHILE focused, where the toast is correctly
+    suppressed — but latching the derived state there consumed the edge on a
+    notification nobody received, so the question was never announced
+    afterwards. Indefinitely: the latch re-arms only by answering the question
+    the user does not know exists.
+    """
+    from textual.events import AppBlur
+
+    session = JobsSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        notifier.focused = True
+        app._approval = ApprovalBlock("bash", "rm -rf /tmp/x", on_answer=lambda _: None)
+        app._refresh_working_activity()
+        assert notifier.kinds == []  # suppressed: the user is watching
+        app.on_app_blur(AppBlur())
+        await pilot.pause()
+    assert notifier.kinds == ["approval"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_parked_at_the_capacity_gate_still_blocks_completion() -> None:
+    """`run_subagent` registers with `queued=True` when the manager is full, so
+    the child has not merely failed to finish — it has not STARTED. The status
+    band's running count excludes it by design, which made the completion gate
+    fire over delegated work that had yet to run."""
+    session = JobsSession(running_tasks=0, queued_tasks=1)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        await pilot.pause()
+    assert notifier.calls[-1] == ("complete", 1)
+
+
+@pytest.mark.asyncio
+async def test_a_backgrounded_bash_job_does_not_produce_a_second_toast() -> None:
+    """Both job types re-enter the conversation as a fresh turn when they
+    settle (`Session._on_job_completed` delivers `task` AND `bash`), so counting
+    only `task` announced the turn twice for one event."""
+    session = JobsSession(running_bash=1)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        await pilot.pause()
+    assert notifier.calls[-1] == ("complete", 1)
+
+
+@pytest.mark.asyncio
+async def test_a_suppressed_completion_is_delivered_when_the_last_child_settles() -> None:
+    """The "nothing is lost" guarantee, made true.
+
+    It relied on the settled job re-entering as a notifiable turn, which
+    `Session._on_job_completed` does not promise: it returns early for a
+    cancelled, consumed, nested or mid-stream job, and the manager's cancel
+    branch never delivers at all. So the app remembers the suppressed finish
+    and flushes it when the delegated work is actually over.
+    """
+    from local_operator.tui.events import SubagentEnded
+
+    session = JobsSession(running_tasks=1)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        assert notifier.kinds == ["complete"]  # suppressed (returned False)
+        # The child is CANCELLED, which produces no re-entering turn at all.
+        session.running_tasks = 0
+        app.on_subagent_ended(SubagentEnded(job_id="j1", label="child", status="cancelled"))
+        await pilot.pause()
+    assert notifier.calls[-1] == ("complete", 0)
+
+
+@pytest.mark.asyncio
+async def test_siblings_still_working_keep_the_deferred_completion_waiting() -> None:
+    """Only the LAST child to settle announces the finish."""
+    from local_operator.tui.events import SubagentEnded
+
+    session = JobsSession(running_tasks=2)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        before = len(notifier.calls)
+        session.running_tasks = 1  # one settled, one still going
+        app.on_subagent_ended(SubagentEnded(job_id="j1", label="a", status="completed"))
+        await pilot.pause()
+        assert len(notifier.calls) == before  # nothing yet
+        session.running_tasks = 0
+        app.on_subagent_ended(SubagentEnded(job_id="j2", label="b", status="completed"))
+        await pilot.pause()
+    assert notifier.calls[-1] == ("complete", 0)
+
+
+@pytest.mark.asyncio
+async def test_an_ask_raised_over_a_live_approval_is_still_announced() -> None:
+    """`ask` and approval share one activity phase, so a bool latch could not
+    see the transition — and the two are worth telling apart, since "waiting
+    for approval" over a question the model asked sends the user hunting for a
+    tool prompt that is not there."""
+    import asyncio
+
+    session = JobsSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app._approval = ApprovalBlock("bash", "x", on_answer=lambda _: None)
+        app._refresh_working_activity()
+        app._ask_pending = asyncio.get_running_loop().create_future()
+        app._refresh_working_activity()
+        await pilot.pause()
+        app._ask_pending.set_result(None)
+    assert notifier.kinds == ["approval", "ask"]

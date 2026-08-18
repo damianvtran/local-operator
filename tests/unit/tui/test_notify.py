@@ -21,6 +21,7 @@ a frame Textual paints, so the properties are pinned here:
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 
 from local_operator.tui.notify import (
@@ -32,6 +33,8 @@ from local_operator.tui.notify import (
     OSC99_PREFIX,
     ST,
     Notifier,
+    _spawn_detached,
+    argv_safe,
     cmux_command,
     cmux_surface_id,
     desktop_notify_command,
@@ -39,6 +42,7 @@ from local_operator.tui.notify import (
     notification_sequence,
     notification_writes,
     notifications_enabled,
+    osc99_id,
     sanitize_text,
     should_use_desktop_fallback,
     wrap_tmux_passthrough,
@@ -111,16 +115,20 @@ def test_osc9_carries_the_session_name_and_the_state_on_one_line() -> None:
 def test_osc99_sends_title_and_body_as_two_chunks_sharing_an_id() -> None:
     """kitty groups a notification's payloads by ``i=``; ``d=0`` holds display
     until the body arrives, so the toast is shown once rather than twice."""
-    sequence = notification_sequence("osc99", "Triage sanctions", "Waiting for approval")
-    assert sequence.startswith(f"{OSC99_PREFIX}i=lo:u=1:d=0;Triage sanctions{ST}")
-    assert sequence.endswith(f"{OSC99_PREFIX}i=lo:p=body;Waiting for approval{ST}")
+    sequence = notification_sequence(
+        "osc99", "Triage sanctions", "Waiting for approval", "lo-fixed"
+    )
+    assert sequence == (
+        f"{OSC99_PREFIX}i=lo-fixed:u=1:d=0;Triage sanctions{ST}"
+        f"{OSC99_PREFIX}i=lo-fixed:p=body;Waiting for approval{ST}"
+    )
 
 
 def test_osc99_without_a_body_displays_immediately() -> None:
     """No second chunk is coming, so holding display with ``d=0`` would leave
     the notification permanently unshown."""
-    assert notification_sequence("osc99", "Only a title", "") == (
-        f"{OSC99_PREFIX}i=lo:u=1;Only a title{ST}"
+    assert notification_sequence("osc99", "Only a title", "", "lo-fixed") == (
+        f"{OSC99_PREFIX}i=lo-fixed:u=1;Only a title{ST}"
     )
 
 
@@ -383,3 +391,90 @@ def test_notifications_are_on_by_default(monkeypatch: Any) -> None:
     monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
     monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default: default)
     assert notifications_enabled() is True
+
+
+# -- round 1 review: the wire fixes ------------------------------------------
+
+
+def test_each_osc99_notification_gets_its_own_id() -> None:
+    """kitty treats `i=` as an identity: a reused id REPLACES the toast on
+    screen. A constant id let a later completion silently overwrite an
+    unanswered approval, and made every session on the machine collide."""
+    first = notification_sequence("osc99", "Session", "Waiting for approval")
+    second = notification_sequence("osc99", "Session", "Task complete")
+    assert _osc99_ids(first) != _osc99_ids(second)
+
+
+def test_the_two_chunks_of_one_notification_share_their_id() -> None:
+    """Title and body are one notification; kitty groups them BY that id, so
+    differing ids would show two toasts, one of them bodiless."""
+    ids = _osc99_ids(notification_sequence("osc99", "Session", "Task complete"))
+    assert len(ids) == 2 and ids[0] == ids[1]
+
+
+def test_osc99_ids_use_only_characters_the_spec_allows() -> None:
+    import re
+
+    for _ in range(20):
+        assert re.fullmatch(r"[a-zA-Z0-9_+\-.]+", osc99_id())
+
+
+def _osc99_ids(sequence: str) -> list[str]:
+    import re
+
+    return re.findall(r"\x1b\]99;i=([^:;]+)", sequence)
+
+
+def test_a_dash_leading_session_name_cannot_become_a_notify_send_option() -> None:
+    """Sanitisation closes the ESCAPE hole but not the string's SHAPE: a
+    model-written name like `--help` or `-u critical` otherwise lands in
+    notify-send's option namespace instead of its summary."""
+    argv = desktop_notify_command("/usr/bin/notify-send", "--help", "Task complete")
+    assert "--" in argv
+    assert argv.index("--") < argv.index("--help")
+    assert argv[-2:] == ["--help", "Task complete"]
+
+
+def test_a_dash_leading_session_name_is_neutralised_for_cmux() -> None:
+    surface = "773d5e5e-1111-4222-8333-444455556666"
+    argv = cmux_command(surface, "-u critical", "Task complete")
+    assert not argv[argv.index("--title") + 1].startswith("-")
+
+
+def test_argv_safe_leaves_ordinary_titles_untouched() -> None:
+    """It must not mangle the common case: this is a user-facing toast title."""
+    assert argv_safe("Fix quota reporting") == "Fix quota reporting"
+
+
+def test_the_notifier_subprocess_cannot_stall_the_render_loop(monkeypatch: Any) -> None:
+    """The hardening `_spawn_detached`'s docstring promises, pinned.
+
+    A notifier is fire-and-forget: without `start_new_session` and fully
+    redirected stdio, a hung D-Bus activation or a cmux socket mid-restart
+    holds the TUI's loop, and the child's output interleaves into the frame
+    Textual is painting.
+    """
+    seen: dict[str, Any] = {}
+
+    def fake_popen(argv: list[str], **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        seen["argv"] = argv
+        return object()
+
+    monkeypatch.setattr("local_operator.tui.notify.subprocess.Popen", fake_popen)
+    _spawn_detached(["notify-send", "hi"])
+    assert seen["start_new_session"] is True
+    assert seen["stdin"] == subprocess.DEVNULL
+    assert seen["stdout"] == subprocess.DEVNULL
+    assert seen["stderr"] == subprocess.DEVNULL
+
+
+def test_a_failing_notifier_spawn_is_silent(monkeypatch: Any) -> None:
+    """The user asked for a task, not for a toast: a missing binary must not
+    surface as an error in the session."""
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise FileNotFoundError("notify-send")
+
+    monkeypatch.setattr("local_operator.tui.notify.subprocess.Popen", boom)
+    _spawn_detached(["notify-send", "hi"])  # must not raise

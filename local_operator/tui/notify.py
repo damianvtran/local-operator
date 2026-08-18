@@ -84,6 +84,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from typing import Callable, Literal, Mapping
 
 from local_operator.tui.settings import settings_get
@@ -262,7 +263,26 @@ def wrap_tmux_passthrough(sequence: str) -> str:
     return f"\x1bPtmux;{sequence.replace(chr(27), chr(27) * 2)}\x1b\\"
 
 
-def osc99_sequence(title: str, body: str) -> str:
+def osc99_id() -> str:
+    """A fresh OSC 99 notification id, unique per notification.
+
+    kitty treats the ``i=`` key as an IDENTITY: a notification reusing a live
+    id REPLACES the one on screen. A constant id therefore let a later "task
+    complete" silently overwrite an unanswered "waiting for approval" — losing
+    exactly the toast the user most needed — and made every session on the
+    machine share one id, which is the multiplexer-routing collision kitty's
+    spec warns about and the opposite of this feature's "five sessions must be
+    tellable apart" goal.
+
+    A UUID stem rather than a counter because the uniqueness has to hold ACROSS
+    processes, not just within one: several sessions run side by side, and each
+    would start its counter at the same place. Restricted to the
+    ``[a-zA-Z0-9_+-.]`` set the spec allows.
+    """
+    return f"lo-{uuid.uuid4().hex[:12]}"
+
+
+def osc99_sequence(title: str, body: str, notification_id: str | None = None) -> str:
     """A structured OSC 99 notification: one payload for title, one for body.
 
     kitty's protocol chunks a notification by id: metadata rides on the first
@@ -270,18 +290,26 @@ def osc99_sequence(title: str, body: str) -> str:
     marks the body payload. ``i=`` groups them. We send the fixed metadata
     kitty defines (application name, urgency) and nothing dynamic — the
     interesting variability here is the text, and every field we would
-    otherwise vary is already expressed by it.
+    otherwise vary is already expressed by it. The application name (``f=``) is
+    deliberately NOT sent: the spec requires it base64-encoded, and it buys
+    nothing here because the title already names the session.
 
     Sent WITHOUT base64: both fields are sanitised to printable text by
     :func:`sanitize_text`, so there is nothing left that would need escaping,
     and plain payloads stay readable in a terminal capture.
     """
+    nid = notification_id or osc99_id()
     if not body:
-        return f"{OSC99_PREFIX}i=lo:u=1;{title}{ST}"
-    return f"{OSC99_PREFIX}i=lo:u=1:d=0;{title}{ST}{OSC99_PREFIX}i=lo:p=body;{body}{ST}"
+        return f"{OSC99_PREFIX}i={nid}:u=1;{title}{ST}"
+    return f"{OSC99_PREFIX}i={nid}:u=1:d=0;{title}{ST}" f"{OSC99_PREFIX}i={nid}:p=body;{body}{ST}"
 
 
-def notification_sequence(protocol: NotifyProtocol, title: str, body: str) -> str:
+def notification_sequence(
+    protocol: NotifyProtocol,
+    title: str,
+    body: str,
+    notification_id: str | None = None,
+) -> str:
     """The in-band escape for one notification under ``protocol``.
 
     ``bell`` returns a bare BEL: it cannot carry text, and pretending otherwise
@@ -290,7 +318,9 @@ def notification_sequence(protocol: NotifyProtocol, title: str, body: str) -> st
     if protocol == "bell":
         return BEL
     if protocol == "osc99":
-        return osc99_sequence(title, body)
+        # `notification_id` is injectable ONLY so a test can pin the wire; every
+        # production caller leaves it None and gets a fresh id per notification.
+        return osc99_sequence(title, body, notification_id)
     # OSC 9 has no title/body split — one line is all it takes. The title leads
     # because a notification centre truncates from the right, and which session
     # this is matters more than which of four fixed states it reached.
@@ -318,6 +348,12 @@ def notification_writes(
     if protocol == "bell":
         return [sequence]
     if in_tmux:
+        # Checked BEFORE Zellij, and correct when both are set (Zellij hosting
+        # a tmux session, or the reverse): tmux is the INNER multiplexer that
+        # would otherwise eat the OSC, so it is the one needing the envelope,
+        # and the BEL appended here is exactly what the Zellij branch would
+        # have contributed anyway. Stated rather than left to be rediscovered,
+        # because "the second branch is unreachable" reads like a bug.
         return [wrap_tmux_passthrough(sequence), BEL]
     if in_zellij:
         # No passthrough envelope exists for Zellij; it swallows the OSC and
@@ -342,6 +378,18 @@ def cmux_surface_id(env: EnvMap | None = None) -> str | None:
     return value
 
 
+def argv_safe(value: str) -> str:
+    """``value`` with any leading dashes neutralised for an argv position.
+
+    Complements :func:`sanitize_text`, which closes the ESCAPE hole but says
+    nothing about a string's SHAPE. A conversation name is model-generated, so
+    it can begin with ``-``; most argument parsers then read it as an option.
+    A leading space is enough to make it unambiguous while leaving the text
+    readable, which matters because this is a user-facing toast title.
+    """
+    return f" {value}" if value.startswith("-") else value
+
+
 def cmux_command(surface_id: str, title: str, body: str) -> list[str]:
     """argv delivering one notification to a specific cmux surface.
 
@@ -352,10 +400,16 @@ def cmux_command(surface_id: str, title: str, body: str) -> list[str]:
         "notify",
         "--surface",
         surface_id,
+        # Each value follows its own flag, so cmux consumes it positionally
+        # rather than re-parsing it as an option — but the title is still
+        # model-written, so it is passed through `argv_safe` for the same reason
+        # the notify-send path uses `--`: a value that begins with a dash is
+        # ambiguous to most parsers, and being right here costs one function
+        # call. The surface id is already UUID-validated by `cmux_surface_id`.
         "--title",
-        title or APP_NAME,
+        argv_safe(title or APP_NAME),
         "--body",
-        body,
+        argv_safe(body),
     ]
 
 
@@ -375,6 +429,15 @@ def desktop_notify_command(
         APP_NAME,
         f"--urgency={urgency}",
         "--expire-time=5000",
+        # `--` ends option parsing. The title is derived from a MODEL-WRITTEN
+        # conversation name, and sanitisation strips control characters without
+        # constraining the string's shape — so a session named `--help` or
+        # `-u critical` otherwise lands in notify-send's option namespace
+        # instead of its summary, silently breaking delivery or reaching the
+        # urgency this module deliberately refuses to send. Not a shell risk
+        # (`Popen` without `shell=True`), but model-controlled input reaching an
+        # argument parser is the same class of defect.
+        "--",
         title or APP_NAME,
         body,
     ]
