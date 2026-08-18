@@ -731,6 +731,15 @@ class OperatorApp(App[None]):
         #: parent that finished while a child was later CANCELLED was never
         #: announced. This flag is what lets the last child's settle deliver it.
         self._completion_deferred: bool = False
+        #: Job ids whose ``SubagentEnded`` this app has already handled but
+        #: which the job manager may not have marked settled yet. A SET, not a
+        #: single id, because a `task` batch settles its children inside one
+        #: another's teardown windows: each end event arrives while every one of
+        #: those rows still reads ``running``, so a handler that excluded only
+        #: ITSELF saw its siblings as outstanding and returned early. Nobody was
+        #: last, so nobody delivered the completion — and the deferred flag then
+        #: latched, swallowing every later completion in the session.
+        self._settled_child_ids: set[str] = set()
         self._streaming_block: AssistantBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
@@ -1524,6 +1533,7 @@ class OperatorApp(App[None]):
         # (The waiting latch needs no line here: `_refresh_working_activity`
         # runs just above, after `_approval` is cleared, and clears it.)
         self._completion_deferred = False
+        self._settled_child_ids.clear()
         if self._controller is not None:
             # BEFORE disposal, always: the ledger is being rebuilt from the
             # replacement session, so the dying session's terminal events have
@@ -4107,7 +4117,7 @@ class OperatorApp(App[None]):
         except Exception:
             return 0
 
-    def _outstanding_delegated_jobs(self, excluding: str | None = None) -> int:
+    def _outstanding_delegated_jobs(self, excluding: set[str] | None = None) -> int:
         """Subagents that have not settled \u2014 including children still QUEUED.
 
         A different question from :meth:`_job_count`, which answers "how many
@@ -4137,14 +4147,20 @@ class OperatorApp(App[None]):
         it genuinely is over, and the later turn that reacts to its output is a
         separate completion worth its own notification.
 
-        ``excluding`` drops one job id from the tally, and it exists for a real
-        ordering hazard rather than for tidiness. ``SubagentEndEvent`` is
-        emitted from INSIDE the job coroutine (``harness/subagent.py``), while
-        the manager flips ``job.status`` to settled only once that coroutine
-        RETURNS — with an awaited transcript flush and task-group close in
-        between. A handler that drains the event inside that window therefore
-        counts the very child whose ending it is handling, concludes work is
-        outstanding, and drops the completion it was called to deliver.
+        ``excluding`` drops already-handled job ids from the tally, and it
+        exists for a real ordering hazard rather than for tidiness.
+        ``SubagentEndEvent`` is emitted from INSIDE the job coroutine
+        (``harness/subagent.py``), while the manager flips ``job.status`` to
+        settled only once that coroutine RETURNS — with an awaited transcript
+        flush and task-group close in between. A handler that drains the event
+        inside that window counts children that have in fact finished.
+
+        A SET rather than the single id being handled, because a ``task`` batch
+        settles its children inside one another's windows: every end event
+        arrives while every one of those rows still reads ``running``. Excluding
+        only the current job left each handler seeing its siblings as
+        outstanding, so none of them was last and the completion was never
+        delivered.
 
         Never raises: a notification must not be able to take the app down.
         """
@@ -4157,7 +4173,7 @@ class OperatorApp(App[None]):
                 for job in manager.list()
                 if job.status == "running"
                 and job.type == "task"
-                and (excluding is None or str(getattr(job, "id", "")) != excluding)
+                and (excluding is None or str(getattr(job, "id", "")) not in excluding)
             )
         except Exception:
             return 0
@@ -6718,6 +6734,7 @@ class OperatorApp(App[None]):
         # than flushed for the same reason the notification is suppressed while
         # children run: the user is told when the work is actually over.
         self._completion_deferred = False
+        self._settled_child_ids.clear()
         # The waiting latch is turn-scoped too, and clearing it HERE is what
         # keeps it from going stale. `_refresh_working_activity` clears it when
         # a question is answered, but an ABORTED turn does not go through that
@@ -6822,6 +6839,9 @@ class OperatorApp(App[None]):
             if self._notify("complete", running_children=outstanding):
                 self._completion_deferred = False
             elif outstanding:
+                # A fresh deferral starts with an empty handled-set, or ids
+                # from the previous one would mask children of this turn.
+                self._settled_child_ids.clear()
                 # Remember that a finish went unannounced, so it can be told
                 # when the delegated work actually settles. `_on_job_completed`
                 # is NOT a reliable second chance: it returns early for a
@@ -7333,12 +7353,13 @@ class OperatorApp(App[None]):
         # way, and "finished" is the fact the user is waiting to hear.
         if not self._completion_deferred:
             return
-        # Excluding THIS child: its own end event reaches us before the manager
-        # has marked it settled (see `_outstanding_delegated_jobs`), so without
-        # the exclusion the last child to finish counts itself, the guard
-        # returns early, and the completion is lost — permanently, since the
-        # flag then latches and swallows every later completion in the session.
-        if self._outstanding_delegated_jobs(excluding=message.job_id):
+        # Every child whose end we have already handled is excluded, not just
+        # this one: their rows can all still read `running` (see
+        # `_outstanding_delegated_jobs`), and a batch settles inside one
+        # another's windows, so excluding only the current job left each
+        # handler blocked by its siblings and nobody delivered.
+        self._settled_child_ids.add(message.job_id)
+        if self._outstanding_delegated_jobs(excluding=self._settled_child_ids):
             return  # siblings still working; the last one to settle tells them
         # Cleared whether or not the toast was DELIVERED, and that asymmetry
         # with the waiting latch is the point. A question outlives the moment
@@ -7350,6 +7371,10 @@ class OperatorApp(App[None]):
         # alt-tabbed away, unboundedly later.
         self._notify("complete", running_children=0)
         self._completion_deferred = False
+        # Bounded: the set only has to outlive ONE deferred completion, and
+        # holding ids past it would let a later batch's guard skip a child that
+        # really is running. Cleared wherever the flag it serves is cleared.
+        self._settled_child_ids.clear()
 
 
 def _model_spec(session) -> Any | None:

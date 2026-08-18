@@ -693,3 +693,64 @@ async def test_the_last_child_still_counts_itself_when_its_end_arrives() -> None
         await pilot.pause()
     assert notifier.calls[-1] == ("complete", 0)
     assert app._completion_deferred is False
+
+
+@pytest.mark.asyncio
+async def test_a_batch_of_children_settling_together_still_notifies_once() -> None:
+    """Round 5, B6. The `task(tasks=[...])` batch, which is the common shape.
+
+    A batch settles its children inside one another's teardown windows, so
+    every end event arrives while EVERY one of those rows still reads
+    `running` (the manager settles a job only after the coroutine that emitted
+    its end event returns). Excluding only the job being handled left each
+    handler seeing its siblings as outstanding: nobody was last, nobody
+    delivered, and the deferred flag latched — swallowing every later
+    completion in the session too.
+
+    Every other test here exercises exactly one child in that window, which is
+    why this survived the previous round. Note that `running_tasks` is NOT
+    decremented: all three rows stay `running` for the whole exchange.
+    """
+    from local_operator.tui.events import SubagentEnded
+
+    session = JobsSession(running_tasks=3)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        assert app._completion_deferred is True
+        for job_id in ("j1", "j2", "j3"):
+            app.on_subagent_ended(SubagentEnded(job_id=job_id, label=job_id, status="completed"))
+        await pilot.pause()
+    assert [call for call in notifier.calls if call == ("complete", 0)] == [("complete", 0)]
+    assert app._completion_deferred is False
+
+
+@pytest.mark.asyncio
+async def test_a_later_batch_is_not_masked_by_the_previous_ones_ids() -> None:
+    """The handled-set must not outlive the deferral it serves.
+
+    Ids held past a completion would let the NEXT turn's guard skip a child
+    that really is running, which is the B2 false finish arriving through the
+    exclusion instead of the count.
+    """
+    from local_operator.tui.events import SubagentEnded, TurnStarted
+
+    session = JobsSession(running_tasks=1)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        app.on_subagent_ended(SubagentEnded(job_id="j1", label="a", status="completed"))
+        await pilot.pause()
+        assert app._settled_child_ids == set()
+        # A new turn delegates again, and `j1` is a DIFFERENT live child now.
+        app.on_turn_started(TurnStarted())
+        app.on_turn_ended(TurnEnded(aborted=False, error=None))
+        before = len(notifier.calls)
+        session.running_tasks = 2
+        app.on_subagent_ended(SubagentEnded(job_id="j2", label="b", status="completed"))
+        await pilot.pause()
+    assert notifier.calls[before:] == []  # `j1` still running: correctly silent
