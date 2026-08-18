@@ -22,6 +22,12 @@ _DEFAULTS: dict[str, Any] = {
     # the sequence entirely, and the title is saved on start and restored on
     # exit, so the worst case for an unsupported terminal is no change at all.
     "display.terminal_title": True,
+    # Desktop notifications for the two moments a user who is looking elsewhere
+    # needs to know about: the parent agent finished, or it is waiting on them
+    # (`tui/notify.py`). Defaults ON, and only ever fires while the terminal is
+    # UNFOCUSED, so a user watching the session is never interrupted; the env
+    # kill switch is `LOCAL_OPERATOR_NO_NOTIFICATIONS`.
+    "display.notifications": True,
 }
 
 _cache: dict[str, Any] | None = None
