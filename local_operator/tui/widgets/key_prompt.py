@@ -193,7 +193,14 @@ class KeyPromptBlock(TranscriptBlock):
         self.instructions = strip_control_sequences(instructions or "")
         self._typed: list[str] = []
         self._settled = False
-        self._submitted: str | None = None
+        #: The LENGTH of the value handed over, or None when nothing was (a
+        #: cancel). Deliberately not the value: the receipt only ever needs how
+        #: many characters arrived, and a settled block outlives the login — it
+        #: sits in the transcript, and the app also retains the last one to
+        #: correct its receipt — so holding the key here would keep a
+        #: credential resident for the rest of the session. Same reason
+        #: ``_typed`` is dropped in :meth:`resolve`.
+        self._submitted_length: int | None = None
         #: Set when the prompt was retired because the login completed another
         #: way (see :meth:`resolve`), so the receipt does not claim a cancel.
         self._superseded = False
@@ -244,7 +251,7 @@ class KeyPromptBlock(TranscriptBlock):
             return
         self._settled = True
         self._superseded = superseded
-        self._submitted = value
+        self._submitted_length = None if value is None else len(value)
         # The buffer is dropped as soon as the value has been handed over, so a
         # settled block sitting in the transcript is not still holding the
         # user's key in memory for the rest of the session.
@@ -278,7 +285,7 @@ class KeyPromptBlock(TranscriptBlock):
         No-op on a prompt that is not settled or was cancelled: there is no
         success claim to correct in either case.
         """
-        if not self._settled or self._submitted is None:
+        if not self._settled or self._submitted_length is None:
             return
         self._unusable = True
         self._refresh_row()
@@ -503,7 +510,7 @@ class KeyPromptBlock(TranscriptBlock):
                 # Says only what this BLOCK knows: it stopped being needed. The
                 # login's own outcome notice, success or failure, follows it.
                 return row(("· ", dim), ("no longer needed ", muted), (self.provider_label, dim))
-            if self._submitted is None:
+            if self._submitted_length is None:
                 if not self.sole_path:
                     # Declining here does not end the login (see ``sole_path``):
                     # the browser flow is still live, so the receipt says what
@@ -529,7 +536,7 @@ class KeyPromptBlock(TranscriptBlock):
             return row(
                 ("✓ ", success),
                 (f"{self.provider_label} {'key' if self.secret else 'code'} received ", muted),
-                (f"({len(self._submitted)} chars)", dim),
+                (f"({self._submitted_length} chars)", dim),
             )
 
         noun = "API key" if self.secret else "authorization code"

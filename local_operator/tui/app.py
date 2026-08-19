@@ -2760,6 +2760,10 @@ class OperatorApp(App[None]):
         """
         block = self._key_prompt
         self._key_prompt = None
+        # Dropped here too: this is the "the login is over" path, so there is no
+        # longer a receipt anyone can be asked to correct, and keeping the
+        # reference would outlive every path that clears the transcript.
+        self._last_login_prompt = None
         if block is not None:
             try:
                 block.resolve(None)

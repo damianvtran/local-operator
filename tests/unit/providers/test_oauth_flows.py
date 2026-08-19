@@ -1521,6 +1521,46 @@ class TestABadPasteDoesNotEndTheLogin:
 
         assert got == ("browser-code", "browser-state")
 
+    async def test_a_raising_host_sink_cannot_kill_the_login(self) -> None:
+        """Agent review round 4, Z8: a host whose reporting sink raises took the
+        sign-in down with it.
+
+        `on_warning` and `on_input_rejected` are REPORTING hooks -- they tell
+        the user what happened and take no part in deciding the login. Letting
+        one propagate out of `_manual` broke this class's premise from a third
+        direction: an embedder with a broken message sink would lose a grant
+        the browser callback was about to deliver. `on_manual_code_input` is
+        deliberately not covered by that guard, since its return value is acted
+        on.
+        """
+        from local_operator.providers.oauth import callback_server as cs
+
+        def _boom(*_args: Any) -> None:
+            raise RuntimeError("this host cannot render messages")
+
+        for hook in ("on_warning", "on_input_rejected", "on_progress"):
+            loop = asyncio.get_running_loop()
+            flow = self._flow("http://localhost:54548/cb?error=access_denied", [])
+            flow.callbacks = cs.LoginCallbacks(
+                on_manual_code_input=lambda: "http://localhost:54548/cb?error=access_denied",
+                **{hook: _boom},
+            )
+            flow._captured = loop.create_future()
+            flow._capture_error = loop.create_future()
+
+            async def browser() -> None:
+                await asyncio.sleep(0.05)
+                if not flow._captured.done():
+                    flow._captured.set_result(("browser-code", "browser-state"))
+
+            task = asyncio.create_task(browser())
+            try:
+                got = await asyncio.wait_for(flow._await_code(), timeout=5.0)
+            finally:
+                task.cancel()
+
+            assert got == ("browser-code", "browser-state"), hook
+
     async def test_re_prompting_does_not_starve_the_event_loop(self) -> None:
         """Design round 1 D1(a) re-prompts after a rejected paste, and the loop
         that does it must yield.

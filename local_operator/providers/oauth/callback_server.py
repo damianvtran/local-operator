@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import logging
 import secrets
 import urllib.parse
 import webbrowser
@@ -154,6 +155,35 @@ class LoginCallbacks:
 
 
 _T = TypeVar("_T")
+
+
+logger = logging.getLogger(__name__)
+
+
+async def report_safely(
+    hook: Callable[..., Awaitable[None] | None] | None,
+    *args: Any,
+) -> None:
+    """Invoke a host REPORTING hook, swallowing anything it raises.
+
+    Reporting hooks (``on_progress``, ``on_warning``, ``on_input_rejected``)
+    tell the user what is happening; they take no part in deciding the login.
+    An embedding host whose sink raises would otherwise propagate out of the
+    waiter and out of ``_await_code`` -- losing a sign-in the browser callback
+    was about to complete, which is the exact failure the surrounding code
+    exists to prevent. A host that cannot render a message must not be able to
+    destroy a credential grant.
+
+    Deliberately NOT used for ``on_manual_code_input``: that hook returns a
+    value the flow acts on, so an exception there is a real failure and has to
+    surface rather than be swallowed.
+    """
+    if hook is None:
+        return
+    try:
+        await maybe_await(hook(*args))
+    except Exception:  # pragma: no cover - host-defined sinks
+        logger.debug("a login reporting hook raised; continuing", exc_info=True)
 
 
 async def maybe_await(value: Awaitable[_T] | _T) -> _T:
@@ -468,15 +498,13 @@ class OAuthCallbackFlow(ABC):
                     # given up waits for the browser or the timeout exactly as
                     # before, and the callback keeps its chance to win either
                     # way because this loop never blocks it.
-                    report = self.callbacks.on_warning or self.callbacks.on_progress
-                    if report is not None:
-                        await maybe_await(report(str(exc)))
+                    await report_safely(
+                        self.callbacks.on_warning or self.callbacks.on_progress, str(exc)
+                    )
                     # Ordered after the message so a host that repaints on
                     # rejection does so with the reason already on screen
                     # above it.
-                    rejected = self.callbacks.on_input_rejected
-                    if rejected is not None:
-                        await maybe_await(rejected())
+                    await report_safely(self.callbacks.on_input_rejected)
                     # Yield before asking again. A host may implement
                     # ``on_manual_code_input`` SYNCHRONOUSLY (the callbacks are
                     # documented to allow it, and the CLI host and the tests
@@ -493,10 +521,15 @@ class OAuthCallbackFlow(ABC):
                     #
                     # A host that returns a value WITHOUT waiting for the user
                     # (a test double, not a real prompt -- the TUI awaits a
-                    # mounted block's future and the CLI blocks on input) will
-                    # re-offer in a tight loop until another waiter wins or the
-                    # flow's timeout fires. That is bounded and no longer
-                    # blocking, which is the property that matters here.
+                    # mounted block's future and the CLI awaits
+                    # `asyncio.to_thread(read_line)`) will re-offer in a tight
+                    # loop until another waiter wins or the flow's timeout
+                    # fires. Bounded in TIME, not in WORK: the loop also
+                    # reports each rejection, so such a host would see tens of
+                    # thousands of warnings inside one timeout window (~37k in
+                    # 1s when measured). Liveness is what the yield restores;
+                    # an immediate-return prompt is a host bug, and this note
+                    # exists so it reads as one rather than as merely wasteful.
                     await asyncio.sleep(0)
 
         async def _abort_watch() -> tuple[str, str]:

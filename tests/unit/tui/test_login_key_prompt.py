@@ -699,6 +699,13 @@ async def test_mark_unusable_cannot_rewrite_a_cancel_or_a_live_prompt() -> None:
     path in principle (a host may call the hook at any time), and neither has a
     success claim to correct — turning either into "paste not usable" would
     invent a paste the user never made.
+
+    Asserts the FLAG and not only the rendered row (agent review round 4, Z9):
+    `_build`'s precedence tests `_superseded` and "nothing submitted" before it
+    reaches the `_unusable` branch, so the renderer produces the right output
+    even with the guard deleted. A rendering-only assertion therefore passes
+    for a reason other than the one it names, and this test's whole subject is
+    the guard.
     """
     app = _PromptHost()
     async with app.run_test() as pilot:
@@ -710,6 +717,7 @@ async def test_mark_unusable_cannot_rewrite_a_cancel_or_a_live_prompt() -> None:
         before = _rendered(declined)
         declined.mark_unusable()
         await pilot.pause()
+        assert declined._unusable is False, "a cancel was rewritten as an unusable paste"
         assert _rendered(declined) == before
 
         live = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
@@ -718,5 +726,36 @@ async def test_mark_unusable_cannot_rewrite_a_cancel_or_a_live_prompt() -> None:
         before_live = _rendered(live)
         live.mark_unusable()
         await pilot.pause()
+        assert live._unusable is False, "a live prompt was rewritten as an unusable paste"
         assert _rendered(live) == before_live
         assert not live.answered
+
+
+@pytest.mark.asyncio
+async def test_a_settled_prompt_does_not_retain_the_pasted_value() -> None:
+    """Agent review round 4, Z7: the block held the submitted value verbatim.
+
+    `resolve` drops `_typed` precisely so a settled block in the transcript is
+    not still holding the user's key, but the value was then kept under
+    `_submitted` for the receipt's character count — and the app retains the
+    last prompt to correct its receipt, so that reference outlived even
+    `/clear`. The receipt only ever needed the LENGTH.
+    """
+    app = _PromptHost()
+    async with app.run_test() as pilot:
+        block = KeyPromptBlock("Alibaba Cloud")
+        await app.mount(block)
+        await pilot.pause()
+        block.resolve("sk-SUPERSECRET-abcdef")
+        await pilot.pause()
+
+        held = [
+            value
+            for value in vars(block).values()
+            if isinstance(value, str) and "SUPERSECRET" in value
+        ]
+        assert held == [], f"the settled block still holds the pasted value: {held}"
+
+        # The receipt still reports the length, or the assertion above could be
+        # satisfied by a block that simply stopped describing the paste.
+        assert "21 chars" in _rendered(block)
