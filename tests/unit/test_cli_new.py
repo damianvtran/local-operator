@@ -737,21 +737,40 @@ def test_main_preflight_missing_hosting(
     assert called["factory"] is False
 
 
-def test_main_preflight_missing_api_key(
+def test_main_interactive_missing_api_key_warns_and_starts(
     tmp_home: Path,
     quiet_env: None,
     monkeypatch: pytest.MonkeyPatch,
     capsys,
 ) -> None:
-    """A keyed provider with NO resolvable key fails preflight (-1) before the
-    turn; keyless providers (test) pass through."""
+    """A keyed provider with NO resolvable key still starts interactively.
+
+    The fatal preflight sat between the user and the in-app `/login` remedy:
+    a config whose default hosting was a keyed provider (e.g. openrouter)
+    could not start at all once the key was gone. Interactive startup now
+    warns on stderr and boots; the exec path keeps the fatal check (see
+    test_preflight_api_key_fatal_by_default below).
+    """
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    called: dict[str, bool] = {"factory": False}
+    seen: dict[str, Any] = {}
 
     async def fake_create_session(*args, **kwargs):
-        called["factory"] = True
+        seen["built"] = True
         return MagicMock()
 
+    fake_tui = types.ModuleType("local_operator.tui")
+
+    async def fake_run_tui(
+        session_factory,
+        theme_name="dark",
+        provider_controller=None,
+        resume_factory=None,
+    ) -> int:
+        await session_factory()
+        return 0
+
+    setattr(fake_tui, "run_tui", fake_run_tui)
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
@@ -759,13 +778,29 @@ def test_main_preflight_missing_api_key(
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program", "--hosting", "openai", "--model", "gpt-4o"]):
-        assert main() == -1
-    # stderr: this is the most common `exec --json` failure there is (fresh
-    # install, or a typo'd --hosting), so a coloured line on stdout broke the
-    # consumer at exactly the moment it needed to read the error.
+        assert main() == 0
+    err = capsys.readouterr().err
+    # The warning names the fact and the in-app remedy, and is not an Error.
+    assert "Warning" in err and "openai" in err and "/login openai" in err
+    assert "Error" not in err
+    assert seen.get("built") is True
+
+
+def test_preflight_api_key_fatal_by_default(
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """`_preflight_api_key` stays fatal without the interactive opt-out.
+
+    The exec path calls it bare: a scripted one-shot run has no login prompt,
+    so "start anyway and fail mid-turn" would only move the same failure
+    somewhere harder to read.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert cli._preflight_api_key("openai", _bare_credential_manager()) == -1
     err = capsys.readouterr().err
     assert "OPENAI_API_KEY" in err and "Error" in err
-    assert called["factory"] is False
 
 
 def test_preflight_accepts_stored_oauth_under_temporary_backoff(
