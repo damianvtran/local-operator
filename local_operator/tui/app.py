@@ -665,10 +665,11 @@ class _ProviderRows(NamedTuple):
 
 #: Tag for the toast the COMPOSER's copy raises, so a later edit can withdraw
 #: that card and no other. One `Toast` slot serves every caller, and a receipt
-#: may be showing OR held behind an actionable notice — the showing case is
-#: named by `Toast.generation`, and this names the held one. A bare sentinel
-#: rather than a widget reference: the identity is all that is compared, and
-#: holding a widget in app state is a lifetime problem for no benefit.
+#: may be SHOWING or HELD behind an actionable notice; the tag rides the card
+#: through both, which is what lets `Toast.withdraw` treat them as one case
+#: (see `on_editor_copied`). A bare sentinel rather than a widget reference:
+#: identity is all that is compared, and holding a widget in app state is a
+#: lifetime problem for no benefit.
 COMPOSER_COPY = object()
 
 

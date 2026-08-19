@@ -314,8 +314,19 @@ class Toast(Static):
 
         Ownership is the whole check. The slot is shared, so an unqualified
         withdrawal lets evidence about one gesture discard another's notice
-        (review round 4, F14).
+        (review round 4, F14). ``None`` is not an owner: it is the tag every
+        card that named no owner carries, so accepting it here would retire an
+        unread MCP failure on a one-word mistake that typechecks and passes the
+        suite — D2 restored for the third time (review round 5, F17).
+
+        **The hold is dropped FIRST.** ``dismiss_toast`` promotes whatever is
+        held, so dismissing first would raise the very card being withdrawn and
+        then find the hold already consumed. Reachable whenever one owner has a
+        card showing and another held, which is the shipped
+        failure-notice-plus-copy state (review round 5, F15).
         """
+        if owner is None:
+            raise ValueError("withdraw() needs an owner; None is every unowned card")
         self.drop_deferred(owner)
         if self.display and self._owner is owner:
             self.dismiss_toast()
@@ -337,7 +348,11 @@ class Toast(Static):
 
         Idempotent, and silent when nothing of theirs is held: a caller
         withdrawing a claim should not have to know whether it was ever queued.
+
+        ``None`` is refused for the same reason :meth:`withdraw` refuses it.
         """
+        if owner is None:
+            raise ValueError("drop_deferred() needs an owner; None is every unowned card")
         if self._deferred is not None and self._deferred[2] is owner:
             self._deferred = None
 
@@ -357,6 +372,10 @@ class Toast(Static):
         self.display = False
         self._message = ""
         self._actionable = False
+        # Hygiene, not logic: the only reader of `_owner` is gated on
+        # `display`, which is now False, and a promotion overwrites it a moment
+        # later anyway. Cleared so a hidden card does not sit there claiming an
+        # owner — no test can distinguish it, and it should stay.
         self._owner = None
         self.update("")
         # The slot is free, so a receipt that deferred to this card gets its

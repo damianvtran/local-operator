@@ -567,3 +567,162 @@ async def test_a_card_that_actually_showed_clears_the_deferred_one() -> None:
         await pilot.pause()
         assert toast.message == ""
         assert toast.display is False
+
+
+# -- withdrawal, by owner -----------------------------------------------------
+#
+# The slot is shared, so "retire my card" has to mean *mine*. Four bugs in this
+# PR (F5, D8, D14, F14) were all one signal reaching a card it did not own,
+# patched at four different layers; `withdraw(owner)` asks the question once.
+# These pin it at the widget, where the ownership actually lives — the
+# end-to-end tests in `test_transcript_selection.py` only ever exercise two
+# owners, so the cases that make ownership MEAN something are unpinned there
+# (review round 5, F16).
+
+#: Two distinct callers, as the app's own sentinels are.
+OWNER_A = object()
+OWNER_B = object()
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_retires_a_showing_card_of_your_own() -> None:
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("mine", owner=OWNER_A)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+
+        assert toast.message == ""
+        assert toast.display is False
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_leaves_someone_else_s_showing_card_alone() -> None:
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("theirs", owner=OWNER_B)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+
+        assert toast.message == "theirs"
+        assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_leaves_someone_else_s_held_card_alone() -> None:
+    """...and it still gets its turn when the slot frees."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        toast.show("theirs", yield_to_actionable=True, owner=OWNER_B)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        assert toast.message == "theirs"
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_drops_the_hold_without_touching_the_card_above_it() -> None:
+    """One owner showing, another held — the shipped failure-plus-copy state."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS, owner=OWNER_B)
+        await pilot.pause()
+        toast.show("mine", yield_to_actionable=True, owner=OWNER_A)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+        assert toast.message == "⊙ MCP failed: github"
+
+        # The slot frees to nothing: the held card was withdrawn, not promoted.
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.message == ""
+        assert toast.display is False
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_the_card_above_promotes_the_hold_beneath_it() -> None:
+    """The same state, withdrawn from the other side."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS, owner=OWNER_B)
+        await pilot.pause()
+        toast.show("mine", yield_to_actionable=True, owner=OWNER_A)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_B)
+        await pilot.pause()
+
+        assert toast.message == "mine"
+        assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_drops_the_hold_before_dismissing_the_card() -> None:
+    """The order inside `withdraw` is load-bearing, in a reachable state.
+
+    `dismiss_toast` PROMOTES whatever is held. So if `withdraw` dismissed
+    first, it would raise the very card it is withdrawing and then find the
+    hold already consumed — leaving the claim on screen. Reachable whenever one
+    owner holds both cards (review round 5, F15).
+
+    Swapping the two statements leaves every other test in the suite passing,
+    which is exactly why this one exists.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("mine, actionable", duration_ms=TOAST_FAILURE_MS, owner=OWNER_A)
+        await pilot.pause()
+        toast.show("mine, held", yield_to_actionable=True, owner=OWNER_A)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+
+        assert toast.message == ""
+        assert toast.display is False
+        assert toast._deferred is None
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_nothing_is_silent() -> None:
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+
+        assert toast.message == ""
+        assert toast.display is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["withdraw", "drop_deferred"])
+async def test_none_is_not_an_owner(method: str) -> None:
+    """`None` tags every card that named no owner, so it cannot address one.
+
+    Nothing calls it that way today, but it is a one-word mistake that
+    typechecks (`object` includes `None`) and would silently retire an unread
+    MCP failure — D2 for the third time (review round 5, F17).
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        with pytest.raises(ValueError):
+            getattr(toast, method)(None)
+
+        assert toast.message == "⊙ MCP failed: github"
+        assert toast.display
