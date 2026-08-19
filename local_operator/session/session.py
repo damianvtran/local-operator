@@ -127,6 +127,21 @@ _CONTINUATION_PROMPT = (
 #: recovery band must not re-prompt forever.
 _MAX_CONTINUATIONS = 8
 
+#: How many times the title journal will chase a name that moved WHILE it was
+#: being written (see :meth:`Session._persist_conversation_name`). A cap rather
+#: than a convergence argument: the window is the append's own duration, which
+#: is constant, so a writer that renames on every append never converges — as
+#: recursion it reached 2 987 frames and 522 KB of rows. Three is generous for
+#: the real case (a `/rename` landing inside one append), and whatever is still
+#: unwritten afterwards is left for the dispose flush rather than spun on.
+_NAME_CHASE_ATTEMPTS = 3
+
+#: How long ``dispose`` waits for an in-flight title write before giving up on
+#: it. Bounded because teardown must not hang on a wedged filesystem, and short
+#: because the title is decoration; the write is shielded, so it continues on
+#: its own and the wait only stops BLOCKING on it.
+_NAME_FLUSH_TIMEOUT_S = 2.0
+
 #: The builtin tools whose createIf gate reads a field only a SESSION can fill
 #: (``subagent_launcher``, ``jobs``, ``wake_scheduler``, ``subagent_comms``, the
 #: ask hook). Named here rather than inline in
@@ -718,6 +733,11 @@ class Session:
         #: ``_background_tasks`` because dispose CANCELS those and this one has
         #: to be awaited instead — see :meth:`_spawn_conversation_name_write`.
         self._conversation_name_task: "asyncio.Future[None] | None" = None
+        #: ``(text, user_set)`` of the newest row actually WRITTEN. Lets the
+        #: dispose flush tell a title that never reached disk from one whose
+        #: slow write simply has not cleared the dirty flag yet, which is the
+        #: difference between a needed retry and a duplicate row.
+        self._conversation_name_journalled: tuple[str, bool] | None = None
         self._system_blocks_provider = system_blocks_provider
         self._convert_to_llm = convert_to_llm or _default_convert_to_llm
         #: Set once a provider refuses a request because of an image block, and
@@ -1281,16 +1301,49 @@ class Session:
         append a duplicate row for one change.
         """
         if self._disposed:
+            # Nothing will flush this: dispose is idempotent and has already
+            # run its flush. Say so rather than dropping the name silently —
+            # the holder keeps the new title, so the band and the on-disk row
+            # disagree until the process ends, and that is worth being able to
+            # find in a log (review round 1, F6).
+            logger.debug(
+                "conversation name %r stored after dispose; not journalled",
+                self._conversation_name.text,
+            )
             return
         task = self._conversation_name_task
         if task is not None and not task.done():
             return
         try:
-            self._conversation_name_task = asyncio.ensure_future(self._persist_conversation_name())
+            self._conversation_name_task = asyncio.ensure_future(
+                self._guarded_conversation_name_write()
+            )
         except RuntimeError:
-            # No running loop (a session constructed and named outside one).
-            # The dispose flush is the backstop; the name is not lost.
+            # No running loop at all. `ensure_future` does NOT raise merely
+            # because a session was constructed outside one — it returns a task
+            # bound to an unrun loop, which later dies as "Task was destroyed
+            # but it is pending!" and is covered by the dispose flush. This
+            # catch is for the case where no loop can be resolved at all, so
+            # the name simply waits for the flush (review round 1, F8).
             self._conversation_name_task = None
+
+    async def _guarded_conversation_name_write(self) -> None:
+        """Journal the title, logging any failure instead of raising.
+
+        The same guard ``_spawn_background`` puts on every other
+        fire-and-forget in this class, and for the same reason: this task is
+        deliberately NOT routed through that helper (dispose must await it, not
+        cancel it), so without its own wrapper the exception was never
+        retrieved and asyncio printed a traceback into the user's terminal when
+        the volume was full or read-only. A title is decoration; it must never
+        cost the user a traceback, let alone a turn (review round 1, F2).
+        """
+        try:
+            await self._persist_conversation_name()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("failed to journal the conversation name", exc_info=True)
 
     def _load_conversation_name(self) -> None:
         """Adopt the title journalled by the session this one resumes.
@@ -1340,24 +1393,37 @@ class Session:
 
         Left dirty, the write is re-driven by the flush at dispose, so the last
         title a user chose is the one on disk.
+
+        The chase is a bounded LOOP, not recursion. It was recursion, on the
+        argument that it was bounded by renames actually landing inside a
+        write — which is a property of user behaviour, not of the code. A
+        transcript that moves the holder during every append never converges:
+        2 987 frames, 2 986 rows and 522 KB before ``RecursionError``. Neither
+        half of that is acceptable for decoration, so the stack hazard is gone
+        and the growth is capped: after ``_NAME_CHASE_ATTEMPTS`` the newest
+        title is left dirty for the dispose flush, which is exactly the
+        fallback that already exists for a cancelled write (review round 1,
+        F3).
         """
-        payload = {
-            "text": self._conversation_name.text,
-            "user_set": self._conversation_name.user_set,
-        }
-        await self._transcript.append_custom(CONVERSATION_NAME_CUSTOM_TYPE, payload)
-        if (self._conversation_name.text, self._conversation_name.user_set) == (
-            payload["text"],
-            payload["user_set"],
-        ):
-            self._conversation_name_dirty = False
-            return
-        # The title moved under the append. Chase it now rather than leaving the
-        # newer name to the dispose flush: a session can run for hours after a
-        # rename, and "correct only if you quit" is not a property worth having
-        # when the retry is one more append. Recursion is bounded by renames
-        # actually landing inside a write, and each pass narrows the window.
-        await self._persist_conversation_name()
+        for _ in range(_NAME_CHASE_ATTEMPTS):
+            payload = {
+                "text": self._conversation_name.text,
+                "user_set": self._conversation_name.user_set,
+            }
+            await self._transcript.append_custom(CONVERSATION_NAME_CUSTOM_TYPE, payload)
+            # What is now ON DISK, recorded before the comparison below so the
+            # dispose flush can tell "the flag is stale" from "the title moved".
+            self._conversation_name_journalled = (payload["text"], payload["user_set"])
+            if (self._conversation_name.text, self._conversation_name.user_set) == (
+                payload["text"],
+                payload["user_set"],
+            ):
+                self._conversation_name_dirty = False
+                return
+            # The title moved under the append. Chase it now rather than
+            # leaving the newer name to the dispose flush: a session can run
+            # for hours after a rename, and "correct only if you quit" is not a
+            # property worth having when the retry is one more append.
 
     async def _flush_conversation_name(self) -> None:
         """Land an outstanding title write before the session tears down.
@@ -1373,14 +1439,30 @@ class Session:
         Any write already in flight is awaited first, so the ordinary path
         costs nothing here and the retry below only runs when that write never
         happened (never scheduled, or cancelled).
+
+        The wait is SHIELDED — the write must not be cancelled by the timeout,
+        or the flush would be racing the thing it is trying to complete — and
+        the retry is gated on the payload actually differing rather than on the
+        dirty flag alone. A slow append still holds the flag while it runs, so
+        gating on the flag re-appended a byte-identical row and dispose took the
+        write's full duration anyway (measured: a 3 s append gave a 5 s dispose
+        and two identical rows). Now a write that is merely slow is waited for
+        once and never duplicated (review round 1, F5).
         """
         task = self._conversation_name_task
         if task is not None and not task.done():
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                await asyncio.wait_for(asyncio.shield(task), timeout=_NAME_FLUSH_TIMEOUT_S)
             except BaseException:  # noqa: BLE001 — fall through to the retry
                 pass
         if not self._conversation_name_dirty:
+            return
+        if self._conversation_name_journalled == (
+            self._conversation_name.text,
+            self._conversation_name.user_set,
+        ):
+            # A slow write already put THIS title on disk; the flag is still set
+            # only because that write has not reached its own clear yet.
             return
         try:
             await self._persist_conversation_name()

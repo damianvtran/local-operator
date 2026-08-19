@@ -32,7 +32,7 @@ import pytest
 
 from local_operator.harness.types import StreamEndEvent
 from local_operator.session.naming import CONVERSATION_NAME_CUSTOM_TYPE
-from local_operator.session.session import Session
+from local_operator.session.session import _NAME_CHASE_ATTEMPTS, Session
 from local_operator.session.transcript import Transcript
 from tests.unit.session.test_session import MODEL, ScriptedStream
 
@@ -229,6 +229,103 @@ async def test_a_rename_landing_mid_write_is_not_lost(tmp_path) -> None:
     assert _session(tmp_path).conversation_name == "Second title"
     await session.dispose()
     assert _session(tmp_path).conversation_name == "Second title"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_journal_write_is_logged_not_raised(tmp_path, caplog) -> None:
+    """A full or read-only volume must not print a traceback for decoration.
+
+    The write is deliberately NOT routed through ``_spawn_background`` (dispose
+    has to await it, not cancel it), so it needs that helper's guard of its own.
+    Without it the exception was never retrieved and asyncio wrote
+    ``Task exception was never retrieved`` into the user's terminal — for a
+    title (review round 1, F2).
+    """
+
+    class FailingTranscript(Transcript):
+        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+            raise OSError("disk full")
+
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=FailingTranscript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+    await session.async_init()
+    with caplog.at_level("WARNING"):
+        session.set_conversation_name("A title nobody can store", user_set=True)
+        await asyncio.sleep(0.05)
+        # The session survives, and dispose does too — a decoration failure may
+        # not take teardown down with it.
+        await session.dispose()
+
+    assert any("conversation name" in record.message for record in caplog.records)
+    assert session.conversation_name == "A title nobody can store"
+
+
+@pytest.mark.asyncio
+async def test_a_title_that_keeps_moving_cannot_spin_the_journal(tmp_path) -> None:
+    """The chase is CAPPED, not merely "bounded by user behaviour".
+
+    A writer that renames during every append never converges, and as recursion
+    that was 2 987 frames, 2 986 rows and 522 KB before ``RecursionError``. The
+    loop stops after ``_NAME_CHASE_ATTEMPTS`` and leaves the rest to the dispose
+    flush (review round 1, F3).
+    """
+    renames = iter(range(1, 10_000))
+
+    class MovingTranscript(Transcript):
+        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+            result = await super().append_custom(custom_type, details)
+            # Move the holder under the write, every single time.
+            session._conversation_name.text = f"Moving title {next(renames)}"
+            return result
+
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=MovingTranscript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+    await session.async_init()
+    session.set_conversation_name("First", user_set=True)
+    await asyncio.sleep(0.1)
+    await session.dispose()
+
+    # Capped rather than unbounded: a handful of rows, not thousands.
+    rows = _name_entries(tmp_path)
+    assert len(rows) <= _NAME_CHASE_ATTEMPTS * 2 + 2, f"the chase spun: {len(rows)} rows"
+
+
+@pytest.mark.asyncio
+async def test_a_slow_write_is_not_duplicated_by_the_dispose_flush(tmp_path) -> None:
+    """Dispose must not re-append a row a slow write already put on disk.
+
+    The flush waits on the in-flight write and then retried whenever the dirty
+    flag was still set — which a slow append holds for its whole duration, so
+    the identical payload was written twice (review round 1, F5).
+    """
+
+    class SlowTranscript(Transcript):
+        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+            await asyncio.sleep(0.3)
+            return await super().append_custom(custom_type, details)
+
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=SlowTranscript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+    await session.async_init()
+    session.set_conversation_name("Slow write", user_set=True)
+    await session.dispose()
+
+    assert _name_entries(tmp_path) == [{"text": "Slow write", "user_set": True}]
 
 
 @pytest.mark.asyncio

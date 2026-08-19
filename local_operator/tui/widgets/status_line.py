@@ -958,9 +958,12 @@ class StatusLine:
         # no longer is: `OperatorApp._show_provisional_name` paints an excerpt of
         # the opener in the SAME frame as the submit, with no provider call at
         # all. What still reaches the directory is a conversation nobody has
-        # prompted yet — boot, `/new`, or a resume, since `ConversationName` is
-        # never journalled — and one whose opener had no topic to quote ("hi",
-        # "thanks"), which `naming.is_low_signal` refuses to label. A sidebar row
+        # prompted yet — boot or `/new`; a RESUME no longer lands here, since
+        # the title is journalled and restored (`session.naming`) and a
+        # transcript predating that entry is labelled from its replayed opener
+        # by `OperatorApp._restore_resumed_name` — and one whose opener had no
+        # topic to quote ("hi", "thanks"), which `naming.is_low_signal` refuses
+        # to label. A sidebar row
         # reading `lo ›` five times over is the exact failure this feature exists
         # to fix, and the directory is what the user opened the session for.
         title.set_label(label or cwd_label(self._cwd))
