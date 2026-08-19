@@ -1113,16 +1113,18 @@ def _preflight_hosting_model(
     engine itself would accept.
 
     ``require_api_key=False`` demotes a missing API key from a fatal error to
-    a stderr warning, and exists for the interactive front ends (TUI and
-    headless REPL): the in-app ``/login`` command is the product's own remedy
-    for a missing key, and a fatal preflight sat exactly between the user and
-    that remedy — a fresh config whose default hosting was a keyed provider
-    could not start at all. Session construction never needs the key (stream
-    time resolves it through the AuthStore cascade), the TUI splash already
-    shows "not logged in — /login <provider>", and a keyless turn fails with
-    its own accurate message, so letting the app start loses nothing. Hosting/
-    model resolution errors stay fatal on every path: without a hosting there
-    is no session to build and nothing for ``/login`` to fix.
+    a stderr warning, and exists for the interactive front ends: the TUI's
+    ``/login`` command is the product's own remedy for a missing key, and a
+    fatal preflight sat exactly between the user and that remedy — a fresh
+    config whose default hosting was a keyed provider could not start at all.
+    The headless REPL has no slash commands, but its remedy (``local-operator
+    login``) is named in the warning it keeps visible on stderr, and a keyless
+    turn fails with its own accurate per-turn message rather than a lockout.
+    Session construction never needs the key (stream time resolves it through
+    the AuthStore cascade) and the TUI splash already shows "not logged in —
+    /login <provider>", so letting the app start loses nothing. Hosting/model
+    resolution errors stay fatal on every path: without a hosting there is no
+    session to build and nothing for a login to fix.
 
     Returns -1 (already printed) on failure, None to continue. All engine
     imports stay lazy so this never weights down parser-only paths.
@@ -1199,14 +1201,16 @@ def _preflight_api_key(
 
     key_name = definition.env_keys if isinstance(definition.env_keys, str) else "API key"
     if not require_key:
-        # Interactive start: name the fact and the in-app remedy, then let the
-        # app come up. The TUI repaints over this line, but its splash carries
-        # the same warning; the headless REPL keeps it visible on stderr.
+        # Interactive start: name the fact and the remedies, then let the app
+        # come up. `/login` is scoped to the TUI because the headless REPL has
+        # no slash dispatch — there the shell command is the remedy, and this
+        # line stays visible on stderr (the TUI repaints over it, but its
+        # splash carries the same warning).
         print(
             f"\n\033[1;33mWarning: no credentials are configured for hosting "
             f"platform '{hosting}'. Starting anyway — run `/login {canonical}` "
-            f"in the app, `local-operator login {canonical}`, or set "
-            f"{key_name} in the environment.\033[0m",
+            f"in the TUI, `local-operator login {canonical}` from a shell, or "
+            f"set {key_name} in the environment.\033[0m",
             file=sys.stderr,
         )
         return None
