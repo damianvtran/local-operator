@@ -1162,7 +1162,10 @@ def test_the_advertised_set_is_the_dispatch_table() -> None:
     from local_operator.providers import usage as usage_mod
 
     assert usage_mod.USAGE_PROVIDERS == frozenset(usage_mod._FETCHERS)
-    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 11
+    # 12 since `zai-oauth` joined: the Z.AI browser sign-in is its own provider
+    # id, like `xai-oauth`, and needs its own route or a signed-in account
+    # reports no usage at all.
+    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 12
     assert not hasattr(usage_mod, "OAUTH_USAGE_PROVIDERS")
 
 
@@ -1395,3 +1398,27 @@ async def test_qwencloud_token_plan_fails_closed_on_console_need_login() -> None
             oauth_creds={"access": "expired-mgmt"},
         )
     assert report is None
+
+
+class TestZaiSignInReportsUsage:
+    """R4: `/provider` advertised Z.AI usage and then showed nothing to anyone
+    who signed in rather than pasting a key.
+
+    The browser sign-in ends by minting an ordinary durable coding-plan key and
+    stores it in `access`, so the OAuth slot wants the SAME fetcher the api-key
+    slot uses -- an empty OAuth slot made `fetch_usage` return None.
+    """
+
+    def test_both_credential_kinds_route_to_the_quota_fetcher(self) -> None:
+        from local_operator.providers.usage import _FETCHERS
+
+        assert _FETCHERS["zai"] == ("zai-quota", "zai-quota")
+        # The login flavour resolves too: it is a separate provider id.
+        assert _FETCHERS["zai-oauth"] == ("zai-quota", "zai-quota")
+
+    def test_a_signed_in_account_is_reported_as_capable_of_usage(self) -> None:
+        from local_operator.providers.usage import usage_kinds
+
+        oauth_kind, api_key_kind = usage_kinds("zai")
+        assert oauth_kind is not None, "a signed-in Z.AI account reports no usage"
+        assert api_key_kind is not None

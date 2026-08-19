@@ -19,14 +19,20 @@ suite expects:
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/unit/tui -q
 ```
 
-Gates, all of which must be clean before a PR:
+Gates, all of which must be clean before a PR. **Run them over the whole tree,
+exactly as CI does** — these are the commands from `.github/workflows/ci.yml`:
 
 ```sh
 .venv/bin/python -m flake8 .
-uvx --from black==26.1.0 black --check local_operator tests
-uvx isort --check-only --profile black local_operator tests
+uvx --from black==26.1.0 black --check .
+uvx isort==5.13.2 --check .
 .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 ```
+
+Narrowing the last two to `local_operator tests`, or passing `--profile black`
+instead of letting isort read the repo's own config, checks something CI does
+not: both combinations pass on a file that CI then rejects. An unsorted
+function-local import reached CI exactly that way.
 
 The venv is uv-managed and has the package installed **editable**, so source
 edits are live. After a pull that changes dependencies:
