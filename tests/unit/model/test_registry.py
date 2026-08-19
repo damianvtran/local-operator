@@ -189,7 +189,15 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
     the id: `wan2.7-image` reads like an image-only model and answers chat
     requests with an empty body, while `deepseek-v4-flash-0731` reads like one
     of a family and is a full reasoning chat model.
+
+    WHEN THIS FAILS, suspect the expected side first. Both literals are a
+    snapshot of a remote catalogue, dated below; a provider that adds or
+    withdraws a model breaks this test without anything in the repo changing.
+    That is the intended trade-off — a new chat model must not reach users at
+    the 128k default just because nobody noticed it — but it means the fix is
+    usually to re-derive the snapshot, not to edit the map.
     """
+    # Snapshot of GET /compatible-mode/v1/models, 2026-08-19.
     gateway_chat_models = {
         "qwen3.8-max",
         "qwen3.7-max",
@@ -199,8 +207,10 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
         "deepseek-v4-pro",
         "deepseek-v4-flash-0731",
     }
-    # Listed by the gateway but not chat models: they return no chat payload
-    # (the image/TTS pair) or reject the route outright (the realtime one).
+    # Same snapshot, same date: listed by the gateway but NOT chat models — they
+    # return no chat payload (the image/TTS entries) or reject the route
+    # outright (the realtime one). Asserted against the map too, so an id that
+    # migrates between these two sets cannot be added twice or silently ignored.
     gateway_non_chat_models = {
         "wan2.7-image",
         "wan2.7-image-pro",
@@ -209,6 +219,9 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
     }
     assert set(qwencloud_token_plan_models) == gateway_chat_models
     assert gateway_chat_models.isdisjoint(gateway_non_chat_models)
+    # The non-chat ids must not acquire rows: a window on a model that returns
+    # no chat payload would offer it in the picker as though it were selectable.
+    assert gateway_non_chat_models.isdisjoint(set(qwencloud_token_plan_models))
 
 
 def test_token_plan_ships_no_row_the_gateway_serves_under_another_id() -> None:

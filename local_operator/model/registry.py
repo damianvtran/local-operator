@@ -1595,6 +1595,14 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
         # because the id sits among the image/audio entries, and without a row
         # it resolved to the 128k default: the exact defect this map fixes, one
         # line away from a sibling that got it right.
+        #
+        # Deliberately NOT suffixed "(Token Plan)" like the two rows below, even
+        # though `deepseek/deepseek-v4-flash-0731` also ships. The suffix exists
+        # to break a collision between two IDENTICAL curated names, and there is
+        # none here: the direct row is "DeepSeek V4 Flash (2026-07-31)". Adding
+        # a suffix would in fact make the label WORSE — `_drop_qualifier` would
+        # strip it, the bare form would then collide with the direct row, and
+        # the compact rung would fall back to the bare id.
         name="DeepSeek V4 Flash 0731",
         max_tokens=393_216,
         context_window=1_000_000,
