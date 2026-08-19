@@ -130,10 +130,18 @@ CURSOR = "❯"
 GUTTER_CELLS = 2
 
 #: Prefix on a row the filter admitted because the query appears in the
-#: CONVERSATION rather than in the visible name. ASCII and two cells, so it
-#: costs the same width in every terminal and cannot render as a replacement
-#: glyph on a font that lacks an icon.
-BODY_MATCH_MARKER = "· "
+#: CONVERSATION rather than in the visible name.
+#:
+#: Two cells wide and drawn from the ASCII/Latin-1 range, so it costs the same
+#: width in every terminal and cannot arrive as a replacement box on a font
+#: without an icon set.
+#:
+#: A QUOTE mark rather than the `·` first shipped: the footer on this same
+#: card uses `·` as its separator forty cells below, and one glyph meaning
+#: "and also" in the chrome and "found inside this conversation" in the list
+#: is a collision the reader has to resolve every time (D4). A quote reads as
+#: "something was said here", which is what the mark actually means.
+BODY_MATCH_MARKER = "” "
 
 
 def filter_rows(
@@ -222,7 +230,7 @@ def _wrap_cells(text: str, width: int) -> list[str]:
 
 
 def plan_columns(
-    rows: Sequence[SessionRow], width: int, ages: Sequence[str]
+    rows: Sequence[SessionRow], width: int, ages: Sequence[str], marked: bool = False
 ) -> tuple[int, int, int]:
     """``(name, age, id)`` cell budgets for ``width``, dropping before cutting.
 
@@ -231,18 +239,33 @@ def plan_columns(
     copies into ``/resume <id>``. The age goes second — "4h" with the "ago"
     sliced off is noise. The name is last and truncates with an ellipsis,
     because a prefix of a sentence is still recognisable.
+
+    ``marked`` reserves the body-match marker's cells as part of the FIXED
+    chrome, for every row in the list rather than only the matched ones. Two
+    reasons, and both were found by looking at rendered frames rather than at
+    the arithmetic:
+
+    * Subtracting the marker from the name AFTER this function had already
+      spent the budget down to :data:`NAME_MIN_CELLS` rendered marked names at
+      14 cells — under the floor this module documents as "not identifiable",
+      and it let the marker jump a queue in which the id and the age are
+      supposed to surrender their cells before the name gives up any.
+    * Reserving it only on matched rows started names at a different column
+      depending on how each row matched, so a filtered list rendered a ragged
+      left edge for the one field the user is reading down.
     """
+    marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     age_col = max((cell_len(age) for age in ages), default=0)
     # Measured rather than assumed at 12: an id written by an older build with
     # a different length must still line up instead of ragging the column.
     id_col = max((cell_len(row.id) for row in rows), default=0)
-    fixed = GUTTER_CELLS + 2 + age_col + 2 + id_col
+    fixed = GUTTER_CELLS + marker_col + 2 + age_col + 2 + id_col
     if width - fixed >= NAME_MIN_CELLS:
         return width - fixed, age_col, id_col
-    fixed = GUTTER_CELLS + 2 + age_col
+    fixed = GUTTER_CELLS + marker_col + 2 + age_col
     if width - fixed >= NAME_MIN_CELLS:
         return width - fixed, age_col, 0
-    return max(NAME_MIN_CELLS, width - GUTTER_CELLS), 0, 0
+    return max(NAME_MIN_CELLS, width - GUTTER_CELLS - marker_col), 0, 0
 
 
 def render_rows(
@@ -266,7 +289,11 @@ def render_rows(
     dim = theme_mod.semantic_color("dim")
 
     ages = [format_age(max(0.0, now - row.mtime)) for row in rows]
-    name_col, age_col, id_col = plan_columns(rows, width, ages)
+    # Whether ANY row on screen is marked decides the column for ALL of them,
+    # so the name's left edge is straight down the list.
+    marked = any(row.id in body_matched for row in rows)
+    name_col, age_col, id_col = plan_columns(rows, width, ages, marked)
+    marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
 
     lines: list[Text] = []
     for index, (row, age) in enumerate(zip(rows, ages)):
@@ -308,17 +335,26 @@ def render_rows(
             name_colour = muted if current else dim
         # A row that matched inside the conversation carries a mark, because
         # its NAME does not contain what was typed and an unexplained row makes
-        # the whole result set read as broken. Prefixed rather than appended so
-        # it cannot be the thing the name's ellipsis eats, and counted against
-        # the name budget so a marked row is still exactly one line wide.
-        marker = BODY_MATCH_MARKER if row.id in body_matched else ""
-        if marker:
-            line.append(marker, style=row_bg + Style(color=dim))
+        # the whole result set read as broken.
+        #
+        # The COLUMN is reserved for every row whenever any row is marked (see
+        # ``plan_columns``), and unmarked rows pad it with blanks. Painting it
+        # only where it applies moved the start of the name between rows, which
+        # ragged the left edge of the one field being read down the list.
+        #
+        # `muted`, not `dim`. The two are interchangeable for the id and the
+        # age, which are redundant lookup keys, but this mark is the ONLY thing
+        # explaining why a row with no visible match is in the results — and
+        # `dim` measures 3.43:1 dark / 2.72:1 light on this card's raised
+        # ground, under AA. `muted` is 6.51:1 / 5.18:1, and is already the
+        # caret's ink for exactly this argument (D3).
+        if marker_col:
+            line.append(
+                _pad_cells(BODY_MATCH_MARKER if row.id in body_matched else "", marker_col),
+                style=row_bg + Style(color=muted),
+            )
         line.append(
-            _pad_cells(
-                truncate_cells(name, max(1, name_col - cell_len(marker))),
-                max(1, name_col - cell_len(marker)),
-            ),
+            _pad_cells(truncate_cells(name, name_col), name_col),
             style=row_bg + Style(color=name_colour),
         )
         if age_col:

@@ -27,10 +27,12 @@ from local_operator.resume import (
 )
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
+    BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
     CARD_PADDING_ROWS,
     NAME_MIN_CELLS,
     PAGE_ROWS_MAX,
+    PICKER_MIN_WIDTH,
     SessionPickerScreen,
     filter_rows,
     matched_in_body,
@@ -993,14 +995,45 @@ def test_only_a_body_match_is_marked() -> None:
 
 
 def test_a_marked_row_still_occupies_exactly_one_row_width() -> None:
-    """The marker is counted against the name budget, so it cannot push the
-    row past the card and silently eat the age and id columns."""
+    """The marker is reserved as a column, so it cannot push the row past the
+    card and silently eat the age and id columns."""
     row = _row("abc123def456", "a name long enough to need the whole budget here")
     plain = render_rows([row], 0, 74, NOW)[0].plain
     marked = render_rows([row], 0, 74, NOW, None, {"abc123def456"})[0].plain
     assert cell_len(marked) == cell_len(plain)
-    assert "·" in marked and "·" not in plain
+    assert BODY_MATCH_MARKER.strip() in marked
+    assert BODY_MATCH_MARKER.strip() not in plain
     assert "abc123def456" in marked
+
+
+def test_the_marker_never_pushes_the_name_below_its_floor() -> None:
+    """The marker must not jump the queue in which the id and the age give up
+    their cells before the name gives up any.
+
+    Subtracting it from the name AFTER the budget was already spent down to
+    the floor rendered marked names at 14 cells at several reachable widths.
+    """
+    rows = [_row("abc123def456", "a long conversation title"), _row("bbb222ccc333", "another")]
+    for width in range(PICKER_MIN_WIDTH, 140):
+        name_col, _, _ = plan_columns(rows, width, ["1m ago", "1h ago"], True)
+        assert name_col >= NAME_MIN_CELLS, width
+
+
+def test_every_row_starts_its_name_at_the_same_column() -> None:
+    """Reserving the marker only on matched rows ragged the left edge of the
+    one field the user reads down the list."""
+    rows = [_row("abc123def456", "matched inside"), _row("bbb222ccc333", "not matched")]
+    lines = [line.plain for line in render_rows(rows, 0, 74, NOW, None, {"abc123def456"})]
+    # The marker column is reserved on BOTH rows, so each name begins at the
+    # same offset: the marked row spends it on the mark, the other on blanks.
+    assert lines[0].index("matched inside") == lines[1].index("not matched")
+
+
+def test_a_marked_list_fills_the_card_at_every_reachable_width() -> None:
+    rows = [_row("abc123def456", "a long conversation title"), _row("bbb222ccc333", "another")]
+    for width in range(PICKER_MIN_WIDTH, 140):
+        for line in render_rows(rows, 0, width, NOW, None, {"abc123def456"}):
+            assert cell_len(line.plain) == width, width
 
 
 @pytest.mark.asyncio
