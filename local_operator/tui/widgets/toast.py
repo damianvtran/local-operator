@@ -321,9 +321,18 @@ class Toast(Static):
 
         **The hold is dropped FIRST.** ``dismiss_toast`` promotes whatever is
         held, so dismissing first would raise the very card being withdrawn and
-        then find the hold already consumed. Reachable whenever one owner has a
-        card showing and another held, which is the shipped
-        failure-notice-plus-copy state (review round 5, F15).
+        then find the hold already consumed.
+
+        This bites only when ONE owner has a card showing and another of its
+        own held, which today cannot happen: holding requires the showing card
+        to be actionable, and the only owned card the app raises is a copy
+        receipt at ``TOAST_DEFAULT_MS``. So the order is defensive, not a live
+        fix — it is the right order the moment any owner raises an actionable
+        card, and the test that pins it constructs that state directly rather
+        than waiting for a caller to make it reachable (review round 5, F15;
+        corrected in round 6, F19 — the earlier note claimed the shipped
+        failure-plus-copy state, where the owners differ and the swap is in
+        fact harmless).
         """
         if owner is None:
             raise ValueError("withdraw() needs an owner; None is every unowned card")

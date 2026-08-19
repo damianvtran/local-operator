@@ -674,8 +674,13 @@ async def test_withdrawing_drops_the_hold_before_dismissing_the_card() -> None:
 
     `dismiss_toast` PROMOTES whatever is held. So if `withdraw` dismissed
     first, it would raise the very card it is withdrawing and then find the
-    hold already consumed — leaving the claim on screen. Reachable whenever one
-    owner holds both cards (review round 5, F15).
+    hold already consumed — leaving the claim on screen (review round 5, F15).
+
+    The state is constructed directly because no caller reaches it yet: holding
+    requires the showing card to be actionable, and the only owned card the app
+    raises is a copy receipt at `TOAST_DEFAULT_MS`. That is the point — the
+    order is correct defensively, and this pins it before the first owner that
+    would make the hazard live (round 6, F19).
 
     Swapping the two statements leaves every other test in the suite passing,
     which is exactly why this one exists.
