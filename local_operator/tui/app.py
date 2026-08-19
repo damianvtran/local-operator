@@ -130,6 +130,8 @@ from local_operator.tui.widgets.editor import (
     ArgumentQueryOpened,
     Attachment,
     Editor,
+    EditorCopied,
+    EditorCopyStale,
     EditorQuit,
     EditorSubmitted,
     InterruptRequested,
@@ -683,6 +685,16 @@ class _ProviderRows(NamedTuple):
 
     choices: list[ArgumentChoice]
     problem: str
+
+
+#: Tag for the toast the COMPOSER's copy raises, so a later edit can withdraw
+#: that card and no other. One `Toast` slot serves every caller, and a receipt
+#: may be SHOWING or HELD behind an actionable notice; the tag rides the card
+#: through both, which is what lets `Toast.withdraw` treat them as one case
+#: (see `on_editor_copied`). A bare sentinel rather than a widget reference:
+#: identity is all that is compared, and holding a widget in app state is a
+#: lifetime problem for no benefit.
+COMPOSER_COPY = object()
 
 
 class Chrome(Static):
@@ -2491,12 +2503,131 @@ class OperatorApp(App[None]):
         ``None`` for no selection at all, ``""`` for a selection over widgets
         that every one of them declined.
         """
-        text = self.screen.get_selected_text()
+        self._put_on_clipboard(self.screen.get_selected_text())
+
+    def on_editor_copied(self, message: EditorCopied) -> None:
+        """A drag over the COMPOSER copies too, and says so identically.
+
+        The composer is invisible to ``Screen.selections`` — ``TextArea`` clears
+        the screen selection on every caret move, and the mouse-down that starts
+        the drag is a caret move — so :meth:`on_text_selected` sees nothing to
+        copy and the highlight the user is looking at goes nowhere. The widget
+        therefore reports its own release (``Editor._copy_drag``), and it lands
+        HERE rather than writing the clipboard itself so that both gestures
+        share one clipboard write and one toast: a copy out of the input must be
+        indistinguishable from a copy out of the transcript, or the receipt
+        becomes evidence about which widget you dragged over.
+
+        Only THIS path tags the card for later withdrawal: the composer's copy
+        is the one an edit to the composer can falsify. A transcript copy goes
+        through the same clipboard write and must NOT be retired when the user
+        turns to the composer and starts typing their next prompt (review round
+        2, F5; design round 2, D8).
+
+        The tag is all the bookkeeping there is. An earlier version recorded
+        ``Toast.generation`` here instead, which named only a card that had
+        actually been PAINTED — so a receipt held behind an actionable notice
+        was untracked while held (design round 4, D14), and untouchable once
+        the slot freed and promoted it. Ownership rides the card through both
+        states, so the two cases collapse into one (review round 4).
+        """
+        # `COMPOSER_COPY` tags the card as this gesture's, so that a later edit
+        # can withdraw it whether it went up or was held behind an actionable
+        # notice — and can withdraw ONLY it. The tag rides the Toast rather than
+        # being tracked here, which is what makes the two states one case
+        # (review round 4, F14).
+        self._put_on_clipboard(message.text, owner=COMPOSER_COPY)
+
+    def on_editor_copy_stale(self, message: EditorCopyStale) -> None:
+        """The text a copy receipt describes was edited away — drop the card.
+
+        Select-to-overwrite is the commonest edit in an input: drag a word, type
+        the replacement. The drag copies (that is this PR's whole point), and
+        the receipt then sat there for the rest of its five seconds asserting a
+        copy of characters the user had already replaced (design round 1, D3).
+
+        Only the CLAIM is withdrawn. The clipboard keeps what it took — the
+        copy really happened, and a paste a minute later must still produce it.
+
+        Retires THE CARD THIS EDITOR'S COPY RAISED, by owner, and nothing else.
+        Three ways that has gone wrong, all now answered by the one call:
+
+        * Matching on the message text could not tell one receipt from another,
+          so typing the next prompt withdrew the TRANSCRIPT's copy receipt —
+          D3 inverted, withdrawing a claim that was still true (review round 2,
+          F5; design round 2, D8).
+        * A receipt held behind an actionable notice (D9) escaped the check
+          entirely and appeared, already false, when the slot freed (design
+          round 4, D14).
+        * Withdrawing whatever was held, unqualified, discarded a transcript
+          copy's held receipt on a composer keystroke (review round 4, F14).
+
+        ``Toast.withdraw`` covers a card in either state and refuses one that
+        belongs to anybody else, so this handler no longer has to know which
+        state its receipt reached.
+        """
+        self.query_one(Toast).withdraw(COMPOSER_COPY)
+
+    def _put_on_clipboard(self, text: str | None, owner: object | None = None) -> None:
+        """The one clipboard write, with the receipt that makes it visible.
+
+        Shared by the transcript's ``TextSelected`` and the composer's
+        :class:`EditorCopied` so the two gestures cannot drift apart in what
+        they write or what they claim. The write is OSC 52
+        (``App.copy_to_clipboard``), which is what carries a copy back to the
+        real clipboard over ssh and inside a multiplexer.
+
+        Empty is not an event: ``None`` (nothing selected) and ``""`` (a
+        selection nothing would give up) are both "no copy happened", and a
+        toast for either would be the same lie the silent copy was.
+
+        **The unit follows the SHAPE of what was taken**, because "line" is a
+        claim the frame can contradict:
+
+        * A selection carrying no newline is reported in CHARACTERS. Saying
+          ``copied 1 line`` there asserted a whole line the user had not taken
+          (they dragged three words out of one), and in the composer it also
+          contradicted the screen: a long draft soft-wraps, so one document
+          line is painted as three highlighted rows and the receipt said
+          ``1 line`` while the user was looking at three (design round 1,
+          D1/D5). A character count is true of both the clipboard and the
+          frame, and it is the number that actually distinguishes "I got the
+          word" from "I got the word and a trailing space".
+        * A selection that spans lines is reported in LINES, which is the
+          useful magnitude there and keeps the transcript's familiar receipt
+          for the multi-paragraph copy it was written for.
+
+        The count is ``splitlines()``, not ``count("\\n") + 1``: the latter
+        reads a trailing newline as a whole further line, so selecting exactly
+        one line and its break — "select this line", a natural composer drag —
+        was reported as ``copied 2 lines`` (review round 1, F3). It is the count
+        the tests already cross-checked against, so the two now agree for every
+        selection rather than only for those ending mid-line.
+
+        The receipt is deliberately a COURTESY (see ``Toast.show``): the user
+        performed this action and can see its result, so it must not evict an
+        actionable failure notice they have not read (design round 1, D2).
+        """
         if not text:
             return
         self.copy_to_clipboard(text)
-        lines = text.count("\n") + 1
-        self.query_one(Toast).show(f"copied {lines} line{'' if lines == 1 else 's'}")
+        lines = len(text.splitlines())
+        if lines <= 1:
+            # `len` rather than `cell_len`, i.e. the word means what it says.
+            # Cells were tried first, on the theory that the receipt should
+            # count what is painted \u2014 but cell width matches the frame only for
+            # the cases where it already matches `len`. An emoji is ONE glyph
+            # the user highlighted and `cell_len` calls it two; a tab is scored
+            # 0 while the editor paints it expanded to `indent_width`, so cells
+            # matched neither the document nor the screen (review round 2, F6).
+            # A newline scores 0 too, which made "select this line and its
+            # break" announce `copied 0 characters` for a real clipboard write
+            # \u2014 a receipt that reads as a failure (design round 2, D10).
+            count = len(text)
+            message = f"copied {count} character{'' if count == 1 else 's'}"
+        else:
+            message = f"copied {lines} lines"
+        self.query_one(Toast).show(message, yield_to_actionable=True, owner=owner)
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
