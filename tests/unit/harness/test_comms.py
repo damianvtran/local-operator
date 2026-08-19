@@ -1014,10 +1014,18 @@ async def test_the_tool_accepts_the_string_forms_models_send_for_to():
     listed = await execute_hub("call-2", {"op": "list"}, None, None, context)
     assert not listed.is_error
 
-    bad = await execute_hub(
-        "call-3", {"op": "send", "to": 42, "message": "hi"}, None, None, context
+    for bad_to in (42, ""):
+        bad = await execute_hub(
+            "call-3", {"op": "send", "to": bad_to, "message": "hi"}, None, None, context
+        )
+        assert bad.is_error and "valid list" in body(bad), bad_to
+
+    # '[null]' drops its non-string item and fails as a missing target, not
+    # as a fabricated "None" target name.
+    nulls = await execute_hub(
+        "call-4", {"op": "send", "to": "[null]", "message": "hi"}, None, None, context
     )
-    assert bad.is_error and "valid list" in body(bad)
+    assert nulls.is_error and "needs a 'to' target" in body(nulls)
 
 
 def test_the_hub_schema_still_advertises_a_nullable_array_not_a_union():

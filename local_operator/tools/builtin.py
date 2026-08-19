@@ -5982,6 +5982,16 @@ def _coerce_hub_to(value: Any) -> Any:
     split, fall back to the bare string as a single target. Anything that is
     not one of those shapes passes through untouched and fails validation
     with the normal message.
+
+    The bracket-stripped split — also taken when a leading-``[`` value is not
+    valid JSON, e.g. ``'[job-1'`` — splits on commas, so a comma-bearing label
+    sent in the unquoted form splits into fragments; the JSON form is the only
+    shape that carries commas safely. That is an accepted leniency tradeoff on
+    a path that previously hard-failed: the fragments fail resolution instead
+    of the call failing validation, and the observed live shapes never carried
+    commas. Non-string items inside a parsed JSON array are dropped, so
+    ``'[null]'`` coerces to ``[]`` and fails with the normal "needs a 'to'
+    target" message rather than a fabricated ``"None"`` target name.
     """
     if not isinstance(value, str):
         return value
@@ -5994,7 +6004,7 @@ def _coerce_hub_to(value: Any) -> Any:
             # split below recovers it.
             parsed = None
         if isinstance(parsed, list):
-            return [item if isinstance(item, str) else str(item) for item in parsed]
+            return [item for item in parsed if isinstance(item, str)]
         inner = text[1:]
         if inner.endswith("]"):
             inner = inner[:-1]
