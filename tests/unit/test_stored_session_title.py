@@ -166,3 +166,58 @@ def test_a_late_rename_still_outranks_the_title_journalled_at_the_head(tmp_path:
 
     asyncio.run(build())
     assert stored_session_title(session) == "Renamed Much Later"
+
+
+def test_a_transcript_between_one_and_two_windows_still_finds_the_newest_title(
+    tmp_path: Path,
+):
+    """The band where the two scan windows would overlap.
+
+    This size class had no coverage while the other tests all built files
+    several windows wide, and the branch serving it once read the tail from a
+    handle already at EOF -- so it searched the head only and returned the name
+    the user had renamed AWAY from. A stale title is worse than a missing one,
+    because the picker states it with the same confidence as a correct one.
+    """
+    session = tmp_path / "sessions" / "bandsized"
+
+    async def build() -> None:
+        transcript = Transcript(session)
+        await transcript.append_message(
+            Message(role="user", content=[TextContent(text="opening line")])
+        )
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": "Original Head Title", "user_set": False}
+        )
+        for index in range(24):
+            await transcript.append_message(
+                Message(role="assistant", content=[TextContent(text=f"{index} " + "z" * 8_000)])
+            )
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": "Renamed Much Later", "user_set": True}
+        )
+
+    asyncio.run(build())
+    size = session.joinpath("transcript.jsonl").stat().st_size
+    assert TITLE_SCAN_BYTES < size <= TITLE_SCAN_BYTES * 2, size
+    assert stored_session_title(session) == "Renamed Much Later"
+
+
+def test_a_band_sized_transcript_whose_title_is_only_at_the_head(tmp_path: Path):
+    """The other half of the band: a session auto-named at turn 2 behind a
+    very large opening turn, never renamed. The title is only near the head."""
+    session = tmp_path / "sessions" / "bigfirstturn"
+
+    async def build() -> None:
+        transcript = Transcript(session)
+        await transcript.append_message(
+            Message(role="user", content=[TextContent(text="x" * 240_000)])
+        )
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": "Auto Named At Turn 2", "user_set": False}
+        )
+
+    asyncio.run(build())
+    size = session.joinpath("transcript.jsonl").stat().st_size
+    assert TITLE_SCAN_BYTES < size <= TITLE_SCAN_BYTES * 2, size
+    assert stored_session_title(session) == "Auto Named At Turn 2"

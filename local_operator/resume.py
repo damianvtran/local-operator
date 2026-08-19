@@ -452,18 +452,27 @@ def stored_session_title(session_dir: Path) -> str:
     transcript = session_dir / TRANSCRIPT_NAME
     try:
         with transcript.open("rb") as handle:
-            head = handle.read(TITLE_SCAN_BYTES)
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
-            # Only when the file is big enough for the two windows to be
-            # disjoint. Re-reading an overlap would be harmless (the same row
-            # would simply match twice) but it doubles the read for the small
-            # transcripts that are the common case.
             if size > TITLE_SCAN_BYTES * 2:
+                # Large enough for two disjoint windows: read the head, then
+                # seek to the last TITLE_SCAN_BYTES for the tail.
+                handle.seek(0)
+                head = handle.read(TITLE_SCAN_BYTES)
                 handle.seek(size - TITLE_SCAN_BYTES)
                 tail = handle.read()
             else:
-                tail = handle.read()
+                # Small enough that the two windows would overlap: read the
+                # WHOLE file once and let it serve as both. Splitting it here
+                # is what broke this the first time round -- the head was read,
+                # the handle was left at EOF by the size probe, and the `else`
+                # branch's read returned b"", so files between 1x and 2x the
+                # window (30% of a real store) were searched head-only. That
+                # silently reverted a late rename to the name it was renamed
+                # AWAY from, which is worse than the missing name this function
+                # exists to prevent.
+                handle.seek(0)
+                head = tail = handle.read()
     except OSError:
         return ""
     # The tail is searched FIRST and wins: a rename made late in a long session
