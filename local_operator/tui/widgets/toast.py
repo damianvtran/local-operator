@@ -196,9 +196,14 @@ class Toast(Static):
         #: :meth:`show`.
         self._actionable = False
         #: A courtesy notice that arrived while an actionable one held the slot,
-        #: as ``(text, duration_ms)``. Shown when the slot frees; see
-        #: :meth:`show` and :meth:`dismiss_toast`.
-        self._deferred: tuple[str | Text, int] | None = None
+        #: as ``(text, duration_ms, owner)``. Shown when the slot frees; see
+        #: :meth:`show` and :meth:`dismiss_toast`. The owner is an opaque tag
+        #: supplied by the caller so a withdrawal can name its OWN held card
+        #: (:meth:`withdraw`) — one slot serves every caller, and evidence
+        #: about one gesture must not discard another's notice.
+        self._deferred: tuple[str | Text, int, object | None] | None = None
+        #: Who raised the card currently showing (see :meth:`show`), or None.
+        self._owner: object | None = None
         #: Bumped by every :meth:`show`. Lets a caller name the card IT raised
         #: and act on it only while that card is still the one on screen — a
         #: message string cannot do this, because two notices can word
@@ -249,6 +254,7 @@ class Toast(Static):
         *,
         duration_ms: int = TOAST_DEFAULT_MS,
         yield_to_actionable: bool = False,
+        owner: object | None = None,
     ) -> None:
         """Replace whatever is showing, and re-arm the dismissal timer.
 
@@ -275,11 +281,14 @@ class Toast(Static):
             # Only the LATEST is kept: an older receipt is superseded news, and
             # a queue of them would march the card down the screen, which is
             # the stacking this widget exists to avoid.
-            self._deferred = (text, duration_ms)
+            self._deferred = (text, duration_ms, owner)
             return
         self._deferred = None
         self._stop_timer()
         self._generation += 1
+        #: Who raised the card now showing, for the same reason the deferred
+        #: tuple carries one: a caller may only withdraw its own.
+        self._owner = owner
         #: Only an actionable notice claims the slot against a courtesy one.
         #: Set from the DURATION rather than a severity name, for the same
         #: reason the durations are: `TOAST_FAILURE_MS` is the app's one marker
@@ -294,8 +303,25 @@ class Toast(Static):
         self._refit()
         self._timer = self.set_timer(duration_ms / 1000, self.dismiss_toast)
 
-    def drop_deferred(self) -> None:
-        """Forget a held card that has stopped being worth showing.
+    def withdraw(self, owner: object) -> None:
+        """Retire ``owner``'s card, whether it is SHOWING or still held.
+
+        One entry point for both, because a caller withdrawing a claim should
+        not have to know which state its card reached — and getting that wrong
+        is a real bug rather than an inelegance: a receipt that was deferred
+        and then promoted when the slot freed became unretirable, so an edit
+        could no longer falsify it (review round 4).
+
+        Ownership is the whole check. The slot is shared, so an unqualified
+        withdrawal lets evidence about one gesture discard another's notice
+        (review round 4, F14).
+        """
+        self.drop_deferred(owner)
+        if self.display and self._owner is owner:
+            self.dismiss_toast()
+
+    def drop_deferred(self, owner: object) -> None:
+        """Forget a held card of ``owner``'s that stopped being worth showing.
 
         The counterpart to the hold in :meth:`show`: a deferred notice is news
         waiting for a slot, and news can go stale before it gets one. The copy
@@ -303,10 +329,17 @@ class Toast(Static):
         while an MCP failure is still holding the slot \u2014 and a card that is
         already false when it is painted is worse than one that never appears.
 
-        Idempotent, and silent when nothing is held: a caller withdrawing a
-        claim should not have to know whether it was ever queued.
+        Withdraws only what ``owner`` put there. The slot is shared, so an
+        unqualified drop let evidence about ONE gesture discard another's held
+        card: a composer edit threw away a transcript copy's receipt, which was
+        still perfectly true (review round 4, F14). Same rule, and the same
+        failure, as the showing card's generation check.
+
+        Idempotent, and silent when nothing of theirs is held: a caller
+        withdrawing a claim should not have to know whether it was ever queued.
         """
-        self._deferred = None
+        if self._deferred is not None and self._deferred[2] is owner:
+            self._deferred = None
 
     def dismiss_toast(self) -> None:
         """Hide the card and drop its timer (idempotent).
@@ -324,6 +357,7 @@ class Toast(Static):
         self.display = False
         self._message = ""
         self._actionable = False
+        self._owner = None
         self.update("")
         # The slot is free, so a receipt that deferred to this card gets its
         # turn — the acknowledgement is late rather than lost. Read and cleared
@@ -332,8 +366,8 @@ class Toast(Static):
         # again and recurse.
         deferred, self._deferred = self._deferred, None
         if deferred is not None:
-            text, duration_ms = deferred
-            self.show(text, duration_ms=duration_ms)
+            text, duration_ms, owner = deferred
+            self.show(text, duration_ms=duration_ms, owner=owner)
 
     def on_unmount(self) -> None:
         """Teardown must not leave a live timer behind (see the module note)."""

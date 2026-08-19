@@ -663,6 +663,15 @@ class _ProviderRows(NamedTuple):
     problem: str
 
 
+#: Tag for the toast the COMPOSER's copy raises, so a later edit can withdraw
+#: that card and no other. One `Toast` slot serves every caller, and a receipt
+#: may be showing OR held behind an actionable notice — the showing case is
+#: named by `Toast.generation`, and this names the held one. A bare sentinel
+#: rather than a widget reference: the identity is all that is compared, and
+#: holding a widget in app state is a lifetime problem for no benefit.
+COMPOSER_COPY = object()
+
+
 class Chrome(Static):
     """A frame element the app draws for itself, and never lets a copy pick up.
 
@@ -975,10 +984,6 @@ class OperatorApp(App[None]):
         #: The two together are the FIFO the engine drains: these rows were
         #: queued first, so they settle first (see `on_steering_delivered`).
         self._deferred_steer_notices: list[NoticeBlock] = []
-        #: The `Toast.generation` of the card the composer's last copy raised,
-        #: or None once it has been withdrawn or superseded. Editing the copied
-        #: text retires THAT card and no other — see `on_editor_copy_stale`.
-        self._copy_receipt: int | None = None
         #: What the CURRENT turn has already been billed for, per model call, by
         #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
         #: whole and is the authoritative figure, so it adds only the difference
@@ -2427,22 +2432,25 @@ class OperatorApp(App[None]):
         indistinguishable from a copy out of the transcript, or the receipt
         becomes evidence about which widget you dragged over.
 
-        Only THIS path records the receipt for later withdrawal: the composer's
-        copy is the one an edit to the composer can falsify. A transcript copy
-        goes through the same clipboard write and must NOT be retired when the
-        user turns to the composer and starts typing their next prompt (review
-        round 2, F5; design round 2, D8).
+        Only THIS path tags the card for later withdrawal: the composer's copy
+        is the one an edit to the composer can falsify. A transcript copy goes
+        through the same clipboard write and must NOT be retired when the user
+        turns to the composer and starts typing their next prompt (review round
+        2, F5; design round 2, D8).
 
-        The generation is read BEFORE the write and only adopted if it moved.
-        ``Toast.show`` declines the slot while an actionable notice is up, and
-        an unconditional read then pointed this at the FAILURE's card — so the
-        next keystroke dismissed the very notice the deference existed to
-        protect (review round 3). No card raised, nothing to withdraw.
+        The tag is all the bookkeeping there is. An earlier version recorded
+        ``Toast.generation`` here instead, which named only a card that had
+        actually been PAINTED — so a receipt held behind an actionable notice
+        was untracked while held (design round 4, D14), and untouchable once
+        the slot freed and promoted it. Ownership rides the card through both
+        states, so the two cases collapse into one (review round 4).
         """
-        toast = self.query_one(Toast)
-        before = toast.generation
-        self._put_on_clipboard(message.text)
-        self._copy_receipt = toast.generation if toast.generation != before else None
+        # `COMPOSER_COPY` tags the card as this gesture's, so that a later edit
+        # can withdraw it whether it went up or was held behind an actionable
+        # notice — and can withdraw ONLY it. The tag rides the Toast rather than
+        # being tracked here, which is what makes the two states one case
+        # (review round 4, F14).
+        self._put_on_clipboard(message.text, owner=COMPOSER_COPY)
 
     def on_editor_copy_stale(self, message: EditorCopyStale) -> None:
         """The text a copy receipt describes was edited away — drop the card.
@@ -2455,37 +2463,26 @@ class OperatorApp(App[None]):
         Only the CLAIM is withdrawn. The clipboard keeps what it took — the
         copy really happened, and a paste a minute later must still produce it.
 
-        Retires THE CARD THIS EDITOR'S COPY RAISED, by identity, and nothing
-        else. The first version asked whether the message started with
-        ``copied ``, which cannot tell one receipt from another: a transcript
-        copy raises a ``copied …`` card too, so typing the next prompt dismissed
-        a receipt for text the composer never touched — D3 inverted, withdrawing
-        a claim that was still true (review round 2, F5; design round 2, D8).
-        Comparing the object also drops the string coupling between this method
-        and the two f-strings that build the message (F8).
-        """
-        receipt = self._copy_receipt
-        self._copy_receipt = None
-        toast = self.query_one(Toast)
-        if receipt is None:
-            # No card of ours is SHOWING — but one may be waiting. A copy made
-            # while an actionable notice held the slot is held back rather than
-            # dropped (D9), and the edit that falsifies it can easily land in
-            # that window: the notice runs for ten seconds and the user is
-            # typing (design round 4, D14). Withdrawing it before it is ever
-            # painted is the same rule as below, applied one moment earlier —
-            # otherwise the claim escapes the staleness check entirely and
-            # appears, already false, when the slot frees.
-            toast.drop_deferred()
-            return
-        # The GENERATION, not the wording: two copies can produce the same
-        # string, and what must be true is that the card on screen is still the
-        # one this editor's copy put there. Any later `show` — another copy, an
-        # MCP failure — moves the counter and this stands down.
-        if toast.generation == receipt:
-            toast.dismiss_toast()
+        Retires THE CARD THIS EDITOR'S COPY RAISED, by owner, and nothing else.
+        Three ways that has gone wrong, all now answered by the one call:
 
-    def _put_on_clipboard(self, text: str | None) -> None:
+        * Matching on the message text could not tell one receipt from another,
+          so typing the next prompt withdrew the TRANSCRIPT's copy receipt —
+          D3 inverted, withdrawing a claim that was still true (review round 2,
+          F5; design round 2, D8).
+        * A receipt held behind an actionable notice (D9) escaped the check
+          entirely and appeared, already false, when the slot freed (design
+          round 4, D14).
+        * Withdrawing whatever was held, unqualified, discarded a transcript
+          copy's held receipt on a composer keystroke (review round 4, F14).
+
+        ``Toast.withdraw`` covers a card in either state and refuses one that
+        belongs to anybody else, so this handler no longer has to know which
+        state its receipt reached.
+        """
+        self.query_one(Toast).withdraw(COMPOSER_COPY)
+
+    def _put_on_clipboard(self, text: str | None, owner: object | None = None) -> None:
         """The one clipboard write, with the receipt that makes it visible.
 
         Shared by the transcript's ``TextSelected`` and the composer's
@@ -2544,12 +2541,7 @@ class OperatorApp(App[None]):
             message = f"copied {count} character{'' if count == 1 else 's'}"
         else:
             message = f"copied {lines} lines"
-        self.query_one(Toast).show(message, yield_to_actionable=True)
-        # Any card raised here supersedes a composer receipt this app was
-        # holding: whatever is on screen now is not the one that copy put there,
-        # so there is nothing left for a later edit to withdraw. (The composer's
-        # own path re-arms it immediately afterwards.)
-        self._copy_receipt = None
+        self.query_one(Toast).show(message, yield_to_actionable=True, owner=owner)
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]

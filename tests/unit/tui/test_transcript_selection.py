@@ -1736,3 +1736,73 @@ async def test_a_held_receipt_still_arrives_when_its_text_survives() -> None:
 
         assert toast.message == "copied 9 characters"
         assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_a_composer_edit_does_not_discard_the_transcript_s_held_receipt() -> None:
+    """The held slot is shared, so a withdrawal has to name its own card.
+
+    `EditorCopyStale` is evidence about the COMPOSER's buffer, and the first
+    version of the D14 withdrawal dropped whatever was held — so typing in the
+    composer threw away a transcript copy's receipt that was still perfectly
+    true (review round 4, F14). The same failure as F5/D8, one layer down: the
+    composer's staleness signal reaching a card it does not own.
+
+    The composer copy at the start is what makes this bite: it arms `_copied`,
+    so the later keystroke actually posts the stale message.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        block = await _seeded(app, pilot)
+        editor = await _composer(app, pilot, "draft prompt")
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 5))
+        assert editor._copied, "the composer's flag must be armed for this to mean anything"
+
+        toast.show("mcp: failed: github — command not found: gh", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        # A TRANSCRIPT copy, deferred behind the notice.
+        await _drag(app, pilot, (block.region.x, block.region.y), (79, 23))
+        assert toast._deferred is not None
+
+        editor.focus()
+        await pilot.press("x")
+        await pilot.pause()
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        assert toast.message == "copied 3 lines"
+        assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_a_receipt_promoted_from_the_hold_can_still_be_retired() -> None:
+    """A card that waited for the slot is still the composer's card.
+
+    Tracking the receipt by `Toast.generation` named only a card that had been
+    PAINTED, so one that was deferred and then promoted when the slot freed
+    became unretirable — an edit could no longer falsify it. Ownership rides
+    the card through both states, which is what collapses them into one case
+    (review round 4).
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+        toast.show("mcp: failed: github — command not found: gh", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 9))
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.message == "copied 9 characters", "the held card must have been promoted"
+
+        await pilot.press("z")
+        await pilot.pause()
+
+        assert toast.message == ""
+        assert toast.display is False
