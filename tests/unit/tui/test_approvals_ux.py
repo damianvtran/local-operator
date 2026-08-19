@@ -30,7 +30,7 @@ import yaml
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tui.app import SLASH_COMMANDS, OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice, ArgumentMode
-from local_operator.tui.widgets.approval import ApprovalBlock
+from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
 from local_operator.tui.widgets.command_picker import PickerMode
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
@@ -221,7 +221,9 @@ async def test_the_saved_default_is_in_force_in_the_next_session(config_dir: Pat
         # The gate, not the flag: a write-only default would pass every
         # assertion above and still stop the first tool of the session.
         assert await _gate(session)("bash", "run: ls") is True
-        assert not relaunched.query(ApprovalBlock), "auto-approve still mounted a prompt"
+        # `ApprovalPrompt`, not `ApprovalBlock`: the live question is the docked
+        # card now, and the block is only the receipt written after an answer.
+        assert not relaunched.query(ApprovalPrompt), "auto-approve still mounted a prompt"
         # The band's trailing cell is the alarm. It no longer spells the mode out
         # — the session NAME owns that slot now — so `auto` and `always` are one
         # glyph here, and `/approvals` is what distinguishes them.
@@ -567,7 +569,9 @@ async def test_the_live_prompt_is_untouched_by_the_default_machinery(
 
         first = asyncio.ensure_future(gate("bash", "run: one"))
         await pilot.pause(0.3)
-        assert app.query(ApprovalBlock), "the prompt no longer mounts"
+        # The live question is the docked card; the transcript keeps the
+        # RECEIPT once it is answered. Two widgets, two jobs.
+        assert app.query(ApprovalPrompt), "the prompt no longer mounts"
         assert not first.done(), "the gate stopped waiting for an answer"
         await pilot.press("n")
         assert await asyncio.wait_for(first, 2) is False
@@ -575,19 +579,23 @@ async def test_the_live_prompt_is_untouched_by_the_default_machinery(
         # …and one refusal is not a mode: the next ask still asks.
         second = asyncio.ensure_future(gate("write", "write: two"))
         await pilot.pause(0.3)
-        assert app.query(ApprovalBlock)
+        assert app.query(ApprovalPrompt)
         await pilot.press("y")
         assert await asyncio.wait_for(second, 2) is True
         # The turn-scoped latch: a stop drains what the stopped turn queued,
         # with no card, and that is still true with a saved default in play.
         await _submit(pilot, app, "/approvals default ask")
-        asked = len(app.query(ApprovalBlock))
+        receipts = len(app.query(ApprovalBlock))
         app._deny_queued_approvals()
         third = asyncio.ensure_future(gate("bash", "run: three"))
         assert await asyncio.wait_for(third, 2) is False
-        # Counted, not queried for emptiness: the two answered prompts above are
-        # transcript blocks and stay on screen, which is what a ledger is for.
-        assert len(app.query(ApprovalBlock)) == asked, "a stopped turn's ask mounted a question"
+        await pilot.pause(0.2)
+        # No question was raised for the stopped turn's ask...
+        assert not app.query(ApprovalPrompt), "a stopped turn's ask mounted a question"
+        # ...and no receipt was written for a decision the user never made.
+        # Counted rather than queried for emptiness: the two answered prompts
+        # above left receipts and stay on screen, which is what a ledger is for.
+        assert len(app.query(ApprovalBlock)) == receipts
 
 
 @pytest.mark.asyncio

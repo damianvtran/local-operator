@@ -19,7 +19,9 @@ from textual.app import App, ComposeResult
 from local_operator.resume import (
     NAME_MAX_CHARS,
     NAME_SCAN_CHARS,
+    ORIGIN_SUBAGENT,
     SessionRow,
+    mark_session_origin,
     recent_session_rows,
     session_name,
 )
@@ -219,6 +221,38 @@ def test_rows_are_newest_first_and_carry_their_name(tmp_path: Path) -> None:
     rows = recent_session_rows(tmp_path)
     assert [row.id for row in rows] == ["newer1", "older1"]
     assert [row.name for row in rows] == ["the newer one", "the older one"]
+
+
+def test_the_picker_offers_only_sessions_the_user_started(tmp_path: Path) -> None:
+    """A subagent's child session is not a conversation the user can recognise.
+
+    Children land in the same ``sessions/`` tree with the same shape, so the
+    picker named them by their opening message — which for a delegated run is
+    the role preamble the parent wrote. On one machine 40 of 50 offered rows
+    were ``[role: reviewer] You are an INDEPENDENT reviewer…`` and the user's
+    own sessions were paged off the bottom.
+    """
+    _write_transcript(tmp_path, "mine", [_message("user", "fix the resume picker")])
+    child = _write_transcript(
+        tmp_path, "child", [_message("user", "[role: reviewer] You are an INDEPENDENT reviewer")]
+    )
+    mark_session_origin(child, ORIGIN_SUBAGENT, label="reviewer")
+
+    rows = recent_session_rows(tmp_path)
+    assert [row.id for row in rows] == ["mine"]
+    # Hidden from the listing, still on disk: the transcript is what makes a
+    # stopped child resumable by id and readable after the fact.
+    assert (child / "transcript.jsonl").is_file()
+
+
+def test_a_session_with_no_marker_is_still_the_user_s(tmp_path: Path) -> None:
+    """Every conversation that predates the marker must keep appearing.
+
+    The filter reads absence as "the user's" precisely so an upgrade does not
+    empty the picker of real work.
+    """
+    _write_transcript(tmp_path, "before", [_message("user", "an older conversation")])
+    assert [row.id for row in recent_session_rows(tmp_path)] == ["before"]
 
 
 # --- filtering --------------------------------------------------------------
@@ -856,3 +890,66 @@ def test_a_right_click_never_resumes_a_session() -> None:
 
     screen.on_click(_RightClick())
     assert resumed == []
+
+
+def test_the_empty_card_says_whose_sessions_are_missing() -> None:
+    """ "no previous sessions to resume" was false when only children exist.
+
+    Delegated runs share the sessions directory and are deliberately unlisted,
+    and retention evicts an older parent before its newer children — so a
+    machine can reach a state with resumable directories on disk and nothing
+    the picker will offer. The old sentence stated a fact about the disk that
+    was untrue, and named no way forward.
+    """
+    from local_operator.tui.widgets.session_picker import RESUME_EMPTY_NOTICE
+
+    screen = SessionPickerScreen([], NOW)
+    card = "\n".join(screen.render_lines_for_test())
+    assert RESUME_EMPTY_NOTICE in card
+    assert "subagent runs are not listed" in card
+
+
+def test_one_session_is_not_announced_as_1_sessions() -> None:
+    """Filtering makes a one-row list the common case rather than the rare
+    one, so the header's plural now shows up routinely."""
+    single = "\n".join(
+        SessionPickerScreen([_row("aabbcc", "the only one")], NOW).render_lines_for_test()
+    )
+    assert "1 session" in single
+    assert "1 sessions" not in single
+
+    plural = "\n".join(
+        SessionPickerScreen(
+            [_row("aabbcc", "one"), _row("ddeeff", "two")], NOW
+        ).render_lines_for_test()
+    )
+    assert "2 sessions" in plural
+
+
+@pytest.mark.asyncio
+async def test_the_empty_card_never_renders_wider_than_the_terminal() -> None:
+    """The empty body is the one line with no truncation behind it.
+
+    Every other row is bounded by the width the card MEASURES; the notice was
+    a constant, so it satisfied the 74-cell ceiling and still overflowed the
+    real card on any narrow terminal — at 60 columns it was cut to
+    "…subagent runs are", losing the clause that explains why the list is
+    empty, which is the whole reason the wording changed.
+
+    Asserted against the TERMINAL width like the populated-rows guard above,
+    never against ``PICKER_MAX_WIDTH``: the ceiling is 74 while an 80-column
+    screen gives the card 70, so a constant-based assertion passes on a string
+    that overflows.
+    """
+    for width in (60, 70, 80, 100, 120):
+        app = _PickerHost([])
+        async with app.run_test(size=(width, 30)) as pilot:
+            screen = await app.open_picker()
+            await pilot.pause()
+            lines = screen.render_lines_for_test()
+            for line in lines:
+                assert cell_len(line) <= width, (width, line)
+            # The explanation survives the narrow case rather than being the
+            # first thing dropped: it is what makes the empty state honest.
+            body = " ".join(line.strip() for line in lines)
+            assert "subagent runs are not listed" in body, (width, body)

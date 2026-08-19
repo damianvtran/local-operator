@@ -905,6 +905,9 @@ def test_only_browser_signin_flows_race_a_pasted_code_against_their_callback() -
     the Anthropic wiring). A provider whose login is "paste your API key" is NOT
     one of these -- that is ``paste_prompt_required``, asserted in the companion
     test.
+    the Anthropic wiring, as omp's `zai-coding-plan` does). A provider whose
+    login is "paste your API key" is NOT one of these -- that is
+    ``paste_prompt_required``, asserted in the companion test.
 
     This test used to assert something wider and false in its name and
     docstring — that no provider REQUIRES a paste — while asserting only the

@@ -47,6 +47,16 @@ class ProviderDefinition:
     - ``allows_missing_api_key``: transport needs no bearer (local servers).
     - ``store_credentials_as``: alias the credential row under another
       provider id (xai-oauth ⇒ xai; openai-device ⇒ openai).
+    - ``oauth_base_url``: host to use when the resolved credential is an OAuth
+      token, for providers that serve subscription sign-ins and pay-as-you-go
+      API keys from DIFFERENT hosts. Kimi is the case that forced it: the
+      coding-plan OAuth grant is only accepted at ``api.kimi.com/coding/v1``
+      (which is where ``k3`` lives), while ``KIMI_API_KEY`` belongs to the
+      mainland ``api.moonshot.cn/v1`` platform and 401s there. One ``base_url``
+      per provider therefore cannot be right for both credential kinds, and the
+      symptom is silent: model discovery 401s, falls back to the static
+      registry, and the picker shows a years-old model list.
+      ``None`` means the provider serves both kinds from ``base_url``.
     - ``wire``: which wire client serves this provider.
     - ``search_aliases``: other names a USER would type for this provider —
       almost always the model family it is known by (``claude`` for anthropic,
@@ -81,6 +91,7 @@ class ProviderDefinition:
     callback_port: int | None = None
     paste_code_flow: bool = False
     base_url: str | None = None
+    oauth_base_url: str | None = None
     wire: WireFormat = "openai-compat"
     search_aliases: tuple[str, ...] = ()
     #: Whether this login cannot complete without reading text from the user.
@@ -306,6 +317,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         search_aliases=(
             "moonshot",
             "k2",
+            "k3",
         ),
         name="Kimi (Moonshot)",
         env_keys="KIMI_API_KEY",
@@ -313,6 +325,12 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         refresh_token=_lazy_refresh("local_operator.providers.oauth.kimi", "refresh_kimi_token"),
         get_api_key=_oauth_api_key,
         base_url="https://api.moonshot.cn/v1",
+        # The coding-plan host, used only for OAuth sign-ins. It is a different
+        # PLATFORM from the mainland API-key host above, not merely a different
+        # path: it is where the subscription's models live (`k3`, `k3-256k`,
+        # `kimi-for-coding`), and the mainland host rejects the OAuth bearer
+        # with 401 "Invalid Authentication". Confirmed live against both hosts.
+        oauth_base_url="https://api.kimi.com/coding/v1",
     ),
     ProviderDefinition(
         id="xai",

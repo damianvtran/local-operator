@@ -138,6 +138,15 @@ class ChildInfo:
     age_s: float | None = None
     #: Why ``resumable`` is False, when it is False for an interesting reason.
     detail: str | None = None
+    #: The child's TRANSCRIPT directory name — the id ``--resume`` takes, which
+    #: is not the ``job_id`` above. Carried because this roster is now the only
+    #: surface that can show it: children were dropped from the ``/resume``
+    #: picker (they are the machine's own runs, not the user's conversations),
+    #: and the job row that carries ``job_id`` is swept minutes after a child
+    #: settles. Without it, an operator investigating a subagent that crashed
+    #: an hour ago had no in-product path to its transcript at all — exactly
+    #: the case this class's docstring says it exists to cover.
+    session_id: str | None = None
 
 
 class ChildSession(Protocol):
@@ -171,6 +180,14 @@ class _ChildRecord:
     unsubscribe: Callable[[], None] | None = None
     #: Notes addressed to this child before its session existed.
     pending: list[CustomMessage] = field(default_factory=list)
+    #: Futures for BUFFERED questions, keyed by the id of the message they were
+    #: created for. Identity, not type: :meth:`SubagentComms.attach` must arm
+    #: each flushed question with the future belonging to THAT message. Binding
+    #: at flush time by asking "is this a question?" and reaching for
+    #: ``record.ask`` returned one question's answer to a different caller —
+    #: the exact hazard ``_thunk``'s identity check exists to prevent, defeated
+    #: because the identity was resolved too late (review round 2, R5).
+    pending_asks: dict[str, "asyncio.Future[str]"] = field(default_factory=dict)
     #: The parent's unanswered question, if any.
     ask: asyncio.Future[str] | None = None
     #: Set when that question actually reached the child's context, so a
@@ -250,8 +267,21 @@ class SubagentComms:
         record.settled = False
         record.unsubscribe = child.subscribe(self._make_reply_watcher(record))
         for message in record.pending:
-            child.queue_aside(self._thunk(record, message))
+            # Armed BY IDENTITY: the future recorded for THIS message, never
+            # whatever ``record.ask`` happens to hold now. Binding by type
+            # ("is this a question?") let a stale buffered question — one whose
+            # asker had already timed out, and which nothing withdrew — arm the
+            # NEXT asker's future and hand that caller the answer to a question
+            # it never asked, with no error and no timeout to signal it (review
+            # round 2, R5). A question with no live future is a note: it still
+            # reaches the child, which is right (it was asked), but it can no
+            # longer resolve anyone's wait.
+            awaiting = record.pending_asks.pop(message.id, None)
+            if awaiting is not None and awaiting.done():
+                awaiting = None
+            child.queue_aside(self._thunk(record, message, awaiting=awaiting))
         record.pending.clear()
+        record.pending_asks.clear()
         # Last: everything a waiter in ``_await_child`` needs must be in place
         # before it is allowed to proceed, or it would queue its question onto
         # a record whose buffered notes had not been flushed yet.
@@ -486,6 +516,7 @@ class SubagentComms:
             resumable=resumable,
             age_s=age,
             detail=detail,
+            session_id=record.session_dir.name if record.session_dir is not None else None,
         )
 
     def _live_twin(self, record: _ChildRecord) -> _ChildRecord | None:
@@ -599,6 +630,18 @@ class SubagentComms:
         record = self._records.get(job_id)
         if record is None:
             return Reply(job_id, job_id, error=f"unknown subagent {job_id!r}")
+        # ONE guard for BOTH paths, and it has to be here rather than beside
+        # the attached path's queue_aside: the buffered path used to skip it
+        # and overwrite a live ``record.ask``, orphaning a caller that was
+        # still waiting — nothing then held its future, so it could receive
+        # neither an answer nor a failure and burned its whole budget (up to
+        # the 600 s schema maximum). Refusing early is also cheaper: it
+        # happens before the attach grace, so a doomed second question does
+        # not first spend 30 s waiting to be refused (review round 2, R6).
+        if record.ask is not None and not record.ask.done():
+            return Reply(
+                job_id, record.label, error="a question is already pending for this subagent"
+            )
         # ``timeout_ms`` is the caller's WHOLE budget, so any time spent
         # waiting for the child to come up is deducted from the answer wait
         # below rather than added to it. Charging the grace on top let a
@@ -618,12 +661,68 @@ class SubagentComms:
                 # A child that DIED while we waited is gone, not "not started":
                 # telling a caller to retry in a moment is the polling loop this
                 # wait exists to remove.
-                reason = (
-                    self._gone_reason(record)
-                    if record.settled or not self._is_running(record)
-                    else self._not_started_reason(record)
-                )
-                return Reply(job_id, record.label, error=reason)
+                if record.settled or not self._is_running(record):
+                    return Reply(job_id, record.label, error=self._gone_reason(record))
+                if not parked and self._has_begun(record):
+                    # The grace expired but the RUNNER IS RUNNING — it simply
+                    # has not attached (a slow child build, a resumed child
+                    # replaying a large transcript, or an event loop the parent
+                    # is monopolising). Refusing here reports "has not started
+                    # yet ... retry in a moment" about a child that has been
+                    # working for half an hour, and that message is acted on:
+                    # one healthy reviewer subagent was cancelled on the
+                    # strength of it after a 30 s grace expired (the wait is
+                    # capped by ATTACH_WAIT_MAX_S, so a long timeout does not
+                    # make it more patient).
+                    #
+                    # Buffer instead. ``attach`` flushes pending messages and
+                    # arms each question with the future created for THAT
+                    # message, so the question lands at the child's first
+                    # injection boundary and the answer comes back here.
+                    #
+                    # RE-CHECK after the grace, the way the attached path does.
+                    # The guard at the top of ``ask`` ran before this await, and
+                    # this path only claims ``record.ask`` after it — so without
+                    # this, two concurrent asks both pass the guard and the
+                    # second orphans the first (review round 4, R8; reproduced
+                    # as ``REFUSED COUNT: 0``). Unreachable today because the
+                    # ``hub`` tool is ``concurrency="exclusive"`` and the loop
+                    # batches it alone, but that is a property of a tool
+                    # declaration elsewhere, not an invariant of this layer.
+                    if record.ask is not None and not record.ask.done():
+                        return Reply(
+                            job_id,
+                            record.label,
+                            error="a question is already pending for this subagent",
+                        )
+                    future = asyncio.get_running_loop().create_future()
+                    record.ask = future
+                    record.armed = False
+                    message = self._to_child_message(text, expects_reply=True)
+                    record.pending.append(message)
+                    # Bound to the MESSAGE, not just to ``record.ask``: a
+                    # buffered question that times out leaves its message in
+                    # ``pending``, and arming that stale message at flush time
+                    # with whatever ``record.ask`` then held returned the old
+                    # question's answer to the new asker (R5).
+                    record.pending_asks[message.id] = future
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    try:
+                        if remaining <= 0:
+                            return Reply(job_id, record.label, timed_out=True)
+                        answer = await asyncio.wait_for(future, remaining)
+                    except asyncio.TimeoutError:
+                        return Reply(job_id, record.label, timed_out=True)
+                    except Exception as exc:
+                        return Reply(job_id, record.label, error=str(exc))
+                    finally:
+                        # WITHDRAW the message as well as clearing the future.
+                        # Leaving it queued let a question nobody is waiting for
+                        # reach the child and consume the next asker's answer.
+                        self._withdraw_pending(record, message)
+                        self._clear_ask(record, future)
+                    return Reply(job_id, record.label, text=answer)
+                return Reply(job_id, record.label, error=self._not_started_reason(record))
         if record.child is None:  # pragma: no cover - narrowing for the checker
             return Reply(job_id, record.label, error=self._not_started_reason(record))
         if record.ask is not None and not record.ask.done():
@@ -853,6 +952,30 @@ class SubagentComms:
         job = jobs.get(record.job_id)
         return job is not None and job.status == "running"
 
+    @staticmethod
+    def _expects_reply(message: CustomMessage) -> bool:
+        """Whether a buffered message is a QUESTION (someone is blocked on it).
+
+        Read off the message the sender built rather than tracked separately,
+        so :meth:`attach`'s flush cannot drift from what was queued.
+        """
+        details = getattr(message, "details", None) or {}
+        return bool(details.get("expects_reply"))
+
+    def _has_begun(self, record: _ChildRecord) -> bool:
+        """Whether the child's RUNNER has actually entered.
+
+        ``AsyncJob.started_at`` is stamped as ``_run_job``'s first statement,
+        before the child session is built, so it is true for the whole window
+        in which a child is working but not yet attached — exactly the window
+        ``ask`` must not describe as "not started". Neither ``status`` nor
+        ``queued`` can answer this: ``status`` reads ``running`` from
+        registration, before a line has run.
+        """
+        jobs = self._jobs()
+        job = jobs.get(record.job_id) if jobs is not None else None
+        return job is not None and getattr(job, "started_at", None) is not None
+
     def _not_started_reason(self, record: _ChildRecord) -> str:
         """Why a running job has no live child yet — and they are not the same.
 
@@ -887,6 +1010,21 @@ class SubagentComms:
             return (
                 "subagent has not started yet (parked behind the job capacity gate); "
                 "it starts when a slot frees, so do not wait on it"
+            )
+        if job is not None and getattr(job, "started_at", None) is not None:
+            # A THIRD state, and the one that cost real work: the runner is
+            # well underway but its session is not attached to this record.
+            # ``_await_child``'s grace is capped at ATTACH_WAIT_MAX_S, so a
+            # patient caller still lands here after 30 s and used to be told
+            # the child "has not started yet ... retry in a moment" about an
+            # agent half an hour into its run. An operator acted on that and
+            # cancelled it. ``started_at`` is the authoritative answer (see
+            # :meth:`_has_begun`), so say what is actually true.
+            started = time.time() - float(job.started_at)
+            return (
+                f"subagent started {started:.0f}s ago but has not attached to this parent, "
+                "so it cannot be questioned yet; it is RUNNING — use 'jobs'/'wait' for its "
+                "result rather than cancelling it"
             )
         return (
             "subagent has not started yet (it is scheduled, and starts when this "
@@ -1040,6 +1178,24 @@ class SubagentComms:
         if record.ask is future:
             record.ask = None
         record.armed = False
+
+    @staticmethod
+    def _withdraw_pending(record: _ChildRecord, message: CustomMessage) -> None:
+        """Drop a BUFFERED question nobody is waiting for any more.
+
+        The buffered path's counterpart to ``_thunk``'s ``StaleAside``
+        withdrawal. A question that was never wrapped in a thunk has no
+        ``on_discard`` to fire, so a timed-out ask used to leave its message
+        sitting in ``pending`` indefinitely — and the next flush injected it,
+        let the child answer it, and consumed an answer meant for someone
+        else. Idempotent: the message may already be gone if ``attach``
+        flushed between the timeout and this call.
+        """
+        record.pending_asks.pop(message.id, None)
+        for index, queued in enumerate(record.pending):
+            if queued is message:
+                del record.pending[index]
+                return
 
     def _evict_overflow(self) -> None:
         """Drop the least useful records once the map is over the cap.

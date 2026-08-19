@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Sequence
 from typing import Any, Callable
 
@@ -62,9 +63,21 @@ async def wait_for(predicate, timeout: float = 10.0) -> None:
 
 
 class FakeJob:
-    def __init__(self, job_id: str, status: str = "running", queued: bool = False) -> None:
+    def __init__(
+        self,
+        job_id: str,
+        status: str = "running",
+        queued: bool = False,
+        started_at: float | None = None,
+    ) -> None:
         self.id = job_id
         self.status = status
+        #: Mirrors ``AsyncJob.started_at``: stamped as ``_run_job``'s FIRST
+        #: statement, so it is the only field that answers "has the runner
+        #: actually begun". ``status`` reads ``running`` from registration.
+        #: This fixture not modelling it is why the suite agreed for so long
+        #: that a half-hour-old child had "not started yet".
+        self.started_at = started_at
         #: Mirrors ``AsyncJob.queued``: admitted to the ledger but holding no
         #: execution slot. Distinct from "running but still building its
         #: session", which is what a job carries between registration and
@@ -1631,3 +1644,278 @@ def test_a_swept_row_with_a_transcript_is_still_resumable(tmp_path):
     assert row.resumable is True
     # And the invariant: nothing in resume() disagrees.
     assert comms._live_twin(comms._records["job-1"]) is None
+
+
+def test_the_roster_carries_the_session_id_a_resume_would_take(tmp_path):
+    """The roster is now the ONLY surface that can show a child's session id.
+
+    Children are deliberately kept out of the `/resume` picker — they are the
+    machine's own runs, not the user's conversations — and the job row that
+    carries `job_id` is swept minutes after a child settles. Without the
+    session id here, an operator investigating a subagent that crashed an hour
+    ago has no in-product path to its transcript, which is precisely the case
+    this roster exists to cover.
+
+    Note it is NOT the job id: `--resume` takes the transcript directory name.
+    """
+    session_dir = tmp_path / "9f2c1a0b7e44"
+    session_dir.mkdir()
+    comms, jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), session_dir)
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.record_outcome("job-1", "failed", "provider 500")
+    comms.detach("job-1")
+    del jobs.jobs["job-1"]  # the sweep that used to take the id with it
+
+    [row] = comms.roster()
+
+    assert row.resumable is True
+    assert row.session_id == "9f2c1a0b7e44"
+    assert row.session_id != row.job_id
+
+
+def test_a_child_that_never_started_has_no_session_id_to_offer():
+    """No transcript directory, so there is nothing to print. A blank is
+    honest; the job id in its place would be an id that resumes nothing."""
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].status = "cancelled"
+
+    [row] = comms.roster()
+
+    assert row.session_id is None
+
+
+def test_the_roster_text_tells_the_two_ids_apart(tmp_path):
+    """Both ids are `uuid4().hex[:12]`, so they are visually identical.
+
+    The roster prints a job id and a transcript id two lines apart, and the
+    line under them said "Resume one with hub op='resume'" — which takes the
+    JOB id and rejects the transcript id with `unknown subagent`. Two
+    indistinguishable ids beside an instruction that fits only one is a
+    coin-flip, so each id now names what it is for.
+    """
+    from local_operator.tools.builtin import _hub_list
+
+    session_dir = tmp_path / "9f2c1a0b7e44"
+    session_dir.mkdir()
+    comms, jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), session_dir)
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.record_outcome("job-1", "failed", "provider 500")
+    comms.detach("job-1")
+    del jobs.jobs["job-1"]
+
+    block = _hub_list("call-1", comms).content[0]
+    assert isinstance(block, TextContent)
+    text = block.text
+
+    # The transcript id is shown with the command that actually takes it.
+    assert "local-operator --resume 9f2c1a0b7e44" in text
+    # And the resume instruction says which id it wants, so the transcript id
+    # sitting above it is not read as the argument.
+    assert "JOB id" in text
+    assert "not a job id" in text
+
+
+# --- the running-but-unattached window ----------------------------------------
+#
+# ``_await_child`` already covers the child that is merely SCHEDULED: it yields
+# the loop, which is what lets the runner start, so a parent asking its brand
+# new child a question gets an answer instead of a refusal.
+#
+# It does not cover the child whose runner is well underway but whose session
+# has not attached (a slow child build, a resumed child replaying a large
+# transcript, or a parent monopolising the loop). The grace is capped at
+# ``ATTACH_WAIT_MAX_S``, so even a 300 s request waits 30 s and is then told
+# the subagent "has not started yet ... retry in a moment" — about an agent
+# half an hour into its work. Observed live, and acted on: a healthy reviewer
+# subagent was cancelled on the strength of that message.
+
+
+def test_the_not_started_reason_never_denies_a_running_child():
+    """``started_at`` is the authoritative "has the runner begun". A child that
+    has been working for half an hour must not be described as unstarted."""
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    reason = comms._not_started_reason(comms._records["job-1"])
+
+    assert "has not started" not in reason, reason
+    assert "1800s ago" in reason and "RUNNING" in reason
+    # And it must steer away from the action that destroyed the work.
+    assert "cancelling" in reason
+
+
+def test_the_not_started_reason_still_distinguishes_parked_from_scheduled():
+    """The two genuine not-started states keep their own advice: a parked child
+    may not run for minutes (do not wait), a scheduled one starts on the next
+    yield (retry)."""
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = None
+
+    scheduled = comms._not_started_reason(comms._records["job-1"])
+    jobs.jobs["job-1"].queued = True
+    parked = comms._not_started_reason(comms._records["job-1"])
+
+    assert "session next yields" in scheduled
+    assert "capacity gate" in parked and "do not wait on it" in parked
+
+
+@pytest.mark.asyncio
+async def test_ask_buffers_rather_than_refusing_a_started_but_unattached_child():
+    """The reported bug. Past the attach grace, with the runner underway, the
+    question is BUFFERED for the child instead of refused — and the caller
+    spends its own budget waiting, not 30 s waiting to be told no."""
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    seen: list[str] = []
+    original = comms._withdraw_pending
+
+    def spy(record, message):
+        # The buffer is WITHDRAWN when the ask gives up (round 2, R5), so the
+        # queue is empty by the time ``ask`` returns. Capture it mid-flight
+        # instead of asserting on the wreckage afterwards.
+        seen.append(message.details["body"])
+        return original(record, message)
+
+    comms._withdraw_pending = spy  # type: ignore[method-assign]
+
+    reply = await comms.ask("job-1", "status?", 400)
+
+    assert reply.error is None, f"refused a working child: {reply.error!r}"
+    assert reply.timed_out is True  # nobody attached inside the budget
+    assert seen == ["status?"], "the question was never buffered for the child"
+    assert not comms._records["job-1"].pending, "an abandoned question was left queued"
+
+
+@pytest.mark.asyncio
+async def test_a_question_buffered_past_the_grace_is_answered_once_it_attaches():
+    """End to end: ``attach`` must re-arm the buffered question with the
+    waiter's future. Flushed as a plain note it would be injected and answered
+    while the asker sat out its whole timeout on a reply already returned."""
+    comms, jobs, child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    # 4 s budget -> a 2 s attach grace, so the question buffers well inside
+    # ``wait_for``'s default. (A 20 s budget would spend 10 s in the grace and
+    # time the WAIT out, not the ask.)
+    asking = asyncio.create_task(comms.ask("job-1", "stuck?", 4_000))
+    await wait_for(lambda: bool(comms._records["job-1"].pending), timeout=5.0)
+
+    comms.attach("job-1", child, tmp_dir())  # the window finally closes
+    await wait_for(lambda: bool(child.asides))
+    child.materialize()
+
+    result = await execute_hub(
+        "call-1",
+        {"message": "no, just slow"},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms, job_id="job-1"),
+    )
+
+    assert "answered the parent's question" in body(result)
+    reply = await asking
+    assert reply.error is None and reply.timed_out is False, f"{reply.error!r}"
+    assert reply.text == "no, just slow"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_buffered_question_cannot_answer_the_next_asker():
+    """A timed-out buffered question must be WITHDRAWN, not left in the queue.
+
+    ``_thunk``'s identity check exists so a question whose asker gave up cannot
+    arm the next question's future. The buffered path defeated it by binding at
+    flush time — ``attach`` asked "is this a question?" and reached for
+    whatever ``record.ask`` then held, so the parent asked "are you blocked?"
+    and was handed the answer to "what is your ETA?", with ``error=None`` and
+    ``timed_out=False``. Wrong and indistinguishable from right (round 2, R5).
+    """
+    comms, jobs, child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    stale = await comms.ask("job-1", "OLD: what is your ETA?", 200)
+    assert stale.timed_out is True
+    assert not comms._records["job-1"].pending, "the abandoned question was not withdrawn"
+
+    # 4 s budget -> 2 s attach grace, comfortably inside ``wait_for``.
+    asking = asyncio.create_task(comms.ask("job-1", "NEW: are you blocked?", 4_000))
+    await wait_for(lambda: bool(comms._records["job-1"].pending), timeout=5.0)
+
+    comms.attach("job-1", child, tmp_dir())
+    await wait_for(lambda: bool(child.asides))
+    materialized = child.materialize()
+    assert all(isinstance(message, CustomMessage) for message in materialized)
+    bodies = [
+        message.details["body"] for message in materialized if isinstance(message, CustomMessage)
+    ]
+    assert bodies == ["NEW: are you blocked?"], f"a stale question reached the child: {bodies}"
+
+    await execute_hub(
+        "call-1",
+        {"message": "no, not blocked"},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms, job_id="job-1"),
+    )
+
+    reply = await asking
+    assert reply.text == "no, not blocked", "the asker got someone else's answer"
+
+
+@pytest.mark.asyncio
+async def test_a_second_question_is_refused_on_the_buffered_path_too():
+    """The concurrent-ask guard has to cover BOTH paths.
+
+    The buffered path used to overwrite a live ``record.ask``, orphaning the
+    first caller: nothing held its future afterwards, so it could receive
+    neither an answer nor a failure and burned its whole budget — up to the
+    600 s schema maximum (round 2, R6).
+    """
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    first = asyncio.create_task(comms.ask("job-1", "Q-A", 4_000))
+    # Past the attach grace (half the budget, so 2 s here), where Q-A buffers.
+    await wait_for(lambda: bool(comms._records["job-1"].pending), timeout=5.0)
+    held = comms._records["job-1"].ask
+
+    second = await comms.ask("job-1", "Q-B", 4_000)
+
+    assert second.error == "a question is already pending for this subagent"
+    assert comms._records["job-1"].ask is held, "the first caller's future was replaced"
+    assert [m.details["body"] for m in comms._records["job-1"].pending] == ["Q-A"]
+    first_reply = await first
+    assert first_reply.timed_out is True  # it ended on its OWN terms, not orphaned
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_asks_cannot_both_pass_the_guard():
+    """The guard is check-then-act, so the buffered path re-checks after its
+    attach grace.
+
+    The top-of-``ask`` guard runs BEFORE the grace await, and the buffered path
+    only claims ``record.ask`` after it — so two asks entering together both
+    passed and the second orphaned the first (review round 4, R8). Unreachable
+    through the `hub` tool today, which is ``concurrency="exclusive"`` and is
+    therefore batched alone, but that is a property of a tool declaration
+    elsewhere rather than an invariant of this layer, and it becomes reachable
+    the moment `hub` goes ``shared``.
+    """
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    first, second = await asyncio.gather(
+        comms.ask("job-1", "Q-A", 4_000),
+        comms.ask("job-1", "Q-B", 4_000),
+    )
+
+    refused = [
+        reply for reply in (first, second) if reply.error and "already pending" in reply.error
+    ]
+    served = [reply for reply in (first, second) if reply.error is None]
+    assert len(refused) == 1, "both asks passed the guard; one caller is orphaned"
+    assert len(served) == 1 and served[0].timed_out is True
+    assert comms._records["job-1"].ask is None, "the surviving ask leaked its future"
+    assert not comms._records["job-1"].pending_asks

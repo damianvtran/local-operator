@@ -27,6 +27,7 @@ import logging
 import os
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
 
 from rich.console import Group
@@ -51,6 +52,8 @@ from textual.geometry import Size
 # Aliased: `Message` in this module is the harness's conversation message.
 from textual.message import Message as TextualMessage
 from textual.screen import Screen
+from textual.timer import Timer
+from textual.widget import Widget
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
@@ -92,6 +95,7 @@ from local_operator.tui.events import (
     RetryEnded,
     RetryStarted,
     StartFlushTimer,
+    SteeringDelivered,
     SubagentEnded,
     SubagentProgress,
     SubagentStarted,
@@ -115,7 +119,7 @@ from local_operator.tui.terminal_title import (
     cwd_label,
     terminal_title_enabled,
 )
-from local_operator.tui.widgets.approval import ApprovalBlock
+from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
 from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
@@ -134,7 +138,10 @@ from local_operator.tui.widgets.editor import (
     resolve_markers,
 )
 from local_operator.tui.widgets.model_picker import ModelRow
-from local_operator.tui.widgets.session_picker import SessionPickerScreen
+from local_operator.tui.widgets.session_picker import (
+    RESUME_EMPTY_NOTICE,
+    SessionPickerScreen,
+)
 from local_operator.tui.widgets.status_line import (
     McpStatus,
     StatusLine,
@@ -192,6 +199,98 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: this for new sessions" names the consequence, fits the same slot, and includes
 #: the article the clipped phrase lacked.
 PERSIST_HINT = "/model default saves this for new sessions"
+
+#: Marks a cost figure RESTORED from a resumed conversation rather than accrued
+#: this session. The restored number is a floor — only the last reported turn's
+#: usage survives in a priceable form — and it lands in the same cell a real
+#: running total does, so without a mark a resumed session's `$0.139` is
+#: indistinguishable from a session that has genuinely spent that. `≥` rather
+#: than a word because the segment sheds early on a narrow terminal and one cell
+#: is what the distinction is worth.
+#:
+#: It is NOT dropped by the next turn, which an earlier version claimed: a
+#: restored floor plus a real turn is still a floor, just a larger one. The
+#: figure only becomes exactly known for a session whose spend was accrued
+#: entirely in this process, so the mark is sticky for the life of the
+#: conversation and clears when the ledger it qualifies does.
+RESTORED_COST_PREFIX = "≥"
+
+#: The states of a mid-turn message, as one set so they cannot drift apart.
+#:
+#: The queued line is a promise about the future in the future tense, and the
+#: settled lines are the same fact in the past tense — the row is UPDATED IN
+#: PLACE (`NoticeBlock.restate`) rather than corrected by a second row, so the
+#: transcript ends up holding one statement that came true instead of a stale
+#: promise with a retraction under it. That matters more than it looks: a reader
+#: who scrolled away never sees the transition, only the settled row, so each of
+#: these has to stand alone with no memory of the one before it.
+#:
+#: There are two ways a turn can end without delivering, and BOTH leave the
+#: message in the engine's queue — `abort()` sets its flag and stops the run, it
+#: does not drain `_steering_queue` (verified: queued=1 before the abort,
+#: queued=1 after, and the next turn's first boundary takes it). So neither says
+#: "not sent", which an earlier draft did: a user who reads that retypes their
+#: message, the original arrives anyway, and the agent gets the instruction
+#: twice. The distinction that IS real is why the wait is happening, so that is
+#: what the two lines say.
+#:
+#: One noun for the boundary, deliberately. "step" and "turn" are different
+#: things internally — a turn contains several steps, which is exactly why the
+#: deferred case exists — and the UI teaches neither, so a pair that used both
+#: made the reader translate. All four now describe what the user observes.
+QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
+SENT_STEER_NOTICE = "sent — the agent has it now"
+#: The turn ended without ever reaching a boundary to drain at — interrupted,
+#: failed, or simply answered with no further tool calls. ONE string for all
+#: three, because they are one fact from the user's side: the message is waiting
+#: and goes with their next message, and what they do about it is identical.
+#:
+#: An earlier version named the interrupt in the row ("the turn was stopped"),
+#: which cost 22 cells to restate the `! interrupted` notice sitting one row
+#: below it in the loudest ink the palette has — the same redundancy `note`
+#: weight was chosen to avoid, surviving as words after being fixed as colour.
+#: It also made this the only string in the set to wrap below 61 columns, and
+#: three messages steered into one tool call turned that into six rows of
+#: near-identical text with the notice explaining them pushed to the bottom.
+#:
+#: Dropping it also stops the row being WRONG on the error path, where the turn
+#: was not stopped by anyone: it failed, and its own error notice says so.
+DEFERRED_STEER_NOTICE = "still queued — sends with your next message"
+
+
+#: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
+#: owns below itself (`padding: 0 0 1 0` in the sheet). Added to a panel's
+#: predicted content height so a predicted slot and a measured one mean the
+#: same thing — see :func:`slot_rows`.
+_BAND_SLOT_RHYTHM_ROWS = 1
+
+#: Shortest SCREEN (not terminal — two rows go to the app's own outer padding)
+#: that can afford the dock band's top inset row, ``#band.has-slot``. At or below
+#: 12 rows the dock already crowds the terminal without it — `#input-shell` is
+#: five rows and the transcript's padding two more, with `TodoPanel` clamped at
+#: its floor — so the row costs a clipped list rather than buying rhythm.
+#:
+#: Calibrated, not guessed: swept over 100 configurations (screen heights 12-40 x
+#: todo-only / subagent-only / both), 12 is the value at which this change
+#: overflows in a STRICT SUBSET of the cells `main` already overflows in — it
+#: fixes four and introduces none. A static screen dimension is the
+#: only gate here that CANNOT reflow — see `_sync_band_inset` for why every
+#: attempt to condition the row on measured slot heights made things worse.
+MIN_BAND_INSET_SCREEN_ROWS = 12
+
+#: Rows the column spends around the subagent list, used to decide whether the
+#: dock's inset still fits beside it (see `_subagent_rows_leave_room`): five for
+#: `#input-shell`, two for the transcript's padding, one for the panel's caption,
+#: one for its slot rhythm row, and one of conversation left over.
+_SUBAGENT_DOCK_ROWS = 10
+
+#: Passes `_refresh_band` makes over (panels, inset) before painting. Three,
+#: because the band's visibility, its inset row and `TodoPanel`'s row budget
+#: each depend on the previous one — see the comment in `_refresh_band` for the
+#: measurement. Named rather than inlined so the reason survives next to the
+#: number.
+_BAND_SETTLE_PASSES = 3
+
 
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
@@ -442,6 +541,48 @@ COMPOSER_FOCUSED_CLASS = "-composer-focused"
 #: the pre-resize composer width. 50 ms is past the arrange on every size the
 #: tests sweep and is also the debounce a drag-resize wants: one re-measure per
 #: settled size rather than one per intermediate column.
+#: How long an answer key routed from the COMPOSER is held before it counts as
+#: an answer. Released early by any second keystroke, which proves the user was
+#: typing a word rather than answering.
+#:
+#: It exists because the two intents are indistinguishable at the first
+#: character: `y` on an empty composer with a question up may be "yes", or it
+#: may be the start of `yes do it` typed as a steer. Acting immediately took
+#: the second reading as the first and AUTHORISED a pending `rm -rf` from a
+#: keystroke meant as text (F3, agent review round 2).
+#:
+#: 180 ms is under the ~200 ms floor for deliberate single keypresses and well
+#: over the inter-key interval of even fast typing (60 wpm is ~200 ms/char, and
+#: the burst within a word is far shorter), so a deliberate answer feels
+#: immediate and a typed word never commits one. It only ever delays an answer;
+#: it can never turn typing into one.
+ANSWER_KEY_HOLD_S = 0.18
+
+
+@dataclass
+class _HeldAnswerKey:
+    """An answer key routed from the composer, parked until it is disambiguated.
+
+    Records WHICH QUESTION it was aimed at, not just which widget. The widget
+    is not enough: `AskPickerScreen` walks several questions inside one card, so
+    a key held across an advance would still see the same object and answer
+    whatever question had moved into its place. Measured: pressing `2` in the
+    composer meaning "Canary" for question 1, then answering question 1 from the
+    card inside the hold window, recorded `DROP IT` on a question the user had
+    never seen (F4, agent review round 3).
+    """
+
+    prompt: "AskPickerScreen"
+    #: The question the key was aimed at, by index within this card.
+    question_index: int
+    character: str
+    timer: Timer
+
+    def still_aimed_at(self, live: "AskPickerScreen | None") -> bool:
+        """Whether the question this key was meant for is still the live one."""
+        return live is self.prompt and self.prompt.question_index == self.question_index
+
+
 RESIZE_REFIT_DELAY_S = 0.05
 
 #: Class the Screen carries, on top of ``BOOT_LAYOUT_CLASS``, while the terminal
@@ -805,6 +946,40 @@ class OperatorApp(App[None]):
         #: retention window and a spend counter that goes DOWN when a finished
         #: child is evicted is worse than no counter at all.
         self._subagent_costs: dict[str, float] = {}
+        #: True when `_total_cost` includes money RESTORED from a resumed
+        #: conversation, which makes the band's figure a lower bound rather than
+        #: a total (see `_restore_reported_usage`). Sticky for the life of the
+        #: session: adding a real turn to a floor leaves a floor, so nothing
+        #: this session does can make the figure exactly known again. Cleared
+        #: only on a swap, where the ledger it qualifies is cleared too.
+        self._spend_is_floor: bool = False
+        #: Queued-steer rows still promising a delivery that has not happened.
+        #: Appended when a mid-turn submit is steered, drained when the engine
+        #: reports it took them (`on_steering_delivered`). A list because several
+        #: messages can be queued against one boundary and the engine delivers
+        #: them together; cleared on a session swap, where the rows belong to a
+        #: conversation that is no longer on screen.
+        self._queued_steer_notices: list[NoticeBlock] = []
+        #: Rows whose turn ended before any boundary drained them: they now read
+        #: `still queued — sends with your next message`, and the message really
+        #: is still in the engine's queue, so the NEXT turn's first drain is the
+        #: delivery they were promising. Held for exactly that reason — a row
+        #: dropped here is one that goes on saying `still queued` after the user
+        #: has watched the agent act on the instruction (issue #151).
+        #:
+        #: SEPARATE from `_queued_steer_notices` rather than left in it so a
+        #: turn end restates each row once, instead of rewriting every still
+        #: waiting row at every later turn end for the rest of the session.
+        #: The two together are the FIFO the engine drains: these rows were
+        #: queued first, so they settle first (see `on_steering_delivered`).
+        self._deferred_steer_notices: list[NoticeBlock] = []
+        #: What the CURRENT turn has already been billed for, per model call, by
+        #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
+        #: whole and is the authoritative figure, so it adds only the difference
+        #: and this resets to 0.0 at every turn boundary. Without it the two
+        #: writers would each bill the same tokens and the band would report
+        #: roughly double what a turn actually cost.
+        self._turn_accrued_cost: float = 0.0
         # Auto-naming fires while the conversation is STILL unnamed, at most
         # one attempt in flight. Latched here rather than on the session
         # holder because the app is what schedules the call, and a second
@@ -866,7 +1041,15 @@ class OperatorApp(App[None]):
         # TURN-scoped latch that drains the asks belonging to a turn the user
         # stopped (a queued asker wakes when the front prompt settles, and
         # without the latch it would mount a fresh question for a dead turn).
-        self._approval: ApprovalBlock | None = None
+        self._approval: ApprovalPrompt | None = None
+        #: The composer's text as of the last Changed event, so a buffer that
+        #: went empty can be told apart from one the app emptied. See
+        #: `on_text_area_changed`.
+        self._composer_text_before: str = ""
+        #: An answer key routed from the composer and parked for one keystroke,
+        #: so a key that turns out to be the first character of a word never
+        #: commits an answer. See `route_key_to_live_prompt`.
+        self._held_answer_key: _HeldAnswerKey | None = None
         # The one live `ask` picker and the future the tool call is parked on.
         # Held as a PAIR because settling one without the other is the failure
         # both halves exist to prevent: a dismissed screen whose future is still
@@ -994,6 +1177,23 @@ class OperatorApp(App[None]):
         # with the input when the panel becomes a card. One row does double duty
         # — zero extra height (D3/D17).
         with Container(id="input-dock"):
+            # The prompt host: where a question the turn is PARKED ON lives.
+            #
+            # Above the band and inside the dock, and both halves of that are
+            # deliberate. Inside the dock, because a question anchored to the
+            # composer stays put while the user scrolls the transcript back to
+            # find what they need to answer it — the whole point of moving these
+            # surfaces out of `ModalScreen`, which covered the conversation it
+            # was asking about. Above the band, because the band is STATUS
+            # (subagent jobs, todos) and this is a BLOCKER: the thing being
+            # waited on belongs closest to the composer, and a status list that
+            # grew and shrank underneath the question would shift it under the
+            # user's cursor mid-answer.
+            #
+            # Zero rows when empty, like the band: a transparent positioner
+            # holding at most one prompt. Mounted once and kept, so a question
+            # never has to await a mount before it can be shown.
+            yield Container(id="prompt-host")
             # The dock band (subagent + todo) lives INSIDE the same bottom-docked
             # container as the input shell, ABOVE it (D-15-01). A sibling
             # `dock: bottom` overlapped the input (Textual anchors same-edge
@@ -1183,6 +1383,14 @@ class OperatorApp(App[None]):
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
         self._render_resumed_history(session)
+        # BEFORE the measurement, and the order is load-bearing: this installs
+        # the provider's own exact reading for a resumed conversation, and
+        # `_measure_preloaded_context` refuses to spend an estimate once an
+        # exact figure is standing. Run the other way round, the estimate would
+        # land first and the exact restore would then be the thing overwriting
+        # it — same end state on a quiet boot, but the estimate is resolved in a
+        # worker, so which one won would depend on scheduling.
+        self._restore_reported_usage(session)
         self._measure_preloaded_context(session)
 
     async def _preflight_usage(self, session: Any) -> None:
@@ -1225,6 +1433,75 @@ class OperatorApp(App[None]):
             return
         self._adopt_session(session)
         await self._preflight_usage(session)
+
+    def _restore_reported_usage(self, session: Any) -> None:
+        """Put a RESUMED conversation's own token and cost figures on the band.
+
+        A resumed session opens on a conversation that already happened, and the
+        band is fed entirely by turns that end while this process is running —
+        so before this, `--resume` painted an empty-looking context and no spend
+        for a conversation that might be 40% through its window with real money
+        on it. Measured on a resumed session whose last provider reading was
+        402k of a 1M window: the band opened at `0.2%/1M` with no cost segment,
+        and stayed there until the next turn happened to end.
+
+        Two figures, from the same restored ``Usage`` and with deliberately
+        different standing:
+
+        - **Context** is the provider's own ``context_tokens`` for the last call
+          of the last turn, so it is installed EXACT (``context_is_estimate``
+          False). It is not a guess about the conversation; it is the number the
+          band would still be showing had the process never stopped. Being exact
+          is also what makes it suppress the local estimate below.
+        - **Cost** is the restored turn's price, and it is a FLOOR rather than
+          the session's true lifetime total: only the last reported turn's usage
+          survives in a form this can price, so a ten-turn conversation restores
+          the last turn's dollars and accrues from there. It is seeded anyway
+          because the alternative on screen is an empty segment, and empty reads
+          as "this session has cost nothing" — the one reading that is certainly
+          false. Undercounting a known-partial total beats asserting zero.
+
+        Degrades silently and completely. Reduced hosts (the pilot fakes, the
+        embedders) have no ``restored_usage``, an unpriceable model yields no
+        cost, and a transcript with no usage in it yields nothing at all — in
+        every one of those cases the band keeps exactly the behaviour it had.
+        """
+        restore = getattr(session, "restored_usage", None)
+        if not callable(restore) or self._status is None:
+            return
+        try:
+            usage = restore()
+        except Exception:  # a status readout must never take the app down
+            logger.debug("restored usage unavailable", exc_info=True)
+            return
+        if usage is None:
+            return  # nothing was ever reported: leave the estimate its job
+
+        context_tokens = getattr(usage, "context_tokens", None) or 0
+        if context_tokens > 0:
+            self._status.update(
+                context_tokens=int(context_tokens),
+                context_is_estimate=False,
+                context_window=_context_window(session),
+            )
+
+        # Priced through the same `_cost_for` every live turn uses, so a
+        # restored figure and an accrued one cannot disagree about what the same
+        # usage was worth. `_total_cost` is ASSIGNED rather than added to: this
+        # runs on adopt, where the ledger has just been zeroed for the swap, and
+        # `+=` would double the figure on a `/reload` that lands back on the
+        # same conversation (whose spend `_reconcile_reload` restores).
+        cost = self._cost_for(usage)
+        if cost:
+            self._total_cost = cost
+            # A FLOOR from here on, and the flag rather than the formatting is
+            # what says so: every writer of the cost cell reads it through
+            # `_spend_text`, so none of them can strip the mark by rendering the
+            # same money a different way. Only the last reported turn's usage
+            # survives in a priceable form, so this can be an order of magnitude
+            # under the conversation's real lifetime spend.
+            self._spend_is_floor = True
+            self._status.update(cost=self._spend_text())
 
     def _park_unadopted_session(self, built: asyncio.Future[Any]) -> None:
         """Hand a built-but-never-adopted session to teardown, if there is one.
@@ -1656,7 +1933,7 @@ class OperatorApp(App[None]):
                 self._set_welcome_visible(True)
         self._reconcile_reload(previous_id, previous_len, carried_spend, keep_context=keep_context)
 
-    def _reset_ledger_for_swap(self) -> tuple[float, dict[str, float]]:
+    def _reset_ledger_for_swap(self) -> tuple[float, dict[str, float], bool]:
         """Clear the transcript and the session-scoped band, for a swap.
 
         Returns the spend totals it just zeroed, for `_reconcile_reload` to put
@@ -1701,6 +1978,30 @@ class OperatorApp(App[None]):
         carried_spend = (self._total_cost, dict(self._subagent_costs))
         self._total_cost = 0.0
         self._subagent_costs.clear()
+        # The flag describes the totals just zeroed. `_reconcile_reload` puts
+        # both back together when the reload lands on the same conversation.
+        was_floor, self._spend_is_floor = self._spend_is_floor, False
+        # The held queued-steer rows were just removed with the rest of the
+        # ledger, so the references are to widgets no longer on screen. Left in
+        # the list, the replacement session's first delivery would "settle"
+        # rows the user cannot see and the rows it CAN see would keep promising.
+        #
+        # The DEFERRED rows go with them, and here the reason is stronger than
+        # "the widget is gone": their messages sit in the OLD session's steering
+        # queue, which is being torn down with it. The replacement session's
+        # first delivery is a different conversation's message entirely, so
+        # settling these against it would be a receipt for something that never
+        # happened. This is the distinction the holding in
+        # `_settle_queued_steer_notices_unsent` has to preserve: a turn that
+        # ended keeps its rows (the message is still coming), a SWAP drops them
+        # (the message left with the session).
+        self._queued_steer_notices.clear()
+        self._deferred_steer_notices.clear()
+        # The per-call accrual belongs to a turn on the session being replaced.
+        # Left standing, the NEXT session's first `agent_end` would subtract the
+        # dead conversation's already-billed calls from its own turn total and
+        # under-report that turn by exactly that much.
+        self._turn_accrued_cost = 0.0
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -1728,7 +2029,7 @@ class OperatorApp(App[None]):
             # first turn ended.
             cost="",
         )
-        return carried_spend
+        return (*carried_spend, was_floor)
 
     def _conversation_id(self) -> str:
         """Which conversation is open, or "" when none is."""
@@ -1749,7 +2050,7 @@ class OperatorApp(App[None]):
         self,
         previous_id: str,
         previous_len: int,
-        carried_spend: tuple[float, dict[str, float]],
+        carried_spend: tuple[float, dict[str, float], bool],
         *,
         keep_context: bool,
     ) -> None:
@@ -1770,12 +2071,16 @@ class OperatorApp(App[None]):
         every time a reload refreshes the MCP servers.
         """
         if previous_id and self._conversation_id() == previous_id:
-            total, children = carried_spend
+            total, children, was_floor = carried_spend
             self._total_cost = total
             self._subagent_costs.update(children)
+            # The provenance travels with the money. Without it a `/reload` onto
+            # the same conversation repainted the identical restored floor as a
+            # bare figure — same number, same provenance, honesty mark gone, on
+            # the one command that promises to change nothing.
+            self._spend_is_floor = was_floor
             if self._status is not None:
-                spend = self._spend_total()
-                self._status.update(cost=format_cost(spend) if spend else "")
+                self._status.update(cost=self._spend_text())
         if not keep_context:
             return
         remaining = self._history_length()
@@ -1857,7 +2162,13 @@ class OperatorApp(App[None]):
         if not arg:
             rows = recent_session_rows(config_dir(), limit=RESUME_PICKER_LIMIT)
             if not rows:
-                self._system_notice("no previous sessions to resume", "warning")
+                # Says whose sessions, not that the disk is empty. Delegated
+                # subagent runs live in the same directory and are deliberately
+                # not listed, so on a machine whose only surviving sessions are
+                # children (retention evicts the older parent first) the flat
+                # "none exist" was simply false — and a dead end for a user who
+                # knows work is there.
+                self._system_notice(RESUME_EMPTY_NOTICE, "warning")
                 return
 
             def _resume_choice(session_id: str | None) -> None:
@@ -2111,10 +2422,25 @@ class OperatorApp(App[None]):
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         """Re-fit size-sensitive chrome after a terminal resize.
 
-        The status band is NOT re-fitted here: it answers to its own ``Resize``
-        instead (see :class:`Band` and :meth:`on_band_box_changed`), which covers
-        this case and the boot-card handover, where the band's box changes and the
-        terminal's does not.
+        The status band answers to its own ``Resize`` as well (see :class:`Band`
+        and :meth:`on_band_box_changed`), which covers the boot-card handover
+        where the band's box changes and the terminal's does not. It is ALSO
+        re-fitted from here, at the end: its inset is gated on the screen height
+        and nothing else asked it to re-decide when the terminal crossed that
+        floor.
+
+        The order of the two ``call_after_refresh`` calls below does NOT matter,
+        and this note exists to stop a future reader inventing a reason that it
+        does. They run in queue order, so ``_remeasure_prompt`` runs FIRST and
+        genuinely reads a dock the band has not re-fitted yet (measured: 31 rows
+        on an 18-row screen). That is harmless — the card is repainted again by
+        its own resize path, by the debounced overlay re-fit, and by
+        ``_sync_prompt_host`` — and swapping the two produces byte-identical
+        first and settled frames (agent review round 12, F1).
+
+        What the band DOES need is to be re-fitted here at all: its inset is
+        gated on the screen height, and before main's `_refresh_band` landed
+        nothing asked it to re-decide when the terminal crossed that floor.
         """
         # The EVENT's size, not the app's: during a resize `self.size` is still the
         # previous frame's, and one stale cell is enough to put the card threshold on
@@ -2146,6 +2472,67 @@ class OperatorApp(App[None]):
         # can currently hold keeps the ~50 ms before the timer from showing a
         # card overhanging the frame with its prose clipped mid-word.
         self.call_after_refresh(self._sync_overlay_layout, force=True)
+        # A live prompt re-budgets itself against the new size, and whether it
+        # can be drawn AT ALL can change with it: shrinking past the point where
+        # even its footer fits hides the card, and the host's separation row
+        # must go with it or the dock keeps a row for a prompt painting nothing.
+        #
+        # The card is re-measured from HERE rather than left to its own
+        # `on_resize`, because a hidden widget is not laid out and so receives
+        # no resize event — a card that hid itself on a shrink could never learn
+        # the terminal had grown back, leaving the turn parked on a question
+        # that was invisible for the rest of the session (D10, design round 2).
+        # The app still gets the event when the card does not.
+        self.call_after_refresh(self._remeasure_prompt)
+        # The dock band is size-sensitive for the same reason the cards are, and
+        # had no resize trigger at all: its inset is gated on the screen height
+        # and `TodoPanel` budgets its rows against it, but nothing here asked
+        # either to re-decide. A terminal dragged across the inset's floor was
+        # left with the previous height's answer until the 1 Hz poll or an
+        # unrelated panel event happened to fire — measured at ~0.3 s of a band
+        # sized for a screen that no longer exists, with the overflow that
+        # implies.
+        #
+        # `call_after_refresh` rather than the timer: unlike the cards, the band
+        # is IN the layout, so it re-arranges with the frame and the pass after
+        # that refresh reads real numbers. The timer above then re-measures the
+        # cards over whatever the band settled to, which is the order those two
+        # already depend on.
+        self.call_after_refresh(self._refresh_band)
+
+    def _remeasure_prompt(self) -> None:
+        """Re-lay a live prompt against the current terminal, then fit the host."""
+        prompt = self._live_prompt()
+        remeasure = getattr(prompt, "remeasure", None)
+        if callable(remeasure):
+            try:
+                remeasure()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not re-measure the live prompt", exc_info=True)
+        self._sync_prompt_host()
+        # Hiding a widget takes focus off it and puts it nowhere, so a card that
+        # went undrawable on a shrink came back on the re-grow with the screen
+        # focusing NOTHING — visible, answerable in principle, and receiving no
+        # keys at all. Restored here because this is the path that made it
+        # drawable again.
+        # Only when focus is NOWHERE, which is the state this repairs. Written
+        # as "not the prompt", it fired on every resize regardless of where the
+        # caret was — so a one-column resize while the user was typing took the
+        # keyboard, and the next character of their sentence answered the
+        # question: a `space` ticked a row, and on an approval a `y` AUTHORISED
+        # `rm -rf /data` (F10, agent review round 7). The composer's one-
+        # keystroke hold is a correct defence and was simply bypassed, because
+        # it only guards keys that arrive AT the composer.
+        #
+        # The two cases are cleanly distinguishable and this is the narrower
+        # one: hiding a widget leaves `focused` as None, while a typing user
+        # leaves it as the Editor.
+        if prompt is not None and getattr(prompt, "is_drawable", False):
+            try:
+                if self.screen is not None and self.screen.focused is None:
+                    prompt.focus()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not re-focus the live prompt", exc_info=True)
 
     def on_band_box_changed(self, event: Band.BoxChanged) -> None:
         """Repaint the band for the box it now has.
@@ -2371,6 +2758,186 @@ class OperatorApp(App[None]):
     def on_descendant_blur(self, event: DescendantBlur) -> None:
         self._sync_composer_focus()
 
+    def route_key_to_live_prompt(self, event) -> bool:  # type: ignore[no-untyped-def]
+        """Send an ADVERTISED ANSWER KEY to a live prompt. True if it was taken.
+
+        This is what makes an anchored question answerable while the composer
+        holds the caret, and it deliberately routes the KEY rather than moving
+        FOCUS. The difference is the whole finding: an earlier revision bounced
+        focus onto the prompt whenever the composer was empty, and the composer
+        is empty *exactly* when the user is about to start typing — so the first
+        character of an intended steer landed on the card, where `y` is an
+        answer. Measured through the real gate: typing `yes do it` at a live
+        `rm -rf /Users/damian/project/data` prompt AUTHORISED the call and left
+        `es do it` in the buffer (F3, agent review round 2). That is strictly
+        worse than the defect it was written to fix, which merely lost a
+        keystroke; and it made drafting impossible while a question was up,
+        because focus was taken before the first character could be typed.
+
+        Routing instead means the composer keeps focus and keeps every key it
+        would normally take. Only the small set the card ADVERTISES is
+        intercepted, and only while the buffer is EMPTY:
+
+        - empty buffer, `y`/`n`/`A` (or the picker's digits/Enter): the user is
+          answering the question in front of them, which is the common case and
+          the one D5 was about;
+        - anything else, or any buffer with text in it: the composer takes it,
+          so a steer starting with any character — including `y` — is typed
+          normally the moment a second character follows.
+
+        One more rule closes the last gap, and it is the one that makes this
+        safe for an APPROVAL: a routed key is held for one keystroke rather
+        than acted on immediately. `y` alone answers; `y` followed by another
+        character was the start of a word, so both characters are handed to the
+        composer and nothing is authorised. Without it, typing `yes do it` as a
+        steer approved a pending `rm -rf` on its first character and left
+        `es do it` in the buffer — an irreversible action taken from a
+        keystroke the user meant as text.
+
+        The hold is released by the next key or by the deadline below, so a
+        deliberate `y` still answers within a fraction of a second and the
+        common case is unchanged.
+        """
+        prompt = self._live_prompt()
+        if prompt is None:
+            return False
+        try:
+            editor = self._editor()
+        except Exception:  # pragma: no cover - hosts with no composer
+            return False
+        if not editor.has_focus:
+            return False
+
+        # Tab is the EXPLICIT way to put the keyboard on the question.
+        #
+        # It exists because inferring the moment the user has finished typing
+        # cannot be done from the buffer: both attempts (empty, then
+        # deleted-to-empty) moved focus at a moment the user had not chosen and
+        # cost them a message (F9, D18). A named gesture cannot. It is offered
+        # only while the card actually needs it — a multi-select is answered by
+        # Space and Enter, which the composer owns, so it is the one question
+        # the routed keys cannot reach — and only while the card is drawing
+        # rows to move a cursor through.
+        #
+        # Taken before the buffer check, because a user with a half-typed
+        # message is exactly who needs it: their draft is preserved and waiting
+        # when they come back with `esc` or a click.
+        if getattr(event, "key", None) == "tab":
+            if self._prompt_wants_the_keyboard(prompt):
+                prompt.focus()
+                return True
+            # Swallowed even where it does not hand over, because the
+            # alternative is worse than doing nothing: Tab inserts whitespace,
+            # which makes the buffer non-empty, which stands the routing down —
+            # so a stray Tab silently disabled the very keys the footer is
+            # advertising, and the next `1` typed `    1` instead of answering.
+            # While a question is live, Tab means "the question" and nothing
+            # else; where the question does not want it, it means nothing.
+            return True
+
+        character = getattr(event, "character", None)
+
+        # A key arriving while one is held ends the ambiguity: this was typing.
+        # The held character goes into the composer and the new key then takes
+        # its normal course, so `y` + `e` types `ye` and answers nothing.
+        #
+        # Two keys need the character restored but must NOT then act on the
+        # buffer they have just changed:
+        #
+        # - ENTER submits the composer. Releasing into it first would send a
+        #   prompt the user never finished typing — and releasing after it (as
+        #   the plain path does) drops the character entirely, which is what
+        #   `y` then Enter measured before this branch: an empty submit and a
+        #   lost `y`. Neither is right, so Enter CANCELS the hold instead: the
+        #   character was a deliberate answer, and the answer is taken.
+        # - ESCAPE means stop, and it also settles the prompt. Restoring the
+        #   character would leave a stray `y` sitting in the composer after the
+        #   question had gone, which is exactly what it did.
+        held = self._held_answer_key
+        if held is not None:
+            self._cancel_held_answer_key()
+            key = getattr(event, "key", None)
+            if key == "enter":
+                # Guarded like the timer path: between the keystroke and this
+                # Enter the card may have advanced to another question, and
+                # this branch previously had no check at all — so one keystroke
+                # answered two questions, the second of them unseen (F4).
+                if not held.still_aimed_at(self._live_prompt()):
+                    return False
+                held.prompt.answer_from_key(held.character)
+                return True
+            if key == "escape":
+                return False
+            editor.insert(held.character)
+            return False
+
+        if editor.text or character is None or character not in prompt.answer_keys():
+            return False
+        self._hold_answer_key(prompt, character)
+        return True
+
+    def _hold_answer_key(self, prompt, character: str) -> None:  # type: ignore[no-untyped-def]
+        """Park a routed answer key until it is confirmed as an answer.
+
+        Confirmed by the deadline expiring with no second keystroke. Cancelled
+        by any further key, which proves the user was typing a word.
+        """
+        timer = self.set_timer(ANSWER_KEY_HOLD_S, self._commit_held_answer_key)
+        self._held_answer_key = _HeldAnswerKey(
+            prompt=prompt,
+            question_index=prompt.question_index,
+            character=character,
+            timer=timer,
+        )
+
+    def _cancel_held_answer_key(self) -> None:
+        """Drop a parked key without answering."""
+        held = self._held_answer_key
+        self._held_answer_key = None
+        if held is not None:
+            held.timer.stop()
+
+    def _commit_held_answer_key(self) -> None:
+        """The hold expired with no second keystroke, so it really was an answer."""
+        held = self._held_answer_key
+        self._held_answer_key = None
+        if held is None:
+            return
+        if not held.still_aimed_at(self._live_prompt()):
+            # The question settled, was replaced, or the card advanced to the
+            # NEXT question while the key was held. A key aimed at one question
+            # must never answer another.
+            return
+        held.prompt.answer_from_key(held.character)
+
+    def _prompt_wants_the_keyboard(self, prompt) -> bool:  # type: ignore[no-untyped-def]
+        """Whether ``prompt`` has answers the composer cannot route to it.
+
+        True only for a card that is drawing rows AND offers no routed keys —
+        in practice a multi-select, which is answered by Space and Enter. Every
+        other prompt is fully answerable from the composer, so pulling focus to
+        it would cost the user their caret for nothing.
+        """
+        try:
+            return bool(prompt.visible_rows) and not prompt.answer_keys()
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    def _live_prompt(self):  # type: ignore[no-untyped-def]
+        """The prompt currently awaiting an answer, or ``None``.
+
+        Either surface: an unanswered approval, or the ``ask`` picker. Both are
+        mounted in the prompt host and both are answered by keys that the
+        composer would otherwise swallow.
+        """
+        approval = self._approval
+        if approval is not None and not approval.answered and approval.is_attached:
+            return approval
+        picker = self._ask_screen
+        if picker is not None and not picker.settled and picker.is_attached:
+            return picker
+        return None
+
     def _sync_composer_focus(self) -> None:
         """Mark the input dock while the composer — and only it — has focus.
 
@@ -2557,6 +3124,42 @@ class OperatorApp(App[None]):
             return
         if self._close_subagent_view():
             return
+        # A live `ask` picker takes Escape as "leave this question unanswered",
+        # which is what its own footer advertises (`esc skip`) and what its
+        # binding does when the card holds focus.
+        #
+        # It has to be handled HERE as well, because the card no longer keeps
+        # the caret: the composer does (see `route_key_to_live_prompt`), so the
+        # card's binding never sees the key and its advertised exit did nothing
+        # at all — measured on three consecutive presses, question still up,
+        # tool still waiting (D11, design round 3). Whatever was answered so
+        # far is kept, which is the rule `action_cancel` already follows.
+        #
+        # Before the streaming check, and returning: `skip` is a real answer to
+        # a question the agent asked, not an abort of the turn, and the turn
+        # continues with whatever the user did say.
+        # ...but only when the picker is the prompt the user is actually
+        # looking at. `_live_prompt` ranks an unanswered APPROVAL first, which
+        # is the right order: an approval is a permission gate the engine is
+        # blocked on, and it is the one raised most recently in an overlap.
+        #
+        # Without that check this branch matched on the picker merely EXISTING
+        # and returned before the approval was considered, so in the ask +
+        # approval overlap — the state F1 was filed for — Escape settled the
+        # scrolled-off question and left a focused `rm -rf` approval unanswered
+        # with the turn still running (F5, agent review round 4). That branch is
+        # also the ONLY implementation of the approval's advertised `esc deny`,
+        # because `ApprovalPrompt.action_cancel` raises `SkipAction` by design
+        # so the key reaches here.
+        picker = self._ask_screen
+        if (
+            picker is not None
+            and not picker.settled
+            and picker.is_attached
+            and self._live_prompt() is picker
+        ):
+            self._settle_ask_picker()
+            return
         pending = self._approval is not None and not self._approval.answered
         if pending or (self._session is not None and self._session.is_streaming):
             self._interrupt()
@@ -2627,17 +3230,49 @@ class OperatorApp(App[None]):
         # while still taking focus off the composer the card is pointed at —
         # a turn parked on an answer the user can neither see nor reach.
         self._close_aside()
-        block = ApprovalBlock(tool_name, description, on_answer=self._latch_approval_answer)
-        self._approval = block
-        self._append_block(block)
+        prompt = ApprovalPrompt(tool_name, description, on_answer=self._latch_approval_answer)
+        self._approval = prompt
+        # The QUESTION goes in the dock, where it cannot scroll away from the
+        # turn it is blocking and where it reliably owns its own answer keys.
+        # The transcript gets a RECEIPT instead, and only once the answer is in
+        # (below): a receipt written up front would have to be rewritten, and a
+        # transcript block that changes after later blocks were appended is the
+        # one thing the transcript's finalize discipline forbids.
+        self._mount_prompt(prompt)
         # The turn is now parked on the user, and the working line says so —
         # this is the one wait in a turn that the agent is not responsible for.
         self._refresh_working_activity()
         try:
-            return await block.wait()
+            return await prompt.wait()
         finally:
-            block.restore_focus()
-            if self._approval is block:
+            # Clear the registration BEFORE unmounting. `_unmount_prompt` hands
+            # focus back to the composer, and the focus guard
+            # (`route_key_to_live_prompt`) asks `_live_prompt()` whether anything
+            # is still owed an answer — so with `self._approval` still pointing
+            # at this card, the guard bounced focus straight back onto the
+            # prompt it was being taken off, leaving the composer unfocusable
+            # after every answered approval.
+            if self._approval is prompt:
+                self._approval = None
+            self._unmount_prompt(prompt)
+            # The decision belongs in the conversation: what was asked, and what
+            # was answered. Appended after the fact so the transcript records a
+            # settled fact rather than a question it would then have to revise.
+            #
+            # Guarded, because this runs on the way OUT of a gate that several
+            # paths can end — including a stop, a `/clear`, and app teardown.
+            # The transcript may already be gone by then (`NoMatches` on
+            # `#transcript`), and a receipt is a nice-to-have on that path while
+            # the future underneath it is not: raising here would propagate out
+            # of the approval gate and fail the tool call itself.
+            if prompt.answered:
+                try:
+                    self._append_block(
+                        ApprovalBlock.receipt(tool_name, description, prompt.answer or "n")
+                    )
+                except Exception:  # pragma: no cover - teardown races only
+                    logger.debug("no transcript to record the approval in", exc_info=True)
+            if self._approval is prompt:
                 self._approval = None
             self._refresh_working_activity()
 
@@ -2679,10 +3314,17 @@ class OperatorApp(App[None]):
             if not future.done():
                 future.set_result(result)
 
-        screen = AskPickerScreen(questions)
-        self._ask_screen = screen
+        # The subagent page hides the transcript and the aside floats over it,
+        # and this card is mounted in the dock underneath both: behind either
+        # one the question would be invisible while still holding focus, so the
+        # turn would be parked on an answer the user can neither see nor reach.
+        # The same yield the approval prompt makes, for the same reason.
+        self._close_subagent_view()
+        self._close_aside()
+        card = AskPickerScreen(questions, answered)
+        self._ask_screen = card
         self._ask_pending = future
-        self.push_screen(screen, answered)
+        self._mount_prompt(card)
         # The turn is parked on the user, and the working line and terminal
         # title say so — the same treatment an unanswered approval gets, for the
         # same reason: a spinner over a wait the agent is not responsible for is
@@ -2692,14 +3334,24 @@ class OperatorApp(App[None]):
             return await future
         except asyncio.CancelledError:
             # The tool call was cancelled out from under the question (steering,
-            # a stop, or teardown). Take the picker off screen: a modal left up
-            # for a call that no longer exists holds the keyboard hostage.
+            # a stop, or teardown). Take the card down: a question left up for a
+            # call that no longer exists holds the keyboard hostage.
             self._settle_ask_picker()
             raise
         finally:
             if self._ask_pending is future:
                 self._ask_pending = None
                 self._ask_screen = None
+            # Take the card down on the ORDINARY path too, not only when a stop
+            # or a teardown settles it. The card resolves its own future from
+            # `settle`, so answering the last question satisfied the `await`
+            # above and left the widget mounted: measured after a plain Enter,
+            # the card was still on screen, the host still held its row, and
+            # focus was still on a question nobody was waiting for — so the
+            # composer could not be typed into at all. Registration is cleared
+            # first (above) so the focus guard does not bounce focus back onto
+            # the card being removed.
+            self._unmount_prompt(card)
             self._refresh_working_activity()
 
     def _settle_ask_picker(self) -> None:
@@ -2712,37 +3364,201 @@ class OperatorApp(App[None]):
         because the third was never reached would be a worse report than an
         honest partial one.
         """
-        screen = self._ask_screen
+        card = self._ask_screen
         self._ask_screen = None
         pending = self._ask_pending
         self._ask_pending = None
         if pending is not None and not pending.done():
-            pending.set_result(screen.answers_so_far() if screen is not None else None)
-        if screen is not None and screen.is_attached:
-            # `pop_screen` rather than `dismiss`: the callback would resolve a
-            # future that is already settled above, and this path can run while
-            # the app is being torn down, where dismiss's own mount checks are
-            # the ones that raise.
-            #
-            # And only while the picker IS the top screen, because `pop_screen`
-            # takes whatever the stack ends with rather than a named screen: with
-            # anything mounted above the question — a palette or a picker the
-            # user opened while the agent waited on them — this dismissed THAT
-            # screen and left the settled picker mounted, holding the keyboard
-            # on a future nobody is waiting for. Below the top it is cut out of
-            # the stack instead: `remove()` on its own detaches the widget and
-            # leaves the stack entry behind, so the next pop would resume a
-            # screen that no longer exists.
+            pending.set_result(card.answers_so_far() if card is not None else None)
+        if card is not None:
+            # Mark the card settled BEFORE unmounting it. Its own settle
+            # callback resolves the future this method has just resolved by
+            # hand, and a second `set_result` raises out of whichever path
+            # loses the race; `settle` is idempotent, so claiming it here is
+            # what makes the unmount below unable to double-answer.
+            card.settle(None)
+            self._unmount_prompt(card)
+
+    def _mount_prompt(self, card: Widget) -> None:
+        """Put a prompt into the dock's prompt host, above the status band.
+
+        One place rather than at each call site, because both surfaces that use
+        it (the ``ask`` picker and the approval prompt) have the same two
+        failure modes if this is done by hand: mounting into the transcript,
+        where the question scrolls away from the turn it is blocking, and
+        leaving a previous prompt mounted, where two cards compete for focus and
+        the lower one is unanswerable.
+        """
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - only before the dock is composed
+            logger.debug("prompt host is not mounted yet", exc_info=True)
+            return
+        host.mount(card)
+        # The host reserves rows only while it holds something, so the dock
+        # collapses back to the composer when nothing is being asked.
+        host.display = True
+        # ...and only while that something can actually be drawn. On a terminal
+        # too short for even the card's footer the card hides itself, and a host
+        # left visible would keep its own separation row for a prompt painting
+        # nothing — one row of chrome that pushed the dock past the screen and
+        # made it scrollable (measured at 20x8: virtual_size 7 against size 6).
+        # Read from the card AFTER it has laid out, because that is when it
+        # knows; `call_after_refresh` is what makes this a read of a settled
+        # value rather than of the state before the mount.
+        self.call_after_refresh(self._sync_prompt_host)
+
+    def on_ask_picker_screen_drawable_changed(
+        self, message: AskPickerScreen.DrawableChanged
+    ) -> None:
+        """A prompt gained or lost the ability to draw itself; re-fit the host.
+
+        Both directions matter. Losing it (the terminal shrank past the card's
+        minimum) must give the host's separation row back, or the dock keeps a
+        row for a question painting nothing; regaining it must take the row
+        again, or the card would be drawn flush against the band below it.
+        """
+        message.stop()
+        self._sync_prompt_host()
+
+    def _sync_prompt_host(self) -> None:
+        """Hide the prompt host when what it holds cannot be drawn.
+
+        The host owns its own visibility (it is the only writer), and asks the
+        prompt whether there is anything to show. Two writers is what this
+        replaced: the card set the host False on an undrawable paint while the
+        app set it True on the next mount, and which one stuck depended on
+        ordering.
+        """
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - only during teardown
+            return
+        children = [child for child in host.children]
+        host.display = bool(children) and any(
+            getattr(child, "is_drawable", True) for child in children
+        )
+
+    def _unmount_prompt(self, card: Widget) -> None:
+        """Take a prompt out of the dock and hand focus back to the composer.
+
+        Focus first and unconditionally: the card TAKES focus to receive its
+        answer keys, so removing it without restoring focus leaves the app with
+        nothing focused and every subsequent keystroke going nowhere — the user
+        types their next instruction into a dead terminal.
+        """
+        # Whether the card actually held focus, read BEFORE it is removed. A
+        # removed widget reports nothing useful, and the answer decides whether
+        # anything needs to move at all: a card that never had focus must not
+        # yank it from wherever the user put it.
+        held_focus = bool(getattr(card, "has_focus", False))
+        # Where the caret was before the removal, so it can be put back if the
+        # removal moves it. Read now: a removed widget reports nothing useful.
+        # Guarded: `self.screen` RAISES `ScreenStackError` during teardown,
+        # and this runs on the way out of a gate that teardown can end.
+        try:
+            screen_now = self.screen
+        except Exception:  # pragma: no cover - teardown races only
+            screen_now = None
+        focused_before = screen_now.focused if screen_now is not None else None
+        # A key held for THIS card can never answer anything now. The commit
+        # path already refuses to answer a prompt that is no longer live, so
+        # this is not the correctness guard — it is the timer not outliving the
+        # question it belonged to.
+        held = self._held_answer_key
+        if held is not None and held.prompt is card:
+            self._cancel_held_answer_key()
+        restore = getattr(card, "restore_focus", None)
+        if callable(restore):
             try:
-                stack = self._screen_stack
-                if stack and stack[-1] is screen:
-                    self.pop_screen()
-                else:
-                    if screen in stack:
-                        stack.remove(screen)
-                    screen.remove()
+                restore()
             except Exception:  # pragma: no cover - teardown races only
-                logger.debug("ask picker was already gone", exc_info=True)
+                logger.debug("could not restore focus from a prompt", exc_info=True)
+        try:
+            if card.is_attached:
+                card.remove()
+        except Exception:  # pragma: no cover - teardown races only
+            logger.debug("prompt was already gone", exc_info=True)
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - only during teardown
+            return
+        # Hidden only when nothing ELSE is still being asked.
+        #
+        # `Widget.remove()` is deferred — it returns an awaitable and the child
+        # is still in `children` on this frame — so a plain `not host.children`
+        # test reads the card on its way out and leaves the host displayed, a
+        # row of dock chrome standing after the question was answered. The
+        # departing card is therefore excluded by identity rather than by
+        # waiting for the removal to land.
+        #
+        # What this must NOT do is assume the host holds one prompt. Approvals
+        # serialize against `self._approval`, but `request_user_choice` mounts
+        # into this same host with no interlock, so an `ask` and an approval can
+        # legitimately overlap. Hiding unconditionally then hid a LIVE ask card
+        # the moment an approval beside it was answered: the question stayed
+        # attached and awaited while being invisible and unreachable — the
+        # turn parked on an answer the user cannot see, which is the hang class
+        # this module exists to remove (F1, agent review round 1).
+        remaining = [child for child in host.children if child is not card]
+        host.display = bool(remaining)
+        # The card's own restore target can be missing or stale, and then focus
+        # has nowhere to land: the widget is gone but the screen still names it
+        # as focused, so every later keystroke goes to a removed node and the
+        # composer cannot be typed into at all.
+        #
+        # It is missing more often than it looks. The target is captured at
+        # MOUNT, and a prompt raised early in a session mounts before anything
+        # has taken focus — so it records `None`, `restore_focus` is a no-op,
+        # and the card that had focus keeps it after being removed. Measured
+        # under pytest: prompt unmounted, `_approval` cleared, host hidden, and
+        # `screen.focused` still the detached `ApprovalPrompt`.
+        #
+        # So the composer is the fallback, and it is applied whenever the card
+        # HELD focus and nothing live has it now. Restricted to that case
+        # because the composer must not be stolen from a user who deliberately
+        # put the caret somewhere else while the question was up.
+        try:
+            screen = self.screen
+            # A prompt that is still owed an answer outranks the composer: with
+            # an `ask` and an approval overlapping, answering one must hand the
+            # keyboard to the other rather than to the draft.
+            # The surviving prompt takes the keyboard only if the DEPARTING one
+            # had it. Unconditional, this is F10's defect through the overlap
+            # door: answering one question while the user is typing into the
+            # composer would move the caret onto the other one, where the next
+            # character of their sentence is an answer (F11, agent review round
+            # 7 — same class as F10, narrower reach, same fix).
+            successor = self._live_prompt()
+            if successor is not None and successor is not card:
+                if held_focus:
+                    successor.focus()
+                elif focused_before is not None and focused_before.is_attached:
+                    # The departing card did NOT have the keyboard, so nothing
+                    # should move — but removing a widget makes Textual focus
+                    # the next focusable node, which here is the surviving
+                    # prompt. Put the caret back where the user had it, or a
+                    # question settling elsewhere silently moves the keyboard
+                    # onto the other one mid-sentence (F11, agent review round
+                    # 7 — F10's defect through the overlap door).
+                    focused_before.focus()
+            elif held_focus and screen is not None:
+                focused = screen.focused
+                # "Somewhere the user can type" is the test, not "somewhere".
+                #
+                # Removing a focused widget does not leave focus empty: Textual
+                # moves it to the next focusable node, which here is the
+                # TranscriptView — a scrollable region, not an input. So the
+                # app looked correctly focused while every keystroke went to a
+                # widget that does nothing with them, and the composer could
+                # not be typed into after answering. Checking only for
+                # `None`/detached missed it entirely, because the state was
+                # neither.
+                editor = self._editor()
+                if focused is not editor:
+                    editor.focus()
+        except Exception:  # pragma: no cover - no composer in reduced hosts
+            logger.debug("no composer to hand focus back to", exc_info=True)
 
     def _settle_key_prompt(self) -> None:
         """Cancel a live API-key prompt, freeing the login parked on it.
@@ -2860,7 +3676,12 @@ class OperatorApp(App[None]):
         approval = self._approval
         if approval is not None and not approval.answered:
             approval.resolve(False)
-            approval.restore_focus()
+            # Take the card out of the dock as well as answering it. The prompt
+            # is no longer a transcript block that can repaint itself into a
+            # receipt in place: it is docked chrome, so a settled one left
+            # mounted would sit above the composer holding focus on a decision
+            # that has already been made.
+            self._unmount_prompt(approval)
         self._approval = None
 
     def _approvals_are_denied(self, epoch: int) -> bool:
@@ -2887,7 +3708,7 @@ class OperatorApp(App[None]):
             # latch hook too, so the frame carried the same statement twice in the
             # loudest ink it has.
             approval.resolve(True, answer="y")
-            approval.restore_focus()
+            self._unmount_prompt(approval)
         self._approval = None
 
     def _allow_approvals_again(self) -> None:
@@ -3088,6 +3909,15 @@ class OperatorApp(App[None]):
 
     def _clear_transcript(self) -> None:
         self._transcript_view().clear_blocks()  # fires the on_clear hook
+        # Same reason as the session swap: the rows those references point at
+        # have just been removed, and a delivery landing afterwards must not
+        # try to settle widgets that are no longer in the transcript. The
+        # messages themselves are unaffected — `/clear` empties the screen, not
+        # the engine's queue — so the delivery still happens, it just has no row
+        # left to report it on. The rows still WAITING for a later turn's
+        # delivery are removed by the same clear and go for the same reason.
+        self._queued_steer_notices.clear()
+        self._deferred_steer_notices.clear()
         # ``ends_empty_state=False``: the receipt reports on the CLEAR, so the
         # session has not started talking and the splash the clear just restored
         # must survive it. Going through ``_append_block`` rather than straight to
@@ -3434,7 +4264,20 @@ class OperatorApp(App[None]):
             # the user is waiting for, and below `warning`, which is an alarm this
             # is not. Three warning-tinted rows on one frame for routine receipts
             # is how the loudest ink in the palette stops meaning anything.
-            self._append_block(NoticeBlock("queued — sends when this step finishes", "note"))
+            # Held, not just appended: this row is a promise about the future
+            # ("sends when this step finishes") and the reference is what lets
+            # `on_steering_delivered` settle it into a statement of fact once
+            # the engine actually takes the message. Without that, the row went
+            # on saying `queued` for the rest of the session and the agent's
+            # eventual reply was the only evidence it had ever been delivered.
+            #
+            # A LIST because a user can queue several messages while one tool
+            # runs, and the engine delivers whatever has accumulated at the next
+            # boundary — all of them, together. Settling only the newest would
+            # leave the earlier rows lying.
+            queued = NoticeBlock(QUEUED_STEER_NOTICE, "note")
+            self._append_block(queued)
+            self._queued_steer_notices.append(queued)
             # Still worth a title: the steering message can be the first thing
             # in the conversation that actually says what the task is.
             self._maybe_name_conversation(text)
@@ -3821,7 +4664,7 @@ class OperatorApp(App[None]):
                 self._status.update(
                     subagents=agents,
                     jobs=jobs,
-                    cost=format_cost(total) if total else None,
+                    cost=self._spend_text(total) or None,
                 )
         # The band's belt to the event stream's suspenders: elapsed time and
         # job status move with no Subagent*/tool-end event at all, so the 1 Hz
@@ -3830,6 +4673,121 @@ class OperatorApp(App[None]):
         # free — and never raises, since a status surface may not take the app
         # down (see the panels' own docstrings).
         self._refresh_band()
+
+    def _sync_band_inset(self) -> None:
+        """Give the band its top inset only while it actually holds a slot.
+
+        See ``#band.has-slot`` in the stylesheet for what the row is for. The
+        toggle is here because visibility is a runtime fact: both panels hide
+        themselves when their store is empty, and CSS cannot express "pad only
+        if a child is displayed". Padding a container whose children are all
+        hidden still reserves the row, which on the boot splash is a bare
+        surface strip in a composition measured to the row.
+
+        Never raises: the band is chrome, and a status surface must not be able
+        to take the app down (the same posture as the panels' own ``sync``).
+        """
+        try:
+            band = self.query_one("#band")
+            screen_height = self.screen.size.height
+        except Exception:  # not composed yet (early boot), or no band on this host
+            return
+        docked = any(
+            panel is not None and panel.display
+            for panel in (self._subagent_panel, self._todo_panel)
+        )
+        # DOCKED IS THE WHOLE CONDITION, and getting here took two wrong turns
+        # worth recording, because both look like the careful choice.
+        #
+        # The row can only be afforded if some slot pays for it, and only
+        # `TodoPanel` has a row budget to pay from — `SubagentPanel` mounts one
+        # row per job unconditionally. So the first attempt gated the inset on a
+        # screen-height threshold and the second on measuring whether the band
+        # still fit. Both made it WORSE, because every such test reads heights
+        # that are one layout out of date at exactly the moment a panel appears:
+        # the answer flips between the frame that paints and the frame after it,
+        # and the user sees the dock jump. Measured over 90 configurations
+        # (screen heights 12-40 x todo-only / subagent-only / both):
+        #
+        #     unconditional  : 0 reflowing cells, 25 overflowing
+        #     fit-checked    : 4 reflowing cells, 29 overflowing
+        #     main (no inset): 0 reflowing cells, 29 overflowing
+        #
+        # The conditional version caused the motion it was written to prevent
+        # AND overflowed more often, because withholding the row leaves the todo
+        # panel budgeting for a row it then has to give back. Unconditional is
+        # both stiller and tighter than either.
+        #
+        # The overflow that remains is `SubagentPanel`'s own and PRE-DATES this
+        # row: it has no row cap, so a long enough child list overruns the
+        # screen on `main` too, in the same cells. This change makes that
+        # strictly better rather than worse; the real fix is a row budget and a
+        # `… N more` line on that panel, which is its own change.
+        # The one exception is a SCREEN-HEIGHT floor, and it is safe where the
+        # fit check was not for a specific reason: the screen's height does not
+        # change between the frame that paints and the frame after it, so this
+        # test cannot flip and cannot reflow. Below a 10-row screen the dock
+        # already exceeds the terminal on its own — `#input-shell` is five rows
+        # and the transcript's padding two more, with `TodoPanel` clamped at its
+        # `_MIN_BODY_ROWS` floor — so the row has nowhere to come from and costs
+        # a clipped list. Swept over 100 configurations: with this floor the
+        # change overflows in 28 cells against `main`'s 32 — a strict subset,
+        # fixing four and introducing none — where an unconditional row
+        # overflowed in 33 and the measured fit checks in 29 WITH reflow.
+        #
+        # The second half of the gate is the same shape and covers the case the
+        # height alone misses: a SUBAGENT list long enough to fill the screen by
+        # itself. `SubagentPanel` has no row cap — it mounts one row per job —
+        # so on those screens the dock is already at the edge and the inset is
+        # the row that tips it over. Swept over 112 cells (heights 13-40 x 1-10
+        # children), A/B'd against the identical frame with the class forced
+        # off: the inset causes overflow in five of them, all of the shape
+        # "children + chrome ~= screen".
+        #
+        # Gated on the JOB COUNT rather than on the panel's measured height,
+        # for the reason the fit checks were removed: a count is known
+        # synchronously and cannot change between the frame that paints and the
+        # frame after it, so it cannot flip and cannot reflow. The budget it is
+        # compared against is the same one `TodoPanel` reasons with — the dock's
+        # fixed rows plus the panel's own chrome.
+        band.set_class(
+            docked
+            and screen_height > MIN_BAND_INSET_SCREEN_ROWS
+            and self._subagent_rows_leave_room(screen_height),
+            "has-slot",
+        )
+
+    def _subagent_rows_leave_room(self, screen_height: int) -> bool:
+        """True unless the subagent list is already close to filling the screen.
+
+        ``SubagentPanel`` mounts one row per task job with no cap of its own
+        (unlike ``TodoPanel``, which budgets against the screen), so a long
+        enough child list overruns the dock without any help from the inset —
+        that overflow is this app's on ``main`` too and is out of scope here.
+        What IS in scope is not making it worse, and the inset's row is exactly
+        what tips a list that currently just fits.
+
+        Counted, not measured. A job count is available synchronously and cannot
+        change between the frame that paints and the frame after it; every
+        version of this gate that read a widget's height instead flipped
+        mid-repaint and showed the user a moving dock.
+
+        ``_SUBAGENT_DOCK_ROWS`` is what the column spends around the list: the
+        composer and its status band, the transcript's own padding rows, the
+        panel's caption, its slot rhythm row, and one row of conversation, which
+        is the floor below which the dock has taken the screen.
+        """
+        panel = self._subagent_panel
+        if panel is None or not panel.display:
+            return True
+        jobs = getattr(self._session, "jobs", None)
+        if jobs is None:  # reduced hosts, or before the session is adopted
+            return True
+        try:
+            rows = len([job for job in jobs.list() if getattr(job, "type", "") == "task"])
+        except Exception:  # unreadable ledger; nothing to protect against
+            return True
+        return rows + _SUBAGENT_DOCK_ROWS < screen_height
 
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
@@ -3840,10 +4798,44 @@ class OperatorApp(App[None]):
         treat a missing manager as empty).
         """
         session = self._session
-        if self._subagent_panel is not None:
-            self._subagent_panel.sync(session)
-        if self._todo_panel is not None:
-            self._todo_panel.sync(session)
+        # Three steps, and the order is load-bearing rather than tidy.
+        #
+        # A panel's own `sync` is what decides whether it is displayed at all
+        # (its store went from empty to non-empty), and the band's inset exists
+        # only while something is docked — so visibility has to be settled
+        # before the inset can be. But the inset also SPENDS one of the rows
+        # `TodoPanel` sizes its list against, so the budget has to be settled
+        # before the list is painted. Those two orderings conflict, and doing
+        # only one of them is what produced a visible reflow: the list appeared
+        # at its pre-inset height and lost a row on the following tick.
+        #
+        # Resolved by paying for a second `sync`: settle visibility, settle the
+        # inset from it, then repaint against the budget that results. Verified
+        # necessary rather than assumed — with a single pass the todo list
+        # paints 4 rows against a settled budget of 3 at 100x14 and corrects on
+        # the next tick, which is a row of visible reflow.
+        #
+        # The second pass is cheap but NOT free, and the difference is worth
+        # stating because a reader will be tempted to delete one of them:
+        # Several passes, because the quantities here feed each other: a
+        # panel's visibility decides whether the band takes its inset row, the
+        # inset is one of the rows `TodoPanel` budgets against, and that budget
+        # decides how tall the panel is. One pass leaves the todo list a row too
+        # tall on the frame a panel appears — the reflow this repeat exists to
+        # remove — and a third settles the both-panels case, where the subagent
+        # panel appearing moves the todo panel's sibling term in the same tick.
+        #
+        # Cheap: `TodoPanel` holds an equality guard over (contents, budget) and
+        # returns immediately when neither moved, so the passes after the state
+        # settles cost one comparison. `SubagentPanel` has no such guard on its
+        # non-empty path (measured ~0.005 ms/pass), which is a small price for a
+        # first frame that does not move.
+        for _ in range(_BAND_SETTLE_PASSES):
+            if self._subagent_panel is not None:
+                self._subagent_panel.sync(session)
+            if self._todo_panel is not None:
+                self._todo_panel.sync(session)
+            self._sync_band_inset()
         # The open subagent page rides the SAME tick, for the same reason: a
         # child's elapsed time and its last tool both move with no event, and
         # a page that only advanced on relayed events sat frozen through every
@@ -3856,6 +4848,23 @@ class OperatorApp(App[None]):
         # input into it. `sync_layout` is a no-op when the measurement has not
         # moved.
         self.call_after_refresh(self._sync_overlay_layout)
+        # A live prompt rides it too, as a BACKSTOP rather than as its primary
+        # trigger. The card's footer is derived from state the card does not
+        # own — whether it holds focus, and whether the composer holds a draft —
+        # and neither emits anything the card hears, so "correct in the model,
+        # stale on screen" arrived three review rounds running on three
+        # different inputs. Each was fixed by adding one more explicit trigger,
+        # which is a fix per input and leaves the next one to be found by a
+        # reviewer. This asks the card whether what it is showing is still what
+        # it would draw, so a missed trigger is a frame late instead of
+        # permanently wrong. It is a no-op on every tick where nothing moved.
+        prompt = self._live_prompt()
+        repaint_if_stale = getattr(prompt, "repaint_if_stale", None)
+        if callable(repaint_if_stale):
+            try:
+                repaint_if_stale()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not re-check the live prompt", exc_info=True)
 
     def _sync_overlay_layout(self, *, force: bool = False) -> None:
         """Re-measure the floating cards against the live screen and dock.
@@ -3885,6 +4894,53 @@ class OperatorApp(App[None]):
         """
         if self._aside_is_open():
             self.call_after_refresh(self._sync_overlay_layout)
+        # A live prompt's footer names a DIFFERENT set of keys depending on
+        # whether the composer holds a draft, because the routing stands down
+        # on a non-empty buffer — and nothing else repaints on a keystroke.
+        # `_repaint` fires on focus, resize, answer and advance; typing is none
+        # of those, so the card went on advertising `1-2 answer` while `1` was
+        # being typed into the buffer, and `y/n/A answer` on a live `rm -rf`
+        # gate at a moment when `y` is a text character (F7, agent review round
+        # 5). Same shape as D13 one axis over: the model was right and the
+        # pixels were stale.
+        prompt = self._live_prompt()
+        remeasure = getattr(prompt, "remeasure", None)
+        if callable(remeasure):
+            try:
+                remeasure()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not repaint the live prompt", exc_info=True)
+        # Emptying the composer hands the keyboard back to the question.
+        #
+        # The card yields focus to a draft on mount (D12), and for most
+        # questions that costs nothing because the answer keys are routed. A
+        # MULTI-SELECT has no routed keys at all — it is answered by Space and
+        # Enter, which the composer owns — so a multi-select arriving over a
+        # draft was answerable only by mouse or by abandoning it: `space`, the
+        # digits, `enter`, the arrows and `tab` all went to the composer, and
+        # `shift+tab` is bound to `cycle_effort` (D17, design round 5). That is
+        # a regression from anchoring the card, which was a `ModalScreen` and
+        # simply held the keyboard.
+        #
+        # NOTE: focus is NOT handed to the card here, on any buffer state.
+        #
+        # Two rounds of trying to infer the moment the user is "done typing"
+        # produced two data-loss defects, because every candidate signal is
+        # ambiguous. Keyed on the buffer being EMPTY, sending a message handed
+        # the caret over and the user's next message answered the question
+        # (F9). Keyed on the user DELETING to empty, REWORDING did the same:
+        # clear the line to retype it, and the next `space` ticks an option
+        # while the retyped message goes nowhere — measured as
+        # `{'rollout': ['Backfill from the audit log']}`, an answer never
+        # chosen, with the message lost (D18, design round 6).
+        #
+        # Both had the same shape: a focus change the user did not ask for,
+        # arriving at the moment they were least likely to be watching, with a
+        # destructive next keystroke. There is no better signal to find — the
+        # gesture for "I have finished typing and want to answer" is not
+        # distinguishable from "I am mid-edit" by looking at the buffer. So the
+        # card asks for the keyboard explicitly instead (Tab, advertised in the
+        # footer), which cannot arrive at a moment the user did not choose.
 
     def _open_subagent_view(self, job_id: str) -> None:
         """Enter the full-page subagent view for one task job.
@@ -6820,7 +7876,32 @@ class OperatorApp(App[None]):
         cost_text: str | None = None
         cost = self._cost_for(message.usage)
         if cost is not None:
-            self._total_cost += cost
+            # Only the REMAINDER. `on_context_usage_reported` has been billing
+            # this turn's calls as they landed so the segment moves while the
+            # agent works; this figure prices the whole turn and supersedes the
+            # running one, so adding it whole would count every already-billed
+            # call twice.
+            remainder = cost - self._turn_accrued_cost
+            if remainder < 0:
+                # The floor is the right BEHAVIOUR — a lifetime spend counter
+                # that walks backwards is worse than one that is slightly high —
+                # but it is not a non-event, so it is not swallowed. It means the
+                # two paths disagreed about the same turn: `agent_end` sums only
+                # the messages it carries, and a mid-turn compaction's survivor
+                # filter can drop messages this app already billed live. Logged
+                # so the accounting bug behind it is discoverable instead of
+                # sitting invisibly on the session's total.
+                logger.debug(
+                    "turn total %.6f is below the %.6f already accrued; keeping the accrued figure",
+                    cost,
+                    self._turn_accrued_cost,
+                )
+            self._total_cost += max(0.0, remainder)
+        # The turn is over either way, so the per-call ledger closes here rather
+        # than only on the path that priced something: a turn whose cost came
+        # back unpriceable must not leave its accrual standing to be subtracted
+        # from the NEXT turn's total.
+        self._turn_accrued_cost = 0.0
         # Fold in whatever the children have spent BEFORE reading the total: a
         # turn that delegated has almost certainly moved their figures, and the
         # 1 Hz poll would otherwise be what first showed it.
@@ -6839,7 +7920,7 @@ class OperatorApp(App[None]):
             # returns None for a dead session, so without this clause the leftover
             # dict alone would repaint the dead conversation's total into a band
             # that was just emptied on purpose.
-            cost_text = format_cost(total)
+            cost_text = self._spend_text(total)
         elif message.usage is not None and getattr(message.usage, "input_tokens", 0):
             # D20: the turn billed tokens but pricing is unknown — render an
             # explicit "unavailable" so the segment's absence reads as that,
@@ -6865,6 +7946,18 @@ class OperatorApp(App[None]):
             # N+1 rows when several tools were running.
             self._append_block(NoticeBlock("interrupted", "warning"))
         self._interrupted_cards = 0
+        # EVERY turn end reconciles its queued rows, because the invariant is
+        # simply stated: a row still held when a turn ends is one this turn did
+        # not deliver. What leaves one behind is an ABORT or a stream error:
+        # both return from the run before the outer loop's yield boundary, which
+        # is where `_collect_yield_injections` drains. A turn that ends cleanly
+        # — even one the model answers with no tool calls at all — does reach
+        # that boundary and does drain (verified against the real `AgentLoop`:
+        # clean turn -> one SteeringDelivered, queue empty; aborted mid-stream
+        # -> no event, message still queued). The reconciliation runs on every
+        # path regardless, because "held when the turn ended" is a fact this
+        # handler can check and "which boundary the loop reached" is not.
+        self._settle_queued_steer_notices_unsent()
         # LAST, and only after the turn's outcome is known, because the outcome
         # decides which of the three notifications this is:
         #
@@ -7076,6 +8169,46 @@ class OperatorApp(App[None]):
             if cost is not None:
                 self._subagent_costs[job.id] = cost
 
+    def _spend_text(self, total: float | None = None) -> str:
+        """The session's spend as the band should SPELL it, mark included.
+
+        Every writer of the cost cell goes through here, because the mark is a
+        property of the FIGURE and not of the moment one particular caller
+        happens to render it. Five sites write that cell — turn end, the per-call
+        accrual, the 1 Hz subagent harvest, `/reload`'s reconciliation and the
+        restore itself — and when only the restore knew about the mark, the
+        other four silently stripped it: a resumed session's honest `≥$2.10`
+        became a bare `$2.60` the moment a child reported spend, and `/reload`
+        repainted the identical floor unmarked, on a command whose whole
+        contract is that it changes nothing about the conversation.
+
+        The mark stays until a figure is no longer a floor, which is not the
+        same as "until something else is added to it": a restored floor plus a
+        real turn is still a floor, just a larger one. Only a session whose
+        spend was accrued entirely in this process is exactly known.
+
+        Zero spends NO segment, and picking that spelling settled a genuine
+        disagreement rather than ratifying a majority. Before this helper the
+        five callers had four different zero behaviours: `/reload`'s
+        reconciliation wrote `""` (the only explicit empty), the 1 Hz subagent
+        harvest passed `None` — which
+        :meth:`~local_operator.tui.widgets.status_line.StatusLine.update` reads
+        as "do not write this segment", leaving whatever was there standing, NOT
+        as an empty — turn end reached `format_cost(0.0)` and printed `$0.0000`,
+        and the restore and per-call accrual could not reach zero at all because
+        a truthiness guard returned first, so they expressed no opinion.
+
+        Only one site had a considered zero policy, and this follows it, because
+        it is the one this codebase argues for in its own words: see
+        :func:`~local_operator.tui.costs.turn_cost`, where a confident `$0.0000`
+        over billed tokens is called the more expensive lie. An unpriced model
+        reaching the band as `0.0` is exactly the case that would print it.
+        """
+        spend = self._spend_total() if total is None else total
+        if not spend:
+            return ""
+        return f"{RESTORED_COST_PREFIX if self._spend_is_floor else ''}{format_cost(spend)}"
+
     def _spend_total(self) -> float:
         """Everything this session has spent: its own turns plus its children's.
 
@@ -7193,20 +8326,40 @@ class OperatorApp(App[None]):
         self._refresh_working_activity()
 
     def on_context_usage_reported(self, message: ContextUsageReported) -> None:
-        """Move the context reading DURING a turn, not only when it ends.
+        """Move the context reading AND the cost DURING a turn, not only at its end.
 
         An agentic turn is many model calls over many minutes, and each one
         reports the context it ran against. Waiting for ``agent_end`` meant the
         band showed the pre-turn size for the whole time the agent was working
         — the exact stretch a user watches it for. Reported as exact, because
         it is the provider's own number.
+
+        Money moves on the same signal and for the same reason. Cost used to
+        appear only when the whole turn settled, so a brand-new session's FIRST
+        turn showed no cost at all while it ran — reported from the field as
+        "the cost doesn't start tracking until after the second message". A turn
+        that spends ten minutes in tools is at its most expensive precisely
+        while the segment is empty, and an empty segment reads as free.
+
+        ``_turn_accrued_cost`` is what keeps the two writers honest. This one
+        pays per call as the calls happen; ``on_turn_ended`` prices the turn as
+        a whole and is authoritative (it sums every call, including any this
+        never saw). Recording what was already taken lets the end add only the
+        REMAINDER instead of billing the turn twice.
         """
         assert self._status is not None
-        self._status.update(
-            context_tokens=message.context_tokens,
-            context_is_estimate=False,
-            context_window=_context_window(self._session),
-        )
+        if message.context_tokens > 0:
+            self._status.update(
+                context_tokens=message.context_tokens,
+                context_is_estimate=False,
+                context_window=_context_window(self._session),
+            )
+        cost = self._cost_for(message.usage)
+        if not cost:
+            return
+        self._total_cost += cost
+        self._turn_accrued_cost += cost
+        self._status.update(cost=self._spend_text())
 
     def on_tool_composing(self, message: ToolComposing) -> None:
         """Show the call the model is still dictating (TUI-026).
@@ -7308,6 +8461,121 @@ class OperatorApp(App[None]):
 
     def on_notice_posted(self, message: NoticePosted) -> None:
         self._append_block(NoticeBlock(message.text, message.kind))
+
+    def _settle_queued_steer_notices_unsent(self) -> None:
+        """Retire queued-steer rows the turn that just ended did not deliver.
+
+        The delivery receipt only fires when ``_drain_steering`` actually takes
+        messages, and two paths end a turn without one: the turn was interrupted
+        (Ctrl+C) or it failed. Both return from the run before the outer loop's
+        yield boundary, which is where the queue would have been drained, so
+        both leave a row promising a delivery the app has no receipt for — the
+        defect the receipt exists to prevent, reached by every path that is not
+        the delivery path.
+
+        ONE message for both, because from the user's side they are one fact:
+        the message is still queued (``abort`` stops the run without draining
+        the queue) and goes with their next message. Naming the cause in the row
+        was tried and removed — it restated the ``interrupted`` or error notice
+        sitting a row below it, cost the only string in the set that wraps under
+        61 columns, and was simply wrong on the error path, where nobody stopped
+        anything.
+
+        ``note``, the weight the row already had: the state has not got worse,
+        so the row has no business getting louder — and the loud ink is already
+        spent, once, on the notice that explains why the turn ended.
+
+        The rows are HANDED ON rather than dropped. `still queued — sends with
+        your next message` is still a promise about the future, and it is the
+        one promise in the set that used to be kept off screen: the message goes
+        at the next turn's first boundary, the engine says so, and a row nothing
+        holds cannot hear it. The user then watched the agent act on the
+        instruction with the row above still reading `still queued` (issue #151).
+        """
+        if not self._queued_steer_notices:
+            return
+        for block in self._queued_steer_notices:
+            try:
+                block.restate(DEFERRED_STEER_NOTICE, "note")
+            except Exception:  # a receipt must never take the app down
+                logger.debug("queued-steer notice could not be retired", exc_info=True)
+        # APPENDED, not prepended: a turn cannot end holding rows queued against
+        # a turn that has not started, so everything already deferred is older
+        # than everything being handed over. See `_deferred_steer_notices` for
+        # why that order is the one the engine settles in.
+        self._deferred_steer_notices.extend(self._queued_steer_notices)
+        self._queued_steer_notices.clear()
+
+    def on_steering_delivered(self, message: SteeringDelivered) -> None:
+        """Settle the rows for the messages this delivery actually took.
+
+        The engine has taken those messages into context, so the promise those
+        rows were making has come true and they say so — in place, in the past
+        tense. Appending a second notice instead would leave the stale `queued`
+        claim on screen above its own correction, and spend a row doing it.
+
+        ``count`` bounds it, and the OLDEST rows settle first, because the drain
+        is not always the whole queue: it awaits a disk append per message, and
+        a message steered during that await lands after the ``while`` has
+        already exited. It is genuinely still queued and will go at the next
+        boundary, so settling its row here would claim a delivery that has not
+        happened. FIFO matches the queue's own order, so "the first ``count``
+        rows" and "the messages that went" are the same set — across BOTH held
+        lists, which is why they concatenate here; see
+        `_deferred_steer_notices` for why deferred rows lead.
+        """
+        if not self._deferred_steer_notices and not self._queued_steer_notices:
+            return  # a delivery for rows this app is no longer holding
+        # Defensive bounds: a producer that omits `count` (or sends a nonsense
+        # one) must not settle nothing, and must not settle more rows than are
+        # held. One is the floor because a delivery event means at least one
+        # message went.
+        try:
+            count = int(getattr(message, "count", 1) or 1)
+        except Exception:
+            # `Exception`, not a list of the types that came to mind. The first
+            # attempt named `TypeError`/`ValueError` and still died on
+            # `float("inf")`, which raises `OverflowError` — a value from a
+            # producer this app does not own found the one gap in a guard
+            # written precisely because the producer is not ours. Enumerating
+            # failure modes is how that gap reappears; the surrounding handlers
+            # all take the broad posture for the same reason.
+            # A receipt must never take the app down, and this handler is one
+            # `int()` away from being the exception to that: the field crosses a
+            # thread boundary from a producer this app does not own. One
+            # delivery is the safe reading — the event means at least one
+            # message went.
+            logger.debug("steering delivery reported an unusable count", exc_info=True)
+            count = 1
+        held = self._deferred_steer_notices + self._queued_steer_notices
+        taken = max(1, min(count, len(held)))
+        settled, remaining = held[:taken], held[taken:]
+        # Split back apart by MEMBERSHIP rather than by arithmetic on `taken`:
+        # the lists were concatenated for ordering only, and each survivor goes
+        # back to whichever list it came from, because the two mean different
+        # things. A deferred row has already been restated and must not be
+        # restated again at the next turn end; a queued row is still promising
+        # the current turn and must be. Arithmetic gets this right only while
+        # `taken == count` and the deferred list is consumed whole — the
+        # defensive coercion above exists precisely because that cannot be
+        # assumed of a field this app does not produce.
+        #
+        # A set of the blocks themselves: `NoticeBlock` inherits identity
+        # equality and hashing from `object` (verified: two rows with identical
+        # text compare unequal and occupy two slots in a set), so membership
+        # here is identity, which is what this needs.
+        surviving = set(remaining)
+        self._deferred_steer_notices = [
+            block for block in self._deferred_steer_notices if block in surviving
+        ]
+        self._queued_steer_notices = [
+            block for block in self._queued_steer_notices if block in surviving
+        ]
+        for block in settled:
+            try:
+                block.restate(SENT_STEER_NOTICE, "success")
+            except Exception:  # a receipt must never take the app down
+                logger.debug("queued-steer notice could not be settled", exc_info=True)
 
     def on_compaction_started(self, message: CompactionStarted) -> None:
         self._append_block(NoticeBlock("compacting context…", "info"))
@@ -7424,6 +8692,49 @@ class OperatorApp(App[None]):
         # holding ids past it would let a later batch's guard skip a child that
         # really is running. Cleared wherever the flag it serves is cleared.
         self._settled_child_ids.clear()
+
+
+def slot_rows(slot: Any) -> int:
+    """Rows a docked band slot occupies, measured if possible and predicted if not.
+
+    ``outer_size.height`` is the truth once Textual has arranged the slot, and it
+    is ZERO for one that has just been un-hidden — which is every mid-session
+    appearance of a panel, not a boot-only case. `TodoPanel._band_sibling_rows`
+    reads this at exactly that moment (the todo tool's own event,
+    `SubagentStarted`), so a measurement-only reading makes the first painted
+    frame disagree with the settled one: the dock lands flush and jumps down a
+    row when the 1 Hz poll re-asks, ~0.46 s later on the real event path.
+
+    The prediction asks the panel, because each already knows what it is about
+    to paint — the todo panel from its own row budget, the subagent panel from
+    the rows it has mounted — and adds the slot's own rhythm row
+    (`.band-slot { padding: 0 0 1 0 }`) so both branches mean the same thing.
+    A panel that answers neither contributes 1: it is displayed, so it is at
+    least a row, and under-counting is what puts a row back into the transcript
+    that the dock is about to take.
+    """
+    try:
+        measured = int(slot.outer_size.height)
+    except Exception:  # not a laid-out widget (reduced hosts)
+        measured = 0
+    predicted = 0
+    predict = getattr(slot, "predicted_rows", None)
+    if callable(predict):
+        try:
+            # `cast` because `getattr` on a duck-typed slot widens to `object`;
+            # the `except` below is what actually guards a bad implementation.
+            rows = cast(Callable[[], int], predict)()
+            predicted = max(1, int(rows)) + _BAND_SLOT_RHYTHM_ROWS
+        except Exception:  # a prediction must never break a repaint
+            logger.debug("band slot could not predict its height", exc_info=True)
+    # The LARGER of the two, never "measured if it looks measured". A slot is
+    # not simply arranged-or-not: mid-layout it reports a PARTIAL height, and
+    # trusting that over the prediction is a race — observed as an intermittent
+    # overflow where a 12-row subagent list measured 3, the inset was granted on
+    # the strength of it, and the rows then arrived. Both terms describe the same
+    # slot, so the larger is the safe one: it can only ever withhold the inset,
+    # which costs a blank row, where the smaller costs a scrollable screen.
+    return max(measured, predicted, 1)
 
 
 def _model_spec(session) -> Any | None:

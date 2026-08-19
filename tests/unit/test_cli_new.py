@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import subprocess
 import sys
 import types
@@ -1061,3 +1062,70 @@ def test_a_background_job_carries_the_session_it_was_told_to_resume() -> None:
 
     # Nothing is emitted when nothing was asked for.
     assert "--resume" not in build_worker_argv("hi", ExecArgs())
+
+
+def test_a_bare_resume_classifies_sessions_before_resolving_latest(tmp_path, monkeypatch) -> None:
+    """``--resume`` is answered in the CLI, BEFORE any session is built.
+
+    The session factory also backfills, but it runs when a session is
+    constructed — which is after this branch has already picked a directory.
+    So on the first launch after an upgrade, a bare ``--resume`` resolved
+    ``@latest`` against an unclassified store and reopened whichever delegated
+    run happened to finish last: the CLI spelling of the exact bug the picker
+    fix is about.
+    """
+    import json
+    import os
+
+    from local_operator import resume as resume_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    sessions = tmp_path / "sessions"
+
+    def seed(name: str, opening: str, when: int) -> None:
+        directory = sessions / name
+        directory.mkdir(parents=True)
+        entry = {
+            "id": "e1",
+            "ts": 0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": opening}]},
+        }
+        transcript = directory / resume_mod.TRANSCRIPT_NAME
+        transcript.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+        os.utime(transcript, (when, when))
+
+    # The child settles AFTER the parent's last turn, which is the ordinary
+    # case: a delegated review outlives the turn that launched it.
+    seed("mine00000000", "fix the resume picker", 1_000_000)
+    seed("child0000000", "[role: reviewer]\nreview the diff", 2_000_000)
+
+    # Neither directory is marked, exactly like a store that predates the fix.
+    assert not any((path / resume_mod.ORIGIN_NAME).exists() for path in sessions.iterdir())
+
+    # Drive the CLI branch itself rather than re-implementing its order here:
+    # the defect was entirely in WHICH function ran first, so a test that
+    # calls them in the right order by hand cannot see it. `main` is stopped
+    # right after the resume block by a sentinel raised from the next call it
+    # makes, leaving `args.resume` holding what the branch resolved.
+    resolved: list[str] = []
+
+    class _Stop(Exception):
+        pass
+
+    monkeypatch.setattr(cli, "setup_cross_platform_environment", lambda: None)
+    monkeypatch.setattr(cli.sys, "argv", ["local-operator", "--resume"])
+    original = resume_mod.resolve_resume_id
+
+    def _record(config_dir, requested):  # noqa: ANN001, ANN202
+        value = original(config_dir, requested)
+        resolved.append(value)
+        raise _Stop
+
+    monkeypatch.setattr(resume_mod, "resolve_resume_id", _record)
+    with contextlib.suppress(_Stop, SystemExit, Exception):
+        cli.main()
+
+    assert resolved == [
+        "mine00000000"
+    ], f"a bare --resume reopened a subagent's transcript: {resolved}"
