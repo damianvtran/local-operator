@@ -92,10 +92,24 @@ _TITLE_CUSTOM_TYPE = "conversation_name"
 #: most likely to be hunting for a week later.
 #:
 #: Reading both ends rather than the whole file is what keeps the cost per
-#: picker row bounded on a 6 MB transcript. The middle can still hide a title
-#: only when a session was renamed mid-conversation AND then run long enough to
-#: bury that rename under a further 128 KB without ever being renamed again;
-#: that degrades to the opener, never to a wrong name.
+#: picker row bounded on a 6 MB transcript.
+#:
+#: **The known gap, stated honestly.** A rename made mid-conversation, then
+#: buried under a further 128 KB and never renamed again, falls between the two
+#: windows. The head still holds the ORIGINAL title, so that session is
+#: labelled with the name it was renamed *away from* rather than falling back
+#: to the opener. That is a stale name, and a stale name is stated with exactly
+#: the confidence of a correct one \u2014 so it is a real cost, not a rounding
+#: error, and this comment says so rather than claiming the scan can only ever
+#: miss.
+#:
+#: It is accepted for now because the alternative is reading whole transcripts
+#: on the picker's synchronous path (400 ms against 64 ms across a real store),
+#: and because the case requires a mid-session rename specifically: an
+#: auto-named session has its title at the head, and a session renamed near the
+#: end has it in the tail. If it proves to bite, the fix is to journal the
+#: title to a sidecar the way ``mark_session_origin`` does \u2014 one stat and one
+#: small read, no size dependence at all \u2014 rather than widening this window.
 TITLE_SCAN_BYTES = 131_072
 
 #: Matches a journalled title row in raw JSONL, tolerant of whitespace after

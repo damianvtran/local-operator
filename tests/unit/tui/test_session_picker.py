@@ -29,6 +29,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
     BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
+    GUTTER_CELLS,
     CARD_PADDING_ROWS,
     NAME_MIN_CELLS,
     PAGE_ROWS_MAX,
@@ -1073,8 +1074,16 @@ def test_the_marker_column_does_not_depend_on_what_is_scrolled_into_view() -> No
 
 def test_an_unfiltered_list_reserves_no_marker_column() -> None:
     """The reservation costs nothing when nothing matched, so an ordinary
-    open of the picker renders exactly as it did before the marker existed."""
+    open of the picker renders exactly as it did before the marker existed.
+
+    Asserted against the marked rendering rather than against another call
+    with the same arguments: comparing a no-match render to a no-match render
+    passes however the reservation behaves, which is a test that cannot fail.
+    """
     rows = [_row("abc123def456", "one"), _row("bbb222ccc333", "two")]
-    assert render_rows(rows, 0, 74, NOW)[0].plain == (
-        render_rows(rows, 0, 74, NOW, None, set())[0].plain
-    )
+    unmarked = render_rows(rows, 0, 74, NOW, None, set())[0].plain
+    marked = render_rows(rows, 0, 74, NOW, None, {"abc123def456"})[0].plain
+    # The name starts flush against the cursor gutter when nothing matched,
+    # and exactly the marker's width later when something did.
+    assert unmarked.index("one") == GUTTER_CELLS
+    assert marked.index("one") == GUTTER_CELLS + cell_len(BODY_MATCH_MARKER)
