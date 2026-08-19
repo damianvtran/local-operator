@@ -146,6 +146,34 @@ def _pad_cells(text: str, width: int) -> str:
     return text + " " * max(0, width - cell_len(text))
 
 
+def _wrap_cells(text: str, width: int) -> list[str]:
+    """Break ``text`` into lines of at most ``width`` CELLS, on word bounds.
+
+    Cells rather than characters for the same reason :func:`_pad_cells`
+    measures in them: a wide glyph occupies two, so a character-counted wrap
+    overflows the card on exactly the scripts that can least afford it.
+
+    A single word longer than the width is truncated rather than allowed to
+    run past the card, which is the only case where losing text beats breaking
+    the layout — every other case keeps all of the words and spends rows.
+    """
+    if width <= 0:
+        return [text]
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        candidate = f"{current} {word}" if current else word
+        if cell_len(candidate) <= width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        current = word if cell_len(word) <= width else truncate_cells(word, width)
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
 def plan_columns(
     rows: Sequence[SessionRow], width: int, ages: Sequence[str]
 ) -> tuple[int, int, int]:
@@ -624,7 +652,19 @@ class SessionPickerScreen(ModalScreen[str | None]):
         page = self._page_rows()
         counter: tuple[int, int, int] | None = None
         if not self._all:
-            out.append(RESUME_EMPTY_NOTICE, style=dim)
+            # WRAPPED to the measured width, not printed flat. Every other line
+            # in this card is bounded by the runtime width; this one was a
+            # constant, so it fitted the 74-cell ceiling and still overflowed
+            # the actual card on any narrow terminal — at 60 columns it was cut
+            # to "…subagent runs are", losing the clause that explains why the
+            # list is empty, which is the whole reason the wording changed.
+            # Wrapped rather than truncated for that reason: the explanation is
+            # the message, so it must survive the narrow case, not be the first
+            # thing dropped.
+            for index, line in enumerate(_wrap_cells(RESUME_EMPTY_NOTICE, width)):
+                if index:
+                    out.append("\n")
+                out.append(line, style=dim)
         elif not rows:
             # The header already echoes the query; repeating it here — and via
             # ``repr``, whose quoting flips on an apostrophe — said it twice in

@@ -926,21 +926,30 @@ def test_one_session_is_not_announced_as_1_sessions() -> None:
     assert "2 sessions" in plural
 
 
-def test_the_empty_notice_fits_inside_the_card() -> None:
-    """The notice is the card's own empty body, and the card is capped.
+@pytest.mark.asyncio
+async def test_the_empty_card_never_renders_wider_than_the_terminal() -> None:
+    """The empty body is the one line with no truncation behind it.
 
-    The first wording ran to 76 cells against a 74-cell cap and hung past the
-    rule at full width — much further on a narrow terminal, where every
-    neighbouring row sheds cells to fit. Measured rather than eyeballed,
-    because this is the one row with no truncation behind it.
+    Every other row is bounded by the width the card MEASURES; the notice was
+    a constant, so it satisfied the 74-cell ceiling and still overflowed the
+    real card on any narrow terminal — at 60 columns it was cut to
+    "…subagent runs are", losing the clause that explains why the list is
+    empty, which is the whole reason the wording changed.
+
+    Asserted against the TERMINAL width like the populated-rows guard above,
+    never against ``PICKER_MAX_WIDTH``: the ceiling is 74 while an 80-column
+    screen gives the card 70, so a constant-based assertion passes on a string
+    that overflows.
     """
-    from local_operator.tui.widgets.session_picker import (
-        PICKER_MAX_WIDTH,
-        RESUME_EMPTY_NOTICE,
-    )
-
-    assert cell_len(RESUME_EMPTY_NOTICE) <= PICKER_MAX_WIDTH
-
-    screen = SessionPickerScreen([], NOW)
-    for line in screen.render_lines_for_test():
-        assert cell_len(line) <= PICKER_MAX_WIDTH, line
+    for width in (60, 70, 80, 100, 120):
+        app = _PickerHost([])
+        async with app.run_test(size=(width, 30)) as pilot:
+            screen = await app.open_picker()
+            await pilot.pause()
+            lines = screen.render_lines_for_test()
+            for line in lines:
+                assert cell_len(line) <= width, (width, line)
+            # The explanation survives the narrow case rather than being the
+            # first thing dropped: it is what makes the empty state honest.
+            body = " ".join(line.strip() for line in lines)
+            assert "subagent runs are not listed" in body, (width, body)
