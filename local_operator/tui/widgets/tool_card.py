@@ -1555,7 +1555,7 @@ class ToolCard(TranscriptBlock):
         if self._state == "running":
             self._append_input_body(row, width)
             self._append_live_body(row, width)
-        elif self._diff:
+        elif self._state == "success" and self._diff:
             # A settled write/edit expands to its DIFF ALONE. The arguments are
             # the same change stated twice — `old_text`/`new_text` (or the
             # whole `content`) escaped into flat `\n`-ridden lines above a
@@ -1752,14 +1752,15 @@ class ToolCard(TranscriptBlock):
         # The `---`/`+++` file headers are dropped: the tool diffs one file's
         # before/after in memory, so difflib emits them NAMELESS (`--- ` /
         # `+++ `) and the path already heads the summary row. Two blank-label
-        # rows above every diff were pure chrome. Bound to exactly the headers
-        # difflib produces — a `-`/`+` content line can never start `--- `/
-        # `+++ ` here because content rows carry a single marker cell.
-        diff = [
-            line
-            for line in (self._diff or [])
-            if not (line.startswith("--- ") or line.startswith("+++ ") or line in ("---", "+++"))
-        ]
+        # rows above every diff were pure chrome. Stripped POSITIONALLY — the
+        # first two lines, and only when they are exactly the nameless header
+        # pair — never by pattern over the body: a removed content line that
+        # itself begins `--` (a SQL/Lua comment, say) renders as `--- …` inside
+        # the body, and a pattern filter would silently delete the very record
+        # this expansion now solely carries (review round 1, F1/D1).
+        diff = list(self._diff or [])
+        if len(diff) >= 2 and diff[0].rstrip() == "---" and diff[1].rstrip() == "+++":
+            diff = diff[2:]
         shown = diff[:EXPAND_MAX_LINES]
         for raw in shown:
             line = raw.rstrip()

@@ -300,9 +300,52 @@ def test_a_settled_edit_expansion_is_the_diff_alone() -> None:
     assert "old_text:" not in content
     assert "new_text:" not in content
     assert "path:" not in content
-    # …and no blank-label file headers.
-    assert "---" not in content
-    assert "+++" not in content
+    # …and no blank-label file header ROWS. Asserted per-line rather than by
+    # substring: a body line may legitimately contain or even start with
+    # `---`/`+++` (see the regression test below), so only the leading pair
+    # difflib emits is what must be gone.
+    lines = content.splitlines()
+    assert not any(line.strip() in ("---", "+++") for line in lines)
+
+
+def test_removed_lines_that_start_with_dashes_survive_the_header_strip() -> None:
+    """The header strip is positional, never a pattern over the diff body.
+
+    Regression for review round 1 F1/D1: a removed content line that itself
+    begins `--` (a SQL/Lua/Haskell comment) renders inside the body as
+    `--- old comment`, and a removed bare `--` renders as exactly `---`. A
+    pattern filter silently deleted both — the summary pill said `-2` while
+    the expansion showed no red line at all, and with the argument echo gone
+    the diff is the SOLE record of the removal.
+    """
+    card = ToolCard("t", "edit", {"path": "query.sql"})
+    card.mark_done(
+        "Edited query.sql: replaced 1 occurrence(s) of old_text.",
+        {
+            "path": "query.sql",
+            "added": 0,
+            "removed": 2,
+            "diff": [
+                "--- ",
+                "+++ ",
+                "@@ -1,4 +1,2 @@",
+                " SELECT 1;",
+                "--- old comment",
+                "---",
+                " SELECT 2;",
+            ],
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(80).plain
+    # Both removed lines are painted; only the two leading headers are gone.
+    assert "--- old comment" in content
+    body_lines = [line.strip() for line in content.splitlines()]
+    assert "---" in body_lines  # the removed bare `--` line survives
+    # The nameless header pair itself (rows before the @@ hunk) is absent:
+    # the first diff row painted is the hunk marker.
+    at = next(i for i, line in enumerate(body_lines) if line.startswith("@@"))
+    assert not any(line in ("---", "+++") for line in body_lines[:at])
 
 
 def test_a_running_edit_still_shows_its_arguments() -> None:
@@ -321,17 +364,27 @@ def test_a_running_edit_still_shows_its_arguments() -> None:
 
 
 def test_a_failed_edit_keeps_its_argument_block() -> None:
-    """A failed edit produced no diff; its args are the only record of intent.
+    """A failed edit's args are the only record of intent; diff-only must not apply.
 
     The error ("old_text not found") only makes sense next to the old_text
-    that was searched for, so the diff-only rule must not reach this state.
+    that was searched for. The diff-only branch therefore gates on the
+    SUCCESS state, not on diff presence (review round 1, F2): even if a
+    failing tool ever shipped a diff in its details, the failed card must
+    still paint its arguments and error, not a diff with no account of what
+    was attempted.
     """
     card = ToolCard("t", "edit", {"path": "notes.md", "old_text": "missing", "new_text": "x"})
-    card.mark_failed("old_text not found", "old_text not found (exact and whitespace-tolerant)")
-    assert card._diff is None
+    card.mark_failed(
+        "old_text not found",
+        "old_text not found (exact and whitespace-tolerant)",
+        # A diff in a FAILED result is unreachable from today's tools, but the
+        # branch must be gated by state, not by this payload's presence.
+        {"path": "notes.md", "added": 0, "removed": 0, "diff": ["@@ -1 +1 @@", "-a", "+b"]},
+    )
     card.toggle_expanded()
     content = card._build_content(80).plain
     assert "old_text: missing" in content
+    assert "old_text not found" in content
 
 
 def test_a_tool_without_a_diff_expands_to_its_raw_output() -> None:
