@@ -1249,9 +1249,36 @@ class AgentLoop:
             # request carries a ``tool_use`` with no ``tool_result`` and the
             # provider rejects the whole conversation — so an abort that races
             # a runner's first line must not be able to break the wire.
+            #
+            # The backfill also EMITS the end event, which it previously did
+            # not. Repairing `results_by_slot` alone keeps the wire legal but
+            # tells no consumer anything: a tool whose cleanup outran
+            # ``ABORT_DRAIN_TIMEOUT_S`` had its start event announced and no end
+            # event ever, so the API server holds that execution record
+            # IN_PROGRESS forever and never publishes a TOOL_END on its SSE
+            # stream (R2, agent review round 2). That is the same consumer
+            # damage `interruptible_runner`'s own cancellation handler exists to
+            # prevent — it closes the fast path, and the slow-cleanup path here
+            # reopened it. The TUI happens to survive either way because it
+            # retires orphaned cards at the turn boundary; nothing else does.
+            #
+            # Yielded rather than queued: the drain loop above has already
+            # broken out and nothing will read the queue again.
             for slot, item in enumerate(batch):
                 if results_by_slot[slot] is None:
-                    results_by_slot[slot] = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
+                    result = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
+                    results_by_slot[slot] = result
+                    if item.failure is None and item.tool is not None:
+                        # Only for calls that actually STARTED. A planning
+                        # failure parked its result up front and never emitted a
+                        # start event, so an end event for it would be the
+                        # mirror image of this bug.
+                        yield ToolExecutionEndEvent(
+                            tool_call_id=item.call.id,
+                            tool_name=item.tool.name,
+                            result=result,
+                            is_error=result.is_error,
+                        )
             results.extend(result for result in results_by_slot if result is not None)
         finally:
             if watcher is not None and not watcher.done():

@@ -3483,10 +3483,24 @@ class OperatorApp(App[None]):
         # question the agent asked is not an abort — and above the ordinary
         # stop, because by this point the user has already read the offer and
         # pressed again to take it.
+        # ...and only when no prompt is waiting on the user. The picker branch
+        # above gates on `_live_prompt()` for this reason; without the same
+        # guard here an APPROVAL raised after the offer was armed was outranked
+        # by the escalation, so one Esc cancelled every child on a press the
+        # user could reasonably have meant for the `rm -rf` prompt in front of
+        # them (R1, agent review round 2). `_live_prompt` ranks an unanswered
+        # approval first precisely because it is a permission gate the engine is
+        # blocked on and the most recently raised thing on screen; an armed
+        # offer is older than it by construction, and the older, cheaper-to-
+        # repeat gesture must not outrank the newer, unrecoverable one.
+        #
+        # The offer is NOT disarmed here: the user answers the prompt and their
+        # next press still escalates if it lands inside the window.
         if (
             self._stop_offered_at is not None
             and now - self._stop_offered_at < DOUBLE_STOP_WINDOW_S
             and session is not None
+            and self._live_prompt() is None
         ):
             self._stop_offered_at = None
             offered = self._stop_offer_count

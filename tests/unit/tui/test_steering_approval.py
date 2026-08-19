@@ -2710,3 +2710,44 @@ async def test_ctrl_c_says_where_the_draft_went() -> None:
         # And the exit ladder is still NOT armed by this press.
         assert not any("ctrl+c again" in row for row in painted)
         assert app.is_running
+
+
+@pytest.mark.asyncio
+async def test_an_armed_offer_never_outranks_a_waiting_approval() -> None:
+    """A permission gate takes Escape ahead of the escalation (R1).
+
+    Round 1's F5 was the ask picker outranking an approval; the escalation
+    branch was a second door to the same inversion. With the offer armed and
+    an `rm -rf /` approval on screen, Escape has to answer the PROMPT — the
+    thing the engine is blocked on and the most recently raised surface — not
+    silently destroy every delegated child on a press the user could
+    reasonably have aimed at the approval in front of them.
+
+    The offer survives unspent, so the next press still escalates.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        ask = await _booted_gate(pilot, session)
+        session.streaming = True
+        session.running_children = 2
+
+        pending = asyncio.ensure_future(ask("bash", "run: rm -rf /"))
+        for _ in range(100):
+            if isinstance(app.screen.focused, ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
+        assert app._live_prompt() is app._approval, "the approval is not the live prompt"
+
+        # Arm the ladder exactly as a first Esc during the turn would.
+        app._stop_offered_at = time.monotonic()
+        app._stop_offer_count = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+
+        assert (
+            session.subagent_cancels == []
+        ), "Escape escalated past a waiting approval and killed the subagents"
+        assert await asyncio.wait_for(pending, 2) is False, "the approval was not denied"
+        pending.cancel()

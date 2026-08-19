@@ -1411,3 +1411,72 @@ async def test_a_slow_tool_unwind_does_not_hold_the_turn_open():
     # Still paired, even though the tool never parked its own result.
     tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
     assert [m.tool_call_id for m in tool_messages] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_unwind_still_reports_the_tool_as_ENDED():
+    """Review round 2, R2. The drain timeout must not swallow the end event.
+
+    A tool whose cleanup outruns ``ABORT_DRAIN_TIMEOUT_S`` had its start event
+    announced and no end event ever: the backfill repaired the RESULTS so the
+    wire stayed legal, but emitted nothing, so a consumer holding execution
+    records by id kept that one IN_PROGRESS forever and never published a
+    TOOL_END on its stream. The TUI survives it by retiring orphaned cards at
+    the turn boundary; the API server does not.
+
+    That is the same damage ``interruptible_runner``'s cancellation handler
+    exists to prevent — it closes the fast path, and this closes the slow one.
+    """
+    started = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 2)  # outruns the budget
+            raise
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="stubborn", content=[TextContent(text="late")]
+        )
+
+    tool = AgentTool(
+        name="stubborn",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="stubborn", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=ABORT_DRAIN_TIMEOUT_S + 10)
+
+    starts = [e for e in events if isinstance(e, ToolExecutionStartEvent)]
+    ends = [e for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert len(starts) == 1, "the tool never announced its start"
+    assert len(ends) == 1, (
+        "the tool was announced as started and never as ended, so a consumer "
+        "holding it by id keeps that execution IN_PROGRESS forever"
+    )
+    assert ends[0].tool_call_id == starts[0].tool_call_id
+    assert ends[0].is_error, "an aborted tool must not be reported as a clean success"
