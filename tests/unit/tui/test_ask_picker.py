@@ -17,16 +17,21 @@ its own text agrees with the clip instead of catching it.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
+from textual.containers import Container
 
 from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import (
     ASK_MAX_WIDTH,
-    CARD_PADDING_ROWS,
+    ASK_PADDING_CELLS,
+    MIN_TRANSCRIPT_ROWS,
     OTHER_LABEL,
+    PROMPT_HEIGHT_SHARE,
     RECOMMENDED_TAG,
     AskPickerScreen,
 )
@@ -54,7 +59,12 @@ def _question(
 
 
 class _AskHost(App[None]):
-    """A host whose only job is to own the modal under test."""
+    """A host whose only job is to own the card under test.
+
+    Mounts it into a plain container rather than pushing a screen: the card is
+    dock chrome now, not a modal, and a host that pushed it as a screen would be
+    exercising a mounting path the app no longer uses.
+    """
 
     def __init__(self, questions: list[AskQuestion]) -> None:
         super().__init__()
@@ -62,12 +72,12 @@ class _AskHost(App[None]):
         self.answered: list[dict[str, list[str]] | None] = []
 
     def compose(self) -> ComposeResult:
-        return iter(())
+        yield Container(id="prompt-host")
 
     async def open_picker(self) -> AskPickerScreen:
-        screen = AskPickerScreen(self._questions)
-        self.push_screen(screen, self.answered.append)
-        return screen
+        card = AskPickerScreen(self._questions, self.answered.append)
+        await self.query_one("#prompt-host", Container).mount(card)
+        return card
 
 
 # --- answering --------------------------------------------------------------
@@ -396,7 +406,11 @@ async def test_no_row_overflows_the_card_at_any_width() -> None:
         async with app.run_test(size=(width, 30)) as pilot:
             screen = await app.open_picker()
             await pilot.pause()
-            budget = min(ASK_MAX_WIDTH, max(1, width - 4))
+            # Derived from the card's own padding rather than written as a
+            # literal: the two are one measurement, and a hardcoded `width - 4`
+            # silently described the old modal's `padding: 1 2` after the
+            # docked card moved to the dock's one-cell rail.
+            budget = min(ASK_MAX_WIDTH, max(1, width - ASK_PADDING_CELLS * 2))
             for line in screen.render_lines_for_test():
                 assert cell_len(line) <= budget, (width, line)
 
@@ -418,8 +432,13 @@ async def test_a_short_terminal_drops_descriptions_before_it_drops_options() -> 
         assert "why a" in roomy
         assert len(screen.visible_rows) == screen.row_count
 
+    # 20 rows rather than the 16 this used when the card was a modal. The
+    # number is not the contract; the ORDER is, and the order needs a height
+    # where the descriptions are unaffordable and the rows are not. An anchored
+    # card reserves the conversation's share as well as the composer's, so it
+    # reaches that band at a taller terminal than a card that took the screen.
     app = _AskHost([question])
-    async with app.run_test(size=(100, 16)) as pilot:
+    async with app.run_test(size=(100, 20)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
         cramped = "\n".join(screen.render_lines_for_test())
@@ -440,11 +459,20 @@ async def test_a_terminal_too_short_for_the_list_says_what_it_is_hiding() -> Non
         descriptions=("why a", "why b", "why c", "why d", "why e"),
     )
     app = _AskHost([question])
-    async with app.run_test(size=(100, 10)) as pilot:
+    # 12 rows rather than 10: the question is now bought before the windowing
+    # line, so at 10 the card correctly spends its last row on what is being
+    # asked and drops the count. The contract under test is "a windowed list
+    # says so when it can afford to", which needs a height where it can.
+    async with app.run_test(size=(100, 12)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
         text = "\n".join(screen.render_lines_for_test())
         assert len(screen.visible_rows) < screen.row_count
+        # The count is bought whenever the card can afford it AFTER the
+        # question. Where it cannot, the question wins and the count goes: a
+        # card that says how many answers it is hiding while hiding what the
+        # answers are TO is the worse of the two abbreviations (D1, design
+        # round 1). At this size both fit, so both are asserted.
         assert f"of {screen.row_count}" in text
         # And the window follows the cursor, so Enter can never take a row the
         # card did not draw — the `/resume` picker's bug, where the cursor sat
@@ -479,7 +507,12 @@ def _long_question(recommended: int | None = 1) -> AskQuestion:
 
 
 async def _real_app_card(size: tuple[int, int], questions: list[AskQuestion]):
-    """The card pushed onto a real ``OperatorApp``, with the stylesheet applied."""
+    """The card and a real ``OperatorApp``, with the stylesheet applied.
+
+    Returned unmounted; :func:`_show` puts it in the app's real prompt host.
+    The pair is kept (rather than mounting here) because every caller wants to
+    drive the app's own ``run_test`` context around it.
+    """
     from local_operator.tui.app import OperatorApp
     from tests.unit.tui.test_app_pilot import FakeSession
 
@@ -489,6 +522,124 @@ async def _real_app_card(size: tuple[int, int], questions: list[AskQuestion]):
         return session
 
     return OperatorApp(lambda: factory()), AskPickerScreen(questions)
+
+
+def _baseline_app():  # type: ignore[no-untyped-def]
+    """A real app with no prompt raised, for measuring the dock on its own.
+
+    The comparison every overflow assertion in this file needs: at the shortest
+    terminals the composer and status band already exceed the screen, so the
+    question is never "does anything overflow" but "does raising a question
+    make it worse".
+    """
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    return OperatorApp(lambda: _factory(FakeSession()))
+
+
+async def _seed_conversation(app, pilot, turns: int = 6) -> None:  # type: ignore[no-untyped-def]
+    """Put a real conversation in the transcript before measuring anything.
+
+    Load-bearing, not scene-setting. An app with an EMPTY transcript is still
+    in the BOOT layout, and `Screen.boot TranscriptView` drops the transcript's
+    padding from `1 0 1 1` to `0 0 0 1` — one vertical row instead of two. Every
+    geometry assertion in this file used to run in that state, so a card that
+    under-reserved the transcript by exactly one row measured clean at every
+    size, and the error only appeared once a user had said anything at all
+    (F2, agent review round 1).
+
+    A prompt over an empty transcript is also not a state worth pinning: the
+    agent asks because it is in the middle of something.
+    """
+    from local_operator.tui.widgets.assistant import AssistantBlock
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    for turn in range(turns):
+        app._append_block(UserBlock(f"turn {turn}: what should happen to the stale rows?"))
+        prose = AssistantBlock()
+        prose.update_text(f"answer {turn}: the audit log still has every row, so a backfill works.")
+        app._append_block(prose)
+    await pilot.pause()
+
+
+async def _settle(app, pilot) -> None:  # type: ignore[no-untyped-def]
+    """Pump until the screen's geometry stops moving.
+
+    Three CONSECUTIVE identical frames, not two: the transient after a mount or
+    a boot is itself two frames long (the pre-arrange height repeats once before
+    the dock re-arranges), so a two-frame agreement can match ON the transient
+    and return early. Every overflow assertion in this file compares two such
+    measurements, and both sides have to be settled or the comparison is between
+    a settled number and a mid-arrange one.
+    """
+    # Settles on a RESOLVED frame — one where nothing overflows — and falls
+    # back to a merely stable one for the sizes that genuinely cannot fit the
+    # composer at all (20x5 and under), where overflow is the settled state and
+    # the assertions compare against a no-prompt baseline instead.
+    #
+    # This used to need a much longer budget, and that was hiding a real defect
+    # rather than absorbing jitter: the card under-counted the dock by one row
+    # (it summed the dock's children instead of measuring the dock, missing the
+    # row the container spends on itself), so at some sizes the overflow was
+    # permanent and no amount of pumping cleared it. With that fixed every size
+    # in this file resolves on the first frame.
+    stable = 0
+    previous = None
+    for _ in range(30):
+        await pilot.pause()
+        size = tuple(app.screen.size)
+        virtual = tuple(app.screen.virtual_size)
+        if size == virtual:
+            return
+        stable = stable + 1 if (size, virtual) == previous else 0
+        previous = (size, virtual)
+        if stable >= 4:
+            return
+
+
+async def _show(app, pilot, card) -> None:  # type: ignore[no-untyped-def]
+    """Raise ``card`` through the app's OWN mounting path, and let it settle.
+
+    ``app._mount_prompt`` rather than a hand-rolled mount, because these tests
+    exist to catch what the real composition clips, and a helper that mounts
+    differently measures a layout the app never produces. Written by hand it
+    also set ``display`` on the host directly, which skipped the drawability
+    sync the app does — so the host kept a row for a card that had hidden
+    itself, and the test saw two rows of overflow that the app does not have.
+
+    The settling belongs HERE, not at each call site. The host's visibility is
+    resolved through ``call_after_refresh`` plus the card's own repaint, so a
+    caller that paused twice read a half-settled dock and measured an overflow
+    that does not survive the next frame.
+
+    Seeding the conversation belongs here for a stronger reason: measured
+    against an empty transcript, this whole file was blind to a one-row
+    under-reservation, because the boot layout's transcript padding cancelled
+    it exactly. See :func:`_seed_conversation`.
+    """
+    await _seed_conversation(app, pilot)
+    app._mount_prompt(card)
+    # Settle until the screen stops moving, rather than for a fixed number of
+    # pauses. Mounting the card takes two frames to reach its final height (the
+    # dock re-arranges, then `_sync_prompt_host` resolves the host's row), and a
+    # fixed count is a bet on how many pumps that takes on a loaded machine —
+    # lost intermittently, where the assertion then read a mid-arrange height
+    # and reported an overflow that does not survive the next frame.
+    await _settle(app, pilot)
+
+
+def _painted_footer(app) -> str:  # type: ignore[no-untyped-def]
+    """The card's key-hint row AS PAINTED, from the compositor.
+
+    Deliberately not `render_lines_for_test()`: that re-derives the text, so it
+    cannot see a card whose model changed and whose body was never repainted —
+    which is exactly the defect it once hid (D13, design round 4).
+    """
+    for row in reversed(_painted_rows(app)):
+        if "esc" in row:
+            return row
+    return ""
 
 
 def _painted_rows(app) -> list[str]:  # type: ignore[no-untyped-def]
@@ -512,26 +663,67 @@ async def test_the_keys_and_an_option_survive_every_terminal_the_card_fits_in() 
     parked on. Chrome the card cannot do without is paid for FIRST now, so a
     short terminal abbreviates the list instead of amputating the footer."""
     for size in SHORT_SIZES:
+        # What the dock measures with a conversation but NO prompt. At the
+        # shortest of these the composer already exceeds the screen on its own,
+        # so "nothing overflows" is not true of this app there and never was;
+        # what must be true is that raising a question does not make it worse.
+        baseline_app = _baseline_app()
+        async with baseline_app.run_test(size=size) as pilot:
+            await _seed_conversation(baseline_app, pilot)
+            await _settle(baseline_app, pilot)
+            baseline = tuple(baseline_app.screen.virtual_size)
+
         app, screen = await _real_app_card(size, [_long_question()])
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
-            app.push_screen(screen)
-            await pilot.pause()
-            await pilot.pause()
+            await _show(app, pilot, screen)
             lines = screen.render_lines_for_test()
+            if not lines:
+                # Below the card's minimum the honest card is no card, and the
+                # dock must not keep a row for it either. Asserted rather than
+                # skipped: a host still reserving space for a prompt painting
+                # nothing is what pushed the dock past the screen at 20x8.
+                assert not app.query_one("#prompt-host").display, size
+                assert tuple(app.screen.virtual_size) == baseline, (size, baseline)
+                continue
             card = screen.query_one(".ask-picker")
-            # Every line the card lays out is a line the SCREEN can draw. Not
-            # the body's own region: a child that overflows its container still
+            # Every line the card lays out is a line the SCREEN actually drew.
+            # Measured on the COMPOSITED screen rather than against an
+            # arithmetic `room`: a child that overflows its container still
             # reports the height it wanted, so measuring that agreed with the
-            # clip instead of catching it. Textual drops the overflow silently
-            # and nothing else reads back that it happened.
-            room = screen.size.height - CARD_PADDING_ROWS
-            assert len(lines) <= room, (size, len(lines), room)
+            # clip instead of catching it — and now that the card shares the
+            # screen with the transcript and the composer, a recomputed budget
+            # here would be a second, drifting copy of `_body_rows`.
+            painted = _painted_rows(app)
+            assert lines[-1].strip() in "\n".join(painted), (size, lines[-1], painted)
             assert card.region.height <= screen.size.height, (size, card.region.height)
             assert "esc" in lines[-1] or "enter" in lines[-1], (size, lines[-1])
-            assert len(screen.visible_rows) >= 1, size
+            if not screen.visible_rows:
+                # The collapsed card: the exit, and the question if there is a
+                # row for it. The footer must advertise ONLY the exit — `enter`
+                # would commit a selection the user cannot see, and the digits
+                # would jump within a list that is not drawn.
+                assert lines[-1].strip() == "esc skip", (size, lines)
+                continue
             if len(screen.visible_rows) < screen.row_count:
-                assert f"of {screen.row_count}" in "\n".join(lines), (size, lines)
+                # Rows are hidden, so the card owes the reader an account of
+                # that — UNLESS the row it would take is the one carrying the
+                # question. The question outranks the count (D1), so what is
+                # pinned is that the card is never silent about BOTH: it shows
+                # the count, or it shows what is being asked.
+                text = "\n".join(lines)
+                assert f"of {screen.row_count}" in text or screen.question.question[:20] in text, (
+                    size,
+                    lines,
+                )
+            # The anchoring guarantee itself: the dock never grows past the
+            # screen, so the transcript is never scrolled out from under the
+            # question the user is being asked.
+            assert tuple(app.screen.virtual_size) == baseline, (
+                size,
+                tuple(app.screen.virtual_size),
+                baseline,
+            )
 
 
 @pytest.mark.asyncio
@@ -556,60 +748,100 @@ async def test_the_footer_is_the_last_line_the_card_gives_up() -> None:
     for width in (20, 30, 40, 100):
         for height in (5, 6, 7, 8, 12):
             size = (width, height)
+            # What the dock measures with NO prompt raised. At the shortest of
+            # these the composer and its status band already exceed the screen,
+            # so "nothing overflows" is not true of this app at 20x5 and never
+            # was; what must be true is that raising a question does not make it
+            # worse. Captured per size so the comparison below is like-for-like.
+            baseline_app = _baseline_app()
+            async with baseline_app.run_test(size=size) as pilot:
+                # Seeded and settled by the SAME rules the measured app is, so
+                # the two numbers describe the same layout with and without a
+                # prompt. An unseeded baseline is in the BOOT layout, whose
+                # transcript padding differs — comparing against it measures the
+                # boot/conversation difference as if it were the prompt's cost.
+                await _seed_conversation(baseline_app, pilot)
+                await _settle(baseline_app, pilot)
+                baseline = tuple(baseline_app.screen.virtual_size)
+
             app, screen = await _real_app_card(size, [_long_question()])
             async with app.run_test(size=size) as pilot:
                 await pilot.pause()
-                app.push_screen(screen)
-                await pilot.pause()
-                await pilot.pause()
+                await _show(app, pilot, screen)
                 painted = _painted_rows(app)
-                room = screen.size.height - CARD_PADDING_ROWS
-                # The keys reached the TERMINAL, and reached it last: the footer
-                # is bought first and drawn last, so a clipped tail would take it
-                # and nothing else. Asserted before the counts because this is
-                # the assertion round 2's version could not make.
-                assert painted, (size, "nothing painted")
-                assert "esc" in painted[-1] or "enter" in painted[-1], (size, painted)
-                # And nothing was clipped to get there: the card lays out no more
-                # lines than the screen can draw.
-                assert len(painted) <= room, (size, painted, room)
-                assert len(screen.render_lines_for_test()) <= room, (size, room)
-                if room == 1:
+                lines = screen.render_lines_for_test()
+                if not lines:
+                    # Too short for even the exit. The card draws nothing and
+                    # the dock keeps no row for it, which is the honest card;
+                    # the clip is what happens when it draws anyway.
+                    assert not app.query_one("#prompt-host").display, size
+                    assert tuple(app.screen.virtual_size) == baseline, (size, baseline)
+                    continue
+                # The keys reached the TERMINAL. The footer is bought first and
+                # drawn last, so a clipped tail would take it and nothing else —
+                # this is the assertion the card's own `render_lines_for_test`
+                # cannot make, because an overflowing card still reports the
+                # lines it WANTED.
+                #
+                # `painted[-1]` is no longer the card's last row: the composer
+                # and the status band are painted below it now that the card is
+                # docked rather than covering the screen. So the footer is
+                # located in the painted frame instead of assumed to end it,
+                # which is a stronger check anyway — it fails both if the footer
+                # is missing and if it was clipped to something else.
+                assert lines[-1].strip() in "\n".join(painted), (size, lines[-1], painted)
+                assert "esc" in lines[-1] or "enter" in lines[-1], (size, lines[-1])
+                if not screen.visible_rows:
                     # One line is a line for the exit, and ONLY the exit: with
                     # no option row on screen, `enter` would commit a selection
                     # the user cannot see and the digits would jump within a
                     # list that is not there. Measured before the fix: at a
                     # 5-row terminal `down down down enter` committed an option
                     # nobody had been shown (round 4, R14).
-                    assert len(painted) == 1, (size, painted)
-                    assert painted[0].strip() == "esc skip", (size, painted)
-                    assert screen.visible_rows == [], (size, screen.visible_rows)
-                elif room == 2:
-                    # Two lines buy the selected row beside the footer, which is
-                    # what makes the free-text row echo what is being typed into
-                    # it (round 4, R15). The count is still not affordable.
-                    assert len(screen.visible_rows) == 1, (size, screen.visible_rows)
-                    assert f"of {screen.row_count}" not in "".join(painted), (size, painted)
-                else:
-                    assert len(screen.visible_rows) >= 1, size
+                    assert lines[-1].strip() == "esc skip", (size, lines)
+                elif len(screen.visible_rows) == 1:
+                    # One row beside the footer is what makes the free-text row
+                    # echo what is being typed into it (round 4, R15). The count
+                    # is not affordable at that budget.
+                    assert f"of {screen.row_count}" not in "".join(lines), (size, lines)
+                # Nothing was clipped to get there: raising the question left
+                # the dock exactly as tall as it was without one.
+                assert tuple(app.screen.virtual_size) == baseline, (
+                    size,
+                    tuple(app.screen.virtual_size),
+                    baseline,
+                )
 
     # Four rows and under: the body has no drawable line, and a card drawn into
-    # none of them is the clip itself. Its own padding is two rows the screen
-    # has not got, so laying it out also made the screen scrollable — which
-    # AGENTS.md calls always a bug on this app.
+    # none of them is the clip itself. Its own padding is rows the screen has
+    # not got, so laying it out makes the screen scrollable.
+    #
+    # The screen is ALREADY scrollable at these sizes with no prompt at all —
+    # the composer and its status band do not fit in four rows, which is a
+    # pre-existing property of the dock and not something this card can fix.
+    # So the assertion is a COMPARISON against that baseline rather than an
+    # absolute: raising a question must not make the overflow worse. Measured
+    # without this comparison the test asserted `size == virtual_size` at 40x4
+    # and failed on a tree where the prompt was never mounted.
     for size in ((40, 4), (40, 3), (30, 2), (20, 1)):
+        base_app = _baseline_app()
+        async with base_app.run_test(size=size) as pilot:
+            await _seed_conversation(base_app, pilot)
+            await _settle(base_app, pilot)
+            baseline = tuple(base_app.screen.virtual_size)
+
         app, screen = await _real_app_card(size, [_long_question()])
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
-            app.push_screen(screen)
-            await pilot.pause()
-            await pilot.pause()
+            await _show(app, pilot, screen)
+            for _ in range(4):
+                await pilot.pause()
             assert screen.render_lines_for_test() == [], size
-            assert _painted_rows(app) == [], (size, _painted_rows(app))
-            assert tuple(app.screen.size) == tuple(app.screen.virtual_size), (
+            assert not app.query_one("#prompt-host").display, size
+            assert tuple(app.screen.virtual_size) == baseline, (
                 size,
-                tuple(app.screen.size),
                 tuple(app.screen.virtual_size),
+                baseline,
             )
 
 
@@ -620,18 +852,26 @@ async def test_a_recommended_option_never_widens_the_card_past_the_screen() -> N
     minimum rather than dropped, which bought two cells of overflow at 30x12 —
     and only with a recommendation, which is how it was found."""
     for size in SHORT_SIZES:
+        # The no-prompt baseline for this size, seeded and settled identically:
+        # the smallest of these terminals cannot fit the composer alone, so the
+        # question is whether the RECOMMENDATION costs anything, not whether the
+        # app fits.
+        baseline_app = _baseline_app()
+        async with baseline_app.run_test(size=size) as pilot:
+            await _seed_conversation(baseline_app, pilot)
+            await _settle(baseline_app, pilot)
+            baseline = tuple(baseline_app.screen.virtual_size)
+
         for recommended in (0, None):
             app, screen = await _real_app_card(size, [_long_question(recommended)])
             async with app.run_test(size=size) as pilot:
                 await pilot.pause()
-                app.push_screen(screen)
-                await pilot.pause()
-                await pilot.pause()
-                assert tuple(app.screen.size) == tuple(app.screen.virtual_size), (
+                await _show(app, pilot, screen)
+                assert tuple(app.screen.virtual_size) == baseline, (
                     size,
                     recommended,
-                    tuple(app.screen.size),
                     tuple(app.screen.virtual_size),
+                    baseline,
                 )
 
 
@@ -809,3 +1049,764 @@ async def test_the_free_text_row_keeps_a_key_when_the_list_outruns_the_digits() 
         assert "0-9 jump" in text, text
         await pilot.press("0")
         assert screen.selected_index == screen.other_row
+
+
+# --- the anchoring guarantee -------------------------------------------------
+#
+# The reason this surface was moved out of a `ModalScreen`. A modal covered the
+# conversation the question was about, so a user who needed to re-read the tool
+# output, the error, or the plan in order to ANSWER had to dismiss the question
+# first — and could not scroll at all while it was up.
+
+
+@pytest.mark.asyncio
+async def test_the_conversation_stays_readable_behind_a_question() -> None:
+    """The card is a band above the composer, never a screen over the chat.
+
+    Pinned on the COMPOSITED frame rather than on the widget tree: what matters
+    is that conversation text is painted on the terminal at the same time as the
+    question, which is exactly what the modal made impossible.
+    """
+    from local_operator.tui.widgets.transcript import TranscriptView
+
+    app = _baseline_app()
+    card = AskPickerScreen([_long_question()])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # `_show` seeds the conversation (see `_seed_conversation`), so the
+        # assertions below read the same text every other test in this file
+        # measures against rather than a second, divergent fixture.
+        await _show(app, pilot, card)
+
+        painted = "\n".join(_painted_rows(app))
+        # The question is on screen...
+        assert "the agent needs your decision" in painted
+        # ...and so is the conversation it is about. The last exchange is the
+        # one a user would be reading to answer, so it is the one pinned.
+        assert "answer 5: the audit log still has every row" in painted
+        # The transcript keeps a real share of the screen. Asserted as a
+        # PROPORTION of the rows the two actually divide, not as "more than the
+        # card": a question with four options and a description each is
+        # legitimately tall, and the guarantee is that the conversation is still
+        # substantially there, not that it always wins. At 100x30 this is 9 rows
+        # of conversation against a 13-row card; the modal left zero.
+        transcript = app.query_one(TranscriptView)
+        divisible = transcript.region.height + card.region.height
+        assert transcript.region.height >= MIN_TRANSCRIPT_ROWS
+        assert transcript.region.height >= divisible * (1 - PROMPT_HEIGHT_SHARE)
+        # And the composer is still there to type into, below the question.
+        assert app.query_one("#input-shell").region.y > card.region.y
+
+
+@pytest.mark.asyncio
+async def test_the_question_sits_above_the_dock_band_and_stays_put() -> None:
+    """A question outranks status: it is what the turn is parked on.
+
+    The band (subagent jobs, todos) grows and shrinks on its own as work comes
+    and goes. Below the question that movement would shift the card under the
+    user's cursor mid-answer, so the prompt host is ordered above it.
+    """
+    app = _baseline_app()
+    card = AskPickerScreen([_long_question()])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _show(app, pilot, card)
+        host = app.query_one("#prompt-host")
+        band = app.query_one("#band")
+        shell = app.query_one("#input-shell")
+        # Ordered: question, then status, then the composer.
+        assert host.region.y < shell.region.y
+        assert band.region.y >= host.region.y + host.region.height
+
+
+# --- the footer tells the truth about the keyboard the caret is on ----------
+
+
+@pytest.mark.asyncio
+async def test_escape_skips_the_question_from_the_composer() -> None:
+    """The card's advertised exit has to work where the caret actually is.
+
+    The caret lives in the COMPOSER while a question is up (answer keys are
+    routed rather than focus being moved), so the card's own `escape` binding
+    never sees the key — and `esc skip`, which the footer advertises in every
+    state and which is the only stated way to leave, did nothing at all.
+    Measured on three consecutive presses: question still up, tool still
+    waiting (D11, design round 3).
+
+    Whatever was already answered is kept, which is the rule the card's own
+    Escape follows: a user who answered two of three questions has told the
+    agent something.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(
+            app.request_user_choice(
+                [
+                    _question("first", "First?", labels=("Alpha", "Beta"), descriptions=("", "")),
+                    _question(
+                        "second", "Second?", labels=("Gamma", "Delta"), descriptions=("", "")
+                    ),
+                ]
+            )
+        )
+        for _ in range(14):
+            await pilot.pause()
+
+        # Answer the first question on the card, then move to the composer.
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        await pilot.click(Editor)
+        await pilot.pause(0.1)
+        assert isinstance(app.screen.focused, Editor)
+
+        await pilot.press("escape")
+        # The question is settled, the card is gone, and the answer survived.
+        assert await asyncio.wait_for(asked, 2) == {"first": ["Alpha"]}
+        await pilot.pause(0.2)
+        assert not app.query(AskPickerScreen)
+
+
+@pytest.mark.asyncio
+async def test_the_footer_names_only_keys_that_work_where_the_caret_is() -> None:
+    """A footer describing one keyboard while the caret sits on another lies.
+
+    With focus in the composer the arrows, Enter and the printable keys are the
+    composer's; only the routed ordinals and Escape reach the card. The footer
+    said `↑↓ move · 1-9 jump · enter answer` regardless, and none of the first
+    three did anything (D13, design round 3).
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(14):
+            await pilot.pause()
+        card = app._ask_screen
+        assert card is not None
+
+        # On the card, the full keymap is real and advertised.
+        focused_footer = _painted_footer(app)
+        assert "↑↓" in focused_footer and "enter" in focused_footer
+
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+        # Read what was PAINTED, not what a fresh render would produce.
+        #
+        # This is the assertion the first version of this test got wrong.
+        # `render_lines_for_test` re-derives the card's text on every call, so
+        # it reports the intended footer whether or not anything repainted —
+        # and nothing did, because `has_focus` is not a reactive. The model was
+        # right, the screen still showed `↑↓ move · 1-9 jump · enter answer`,
+        # and this test passed anyway (D13, design round 4). A footer claim is
+        # a claim about pixels, so it has to be read from the compositor.
+        composer_footer = _painted_footer(app)
+        # The keys that no longer reach the card are no longer claimed...
+        assert "↑↓" not in composer_footer, composer_footer
+        assert "enter" not in composer_footer, composer_footer
+        # ...and what IS claimed works: the ordinals and the exit.
+        assert "answer" in composer_footer, composer_footer
+        assert "esc" in composer_footer, composer_footer
+
+        # The advertised range covers the OPTIONS and stops there: the
+        # free-text row cannot be answered by a digit (it is answered by typing
+        # into it, which needs the card to hold the caret), so naming it would
+        # point at a dead end.
+        assert "1-2" in composer_footer, composer_footer
+        assert str(card.other_row + 1) not in composer_footer.split("answer")[0], composer_footer
+
+        await pilot.press("1")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_a_held_key_never_answers_a_question_the_card_moved_on_from() -> None:
+    """A key aimed at one question must not answer the next one.
+
+    The `ask` picker walks several questions inside ONE widget, so guarding a
+    parked keystroke by widget identity is not enough: after the card advances,
+    the object is the same and the question is not. Measured before the fix,
+    with a two-question ask — press `2` in the composer meaning "Canary" for
+    question 1, then answer question 1 on the card inside the 180 ms hold
+    window, and the parked key committed `DROP IT` on a question that had never
+    been on screen (F4, agent review round 3).
+
+    Reachable by one ordinary mouse click, since a single-select click both
+    answers and advances.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    questions = [
+        _question(
+            "rollout", "Which rollout?", labels=("Blue-green", "Canary"), descriptions=("", "")
+        ),
+        _question(
+            "drop_table", "Drop the table?", labels=("Keep it", "DROP IT"), descriptions=("", "")
+        ),
+    ]
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice(questions))
+        for _ in range(14):
+            await pilot.pause()
+        card = app._ask_screen
+        assert card is not None
+
+        await pilot.click(Editor)
+        await pilot.pause(0.1)
+        await pilot.press("2")  # aimed at question 1: "Canary"
+        assert app._held_answer_key is not None, "the key was not held"
+
+        # The card advances to question 2 while the key is still parked.
+        card.focus()
+        await pilot.pause(0.02)
+        card.action_accept()
+        for _ in range(20):
+            await pilot.pause(0.03)
+
+        # The stale key answered nothing: question 2 is still being asked.
+        assert not asked.done(), "a parked key answered a question it was not aimed at"
+        assert app._held_answer_key is None
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_a_multi_select_advertises_no_key_it_cannot_be_answered_by() -> None:
+    """A multi-select cannot be answered by one key, so none is offered.
+
+    It is answered by ticking rows with Space and confirming with Enter, and
+    both belong to the composer while the caret is there. Advertised as
+    `1-2 answer`, pressing a digit only moved the cursor and left the question
+    unanswered with `nothing ticked — space toggles` (D15b, design round 4).
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
+        for _ in range(16):
+            await pilot.pause()
+
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+        footer = _painted_footer(app)
+        # No ORDINAL range is claimed — a digit cannot answer a multi-select.
+        # What is offered instead is the explicit gesture that reaches the card
+        # (D18), which is a different promise: "answer here", not "1-2 answer".
+        assert "1-" not in footer, footer
+        assert "answer here" in footer, footer
+        assert "esc" in footer, footer
+        # ...and the digit that would have been claimed indeed answers nothing.
+        await pilot.press("1")
+        await pilot.pause(0.3)
+        assert not asked.done(), "a digit answered a multi-select"
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_the_composer_footer_keeps_its_exit_on_a_narrow_card() -> None:
+    """`esc skip` is the last thing the footer gives up, in BOTH focus states.
+
+    The composer-mode branch returned its hints raw, so `_cut_row` ellipsised
+    them and the exit was cut mid-word — `1 answer · esc sk…` at 22 columns.
+    `skip` is the one word this row ranks as unsheddable, because a card with
+    no stated way out is unusable (D3, and D16 in design round 4). The branch
+    now runs through the same ladder, shedding the routed hint's word and then
+    the hint itself.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    for width in (26, 22, 20, 18):
+        app = _baseline_app()
+        async with app.run_test(size=(width, 30)) as pilot:
+            await pilot.pause()
+            asked = asyncio.create_task(app.request_user_choice([_question()]))
+            for _ in range(16):
+                await pilot.pause()
+            await pilot.click(Editor)
+            await pilot.pause(0.2)
+
+            footer = _painted_footer(app)
+            # The exit survives WHOLE — not truncated, not ellipsised.
+            assert "esc skip" in footer, (width, footer)
+            assert "…" not in footer, (width, footer)
+
+            asked.cancel()
+            try:
+                await asked
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
+@pytest.mark.asyncio
+async def test_the_footer_follows_the_draft_as_it_is_typed() -> None:
+    """The footer has to repaint when the BUFFER changes, not just on focus.
+
+    The routed keys stand down on a non-empty composer, so the footer's answer
+    changes with every keystroke that opens or closes a draft — and nothing
+    else repaints on a keystroke: `_repaint` fires on focus, resize, answer and
+    advance, and typing is none of those. So the card went on advertising
+    `1-2 answer` while `1` was being typed into the buffer (F7, agent review
+    round 5). Same shape as D13 one axis over: the model right, the pixels
+    stale.
+
+    Asserted on PAINTED text, because that is the only reader that can see the
+    difference — which is the lesson D13 taught this file.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(16):
+            await pilot.pause()
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+        assert "answer" in _painted_footer(app), "the routed keys were never offered"
+
+        # Opening a draft withdraws the offer, on the frame the user sees.
+        for character in "drop":
+            await pilot.press(character)
+        await pilot.pause(0.3)
+        withdrawn = _painted_footer(app)
+        assert "answer" not in withdrawn, withdrawn
+        assert "esc" in withdrawn, withdrawn
+        # ...and the key it stopped advertising really is a text character now.
+        await pilot.press("1")
+        await pilot.pause(0.2)
+        assert not asked.done(), "a routed key answered while a draft was open"
+        assert app.query_one(Editor).text == "drop1"
+
+        # Clearing the draft brings the offer back, and it works.
+        for _ in range(len("drop1")):
+            await pilot.press("backspace")
+        await pilot.pause(0.3)
+        restored = _painted_footer(app)
+        assert "answer" in restored, restored
+        await pilot.press("1")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_a_multi_select_is_reachable_by_an_explicit_gesture() -> None:
+    """A question the composer cannot answer needs a NAMED way to reach it.
+
+    A multi-select is answered by Space and Enter, both of which the composer
+    owns, so it is the one question the routed keys cannot reach. As a
+    `ModalScreen` at the merge base it simply held the keyboard; anchored, it
+    was answerable only by mouse (D17).
+
+    Two attempts to infer the handover from the buffer both cost the user a
+    message — keyed on empty, sending handed over (F9); keyed on
+    deleted-to-empty, REWORDING did (D18). There is no better signal: "I have
+    finished typing" is not distinguishable from "I am mid-edit" by looking at
+    the text. So the gesture is explicit, advertised in the footer, and cannot
+    arrive at a moment the user did not choose.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
+        for _ in range(16):
+            await pilot.pause()
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+
+        # The footer NAMES it, or it is a key nobody can discover.
+        assert "answer here" in _painted_footer(app), _painted_footer(app)
+        # ...and it sheds its WORD before the exit, like every other hint on
+        # this row. Asserted at full width above and at a narrow one below,
+        # because the full-width assertion passes against any truncation.
+
+        await pilot.press("tab")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen.focused, AskPickerScreen)
+
+        await pilot.press("space")
+        await pilot.press("enter")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_the_gesture_sheds_its_word_before_the_exit() -> None:
+    """`esc skip` outranks the Tab hint on a narrow card, as it does every hint.
+
+    The composer-mode branch passed an EMPTY ladder whenever the Tab hint was
+    showing, so both shed passes iterated over nothing and the row went to
+    `_cut_row` raw — the exact case that call exists to prevent. At 18-26
+    columns the multi-select painted `⇥ answer here · esc…`, and then
+    `⇥ answer here…`: no way out stated at all, on the one surface where
+    Escape is the only alternative to the handover (D19, design round 7).
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    for width in (26, 22, 20, 18):
+        app = _baseline_app()
+        async with app.run_test(size=(width, 30)) as pilot:
+            await pilot.pause()
+            asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
+            for _ in range(16):
+                await pilot.pause()
+            await pilot.click(Editor)
+            await pilot.pause(0.25)
+
+            footer = _painted_footer(app)
+            # The exit survives WHOLE, and the Tab key is still named.
+            assert "esc skip" in footer, (width, footer)
+            assert "\u21e5" in footer or "⇥" in footer, (width, footer)
+            assert "…" not in footer, (width, footer)
+
+            asked.cancel()
+            try:
+                await asked
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
+@pytest.mark.asyncio
+async def test_the_gesture_preserves_a_draft_and_leaves_routable_cards_alone() -> None:
+    """Tab is offered only where it is needed, and never costs the draft.
+
+    A single-select IS answerable from the composer, so pulling focus there
+    would take the caret for nothing — and a user with a half-typed message is
+    exactly who needs the gesture, so their text has to survive it.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    # A draft survives the handover.
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "hold that":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.1)
+        asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
+        for _ in range(16):
+            await pilot.pause()
+
+        await pilot.press("tab")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen.focused, AskPickerScreen)
+        assert app.query_one(Editor).text == "hold that", "the gesture ate the draft"
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # A routable card does not take the caret.
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(16):
+            await pilot.pause()
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+        await pilot.press("tab")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen.focused, Editor)
+        # ...because it is answerable from where the caret already is.
+        await pilot.press("1")
+        assert await asyncio.wait_for(asked, 2) == {"stale": ["Drop them"]}
+
+
+@pytest.mark.asyncio
+async def test_rewording_a_draft_never_moves_the_keyboard() -> None:
+    """Clearing a line to retype it is mid-edit, not "I am done typing".
+
+    Keyed on the user deleting to empty, the handover fired here: the next
+    `space` ticked an option, the retyped message went nowhere, and Enter
+    submitted `{'rollout': ['Backfill from the audit log']}` — an answer never
+    chosen, with the message lost (D18, design round 6).
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "hmm":
+            await pilot.press(character)
+        await pilot.pause(0.1)
+        asked = asyncio.create_task(app.request_user_choice([_question(multi=True)]))
+        for _ in range(16):
+            await pilot.pause()
+
+        # Delete the line to reword it...
+        for _ in range(len("hmm")):
+            await pilot.press("backspace")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen.focused, Editor), "rewording moved the keyboard"
+
+        # ...and the retyped message lands in the composer, answering nothing.
+        for character in "just checking":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.3)
+        assert app.query_one(Editor).text == "just checking"
+        assert not asked.done()
+        card = app._ask_screen
+        assert card is not None
+        assert not card.state.checked, "a keystroke ticked an option"
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_the_card_repaints_itself_when_its_inputs_move_untriggered() -> None:
+    """The backstop for "correct in the model, stale on screen".
+
+    The footer is derived from state the card does not own — whether it holds
+    focus, and whether the composer holds a draft — and neither emits anything
+    the card hears. That produced the same defect three review rounds running
+    on three different inputs (D13 focus, F7/D14 the buffer), each fixed by
+    adding one more explicit trigger: a fix per input, with the next input left
+    for a reviewer to find.
+
+    So the card can be ASKED whether what it is showing is still what it would
+    draw. What is pinned here is that mechanism working on its own, with the
+    explicit triggers taken out of the picture: move an input, confirm the card
+    now considers itself stale, tick, and confirm it agrees again — and that
+    the repainted footer is the correct one for the new state.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(16):
+            await pilot.pause()
+        card = app._ask_screen
+        assert card is not None
+        await pilot.click(Editor)
+        await pilot.pause(0.2)
+        assert "answer" in _painted_footer(app)
+
+        # Move the input WITHOUT any repaint: set the buffer directly on the
+        # document, which posts nothing, and forget the recorded fingerprint so
+        # the card is in the state a missed trigger leaves it in.
+        card._painted_fingerprint = (True, True, (), 99)
+        assert card.footer_fingerprint() != card._painted_fingerprint
+
+        # One tick of the app's own poll and the card notices by itself.
+        app._refresh_band()
+        for _ in range(6):
+            await pilot.pause(0.05)
+        assert (
+            card.footer_fingerprint() == card._painted_fingerprint
+        ), "the card did not repaint itself when its inputs had moved"
+        # And what it repainted is right for the state it is actually in.
+        assert "answer" in _painted_footer(app), _painted_footer(app)
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+def test_the_footer_fingerprint_covers_everything_the_footer_says() -> None:
+    """A fingerprint that misses an input is the bug wearing the fix's clothes.
+
+    `repaint_if_stale` is only as good as the fingerprint it compares: any
+    input the footer reads but the fingerprint does not is a state where the
+    card believes it is current while showing something else. The first
+    version tracked focus, the draft, the drawn window and the question index —
+    and missed the refused-Enter complaint and the answer state a multi-select's
+    complaint is derived from, both of which REPLACE the key hints entirely.
+
+    Exhaustive rather than sampled, over every combination of the state the
+    footer reads: two equal fingerprints must produce the same footer. The
+    incomplete version has 14 collisions against this; the current one has none.
+    """
+    from rich.style import Style
+
+    for multi in (False, True):
+        question = _question(multi=multi, labels=("A", "B", "C"), descriptions=("", "", ""))
+        card = AskPickerScreen([question])
+        seen: dict[tuple[object, ...], str] = {}
+        for selected in range(card.row_count):
+            for rejected in (False, True):
+                for checked in ((), (0,), (0, 1)):
+                    for typed in ("", "abc"):
+                        card.state.selected = selected
+                        card._rejected = rejected
+                        card.state.checked = set(checked)
+                        card.state.typed = typed
+                        fingerprint = card.footer_fingerprint()
+                        footer = card._footer_row(60, Style(), Style()).plain
+                        if fingerprint in seen:
+                            assert seen[fingerprint] == footer, (
+                                multi,
+                                fingerprint,
+                                seen[fingerprint],
+                                footer,
+                            )
+                        seen[fingerprint] = footer
+
+
+@pytest.mark.asyncio
+async def test_sending_a_message_does_not_hand_the_keyboard_to_the_question() -> None:
+    """The user's next message must never become the answer to a question.
+
+    The focus hand-back (D17) has to key on the user DELETING their way to
+    empty, not on the buffer being empty: `on_text_area_changed` fires for any
+    document change, and sending a message empties the buffer too. Keyed on
+    emptiness, sending handed the caret to the card — and the user's next line
+    was typed into a question they had stopped looking at, with the space
+    ticking a row and Enter answering it.
+
+    Measured end to end before the fix: `please check the schema` sent,
+    `ok next` typed, Enter, and the ask resolved `{'s': ['next']}` from a line
+    meant for the agent (F9, agent review round 6).
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.editor import Editor
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "please check the schema":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.1)
+
+        asked = asyncio.create_task(
+            app.request_user_choice([_question(multi=True, labels=("Drop", "next"))])
+        )
+        for _ in range(16):
+            await pilot.pause()
+        assert isinstance(app.screen.focused, Editor)
+
+        # Send it. The send empties the buffer, which must NOT be read as the
+        # user finishing with the composer.
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause(0.05)
+        assert session.prompts[-1:] == ["please check the schema"], session.prompts
+        assert isinstance(app.screen.focused, Editor), "sending handed over the keyboard"
+
+        # The next message is typed, not answered.
+        for character in "ok next":
+            await pilot.press("space" if character == " " else character)
+        await pilot.pause(0.2)
+        assert app.query_one(Editor).text == "ok next"
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause(0.05)
+        assert not asked.done(), "a chat message answered the agent's question"
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_a_collapsed_card_never_takes_the_keyboard() -> None:
+    """A card drawing no options has nothing to do with the keyboard.
+
+    `not answer_keys()` is true for two different reasons and only one wants
+    focus: a multi-select, whose answers the composer cannot reach, and a
+    COLLAPSED card, which is drawing nothing. Focus on the latter buys nothing
+    — there is no cursor to move and the permissive keys are refused there
+    anyway (D9) — so taking it is pure theft (F9, agent review round 6).
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 13)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for character in "hmm":
+            await pilot.press(character)
+        await pilot.pause(0.1)
+
+        asked = asyncio.create_task(app.request_user_choice([_long_question()]))
+        for _ in range(16):
+            await pilot.pause()
+        card = app._ask_screen
+        assert card is not None
+        assert not card.visible_rows, "this size is meant to draw no options"
+
+        for _ in range(len("hmm")):
+            await pilot.press("backspace")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen.focused, Editor)
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_a_live_question_does_not_break_slash_completion() -> None:
+    """The pickers own their keys while they are open, question or no question.
+
+    A live prompt swallows Tab so that a stray one cannot make the buffer
+    non-empty and stand the routing down. Routed ahead of the composer's own
+    pickers, that swallow silently broke slash completion for as long as any
+    question was up: `/mod` then Tab left `/mod` instead of completing to
+    `/model `. Found by driving the combination rather than reasoning about it.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _baseline_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        for _ in range(16):
+            await pilot.pause()
+
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause(0.1)
+        for character in "/mod":
+            await pilot.press(character)
+        await pilot.pause(0.3)
+
+        await pilot.press("tab")
+        await pilot.pause(0.3)
+        assert app.query_one(Editor).text == "/model ", app.query_one(Editor).text
+
+        asked.cancel()
+        try:
+            await asked
+        except (asyncio.CancelledError, Exception):
+            pass

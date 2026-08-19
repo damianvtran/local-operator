@@ -27,6 +27,7 @@ import logging
 import os
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
 
 from rich.console import Group
@@ -51,6 +52,8 @@ from textual.geometry import Size
 # Aliased: `Message` in this module is the harness's conversation message.
 from textual.message import Message as TextualMessage
 from textual.screen import Screen
+from textual.timer import Timer
+from textual.widget import Widget
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
@@ -116,7 +119,7 @@ from local_operator.tui.terminal_title import (
     cwd_label,
     terminal_title_enabled,
 )
-from local_operator.tui.widgets.approval import ApprovalBlock
+from local_operator.tui.widgets.approval import ApprovalBlock, ApprovalPrompt
 from local_operator.tui.widgets.aside_panel import ASIDE_PROMPT, AsidePanel
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.assistant import AssistantBlock
@@ -538,6 +541,48 @@ COMPOSER_FOCUSED_CLASS = "-composer-focused"
 #: the pre-resize composer width. 50 ms is past the arrange on every size the
 #: tests sweep and is also the debounce a drag-resize wants: one re-measure per
 #: settled size rather than one per intermediate column.
+#: How long an answer key routed from the COMPOSER is held before it counts as
+#: an answer. Released early by any second keystroke, which proves the user was
+#: typing a word rather than answering.
+#:
+#: It exists because the two intents are indistinguishable at the first
+#: character: `y` on an empty composer with a question up may be "yes", or it
+#: may be the start of `yes do it` typed as a steer. Acting immediately took
+#: the second reading as the first and AUTHORISED a pending `rm -rf` from a
+#: keystroke meant as text (F3, agent review round 2).
+#:
+#: 180 ms is under the ~200 ms floor for deliberate single keypresses and well
+#: over the inter-key interval of even fast typing (60 wpm is ~200 ms/char, and
+#: the burst within a word is far shorter), so a deliberate answer feels
+#: immediate and a typed word never commits one. It only ever delays an answer;
+#: it can never turn typing into one.
+ANSWER_KEY_HOLD_S = 0.18
+
+
+@dataclass
+class _HeldAnswerKey:
+    """An answer key routed from the composer, parked until it is disambiguated.
+
+    Records WHICH QUESTION it was aimed at, not just which widget. The widget
+    is not enough: `AskPickerScreen` walks several questions inside one card, so
+    a key held across an advance would still see the same object and answer
+    whatever question had moved into its place. Measured: pressing `2` in the
+    composer meaning "Canary" for question 1, then answering question 1 from the
+    card inside the hold window, recorded `DROP IT` on a question the user had
+    never seen (F4, agent review round 3).
+    """
+
+    prompt: "AskPickerScreen"
+    #: The question the key was aimed at, by index within this card.
+    question_index: int
+    character: str
+    timer: Timer
+
+    def still_aimed_at(self, live: "AskPickerScreen | None") -> bool:
+        """Whether the question this key was meant for is still the live one."""
+        return live is self.prompt and self.prompt.question_index == self.question_index
+
+
 RESIZE_REFIT_DELAY_S = 0.05
 
 #: Class the Screen carries, on top of ``BOOT_LAYOUT_CLASS``, while the terminal
@@ -996,7 +1041,15 @@ class OperatorApp(App[None]):
         # TURN-scoped latch that drains the asks belonging to a turn the user
         # stopped (a queued asker wakes when the front prompt settles, and
         # without the latch it would mount a fresh question for a dead turn).
-        self._approval: ApprovalBlock | None = None
+        self._approval: ApprovalPrompt | None = None
+        #: The composer's text as of the last Changed event, so a buffer that
+        #: went empty can be told apart from one the app emptied. See
+        #: `on_text_area_changed`.
+        self._composer_text_before: str = ""
+        #: An answer key routed from the composer and parked for one keystroke,
+        #: so a key that turns out to be the first character of a word never
+        #: commits an answer. See `route_key_to_live_prompt`.
+        self._held_answer_key: _HeldAnswerKey | None = None
         # The one live `ask` picker and the future the tool call is parked on.
         # Held as a PAIR because settling one without the other is the failure
         # both halves exist to prevent: a dismissed screen whose future is still
@@ -1119,6 +1172,23 @@ class OperatorApp(App[None]):
         # with the input when the panel becomes a card. One row does double duty
         # — zero extra height (D3/D17).
         with Container(id="input-dock"):
+            # The prompt host: where a question the turn is PARKED ON lives.
+            #
+            # Above the band and inside the dock, and both halves of that are
+            # deliberate. Inside the dock, because a question anchored to the
+            # composer stays put while the user scrolls the transcript back to
+            # find what they need to answer it — the whole point of moving these
+            # surfaces out of `ModalScreen`, which covered the conversation it
+            # was asking about. Above the band, because the band is STATUS
+            # (subagent jobs, todos) and this is a BLOCKER: the thing being
+            # waited on belongs closest to the composer, and a status list that
+            # grew and shrank underneath the question would shift it under the
+            # user's cursor mid-answer.
+            #
+            # Zero rows when empty, like the band: a transparent positioner
+            # holding at most one prompt. Mounted once and kept, so a question
+            # never has to await a mount before it can be shown.
+            yield Container(id="prompt-host")
             # The dock band (subagent + todo) lives INSIDE the same bottom-docked
             # container as the input shell, ABOVE it (D-15-01). A sibling
             # `dock: bottom` overlapped the input (Textual anchors same-edge
@@ -2347,10 +2417,25 @@ class OperatorApp(App[None]):
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         """Re-fit size-sensitive chrome after a terminal resize.
 
-        The status band is NOT re-fitted here: it answers to its own ``Resize``
-        instead (see :class:`Band` and :meth:`on_band_box_changed`), which covers
-        this case and the boot-card handover, where the band's box changes and the
-        terminal's does not.
+        The status band answers to its own ``Resize`` as well (see :class:`Band`
+        and :meth:`on_band_box_changed`), which covers the boot-card handover
+        where the band's box changes and the terminal's does not. It is ALSO
+        re-fitted from here, at the end: its inset is gated on the screen height
+        and nothing else asked it to re-decide when the terminal crossed that
+        floor.
+
+        The order of the two ``call_after_refresh`` calls below does NOT matter,
+        and this note exists to stop a future reader inventing a reason that it
+        does. They run in queue order, so ``_remeasure_prompt`` runs FIRST and
+        genuinely reads a dock the band has not re-fitted yet (measured: 31 rows
+        on an 18-row screen). That is harmless — the card is repainted again by
+        its own resize path, by the debounced overlay re-fit, and by
+        ``_sync_prompt_host`` — and swapping the two produces byte-identical
+        first and settled frames (agent review round 12, F1).
+
+        What the band DOES need is to be re-fitted here at all: its inset is
+        gated on the screen height, and before main's `_refresh_band` landed
+        nothing asked it to re-decide when the terminal crossed that floor.
         """
         # The EVENT's size, not the app's: during a resize `self.size` is still the
         # previous frame's, and one stale cell is enough to put the card threshold on
@@ -2382,6 +2467,18 @@ class OperatorApp(App[None]):
         # can currently hold keeps the ~50 ms before the timer from showing a
         # card overhanging the frame with its prose clipped mid-word.
         self.call_after_refresh(self._sync_overlay_layout, force=True)
+        # A live prompt re-budgets itself against the new size, and whether it
+        # can be drawn AT ALL can change with it: shrinking past the point where
+        # even its footer fits hides the card, and the host's separation row
+        # must go with it or the dock keeps a row for a prompt painting nothing.
+        #
+        # The card is re-measured from HERE rather than left to its own
+        # `on_resize`, because a hidden widget is not laid out and so receives
+        # no resize event — a card that hid itself on a shrink could never learn
+        # the terminal had grown back, leaving the turn parked on a question
+        # that was invisible for the rest of the session (D10, design round 2).
+        # The app still gets the event when the card does not.
+        self.call_after_refresh(self._remeasure_prompt)
         # The dock band is size-sensitive for the same reason the cards are, and
         # had no resize trigger at all: its inset is gated on the screen height
         # and `TodoPanel` budgets its rows against it, but nothing here asked
@@ -2397,6 +2494,40 @@ class OperatorApp(App[None]):
         # cards over whatever the band settled to, which is the order those two
         # already depend on.
         self.call_after_refresh(self._refresh_band)
+
+    def _remeasure_prompt(self) -> None:
+        """Re-lay a live prompt against the current terminal, then fit the host."""
+        prompt = self._live_prompt()
+        remeasure = getattr(prompt, "remeasure", None)
+        if callable(remeasure):
+            try:
+                remeasure()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not re-measure the live prompt", exc_info=True)
+        self._sync_prompt_host()
+        # Hiding a widget takes focus off it and puts it nowhere, so a card that
+        # went undrawable on a shrink came back on the re-grow with the screen
+        # focusing NOTHING — visible, answerable in principle, and receiving no
+        # keys at all. Restored here because this is the path that made it
+        # drawable again.
+        # Only when focus is NOWHERE, which is the state this repairs. Written
+        # as "not the prompt", it fired on every resize regardless of where the
+        # caret was — so a one-column resize while the user was typing took the
+        # keyboard, and the next character of their sentence answered the
+        # question: a `space` ticked a row, and on an approval a `y` AUTHORISED
+        # `rm -rf /data` (F10, agent review round 7). The composer's one-
+        # keystroke hold is a correct defence and was simply bypassed, because
+        # it only guards keys that arrive AT the composer.
+        #
+        # The two cases are cleanly distinguishable and this is the narrower
+        # one: hiding a widget leaves `focused` as None, while a typing user
+        # leaves it as the Editor.
+        if prompt is not None and getattr(prompt, "is_drawable", False):
+            try:
+                if self.screen is not None and self.screen.focused is None:
+                    prompt.focus()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not re-focus the live prompt", exc_info=True)
 
     def on_band_box_changed(self, event: Band.BoxChanged) -> None:
         """Repaint the band for the box it now has.
@@ -2622,6 +2753,186 @@ class OperatorApp(App[None]):
     def on_descendant_blur(self, event: DescendantBlur) -> None:
         self._sync_composer_focus()
 
+    def route_key_to_live_prompt(self, event) -> bool:  # type: ignore[no-untyped-def]
+        """Send an ADVERTISED ANSWER KEY to a live prompt. True if it was taken.
+
+        This is what makes an anchored question answerable while the composer
+        holds the caret, and it deliberately routes the KEY rather than moving
+        FOCUS. The difference is the whole finding: an earlier revision bounced
+        focus onto the prompt whenever the composer was empty, and the composer
+        is empty *exactly* when the user is about to start typing — so the first
+        character of an intended steer landed on the card, where `y` is an
+        answer. Measured through the real gate: typing `yes do it` at a live
+        `rm -rf /Users/damian/project/data` prompt AUTHORISED the call and left
+        `es do it` in the buffer (F3, agent review round 2). That is strictly
+        worse than the defect it was written to fix, which merely lost a
+        keystroke; and it made drafting impossible while a question was up,
+        because focus was taken before the first character could be typed.
+
+        Routing instead means the composer keeps focus and keeps every key it
+        would normally take. Only the small set the card ADVERTISES is
+        intercepted, and only while the buffer is EMPTY:
+
+        - empty buffer, `y`/`n`/`A` (or the picker's digits/Enter): the user is
+          answering the question in front of them, which is the common case and
+          the one D5 was about;
+        - anything else, or any buffer with text in it: the composer takes it,
+          so a steer starting with any character — including `y` — is typed
+          normally the moment a second character follows.
+
+        One more rule closes the last gap, and it is the one that makes this
+        safe for an APPROVAL: a routed key is held for one keystroke rather
+        than acted on immediately. `y` alone answers; `y` followed by another
+        character was the start of a word, so both characters are handed to the
+        composer and nothing is authorised. Without it, typing `yes do it` as a
+        steer approved a pending `rm -rf` on its first character and left
+        `es do it` in the buffer — an irreversible action taken from a
+        keystroke the user meant as text.
+
+        The hold is released by the next key or by the deadline below, so a
+        deliberate `y` still answers within a fraction of a second and the
+        common case is unchanged.
+        """
+        prompt = self._live_prompt()
+        if prompt is None:
+            return False
+        try:
+            editor = self._editor()
+        except Exception:  # pragma: no cover - hosts with no composer
+            return False
+        if not editor.has_focus:
+            return False
+
+        # Tab is the EXPLICIT way to put the keyboard on the question.
+        #
+        # It exists because inferring the moment the user has finished typing
+        # cannot be done from the buffer: both attempts (empty, then
+        # deleted-to-empty) moved focus at a moment the user had not chosen and
+        # cost them a message (F9, D18). A named gesture cannot. It is offered
+        # only while the card actually needs it — a multi-select is answered by
+        # Space and Enter, which the composer owns, so it is the one question
+        # the routed keys cannot reach — and only while the card is drawing
+        # rows to move a cursor through.
+        #
+        # Taken before the buffer check, because a user with a half-typed
+        # message is exactly who needs it: their draft is preserved and waiting
+        # when they come back with `esc` or a click.
+        if getattr(event, "key", None) == "tab":
+            if self._prompt_wants_the_keyboard(prompt):
+                prompt.focus()
+                return True
+            # Swallowed even where it does not hand over, because the
+            # alternative is worse than doing nothing: Tab inserts whitespace,
+            # which makes the buffer non-empty, which stands the routing down —
+            # so a stray Tab silently disabled the very keys the footer is
+            # advertising, and the next `1` typed `    1` instead of answering.
+            # While a question is live, Tab means "the question" and nothing
+            # else; where the question does not want it, it means nothing.
+            return True
+
+        character = getattr(event, "character", None)
+
+        # A key arriving while one is held ends the ambiguity: this was typing.
+        # The held character goes into the composer and the new key then takes
+        # its normal course, so `y` + `e` types `ye` and answers nothing.
+        #
+        # Two keys need the character restored but must NOT then act on the
+        # buffer they have just changed:
+        #
+        # - ENTER submits the composer. Releasing into it first would send a
+        #   prompt the user never finished typing — and releasing after it (as
+        #   the plain path does) drops the character entirely, which is what
+        #   `y` then Enter measured before this branch: an empty submit and a
+        #   lost `y`. Neither is right, so Enter CANCELS the hold instead: the
+        #   character was a deliberate answer, and the answer is taken.
+        # - ESCAPE means stop, and it also settles the prompt. Restoring the
+        #   character would leave a stray `y` sitting in the composer after the
+        #   question had gone, which is exactly what it did.
+        held = self._held_answer_key
+        if held is not None:
+            self._cancel_held_answer_key()
+            key = getattr(event, "key", None)
+            if key == "enter":
+                # Guarded like the timer path: between the keystroke and this
+                # Enter the card may have advanced to another question, and
+                # this branch previously had no check at all — so one keystroke
+                # answered two questions, the second of them unseen (F4).
+                if not held.still_aimed_at(self._live_prompt()):
+                    return False
+                held.prompt.answer_from_key(held.character)
+                return True
+            if key == "escape":
+                return False
+            editor.insert(held.character)
+            return False
+
+        if editor.text or character is None or character not in prompt.answer_keys():
+            return False
+        self._hold_answer_key(prompt, character)
+        return True
+
+    def _hold_answer_key(self, prompt, character: str) -> None:  # type: ignore[no-untyped-def]
+        """Park a routed answer key until it is confirmed as an answer.
+
+        Confirmed by the deadline expiring with no second keystroke. Cancelled
+        by any further key, which proves the user was typing a word.
+        """
+        timer = self.set_timer(ANSWER_KEY_HOLD_S, self._commit_held_answer_key)
+        self._held_answer_key = _HeldAnswerKey(
+            prompt=prompt,
+            question_index=prompt.question_index,
+            character=character,
+            timer=timer,
+        )
+
+    def _cancel_held_answer_key(self) -> None:
+        """Drop a parked key without answering."""
+        held = self._held_answer_key
+        self._held_answer_key = None
+        if held is not None:
+            held.timer.stop()
+
+    def _commit_held_answer_key(self) -> None:
+        """The hold expired with no second keystroke, so it really was an answer."""
+        held = self._held_answer_key
+        self._held_answer_key = None
+        if held is None:
+            return
+        if not held.still_aimed_at(self._live_prompt()):
+            # The question settled, was replaced, or the card advanced to the
+            # NEXT question while the key was held. A key aimed at one question
+            # must never answer another.
+            return
+        held.prompt.answer_from_key(held.character)
+
+    def _prompt_wants_the_keyboard(self, prompt) -> bool:  # type: ignore[no-untyped-def]
+        """Whether ``prompt`` has answers the composer cannot route to it.
+
+        True only for a card that is drawing rows AND offers no routed keys —
+        in practice a multi-select, which is answered by Space and Enter. Every
+        other prompt is fully answerable from the composer, so pulling focus to
+        it would cost the user their caret for nothing.
+        """
+        try:
+            return bool(prompt.visible_rows) and not prompt.answer_keys()
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    def _live_prompt(self):  # type: ignore[no-untyped-def]
+        """The prompt currently awaiting an answer, or ``None``.
+
+        Either surface: an unanswered approval, or the ``ask`` picker. Both are
+        mounted in the prompt host and both are answered by keys that the
+        composer would otherwise swallow.
+        """
+        approval = self._approval
+        if approval is not None and not approval.answered and approval.is_attached:
+            return approval
+        picker = self._ask_screen
+        if picker is not None and not picker.settled and picker.is_attached:
+            return picker
+        return None
+
     def _sync_composer_focus(self) -> None:
         """Mark the input dock while the composer — and only it — has focus.
 
@@ -2808,6 +3119,42 @@ class OperatorApp(App[None]):
             return
         if self._close_subagent_view():
             return
+        # A live `ask` picker takes Escape as "leave this question unanswered",
+        # which is what its own footer advertises (`esc skip`) and what its
+        # binding does when the card holds focus.
+        #
+        # It has to be handled HERE as well, because the card no longer keeps
+        # the caret: the composer does (see `route_key_to_live_prompt`), so the
+        # card's binding never sees the key and its advertised exit did nothing
+        # at all — measured on three consecutive presses, question still up,
+        # tool still waiting (D11, design round 3). Whatever was answered so
+        # far is kept, which is the rule `action_cancel` already follows.
+        #
+        # Before the streaming check, and returning: `skip` is a real answer to
+        # a question the agent asked, not an abort of the turn, and the turn
+        # continues with whatever the user did say.
+        # ...but only when the picker is the prompt the user is actually
+        # looking at. `_live_prompt` ranks an unanswered APPROVAL first, which
+        # is the right order: an approval is a permission gate the engine is
+        # blocked on, and it is the one raised most recently in an overlap.
+        #
+        # Without that check this branch matched on the picker merely EXISTING
+        # and returned before the approval was considered, so in the ask +
+        # approval overlap — the state F1 was filed for — Escape settled the
+        # scrolled-off question and left a focused `rm -rf` approval unanswered
+        # with the turn still running (F5, agent review round 4). That branch is
+        # also the ONLY implementation of the approval's advertised `esc deny`,
+        # because `ApprovalPrompt.action_cancel` raises `SkipAction` by design
+        # so the key reaches here.
+        picker = self._ask_screen
+        if (
+            picker is not None
+            and not picker.settled
+            and picker.is_attached
+            and self._live_prompt() is picker
+        ):
+            self._settle_ask_picker()
+            return
         pending = self._approval is not None and not self._approval.answered
         if pending or (self._session is not None and self._session.is_streaming):
             self._interrupt()
@@ -2878,17 +3225,49 @@ class OperatorApp(App[None]):
         # while still taking focus off the composer the card is pointed at —
         # a turn parked on an answer the user can neither see nor reach.
         self._close_aside()
-        block = ApprovalBlock(tool_name, description, on_answer=self._latch_approval_answer)
-        self._approval = block
-        self._append_block(block)
+        prompt = ApprovalPrompt(tool_name, description, on_answer=self._latch_approval_answer)
+        self._approval = prompt
+        # The QUESTION goes in the dock, where it cannot scroll away from the
+        # turn it is blocking and where it reliably owns its own answer keys.
+        # The transcript gets a RECEIPT instead, and only once the answer is in
+        # (below): a receipt written up front would have to be rewritten, and a
+        # transcript block that changes after later blocks were appended is the
+        # one thing the transcript's finalize discipline forbids.
+        self._mount_prompt(prompt)
         # The turn is now parked on the user, and the working line says so —
         # this is the one wait in a turn that the agent is not responsible for.
         self._refresh_working_activity()
         try:
-            return await block.wait()
+            return await prompt.wait()
         finally:
-            block.restore_focus()
-            if self._approval is block:
+            # Clear the registration BEFORE unmounting. `_unmount_prompt` hands
+            # focus back to the composer, and the focus guard
+            # (`route_key_to_live_prompt`) asks `_live_prompt()` whether anything
+            # is still owed an answer — so with `self._approval` still pointing
+            # at this card, the guard bounced focus straight back onto the
+            # prompt it was being taken off, leaving the composer unfocusable
+            # after every answered approval.
+            if self._approval is prompt:
+                self._approval = None
+            self._unmount_prompt(prompt)
+            # The decision belongs in the conversation: what was asked, and what
+            # was answered. Appended after the fact so the transcript records a
+            # settled fact rather than a question it would then have to revise.
+            #
+            # Guarded, because this runs on the way OUT of a gate that several
+            # paths can end — including a stop, a `/clear`, and app teardown.
+            # The transcript may already be gone by then (`NoMatches` on
+            # `#transcript`), and a receipt is a nice-to-have on that path while
+            # the future underneath it is not: raising here would propagate out
+            # of the approval gate and fail the tool call itself.
+            if prompt.answered:
+                try:
+                    self._append_block(
+                        ApprovalBlock.receipt(tool_name, description, prompt.answer or "n")
+                    )
+                except Exception:  # pragma: no cover - teardown races only
+                    logger.debug("no transcript to record the approval in", exc_info=True)
+            if self._approval is prompt:
                 self._approval = None
             self._refresh_working_activity()
 
@@ -2930,10 +3309,17 @@ class OperatorApp(App[None]):
             if not future.done():
                 future.set_result(result)
 
-        screen = AskPickerScreen(questions)
-        self._ask_screen = screen
+        # The subagent page hides the transcript and the aside floats over it,
+        # and this card is mounted in the dock underneath both: behind either
+        # one the question would be invisible while still holding focus, so the
+        # turn would be parked on an answer the user can neither see nor reach.
+        # The same yield the approval prompt makes, for the same reason.
+        self._close_subagent_view()
+        self._close_aside()
+        card = AskPickerScreen(questions, answered)
+        self._ask_screen = card
         self._ask_pending = future
-        self.push_screen(screen, answered)
+        self._mount_prompt(card)
         # The turn is parked on the user, and the working line and terminal
         # title say so — the same treatment an unanswered approval gets, for the
         # same reason: a spinner over a wait the agent is not responsible for is
@@ -2943,14 +3329,24 @@ class OperatorApp(App[None]):
             return await future
         except asyncio.CancelledError:
             # The tool call was cancelled out from under the question (steering,
-            # a stop, or teardown). Take the picker off screen: a modal left up
-            # for a call that no longer exists holds the keyboard hostage.
+            # a stop, or teardown). Take the card down: a question left up for a
+            # call that no longer exists holds the keyboard hostage.
             self._settle_ask_picker()
             raise
         finally:
             if self._ask_pending is future:
                 self._ask_pending = None
                 self._ask_screen = None
+            # Take the card down on the ORDINARY path too, not only when a stop
+            # or a teardown settles it. The card resolves its own future from
+            # `settle`, so answering the last question satisfied the `await`
+            # above and left the widget mounted: measured after a plain Enter,
+            # the card was still on screen, the host still held its row, and
+            # focus was still on a question nobody was waiting for — so the
+            # composer could not be typed into at all. Registration is cleared
+            # first (above) so the focus guard does not bounce focus back onto
+            # the card being removed.
+            self._unmount_prompt(card)
             self._refresh_working_activity()
 
     def _settle_ask_picker(self) -> None:
@@ -2963,37 +3359,201 @@ class OperatorApp(App[None]):
         because the third was never reached would be a worse report than an
         honest partial one.
         """
-        screen = self._ask_screen
+        card = self._ask_screen
         self._ask_screen = None
         pending = self._ask_pending
         self._ask_pending = None
         if pending is not None and not pending.done():
-            pending.set_result(screen.answers_so_far() if screen is not None else None)
-        if screen is not None and screen.is_attached:
-            # `pop_screen` rather than `dismiss`: the callback would resolve a
-            # future that is already settled above, and this path can run while
-            # the app is being torn down, where dismiss's own mount checks are
-            # the ones that raise.
-            #
-            # And only while the picker IS the top screen, because `pop_screen`
-            # takes whatever the stack ends with rather than a named screen: with
-            # anything mounted above the question — a palette or a picker the
-            # user opened while the agent waited on them — this dismissed THAT
-            # screen and left the settled picker mounted, holding the keyboard
-            # on a future nobody is waiting for. Below the top it is cut out of
-            # the stack instead: `remove()` on its own detaches the widget and
-            # leaves the stack entry behind, so the next pop would resume a
-            # screen that no longer exists.
+            pending.set_result(card.answers_so_far() if card is not None else None)
+        if card is not None:
+            # Mark the card settled BEFORE unmounting it. Its own settle
+            # callback resolves the future this method has just resolved by
+            # hand, and a second `set_result` raises out of whichever path
+            # loses the race; `settle` is idempotent, so claiming it here is
+            # what makes the unmount below unable to double-answer.
+            card.settle(None)
+            self._unmount_prompt(card)
+
+    def _mount_prompt(self, card: Widget) -> None:
+        """Put a prompt into the dock's prompt host, above the status band.
+
+        One place rather than at each call site, because both surfaces that use
+        it (the ``ask`` picker and the approval prompt) have the same two
+        failure modes if this is done by hand: mounting into the transcript,
+        where the question scrolls away from the turn it is blocking, and
+        leaving a previous prompt mounted, where two cards compete for focus and
+        the lower one is unanswerable.
+        """
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - only before the dock is composed
+            logger.debug("prompt host is not mounted yet", exc_info=True)
+            return
+        host.mount(card)
+        # The host reserves rows only while it holds something, so the dock
+        # collapses back to the composer when nothing is being asked.
+        host.display = True
+        # ...and only while that something can actually be drawn. On a terminal
+        # too short for even the card's footer the card hides itself, and a host
+        # left visible would keep its own separation row for a prompt painting
+        # nothing — one row of chrome that pushed the dock past the screen and
+        # made it scrollable (measured at 20x8: virtual_size 7 against size 6).
+        # Read from the card AFTER it has laid out, because that is when it
+        # knows; `call_after_refresh` is what makes this a read of a settled
+        # value rather than of the state before the mount.
+        self.call_after_refresh(self._sync_prompt_host)
+
+    def on_ask_picker_screen_drawable_changed(
+        self, message: AskPickerScreen.DrawableChanged
+    ) -> None:
+        """A prompt gained or lost the ability to draw itself; re-fit the host.
+
+        Both directions matter. Losing it (the terminal shrank past the card's
+        minimum) must give the host's separation row back, or the dock keeps a
+        row for a question painting nothing; regaining it must take the row
+        again, or the card would be drawn flush against the band below it.
+        """
+        message.stop()
+        self._sync_prompt_host()
+
+    def _sync_prompt_host(self) -> None:
+        """Hide the prompt host when what it holds cannot be drawn.
+
+        The host owns its own visibility (it is the only writer), and asks the
+        prompt whether there is anything to show. Two writers is what this
+        replaced: the card set the host False on an undrawable paint while the
+        app set it True on the next mount, and which one stuck depended on
+        ordering.
+        """
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - only during teardown
+            return
+        children = [child for child in host.children]
+        host.display = bool(children) and any(
+            getattr(child, "is_drawable", True) for child in children
+        )
+
+    def _unmount_prompt(self, card: Widget) -> None:
+        """Take a prompt out of the dock and hand focus back to the composer.
+
+        Focus first and unconditionally: the card TAKES focus to receive its
+        answer keys, so removing it without restoring focus leaves the app with
+        nothing focused and every subsequent keystroke going nowhere — the user
+        types their next instruction into a dead terminal.
+        """
+        # Whether the card actually held focus, read BEFORE it is removed. A
+        # removed widget reports nothing useful, and the answer decides whether
+        # anything needs to move at all: a card that never had focus must not
+        # yank it from wherever the user put it.
+        held_focus = bool(getattr(card, "has_focus", False))
+        # Where the caret was before the removal, so it can be put back if the
+        # removal moves it. Read now: a removed widget reports nothing useful.
+        # Guarded: `self.screen` RAISES `ScreenStackError` during teardown,
+        # and this runs on the way out of a gate that teardown can end.
+        try:
+            screen_now = self.screen
+        except Exception:  # pragma: no cover - teardown races only
+            screen_now = None
+        focused_before = screen_now.focused if screen_now is not None else None
+        # A key held for THIS card can never answer anything now. The commit
+        # path already refuses to answer a prompt that is no longer live, so
+        # this is not the correctness guard — it is the timer not outliving the
+        # question it belonged to.
+        held = self._held_answer_key
+        if held is not None and held.prompt is card:
+            self._cancel_held_answer_key()
+        restore = getattr(card, "restore_focus", None)
+        if callable(restore):
             try:
-                stack = self._screen_stack
-                if stack and stack[-1] is screen:
-                    self.pop_screen()
-                else:
-                    if screen in stack:
-                        stack.remove(screen)
-                    screen.remove()
+                restore()
             except Exception:  # pragma: no cover - teardown races only
-                logger.debug("ask picker was already gone", exc_info=True)
+                logger.debug("could not restore focus from a prompt", exc_info=True)
+        try:
+            if card.is_attached:
+                card.remove()
+        except Exception:  # pragma: no cover - teardown races only
+            logger.debug("prompt was already gone", exc_info=True)
+        try:
+            host = self.query_one("#prompt-host", Container)
+        except Exception:  # pragma: no cover - only during teardown
+            return
+        # Hidden only when nothing ELSE is still being asked.
+        #
+        # `Widget.remove()` is deferred — it returns an awaitable and the child
+        # is still in `children` on this frame — so a plain `not host.children`
+        # test reads the card on its way out and leaves the host displayed, a
+        # row of dock chrome standing after the question was answered. The
+        # departing card is therefore excluded by identity rather than by
+        # waiting for the removal to land.
+        #
+        # What this must NOT do is assume the host holds one prompt. Approvals
+        # serialize against `self._approval`, but `request_user_choice` mounts
+        # into this same host with no interlock, so an `ask` and an approval can
+        # legitimately overlap. Hiding unconditionally then hid a LIVE ask card
+        # the moment an approval beside it was answered: the question stayed
+        # attached and awaited while being invisible and unreachable — the
+        # turn parked on an answer the user cannot see, which is the hang class
+        # this module exists to remove (F1, agent review round 1).
+        remaining = [child for child in host.children if child is not card]
+        host.display = bool(remaining)
+        # The card's own restore target can be missing or stale, and then focus
+        # has nowhere to land: the widget is gone but the screen still names it
+        # as focused, so every later keystroke goes to a removed node and the
+        # composer cannot be typed into at all.
+        #
+        # It is missing more often than it looks. The target is captured at
+        # MOUNT, and a prompt raised early in a session mounts before anything
+        # has taken focus — so it records `None`, `restore_focus` is a no-op,
+        # and the card that had focus keeps it after being removed. Measured
+        # under pytest: prompt unmounted, `_approval` cleared, host hidden, and
+        # `screen.focused` still the detached `ApprovalPrompt`.
+        #
+        # So the composer is the fallback, and it is applied whenever the card
+        # HELD focus and nothing live has it now. Restricted to that case
+        # because the composer must not be stolen from a user who deliberately
+        # put the caret somewhere else while the question was up.
+        try:
+            screen = self.screen
+            # A prompt that is still owed an answer outranks the composer: with
+            # an `ask` and an approval overlapping, answering one must hand the
+            # keyboard to the other rather than to the draft.
+            # The surviving prompt takes the keyboard only if the DEPARTING one
+            # had it. Unconditional, this is F10's defect through the overlap
+            # door: answering one question while the user is typing into the
+            # composer would move the caret onto the other one, where the next
+            # character of their sentence is an answer (F11, agent review round
+            # 7 — same class as F10, narrower reach, same fix).
+            successor = self._live_prompt()
+            if successor is not None and successor is not card:
+                if held_focus:
+                    successor.focus()
+                elif focused_before is not None and focused_before.is_attached:
+                    # The departing card did NOT have the keyboard, so nothing
+                    # should move — but removing a widget makes Textual focus
+                    # the next focusable node, which here is the surviving
+                    # prompt. Put the caret back where the user had it, or a
+                    # question settling elsewhere silently moves the keyboard
+                    # onto the other one mid-sentence (F11, agent review round
+                    # 7 — F10's defect through the overlap door).
+                    focused_before.focus()
+            elif held_focus and screen is not None:
+                focused = screen.focused
+                # "Somewhere the user can type" is the test, not "somewhere".
+                #
+                # Removing a focused widget does not leave focus empty: Textual
+                # moves it to the next focusable node, which here is the
+                # TranscriptView — a scrollable region, not an input. So the
+                # app looked correctly focused while every keystroke went to a
+                # widget that does nothing with them, and the composer could
+                # not be typed into after answering. Checking only for
+                # `None`/detached missed it entirely, because the state was
+                # neither.
+                editor = self._editor()
+                if focused is not editor:
+                    editor.focus()
+        except Exception:  # pragma: no cover - no composer in reduced hosts
+            logger.debug("no composer to hand focus back to", exc_info=True)
 
     def _settle_key_prompt(self) -> None:
         """Cancel a live API-key prompt, freeing the login parked on it.
@@ -3096,7 +3656,12 @@ class OperatorApp(App[None]):
         approval = self._approval
         if approval is not None and not approval.answered:
             approval.resolve(False)
-            approval.restore_focus()
+            # Take the card out of the dock as well as answering it. The prompt
+            # is no longer a transcript block that can repaint itself into a
+            # receipt in place: it is docked chrome, so a settled one left
+            # mounted would sit above the composer holding focus on a decision
+            # that has already been made.
+            self._unmount_prompt(approval)
         self._approval = None
 
     def _approvals_are_denied(self, epoch: int) -> bool:
@@ -3123,7 +3688,7 @@ class OperatorApp(App[None]):
             # latch hook too, so the frame carried the same statement twice in the
             # loudest ink it has.
             approval.resolve(True, answer="y")
-            approval.restore_focus()
+            self._unmount_prompt(approval)
         self._approval = None
 
     def _allow_approvals_again(self) -> None:
@@ -4263,6 +4828,23 @@ class OperatorApp(App[None]):
         # input into it. `sync_layout` is a no-op when the measurement has not
         # moved.
         self.call_after_refresh(self._sync_overlay_layout)
+        # A live prompt rides it too, as a BACKSTOP rather than as its primary
+        # trigger. The card's footer is derived from state the card does not
+        # own — whether it holds focus, and whether the composer holds a draft —
+        # and neither emits anything the card hears, so "correct in the model,
+        # stale on screen" arrived three review rounds running on three
+        # different inputs. Each was fixed by adding one more explicit trigger,
+        # which is a fix per input and leaves the next one to be found by a
+        # reviewer. This asks the card whether what it is showing is still what
+        # it would draw, so a missed trigger is a frame late instead of
+        # permanently wrong. It is a no-op on every tick where nothing moved.
+        prompt = self._live_prompt()
+        repaint_if_stale = getattr(prompt, "repaint_if_stale", None)
+        if callable(repaint_if_stale):
+            try:
+                repaint_if_stale()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not re-check the live prompt", exc_info=True)
 
     def _sync_overlay_layout(self, *, force: bool = False) -> None:
         """Re-measure the floating cards against the live screen and dock.
@@ -4292,6 +4874,53 @@ class OperatorApp(App[None]):
         """
         if self._aside_is_open():
             self.call_after_refresh(self._sync_overlay_layout)
+        # A live prompt's footer names a DIFFERENT set of keys depending on
+        # whether the composer holds a draft, because the routing stands down
+        # on a non-empty buffer — and nothing else repaints on a keystroke.
+        # `_repaint` fires on focus, resize, answer and advance; typing is none
+        # of those, so the card went on advertising `1-2 answer` while `1` was
+        # being typed into the buffer, and `y/n/A answer` on a live `rm -rf`
+        # gate at a moment when `y` is a text character (F7, agent review round
+        # 5). Same shape as D13 one axis over: the model was right and the
+        # pixels were stale.
+        prompt = self._live_prompt()
+        remeasure = getattr(prompt, "remeasure", None)
+        if callable(remeasure):
+            try:
+                remeasure()
+            except Exception:  # pragma: no cover - teardown races only
+                logger.debug("could not repaint the live prompt", exc_info=True)
+        # Emptying the composer hands the keyboard back to the question.
+        #
+        # The card yields focus to a draft on mount (D12), and for most
+        # questions that costs nothing because the answer keys are routed. A
+        # MULTI-SELECT has no routed keys at all — it is answered by Space and
+        # Enter, which the composer owns — so a multi-select arriving over a
+        # draft was answerable only by mouse or by abandoning it: `space`, the
+        # digits, `enter`, the arrows and `tab` all went to the composer, and
+        # `shift+tab` is bound to `cycle_effort` (D17, design round 5). That is
+        # a regression from anchoring the card, which was a `ModalScreen` and
+        # simply held the keyboard.
+        #
+        # NOTE: focus is NOT handed to the card here, on any buffer state.
+        #
+        # Two rounds of trying to infer the moment the user is "done typing"
+        # produced two data-loss defects, because every candidate signal is
+        # ambiguous. Keyed on the buffer being EMPTY, sending a message handed
+        # the caret over and the user's next message answered the question
+        # (F9). Keyed on the user DELETING to empty, REWORDING did the same:
+        # clear the line to retype it, and the next `space` ticks an option
+        # while the retyped message goes nowhere — measured as
+        # `{'rollout': ['Backfill from the audit log']}`, an answer never
+        # chosen, with the message lost (D18, design round 6).
+        #
+        # Both had the same shape: a focus change the user did not ask for,
+        # arriving at the moment they were least likely to be watching, with a
+        # destructive next keystroke. There is no better signal to find — the
+        # gesture for "I have finished typing and want to answer" is not
+        # distinguishable from "I am mid-edit" by looking at the buffer. So the
+        # card asks for the keyboard explicitly instead (Tab, advertised in the
+        # footer), which cannot arrive at a moment the user did not choose.
 
     def _open_subagent_view(self, job_id: str) -> None:
         """Enter the full-page subagent view for one task job.
