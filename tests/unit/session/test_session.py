@@ -30,11 +30,17 @@ from local_operator.harness.types import (
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
+    ToolCall,
     ToolResult,
     Usage,
 )
 from local_operator.providers.failover import ProviderError
-from local_operator.session.session import IMAGE_DROPPED_NOTICE, Session
+from local_operator.session.session import (
+    IMAGE_DROPPED_NOTICE,
+    SESSION_INCIDENT_MESSAGE_TYPE,
+    Session,
+    _paired_prefix,
+)
 from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
 
@@ -1817,3 +1823,480 @@ async def test_a_cancelled_subagent_never_persists_a_marker_or_reminder(tmp_path
     ), "the cancelled child's actual turn was dropped"
 
     await child.dispose()
+
+
+# --- durability: a run's progress survives a crash or interrupt -------------
+#
+# Regression cover for the loss reported from a long KOHO debugging session:
+# a transcript held ONLY the user's prompt while the run was in flight, so a
+# session that died mid-run replayed to nothing and every completed tool call
+# was gone. The transcript store always flushed per append; what was missing
+# was any append between the turn's first message and its post-run pass.
+
+
+def _persisted_texts(session: Session) -> list[str]:
+    """Message texts on DISK, read back through a fresh store (never the
+    in-memory entry list, which would pass even if nothing was flushed)."""
+    reopened = Transcript(session._transcript.directory)
+    return [m.text for m in reopened.build_llm_history() if isinstance(m, Message) and m.text]
+
+
+@pytest.mark.asyncio
+async def test_tool_progress_is_on_disk_before_the_run_finishes(tmp_path):
+    """Work completed at a tool boundary is durable IMMEDIATELY, not at the
+    end of the run: a reader opening the file mid-run sees the assistant
+    message and its tool result."""
+    seen: list[list[str]] = []
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="probe", content=[TextContent(text="TOOL-OUTPUT")]
+        )
+
+    probe = AgentTool(
+        name="probe", parameters={"type": "object", "properties": {}}, execute=execute
+    )
+
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="FIRST-STEP"),
+                StreamToolCallDelta(index=0, id="c1", name="probe", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="DONE"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[probe])
+    # Sample the file at the boundary between the two model calls.
+    original = session._on_turn_end
+
+    async def sampling_hook(messages):
+        outcome = await original(messages)
+        seen.append(_persisted_texts(session))
+        return outcome
+
+    session._on_turn_end = sampling_hook  # type: ignore[assignment]
+
+    await session.prompt("go")
+
+    assert seen, "the boundary hook never fired"
+    mid_run = seen[0]
+    assert "FIRST-STEP" in mid_run  # assistant message durable mid-run
+    assert "TOOL-OUTPUT" in mid_run  # and so is the completed tool result
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_completed_work_survives_a_crash_mid_run(tmp_path):
+    """The failure the report described: the run dies AFTER real work, before
+    any normal persistence. Everything completed must still replay."""
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="probe", content=[TextContent(text="EXPENSIVE")]
+        )
+
+    probe = AgentTool(
+        name="probe", parameters={"type": "object", "properties": {}}, execute=execute
+    )
+
+    class CrashOnSecondCall(ScriptedStream):
+        def __call__(self, request, signal):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+
+                async def first():
+                    yield StreamTextDelta(delta="REASONING")
+                    yield StreamToolCallDelta(index=0, id="c1", name="probe", argument_delta="{}")
+                    yield StreamEndEvent(stop_reason="toolUse")
+
+                return first()
+
+            async def boom():
+                raise RuntimeError("provider exploded")
+                yield  # pragma: no cover - generator shape only
+
+            return boom()
+
+    session = make_session(tmp_path, CrashOnSecondCall([]), tools=[probe])
+    # A HARD failure: everything downstream of the run is dead. That is what a
+    # SIGKILL, an OOM, or a bug between boundaries looks like from the
+    # transcript's point of view, and it is the case the loop's own error
+    # handling cannot cover, because the post-run pass never executes at all.
+    # (A mere provider/stream error does NOT reproduce the loss: the loop
+    # catches it, the run ends normally and the post-run pass still writes
+    # everything. Measured on a build with the boundary flush removed: this
+    # sabotage leaves ``['go']`` on disk, a stream error leaves the full run.)
+    #
+    # Sabotage is scoped to the POST-RUN call site rather than the method,
+    # because the durability flushes share that method and disabling it
+    # outright would remove the very thing under test.
+    real_persist = session._persist_new_messages
+    inside_durability_flush = {"now": False}
+    real_progress = session._persist_progress
+
+    async def tracking_progress(messages):
+        inside_durability_flush["now"] = True
+        try:
+            return await real_progress(messages)
+        finally:
+            inside_durability_flush["now"] = False
+
+    async def persist_or_die(messages):
+        if inside_durability_flush["now"]:
+            return await real_persist(messages)
+        raise RuntimeError("post-run persistence never ran")
+
+    session._persist_progress = tracking_progress  # type: ignore[assignment]
+    session._persist_new_messages = persist_or_die  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError):
+        await session.prompt("go")
+
+    replayed = _persisted_texts(session)
+    assert "go" in replayed  # the prompt
+    assert "REASONING" in replayed  # the assistant turn that ran
+    assert "EXPENSIVE" in replayed  # the tool output that cost real time
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_completed_work_survives_cancellation(tmp_path):
+    """Ctrl+C / dispose cancels the turn task. Cancellation must still
+    propagate (the turn really is over) AND leave the COMPLETED work on disk.
+
+    Completed is the operative word. An earlier version of this test cancelled
+    during the FIRST batch and asserted that batch's assistant message was
+    persisted — which is precisely the dangling ``tool_use`` that
+    :func:`_paired_prefix` now refuses to write (see
+    ``test_durability_flush_never_persists_a_dangling_tool_call``). The
+    assertion was wrong, not the trim: an assistant message whose calls never
+    reported is not work to preserve, it is a row that 400s every later
+    resume. So the cancel here lands in the SECOND batch, and what must
+    survive is the first batch, which really did finish.
+    """
+    started = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        if tool_call_id == "c2":
+            started.set()
+            await asyncio.sleep(30)  # cancelled here, one batch in
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="slow", content=[TextContent(text="FINISHED")]
+        )
+
+    slow = AgentTool(name="slow", parameters={"type": "object", "properties": {}}, execute=execute)
+
+    class Steps(ScriptedStream):
+        def __call__(self, request, signal):
+            self.requests.append(request)
+            index = len(self.requests)
+
+            async def gen():
+                yield StreamTextDelta(delta=f"BEFORE-CANCEL-{index}")
+                yield StreamToolCallDelta(index=0, id=f"c{index}", name="slow", argument_delta="{}")
+                yield StreamEndEvent(stop_reason="toolUse")
+
+            return gen()
+
+    session = make_session(tmp_path, Steps([]), tools=[slow])
+
+    task = asyncio.create_task(session.prompt("go"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    replayed = _persisted_texts(session)
+    assert "go" in replayed
+    assert "BEFORE-CANCEL-1" in replayed  # the batch that completed
+    assert "FINISHED" in replayed  # and its tool result
+
+    # Pairing is asserted HERE, on the cancellation path itself, and not only
+    # in the dedicated dangling-call test. An earlier version of this test
+    # checked text alone, and text alone is satisfied by a transcript carrying
+    # an unanswered `tool_use` — so it ratified the corruption instead of
+    # catching it (review round 1, R2).
+    history = Transcript(session._transcript.directory).build_llm_history()
+    calls = {
+        call.id
+        for message in history
+        if isinstance(message, Message) and message.role == "assistant"
+        for call in message.tool_calls
+    }
+    results = {
+        message.tool_call_id
+        for message in history
+        if isinstance(message, Message) and message.role == "tool"
+    }
+    assert not calls - results, f"cancellation left a dangling tool_use: {sorted(calls - results)}"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_durability_flush_never_duplicates_messages(tmp_path):
+    """The boundary flush, the finally flush and the post-run pass all offer
+    the same messages. Idempotence by id means each is stored exactly once."""
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="ONE"),
+                StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta='{"text":"x"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="TWO"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[echo_tool(executed)])
+    await session.prompt("go")
+
+    texts = _persisted_texts(session)
+    for expected in ("go", "ONE", "TWO"):
+        assert texts.count(expected) == 1, f"{expected!r} stored {texts.count(expected)}x: {texts}"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_progress_survives_when_mid_turn_compaction_is_off(tmp_path):
+    """The reported loss, end to end.
+
+    Before the durability flush, the ONLY thing that persisted mid-run was a
+    side effect of the mid-turn compaction gate: it writes the run so far to
+    get a replayable cut target. Every early return above that line therefore
+    left the whole run unpersisted — and with ``mid_turn_enabled`` off the
+    hook returns immediately, so a long tool run kept 100% of its work in
+    memory. Measured against a build without the flush: this scenario left
+    exactly ONE entry (the user's prompt) on disk against ten with it, which
+    is the transcript the report described.
+    """
+    from pydantic import BaseModel, Field
+
+    class CompactionSettings(BaseModel):
+        enabled: bool = True
+        reserve_tokens: int = 16384
+        keep_recent_tokens: int = 20000
+        threshold_percent: float = 0.80
+        threshold_tokens: int = Field(default=600_000)
+        auto_continue: bool = False
+        mid_turn_enabled: bool = False  # the gate that used to carry persistence
+
+    started = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        started.set()
+        if tool_call_id == "c2":
+            await asyncio.sleep(30)  # interrupted here, after real work landed
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="work", content=[TextContent(text="REAL-WORK")]
+        )
+
+    work = AgentTool(name="work", parameters={"type": "object", "properties": {}}, execute=execute)
+
+    class Steps(ScriptedStream):
+        def __call__(self, request, signal):
+            self.requests.append(request)
+            index = len(self.requests)
+
+            async def gen():
+                yield StreamTextDelta(delta=f"STEP-{index}")
+                yield StreamToolCallDelta(index=0, id=f"c{index}", name="work", argument_delta="{}")
+                yield StreamEndEvent(stop_reason="toolUse")
+
+            return gen()
+
+    session = make_session(
+        tmp_path, Steps([]), tools=[work], compaction_settings=CompactionSettings()
+    )
+    task = asyncio.create_task(session.prompt("debug the tenant"))
+    await started.wait()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    replayed = _persisted_texts(session)
+    assert "STEP-1" in replayed, f"the first step was lost: {replayed}"
+    assert "REAL-WORK" in replayed, f"completed tool work was lost: {replayed}"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_durability_flush_never_persists_a_dangling_tool_call(tmp_path):
+    """A crash or Ctrl+C MID-BATCH must not write an unanswered tool call.
+
+    The loop appends the assistant message when the model turn ends and the
+    tool results only when the batch finishes, so for the whole duration of a
+    tool batch the live context ends in an assistant message whose calls have
+    no answers. The ``finally`` flush persists that context — and a dangling
+    ``tool_use`` on disk is permanent: every later resume replays it into a
+    400 ("must be followed by tool messages responding to each
+    tool_call_id"). Caught on a real Ctrl+C, which left ``['c1a', 'c1b']``
+    unpaired before ``_paired_prefix`` trimmed the tail.
+
+    Completed batches must still survive, or the trim would have thrown away
+    the work the flush exists to save.
+    """
+    started = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        if tool_call_id.startswith("c2"):
+            started.set()
+            await asyncio.sleep(30)  # cancelled inside the SECOND batch
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="work",
+            content=[TextContent(text=f"DONE-{tool_call_id}")],
+        )
+
+    work = AgentTool(name="work", parameters={"type": "object", "properties": {}}, execute=execute)
+
+    class TwoCallBatches(ScriptedStream):
+        def __call__(self, request, signal):
+            self.requests.append(request)
+            index = len(self.requests)
+
+            async def gen():
+                yield StreamTextDelta(delta=f"STEP-{index}")
+                yield StreamToolCallDelta(
+                    index=0, id=f"c{index}a", name="work", argument_delta="{}"
+                )
+                yield StreamToolCallDelta(
+                    index=1, id=f"c{index}b", name="work", argument_delta="{}"
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+
+            return gen()
+
+    session = make_session(tmp_path, TwoCallBatches([]), tools=[work])
+    task = asyncio.create_task(session.prompt("go"))
+    await started.wait()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    replayed = Transcript(session._transcript.directory).build_llm_history()
+    calls = {
+        call.id
+        for message in replayed
+        if isinstance(message, Message) and message.role == "assistant"
+        for call in message.tool_calls
+    }
+    results = {
+        message.tool_call_id
+        for message in replayed
+        if isinstance(message, Message) and message.role == "tool"
+    }
+    assert calls, "the first batch should have been persisted"
+    assert not calls - results, f"dangling tool_use persisted: {sorted(calls - results)}"
+
+    texts = [m.text for m in replayed if isinstance(m, Message) and m.text]
+    assert "DONE-c1a" in texts and "DONE-c1b" in texts, f"completed work lost: {texts}"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dispose_does_not_suppress_the_turns_own_flush(tmp_path):
+    """``dispose()`` sets ``_disposed`` BEFORE aborting and awaiting the
+    in-flight turn — deliberately, so that turn's persistence "must land on a
+    live transcript" (HC-14). A ``_disposed`` guard inside the durability
+    flush would therefore suppress exactly the flush dispose is waiting for
+    (review round 1, R3). Completed work must be on disk after a dispose that
+    lands mid-batch, and the tail must still be legal.
+    """
+    started = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        if tool_call_id == "c2":
+            started.set()
+            await asyncio.sleep(30)  # dispose lands here
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="work",
+            content=[TextContent(text=f"DONE-{tool_call_id}")],
+        )
+
+    work = AgentTool(name="work", parameters={"type": "object", "properties": {}}, execute=execute)
+
+    class Steps(ScriptedStream):
+        def __call__(self, request, signal):
+            self.requests.append(request)
+            index = len(self.requests)
+
+            async def gen():
+                yield StreamTextDelta(delta=f"STEP-{index}")
+                yield StreamToolCallDelta(index=0, id=f"c{index}", name="work", argument_delta="{}")
+                yield StreamEndEvent(stop_reason="toolUse")
+
+            return gen()
+
+    session = make_session(tmp_path, Steps([]), tools=[work])
+    asyncio.create_task(session.prompt("go"))
+    await started.wait()
+    await asyncio.sleep(0.05)
+    await session.dispose()
+
+    history = Transcript(session._transcript.directory).build_llm_history()
+    texts = [m.text for m in history if isinstance(m, Message) and m.text]
+    assert "STEP-1" in texts and "DONE-c1" in texts, f"dispose dropped completed work: {texts}"
+
+    calls = {
+        call.id
+        for message in history
+        if isinstance(message, Message) and message.role == "assistant"
+        for call in message.tool_calls
+    }
+    results = {
+        message.tool_call_id
+        for message in history
+        if isinstance(message, Message) and message.role == "tool"
+    }
+    assert not calls - results, f"dispose left a dangling tool_use: {sorted(calls - results)}"
+
+
+def test_paired_prefix_is_not_defeated_by_a_custom_message_in_the_tail():
+    """A persistable ``CustomMessage`` must not shield an unanswered assistant.
+
+    ``journal_incident`` appends straight to the live context and
+    ``_on_mcp_incident`` fires it from a background task, so an MCP breaker
+    tripping mid-batch leaves ``[..., assistant(tool_calls), session_incident]``.
+    A tail scan that stopped at the first non-assistant entry declared that
+    legal and persisted the dangling ``tool_use`` beneath it — R1's corruption
+    through a narrower door (review round 2, R5).
+
+    The custom itself is KEPT: it is real history, and dropping it would lose
+    the incident the model needs to see on resume.
+    """
+    answered = Message(role="assistant", content=[TextContent(text="A1")])
+    answered.tool_calls = [ToolCall(id="c1", name="work", arguments={})]
+    result = Message(
+        role="tool", tool_call_id="c1", tool_name="work", content=[TextContent(text="R1")]
+    )
+    unanswered = Message(role="assistant", content=[TextContent(text="A2")])
+    unanswered.tool_calls = [ToolCall(id="c2", name="work", arguments={})]
+    incident = CustomMessage(
+        custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "MCP server 'linear': breaker tripped"},
+    )
+
+    prompt = Message.user("go")  # bound once: Message.user() mints a fresh id
+
+    kept = _paired_prefix([prompt, answered, result, unanswered, incident])
+
+    assert unanswered not in kept, "a custom in the tail shielded an unanswered assistant"
+    assert incident in kept, "the incident must survive — it is real history"
+    assert kept == [prompt, answered, result, incident]
+
+    # And the ordinary cases still behave: an ANSWERED tail is untouched, and a
+    # run of unanswered assistants under several customs is fully trimmed.
+    answered_tail = [answered, result]
+    assert _paired_prefix(answered_tail) == answered_tail
+    assert _paired_prefix([answered, result, unanswered, incident, incident]) == [
+        answered,
+        result,
+        incident,
+        incident,
+    ]
