@@ -214,6 +214,25 @@ _NO_SAMPLING_PARAMS = re.compile(
     r"claude-[a-z]+-(?:[5-9]|\d{2,})(?!\d)" r"|(?:^|[/:-])o[1-9](?:-|$)" r"|gpt-5"
 )
 
+#: Kimi's coding-plan host pins sampling instead of rejecting the keys
+#: outright: ``api.kimi.com/coding/v1/chat/completions`` answers HTTP 400
+#: ``invalid temperature: only 1 is allowed for this model`` for any other
+#: value, and ``invalid top_p: only 0.95 is allowed`` likewise — while
+#: OMITTING both keys succeeds. Verified live against ``k3`` and
+#: ``k2-thinking`` with temperatures 0.2/0.6/1/absent and top_p 0.9/1/absent.
+#:
+#: Scoped to the coding-plan model ids rather than folded into
+#: :data:`_NO_SAMPLING_PARAMS`, because this is NOT a property of a model
+#: family across routes: the mainland ``api.moonshot.cn`` host serves
+#: ``kimi-k2-*``/``moonshot-*`` under the same ``kimi`` provider id and
+#: accepts the pair. The rule is "any k-numbered coding-host id, now or
+#: later": ``k3``, ``k3-256k``, ``k2-thinking`` (the live probe confirmed it
+#: pins the pair too) and ``kimi-for-coding*`` all exist only on the coding
+#: host, so matching the ``k<digit>``/``kimi-for-coding`` shapes is matching
+#: the endpoint that pins the values. Anchored at the start:
+#: ``kimi-k2-0711-preview`` must not match on its ``k2`` fragment.
+_KIMI_PINNED_SAMPLING = re.compile(r"^(?:k\d+(?:-|$)|kimi-for-coding)")
+
 #: OpenAI introduced the public Responses route for the GPT-5 generation. The
 #: direct `/v1/models` listing exposes ids but no capability flags, so an
 #: uncurated current snapshot still needs a family rule; older registry rows
@@ -282,6 +301,12 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # while a provider-keyed rule would keep shipping a value that is provably
     # discarded and would start 400ing the day an aggregator stops normalising.
     supports_sampling_params = _NO_SAMPLING_PARAMS.search(lowered) is None
+    # The kimi coding-plan host pins temperature/top_p to fixed values and
+    # 400s on any other; omitted keys pass. Unlike _NO_SAMPLING_PARAMS this
+    # IS keyed on the provider too, because the same model family accepts the
+    # pair on the mainland host — see _KIMI_PINNED_SAMPLING.
+    if canonical == "kimi" and _KIMI_PINNED_SAMPLING.match(lowered):
+        supports_sampling_params = False
     # Seeded to the model's own documented default, not left unset, so the band
     # states a real level from the first frame. Safe only because the provider
     # says the two are the same request — Anthropic documents `effort: "high"`
@@ -819,10 +844,9 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
     store = None
     try:
         from local_operator.providers.auth_store import AuthStore
-        from local_operator.providers.registry import get_provider_definition
+        from local_operator.providers.registry import credential_provider_id
 
-        definition = get_provider_definition(provider)
-        storage = (definition.store_credentials_as or provider) if definition else provider
+        storage = credential_provider_id(provider)
         store = AuthStore()
         rows = store.list_credentials(provider=storage)
         for row in reversed(rows):
@@ -1677,10 +1701,9 @@ class SessionStreamFn:
 
     @staticmethod
     def _storage_provider(provider: str) -> str:
-        from local_operator.providers.registry import get_provider_definition
+        from local_operator.providers.registry import credential_provider_id
 
-        definition = get_provider_definition(provider)
-        return definition.store_credentials_as or provider if definition is not None else provider
+        return credential_provider_id(provider)
 
     async def _primary_has_auth(self, model: ModelSpec) -> bool:
         from local_operator.providers.failover import FallbackTarget

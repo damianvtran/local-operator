@@ -1279,6 +1279,25 @@ def test_an_unshipped_xai_id_does_not_keep_the_unknown_placeholder_name(monkeypa
         # silently dropping a working setting is worse than the 400 it avoids.
         ("google", "gemini-2.5-flash-thinking", True),
         ("deepseek", "deepseek-reasoner", True),
+        # Kimi's coding-plan host (api.kimi.com/coding/v1) pins the pair
+        # instead of rejecting the keys: HTTP 400 "invalid temperature: only 1
+        # is allowed for this model" / "invalid top_p: only 0.95 is allowed",
+        # while omitting both succeeds. Verified live against k3 and
+        # k2-thinking on chat/completions. Scoped to the coding-plan ids —
+        # the mainland moonshot host accepts the pair on its own models, so
+        # kimi-k2-0711-preview must keep its sampling settings and must not
+        # be caught by the k3 arm's "k<digit>" shape.
+        ("kimi", "k3", False),
+        ("kimi", "k3-256k", False),
+        # Live-probed alongside k3: pins the pair the same way.
+        ("kimi", "k2-thinking", False),
+        ("kimi", "kimi-for-coding", False),
+        ("kimi", "kimi-for-coding-highspeed", False),
+        ("kimi", "kimi-k2-0711-preview", True),
+        ("kimi", "moonshot-v1-128k", True),
+        # The id shape is kimi's, not the world's: a k-something on another
+        # provider keeps its parameters.
+        ("openrouter", "moonshotai/kimi-k2", True),
     ],
 )
 def test_the_spec_knows_which_models_reject_sampling_parameters(

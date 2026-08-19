@@ -16,6 +16,7 @@ from local_operator.providers.oauth.callback_server import LoginCallbacks, Login
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
     ProviderDefinition,
+    credential_provider_id,
     env_key_name,
     get_provider_definition,
     list_login_providers,
@@ -147,7 +148,7 @@ def run_login(
         print("Login cancelled.")
         return 1
 
-    storage_provider = definition.store_credentials_as or definition.id
+    storage_provider = credential_provider_id(definition.id)
     if isinstance(result, str):
         # Paste-an-API-key login: store as api_key credential with source login.
         if result:
@@ -176,7 +177,7 @@ def run_logout(provider_id: str, auth_store: "AuthStore") -> int:
         print(f"Unknown provider: {provider_id}")
         return 1
     # Log out of both the alias (e.g. xai-oauth) and its storage id (xai).
-    targets = {provider_id, definition.store_credentials_as or provider_id}
+    targets = {provider_id, credential_provider_id(provider_id)}
     removed = 0
     for target in sorted(targets):
         removed += auth_store.delete_credentials_for_provider(target, disabled_cause="logged-out")
