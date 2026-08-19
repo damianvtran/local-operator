@@ -1493,6 +1493,19 @@ class SessionStreamFn:
         # tool calls would bust the provider cache and make one task reason at
         # several depths.
         self._message_effort: str | None = None
+        # The coarse tier (lo/med/hi) the level above was mapped from, kept so a
+        # mid-message model switch can re-fit the SAME judgement onto the new
+        # model's ladder instead of re-reading the conversation — see
+        # ``_effort_for``.
+        self._message_tier: str | None = None
+        # A mid-message model switch owes the NEW model a quota check, and this
+        # is deliberately not ``_message_boundary_pending``: that flag also gates
+        # effort classification, and re-arming it to buy a quota check re-grades
+        # the turn from an aside (see ``on_model_changed``).
+        #
+        # It holds the SELECTOR rather than a bare bool so only the model the
+        # switch was made to can spend it — see ``preflight_usage`` (review F10).
+        self._quota_recheck_for: str | None = None
         self._primary_selector: str | None = None
         self._usage_checked_selector: str | None = None
         self._usage_checked_at = 0.0
@@ -1515,7 +1528,98 @@ class SessionStreamFn:
     def begin_message(self) -> None:
         """Mark the next model call as a user-message boundary."""
         self._message_boundary_pending = True
+        # A switch nobody spent a check on does not carry into the next message:
+        # this boundary re-checks whatever model it opens on anyway.
+        self._quota_recheck_for = None
         self._message_effort = None
+        self._message_tier = None
+
+    def on_model_changed(self, model: ModelSpec) -> None:
+        """The session switched model mid-message; re-open the new model's quota check.
+
+        Only called when the provider/model pair genuinely changed — ``/effort``
+        and per-request sampling overrides write the spec constantly and must
+        not each pay for this (see ``Session.set_model``).
+
+        Must stay SYNCHRONOUS: ``Session.set_model`` is a sync method and
+        discards a returned awaitable, which is the right contract for what is
+        only a cache invalidation.
+
+        The EFFORT is deliberately not touched here. It is re-fitted at apply
+        time against the request's own spec (:meth:`_effort_for`), because the
+        model handed to this hook is not guaranteed to be the model the next
+        request actually carries — the loop's resolver can fall back — and
+        fitting to one while applying to the other is how the two drift
+        (review F9).
+        """
+        # ONLY the quota gate, and it is its OWN token on purpose.
+        # ``_message_boundary_pending`` also gates effort CLASSIFICATION, so
+        # re-arming that to get a quota check would re-grade the turn from
+        # whatever aside happens to be the newest user-role message — the exact
+        # defect review F2 found.
+        #
+        # Without a token of its own the new provider went unchecked for the
+        # rest of the turn (review F7): ``preflight_usage``'s body sits behind
+        # the boundary token, which the turn's FIRST call already spent, so
+        # clearing the memo behind that gate achieved nothing.
+        #
+        # The token names the SELECTOR it was armed for, because a bare bool is
+        # spent by whichever request reaches the preflight first — and that is
+        # not necessarily a request on the new model. A call built just before
+        # the switch can still be in flight (the loop resolves the spec two
+        # yields before it calls the stream, and its resolver may fall back to
+        # the run's snapshot), so a bool let a stale call consume the check the
+        # new provider was owed, reproducing F7 on a narrower path (review F10).
+        self._quota_recheck_for = f"{model.provider}/{model.model_id}"
+
+    def _effort_for(self, model: ModelSpec) -> str | None:
+        """The frozen auto-effort as a rung ``model`` actually accepts.
+
+        The level chosen at the message boundary is a rung on the ladder of the
+        model in force AT THAT MOMENT, and ladders differ between models. A level
+        the current model accepts is passed through unchanged; one it does not is
+        replaced by re-fitting the same coarse judgement (the classifier's
+        lo/med/hi tier) to this model's ladder. What is never done is sending the
+        stored level blind, which is an HTTP 400 that reads as the switch having
+        broken the session.
+
+        Re-fitting rather than re-classifying is the point (review F2). The
+        classifier reads the newest ``role="user"`` message, and mid-turn that is
+        very often not the user's prompt: steering, wake, hub, job-result and
+        todo-reminder asides all render as user turns. Re-classifying on a switch
+        therefore graded the aside — a task opened at ``high`` continued at
+        ``low`` after a "hurry up" nudge. The user's own prompt stays the thing
+        that decided the depth, which is what freezing was for.
+
+        Called per request rather than on the switch itself so the fit is always
+        against the spec being sent (review F9).
+
+        A level the new model ALREADY accepts is kept as-is rather than re-fitted
+        (review F11). So a ``med`` prompt frozen as ``low`` on a two-rung ladder
+        stays ``low`` on a three-rung one, where re-fitting would say ``medium``.
+        That is deliberate: this function exists to keep requests legal, and
+        silently deepening a level the user has been shown — and is being billed
+        for — because the ladder got finer is a bigger surprise than a level that
+        holds steady across a switch.
+        """
+        if self._message_effort is None:
+            return None
+        if self._message_effort in model.reasoning_efforts:
+            return self._message_effort
+        if self._message_tier is None:
+            # A level with no tier behind it cannot be re-fitted, and it is not
+            # on this model's ladder: dropping it costs one call's depth, where
+            # sending it costs the call.
+            return None
+        from local_operator.model.effort_classifier import map_tier_to_effort
+
+        cfg = self._settings.get("effort", {}) if isinstance(self._settings, Mapping) else {}
+        allow_max = (
+            bool(cfg.get("allowMax", cfg.get("allow_max", False)))
+            if isinstance(cfg, Mapping)
+            else False
+        )
+        return map_tier_to_effort(self._message_tier, model.reasoning_efforts, allow_max=allow_max)
 
     async def _notice(self, text: str, kind: str = "warning") -> None:
         if self._notice_handler is None:
@@ -1600,9 +1704,23 @@ class SessionStreamFn:
             self._primary_selector = selector
             self._route_state.clear()
             self._usage_checked_at = 0.0
-        if not self._message_boundary_pending:
+        # EITHER gate opens the check: the user-message boundary (the ordinary
+        # once-per-message case) or a mid-message model switch, which brings a
+        # provider this turn has never checked. The switch needs its own token
+        # because the boundary one was already spent by the turn's first call —
+        # without it the new provider went unchecked for the rest of the turn
+        # (review F7).
+        #
+        # The switch token is honoured only for the selector it was armed for,
+        # and is consumed only by that same selector, so a request still
+        # carrying the pre-switch spec can neither open the gate nor spend the
+        # check the new model is owed (review F10).
+        recheck_due = self._quota_recheck_for == selector
+        if not self._message_boundary_pending and not recheck_due:
             return
         self._message_boundary_pending = False
+        if recheck_due:
+            self._quota_recheck_for = None
 
         now = time.monotonic()
         if (
@@ -1785,19 +1903,24 @@ class SessionStreamFn:
                 request.model.reasoning_efforts,
                 self._settings,
             )
+            # Remembered so a mid-message model switch can re-fit this same
+            # judgement onto a different ladder (``_effort_for``).
+            self._message_tier = classification.tier if classification is not None else None
             if classification is not None and self._message_effort is not None:
                 await self._notice(
                     f"auto effort: {self._message_effort} ({classification.tier}, "
                     f"score {classification.score:.1f})",
                     "info",
                 )
-        if self._message_effort is not None:
+        # Fitted to THIS request's spec, every call. The frozen level belongs to
+        # the model it was classified against, and mid-turn the model can change
+        # under it — by the user's switch, or by the loop's resolver falling back
+        # to the run's snapshot. Applying the stored level blind would send a rung
+        # the current model may not have (review F9).
+        effort = self._effort_for(request.model)
+        if effort is not None:
             request = request.model_copy(
-                update={
-                    "model": request.model.model_copy(
-                        update={"reasoning_effort": self._message_effort}
-                    )
-                }
+                update={"model": request.model.model_copy(update={"reasoning_effort": effort})}
             )
 
         if self._session_id and request.prompt_cache_key is None:

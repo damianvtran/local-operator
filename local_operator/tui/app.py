@@ -240,6 +240,19 @@ RESTORED_COST_PREFIX = "≥"
 #: made the reader translate. All four now describe what the user observes.
 QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
 SENT_STEER_NOTICE = "sent — the agent has it now"
+#: Printed under a ``/model`` switch made WHILE a turn is running, and only
+#: then. The request already streaming cannot be re-targeted, so for a few
+#: seconds the band names the new model while the old one is visibly still
+#: working — which reads as the switch having been ignored, the complaint the
+#: mid-turn switch was built to answer.
+#:
+#: Its own row rather than a third clause on the receipt: that line is already
+#: two clauses and a hint, and measured at the widths this app supports,
+#: folding the timing into its scope parenthetical pushed it from two wrapped
+#: lines to three — the run-on the receipt's own comment exists to prevent.
+#: Same "step" noun as the steering pair above, for the same reason: one word
+#: for one observable boundary.
+MODEL_SWITCH_MID_TURN_NOTICE = "applies from the next step — this one finishes on the old model"
 #: The turn ended without ever reaching a boundary to drain at — interrupted,
 #: failed, or simply answered with no further tool calls. ONE string for all
 #: three, because they are one fact from the user's side: the message is waiting
@@ -5753,6 +5766,33 @@ class OperatorApp(App[None]):
                 f"model: {old_label} → {session.model_label} "
                 f"(this session){suffix} — {PERSIST_HINT}"
             )
+        # MID-TURN is the one moment "starting when" is a live question, and the
+        # next receipt cannot answer it because the answer is visible before
+        # then: the agent goes on working on the old model until the step in
+        # flight ends. On its own row — see MODEL_SWITCH_MID_TURN_NOTICE for why
+        # it is not a third clause on the receipt.
+        #
+        # OUTSIDE the branches above, and that placement is the fix for a real
+        # defect (design review D1): ``/model default <p>/<id>`` performs the
+        # SAME live switch, and while it was nested in the else-branch that
+        # spelling printed only "used from the next launch" — a receipt that
+        # contradicted the band beside it, which had already repainted to the
+        # new model. Every spelling that switches the session owes the same
+        # answer to "starting when".
+        #
+        # ``old_label != session.model_label`` because re-selecting the model
+        # already in force is a no-op, and promising that "this one finishes on
+        # the old model" describes a handover that will not happen (D4). The
+        # session layer already declines to re-derive anything for a same-model
+        # write; this is the UI half of that rule.
+        if session.is_streaming and old_label != session.model_label:
+            # ``info``, matching the receipt it qualifies, NOT ``note`` (design
+            # review D3). Both rows answer one action, and at ``note`` the
+            # subordinate half measured 8.62:1 against the receipt's 4.55:1 —
+            # 1.9x the contrast of its own subject, so the eye landed on the
+            # qualifier first. A continuation reads as a continuation only if it
+            # is not louder than the sentence it continues.
+            notice(MODEL_SWITCH_MID_TURN_NOTICE, "info")
         if warning:
             notice(warning, "warning")
 
@@ -5788,8 +5828,9 @@ class OperatorApp(App[None]):
         """Put ``level`` on the session's spec and repaint the band.
 
         Through ``set_model`` because the spec IS the request: the loop rereads
-        ``config.model`` every turn, so the level takes effect on the next one
-        and every wire client reads it from the same field. Remembered on the
+        the session's spec at every provider call, so the level takes effect on
+        the next one — within the running turn, not just the next turn — and
+        every wire client reads it from the same field. Remembered on the
         app as well, because a session can be REPLACED under a running app —
         ``/new``, ``/reload`` and ``/resume`` all rebuild one — and a setting
         that silently reverted on a reload would be a band asserting a level
