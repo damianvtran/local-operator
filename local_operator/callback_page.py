@@ -1,8 +1,11 @@
-"""The page the browser lands on at the end of an MCP OAuth grant.
+"""The page the browser lands on at the end of an OAuth grant.
 
-This is the only web surface local-operator serves, and it is served at the
-worst possible moment: the user has just handed a third party permission on
-their behalf and is looking for confirmation that the thing they authorized
+Served by both loopback listeners local-operator runs — the MCP authorization
+flow (``local_operator.mcp.auth``) and the provider login flows
+(``local_operator.providers.oauth.callback_server``). It is the only web
+surface local-operator serves, and it is served at the worst possible moment:
+the user has just handed a third party permission on their behalf and is
+looking for confirmation that the thing they authorized
 actually received it. A bare ``<h2>`` on a white page reads like a server
 error even when it says "Authorized", so this page is drawn in the product's
 own design language — the Local Operator marketing site's system
@@ -268,13 +271,19 @@ def render_callback_page(
     *,
     tone: Tone = "neutral",
     server: str | None = None,
+    provider: str | None = None,
     provider_message: str | None = None,
     closable: bool = True,
 ) -> str:
     """The full HTML document for one callback outcome.
 
     ``server`` is the MCP server the grant was for, shown in a labelled trough —
-    omitted rather than faked when the caller does not know it.
+    omitted rather than faked when the caller does not know it. ``provider`` is
+    the same trough for a model-provider login (Anthropic, OpenAI, Z.AI): the
+    name of the party the user just authorized, labelled ``Provider`` so the
+    page says *whose* login finished without pretending an MCP server was
+    involved. The two are mutually exclusive at the call sites (one listener
+    each), but nothing here needs to enforce that.
 
     ``provider_message`` is the third party's own ``error_description``, and it
     gets its own labelled trough rather than being spliced into ``detail``.
@@ -291,6 +300,8 @@ def render_callback_page(
     blocks = ""
     if server:
         blocks += _trough("MCP server", server)
+    if provider:
+        blocks += _trough("Provider", provider)
     # Strip BEFORE the gate. `error_description=%20%20%20` is truthy and
     # reaches here from the wire, and gating on the raw argument then rendering
     # the stripped text produces a labelled empty box — the exact thing the
@@ -327,6 +338,7 @@ def callback_response(
     *,
     tone: Tone = "neutral",
     server: str | None = None,
+    provider: str | None = None,
     provider_message: str | None = None,
     closable: bool = True,
     status: str = "200 OK",
@@ -343,6 +355,7 @@ def callback_response(
         detail,
         tone=tone,
         server=server,
+        provider=provider,
         provider_message=provider_message,
         closable=closable,
     ).encode()

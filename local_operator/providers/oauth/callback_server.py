@@ -27,6 +27,7 @@ import webbrowser
 from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable, TypeVar
 
+from local_operator.callback_page import Tone, render_callback_page
 from local_operator.harness.types import AbortSignal
 
 DEFAULT_TIMEOUT_SECONDS = 300.0
@@ -214,6 +215,12 @@ class CallbackFlowOptions:
     allow_port_fallback: bool = True
     manual_input_only: bool = False
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    #: Display name of the provider being signed into ("Anthropic", "OpenAI"),
+    #: rendered in a labelled trough on the browser landing page so the user
+    #: can see WHOSE login just finished. Optional because the page is honest
+    #: without it — the trough is omitted rather than faked (mirrors how the
+    #: MCP flow treats its server URL).
+    provider_label: str | None = None
 
 
 class OAuthCallbackFlow(ABC):
@@ -329,8 +336,18 @@ class OAuthCallbackFlow(ABC):
             if error:
                 desc = query.get("error_description", "")
                 self._finish_error(f"Authorization failed: {error} {desc}".strip())
-                body = (
-                    b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"
+                # The provider's words go in their own labelled trough rather
+                # than into our sentence — same voice boundary the MCP flow
+                # draws, and where a bare `access_denied` reads as data rather
+                # than as broken English. Stripped `desc` falls back to the
+                # error code so a `error_description=%20%20%20` redirect still
+                # names what went wrong.
+                body = self._page(
+                    "Sign-in failed",
+                    "The provider did not grant this sign-in, so nothing was "
+                    "connected. You can start the login again from Local Operator.",
+                    tone="danger",
+                    provider_message=desc.strip() or error,
                 )
                 await self._respond(writer, 200, body)
             else:
@@ -347,11 +364,28 @@ class OAuthCallbackFlow(ABC):
                             "Authorization callback state mismatch — stale tab or forged "
                             "redirect. Restart the login."
                         )
-                        body = b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"  # noqa: E501
+                        body = self._page(
+                            "Sign-in failed",
+                            "This redirect did not match the login Local Operator "
+                            "started. It may be a stale tab, or a redirect it "
+                            "never asked for. Nothing was connected. Restart the "
+                            "login from Local Operator.",
+                            tone="danger",
+                        )
                         await self._respond(writer, 200, body)
                     else:
                         self._finish(code, state)
-                        body = b"<html><body><h1>Login complete</h1><p>You may close this tab.</p></body></html>"  # noqa: E501
+                        # "Authorization complete", not "Signed in": this page is
+                        # served on CODE receipt, before the token exchange, and
+                        # its own detail line says the sign-in is still finishing.
+                        # Matches the register of the MCP surface's "Authorized"
+                        # (D1, PR #177 design round 1).
+                        body = self._page(
+                            "Authorization complete",
+                            "Local Operator has the authorization code and is "
+                            "finishing the sign-in.",
+                            tone="success",
+                        )
                         await self._respond(writer, 200, body)
                 else:
                     # PR-14: no code AND no error — fail the login promptly
@@ -360,22 +394,77 @@ class OAuthCallbackFlow(ABC):
                         "Authorization callback arrived with neither a code nor an error "
                         "parameter. Restart the login."
                     )
-                    body = b"<html><body><h1>Login failed</h1><p>You may close this tab.</p></body></html>"  # noqa: E501
+                    body = self._page(
+                        "No authorization code",
+                        "The redirect arrived without an authorization code, so "
+                        "there is nothing to hand back. You can start the login "
+                        "again from Local Operator.",
+                        tone="danger",
+                    )
                     await self._respond(writer, 200, body)
         elif path == "/launch" and method == "GET":
             if self._pending_auth_url:
                 await self._respond(
-                    writer, 302, b"", extra_headers=[("Location", self._pending_auth_url)]
+                    writer,
+                    302,
+                    b"",
+                    extra_headers=[("Location", self._pending_auth_url)],
                 )
             else:
-                await self._respond(writer, 404, b"no pending login")
+                body = self._page(
+                    "No login in progress",
+                    "There is no sign-in waiting on this address. Start the "
+                    "login again from Local Operator.",
+                    closable=False,
+                    show_provider=False,
+                )
+                await self._respond(writer, 404, body)
         else:
-            await self._respond(writer, 404, b"not found")
+            # Browsers ask for /favicon.ico off their own bat; a neutral 404
+            # keeps a speculative fetch from being mistaken for the redirect.
+            body = self._page(
+                "Nothing here",
+                "This address only answers the login redirect.",
+                closable=False,
+                show_provider=False,
+            )
+            await self._respond(writer, 404, body)
         try:
             writer.close()
             await writer.wait_closed()
         except Exception:
             pass
+
+    def _page(
+        self,
+        title: str,
+        detail: str,
+        *,
+        tone: Tone = "neutral",
+        provider_message: str | None = None,
+        closable: bool = True,
+        show_provider: bool = True,
+    ) -> bytes:
+        """One outcome of this login, as the shared Local Operator page.
+
+        Same document the MCP OAuth listener serves (``callback_page``), so a
+        user who authorizes a provider and an MCP server sees one product on
+        both landings instead of a styled card on one and bare ``<h1>`` HTML
+        on the other. The provider's display name rides along when the flow
+        knows it — but only on real outcome pages. ``show_provider=False`` is
+        for the neutral 404s (a speculative favicon fetch, ``/launch`` with
+        nothing pending): a non-event given the outcome grammar of a labelled
+        provider trough would read as if something happened with that provider
+        (F2/D2, PR #177 round 1).
+        """
+        return render_callback_page(
+            title,
+            detail,
+            tone=tone,
+            provider=self.options.provider_label if show_provider else None,
+            provider_message=provider_message,
+            closable=closable,
+        ).encode()
 
     async def _respond(
         self,
@@ -389,6 +478,7 @@ class OAuthCallbackFlow(ABC):
             f"HTTP/1.1 {status} {reason}",
             f"Content-Length: {len(body)}",
             "Content-Type: text/html; charset=utf-8",
+            "Cache-Control: no-store",
             "Connection: close",
         ]
         for name, value in extra_headers or []:
@@ -413,7 +503,10 @@ class OAuthCallbackFlow(ABC):
         if self.options.manual_input_only or self._server is None or self._bound_port is None:
             return None
         uri = urllib.parse.urlsplit(self.redirect_uri())
-        if uri.scheme not in ("http", "https") or uri.hostname not in ("localhost", "127.0.0.1"):
+        if uri.scheme not in ("http", "https") or uri.hostname not in (
+            "localhost",
+            "127.0.0.1",
+        ):
             return None
         if self.options.callback_path == "/launch":
             return None
@@ -499,7 +592,8 @@ class OAuthCallbackFlow(ABC):
                     # before, and the callback keeps its chance to win either
                     # way because this loop never blocks it.
                     await report_safely(
-                        self.callbacks.on_warning or self.callbacks.on_progress, str(exc)
+                        self.callbacks.on_warning or self.callbacks.on_progress,
+                        str(exc),
                     )
                     # Ordered after the message so a host that repaints on
                     # rejection does so with the reason already on screen
@@ -545,7 +639,9 @@ class OAuthCallbackFlow(ABC):
 
         try:
             done, _pending = await asyncio.wait(
-                waiters, timeout=self.options.timeout_seconds, return_when=asyncio.FIRST_COMPLETED
+                waiters,
+                timeout=self.options.timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
             for task in waiters:
