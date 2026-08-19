@@ -779,8 +779,9 @@ class AskPickerScreen(Container):
     def _screen_size(self) -> tuple[int, int]:
         """The SCREEN's content box, which is what the card budgets its ROWS against.
 
-        Rows, and — only before the card has been placed — the fallback width in
-        :meth:`_card_width`. The laid-out width does NOT come from here: it is
+        Rows, and — only while :meth:`_card_width` has no laid-out column to
+        read (before the card is placed, or while it is hidden) — the fallback
+        width. The laid-out width does NOT come from here: it is
         imposed by the stylesheet's ``width: 1fr`` and read back off the card's
         own box. See :meth:`_card_width` for why the two axes differ.
 
@@ -931,10 +932,19 @@ class AskPickerScreen(Container):
 
         Padding is not subtracted: Textual is border-box, so ``size`` is already
         the box inside this widget's ``padding``. ``ASK_PADDING_CELLS`` is still
-        the stylesheet's mirror, and it is what the pre-layout fallback below
-        spends — the one path that has no laid-out width to read, because
-        ``compose`` paints once before the card has been placed. That frame is
-        replaced by ``on_resize`` the moment it has.
+        the stylesheet's mirror, and it is what the fallback below spends on the
+        two paths that have no laid-out width to read:
+
+        - before the card has been PLACED, because ``compose`` paints once on
+          the way in; and
+        - while it is HIDDEN, because a card that found no drawable line sets
+          ``display = False`` (see :meth:`_repaint`) and an undisplayed widget
+          reports a zero-width box. A terminal that shrinks past the card and
+          then grows back re-measures through here (agent review round 2, F6).
+
+        Both frames are replaced by ``on_resize`` as soon as there is a real
+        column to read — measured, the fallback returns the same number the
+        layout then assigns, because ``#prompt-host`` adds no horizontal padding.
         """
         mine = self.size.width if self.is_mounted else 0
         if mine:
