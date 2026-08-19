@@ -113,6 +113,22 @@ IMAGE_MAX_EDGE = 1568
 #: of them on every render (review round 1, F1). The ingest bound and the repair
 #: bound answer different questions and only coincide by accident.
 IMAGE_REFUSAL_MAX_EDGE = 2000
+#: What a repaired line-art block is actually resized TO, deliberately a little
+#: under :data:`IMAGE_REFUSAL_MAX_EDGE` rather than exactly at it.
+#:
+#: The provider's wording is "exceed max allowed size ... 2000 pixels", so 2000
+#: itself reads as legal and landing on it would probably work. Probably is the
+#: wrong standard for the one number whose failure mode is a permanently wedged
+#: session, and this module already holds that position for the ingest cap —
+#: "the cap must sit below 2000 with room to spare — not at it". A repair that
+#: lands exactly on a boundary inferred from an error message would be trusting
+#: a strict inequality nobody has tested, on the code path that exists because
+#: the provider changed its mind about what it accepts.
+#:
+#: 1960 keeps a 2% margin, which costs a pixel font nothing measurable (the
+#: Google-shape frame goes to 0.957 scale instead of 0.977) and leaves room for
+#: a provider that reads its own limit as inclusive.
+IMAGE_REPAIR_TARGET_EDGE = 1960
 #: Refuse to DECODE above this pixel count (~200 MB of RGBA at 4 bytes/pixel).
 #: Checked against the header dimensions BEFORE the decode allocates, because a
 #: decompression bomb is small on disk by construction: a byte cap cannot see
@@ -589,8 +605,11 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
     content goes to ``IMAGE_MAX_EDGE``, where the cost argument for 1568 was
     measured. Line art goes only to the refusal ceiling, because its strokes are
     one pixel wide and every pixel removed is a stroke that may disappear — on a
-    snapcompact frame that is the difference between a 2% and a 23% reduction,
+    snapcompact frame that is the difference between a 4% and a 23% reduction,
     and between legible glyphs and glyphs missing strokes (review round 2, F8).
+    The target is :data:`IMAGE_REPAIR_TARGET_EDGE`, which sits just under the
+    refusal line rather than on it — see that constant for why landing exactly
+    on a boundary inferred from an error message is not good enough here.
 
     A block this cannot decode is returned unchanged rather than dropped. It may
     be perfectly acceptable to the provider (a HEIF whose dimensions this cannot
@@ -636,7 +655,7 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
     #
     # Photographic content keeps the 1568 default: it has no strokes to lose,
     # and it is the case the cost argument for 1568 was measured on.
-    edge = IMAGE_REFUSAL_MAX_EDGE if _is_bilevel_bytes(raw, info) else IMAGE_MAX_EDGE
+    edge = IMAGE_REPAIR_TARGET_EDGE if _is_bilevel_bytes(raw, info) else IMAGE_MAX_EDGE
     try:
         payload, wire_mime, _ = bound_image_for_model(raw, info, max_edge=edge)
     except ValueError:

@@ -57,6 +57,20 @@ def _noise_png(size: tuple[int, int]) -> bytes:
     return buffer.getvalue()
 
 
+def _bilevel_png(size: tuple[int, int]) -> bytes:
+    """Black-and-white line art: horizontal one-pixel rules, two values only.
+
+    Stands in for the pixel-font renderings this path actually protects, without
+    depending on snapcompact's geometry.
+    """
+    image = Image.new("L", size, 0)
+    for y in range(0, size[1], 3):
+        image.paste(255, (0, y, size[0], y + 1))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def _sniffed(data: bytes) -> ImageInfo:
     """``sniff_image`` with its ``None`` asserted away.
 
@@ -466,6 +480,27 @@ def test_a_repaired_archive_frame_stays_a_readable_pixel_font() -> None:
     # pixel taken off a 1px stroke is a stroke that may vanish.
     assert max(repaired.size) <= MANY_IMAGE_PIXEL_LIMIT
     assert max(repaired.size) > IMAGE_MAX_EDGE, "line art was shrunk further than it had to be"
+
+
+def test_a_repair_lands_under_the_refusal_line_not_exactly_on_it() -> None:
+    """The boundary is inferred from an error message, so it must not be sat on.
+
+    The provider says dimensions that "exceed max allowed size ... 2000 pixels",
+    which reads as making 2000 itself legal — but this is the one number whose
+    failure mode is a permanently wedged session, and the module already refuses
+    to sit on it for the ingest cap. A repair that landed exactly on 2000 would
+    be betting the fix on a strict inequality nobody has tested.
+    """
+    source = _bilevel_png((2400, 900))
+    rebound = rebound_oversize_image(base64.b64encode(source).decode("ascii"))
+    assert rebound is not None
+    repaired = Image.open(io.BytesIO(base64.b64decode(rebound[0])))
+    assert max(repaired.size) < MANY_IMAGE_PIXEL_LIMIT, "a repair landed on the refusal line"
+
+    # And the gate itself is exclusive: a block already at the limit is legal
+    # and must not be rewritten.
+    at_limit = _bilevel_png((MANY_IMAGE_PIXEL_LIMIT, 900))
+    assert rebound_oversize_image(base64.b64encode(at_limit).decode("ascii")) is None
 
 
 def test_a_photograph_is_still_resized_smoothly_to_the_cheap_bound() -> None:
