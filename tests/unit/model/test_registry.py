@@ -127,13 +127,28 @@ def test_get_model_info() -> None:
 
 
 def test_token_plan_models_ship_their_real_windows() -> None:
-    """Transcribed from Alibaba's published specs and cross-checked against
-    OpenRouter's listing for the same upstream models (both said 1M/131k for
-    qwen3.8-max on 2026-08-18). A drift here is a wrong compaction threshold,
-    not a cosmetic gap."""
-    flagship = qwencloud_token_plan_models["qwen3.8-max"]
-    assert (flagship.context_window, flagship.max_tokens) == (1_000_000, 131_072)
-    assert flagship.supports_images is True
+    """Every row pinned to its exact numbers, not merely to "something positive".
+
+    Transcribed from Alibaba's per-SKU specs for this endpoint. OpenRouter
+    corroborates qwen3.8-max and qwen3.6-flash outright and differs on the other
+    four for reasons recorded beside the map (it advertises the largest window
+    across its routes, which is not a claim about this gateway). Pinning only
+    the corroborated row would leave exactly the deliberate deviations free to
+    drift silently, so all six are asserted here: a change to any of them is a
+    changed compaction threshold and has to be a conscious edit.
+    """
+    assert {
+        model_id: (info.context_window, info.max_tokens)
+        for model_id, info in qwencloud_token_plan_models.items()
+    } == {
+        "qwen3.8-max": (1_000_000, 131_072),
+        "qwen3.7-max": (1_000_000, 65_536),
+        "qwen3.7-plus": (1_000_000, 64_000),
+        "qwen3.6-flash": (1_000_000, 65_536),
+        "glm-5.2": (1_000_000, 131_072),
+        "deepseek-v4-pro": (1_000_000, 384_000),
+    }
+    assert qwencloud_token_plan_models["qwen3.8-max"].supports_images is True
 
     # Both the exact-id chain and the enumerable map must answer, because
     # `build_model_spec` reaches the former and discovery merges over the
@@ -144,9 +159,22 @@ def test_token_plan_models_ship_their_real_windows() -> None:
 
     # Every chat row in the map carries a usable window: a zero or missing one
     # would silently disable compaction for that model (see build_model_spec).
+    # The exact-value assertion above already covers today's rows; this is the
+    # guard for whatever is added next.
     for model_id, info in qwencloud_token_plan_models.items():
         assert info.context_window and info.context_window > 0, model_id
         assert info.max_tokens and info.max_tokens > 0, model_id
+
+
+def test_token_plan_ships_no_row_the_gateway_serves_under_another_id() -> None:
+    """`qwen3.8-max-preview` was shipped and then removed, and the removal is
+    the point: a completion requested against that id comes back stamped
+    ``"model": "qwen3.8-max"``, so it is an ALIAS the gateway resolves rather
+    than a distinct SKU. Carrying it as its own row put a second, different
+    window (983,616) on the same underlying model and offered a duplicate in the
+    picker — and, because the listing does not advertise it, one that only the
+    registry believed in."""
+    assert "qwen3.8-max-preview" not in qwencloud_token_plan_models
 
 
 def test_token_plan_spec_carries_the_window_to_the_session() -> None:
