@@ -72,6 +72,24 @@ PICKER_PADDING_CELLS = 2
 #: the thing being looked up.
 NAME_MIN_CELLS = 16
 
+#: What both empty surfaces say when the picker has nothing to offer: the
+#: card's own body, and the notice ``/resume`` prints instead of opening it.
+#: ONE string because the two are the same statement made in two places, and
+#: they contradicted each other the moment either was edited alone.
+#:
+#: It names WHOSE sessions rather than claiming none exist. Delegated subagent
+#: runs share the directory and are deliberately unlisted, so on a machine
+#: whose only surviving sessions are children — reachable through retention,
+#: which evicts the older parent before its newer children — "no previous
+#: sessions" was false and told the user nothing about why.
+#:
+#: It must also FIT: this string is the card's own empty body, and the card
+#: is capped at :data:`PICKER_MAX_WIDTH` cells. The first wording ran to 76
+#: cells and hung two past the rule at full width — and much further on a
+#: narrow terminal, where every neighbouring row sheds cells to fit. Anything
+#: edited here is measured against that cap, not eyeballed.
+RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are not listed"
+
 #: Rows of sessions shown before the list scrolls, when the terminal has room.
 #: A page that fills the screen makes the modal feel like a mode switch rather
 #: than a popup; ten is enough to scan. A CEILING, not the page size — see
@@ -126,6 +144,34 @@ def _pad_cells(text: str, width: int) -> str:
     ate the age and id columns.
     """
     return text + " " * max(0, width - cell_len(text))
+
+
+def _wrap_cells(text: str, width: int) -> list[str]:
+    """Break ``text`` into lines of at most ``width`` CELLS, on word bounds.
+
+    Cells rather than characters for the same reason :func:`_pad_cells`
+    measures in them: a wide glyph occupies two, so a character-counted wrap
+    overflows the card on exactly the scripts that can least afford it.
+
+    A single word longer than the width is truncated rather than allowed to
+    run past the card, which is the only case where losing text beats breaking
+    the layout — every other case keeps all of the words and spends rows.
+    """
+    if width <= 0:
+        return [text]
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        candidate = f"{current} {word}" if current else word
+        if cell_len(candidate) <= width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        current = word if cell_len(word) <= width else truncate_cells(word, width)
+    if current:
+        lines.append(current)
+    return lines or [""]
 
 
 def plan_columns(
@@ -584,7 +630,11 @@ class SessionPickerScreen(ModalScreen[str | None]):
             else:
                 header.append(truncate_cells(self._query, width), style=label)
         else:
-            tally = f"  {len(self._all)} sessions"
+            # Singular when there is one. Pre-existing, but filtering makes a
+            # one-row list the common case rather than the rare one: a machine
+            # whose delegated fan-out dominates now lands there routinely.
+            count = len(self._all)
+            tally = f"  {count} session" if count == 1 else f"  {count} sessions"
             if cell_len(title) + cell_len(tally) > width:
                 header.append(truncate_cells(title, width), style=Style(color=fg_colour))
             else:
@@ -602,7 +652,19 @@ class SessionPickerScreen(ModalScreen[str | None]):
         page = self._page_rows()
         counter: tuple[int, int, int] | None = None
         if not self._all:
-            out.append("no previous sessions to resume", style=dim)
+            # WRAPPED to the measured width, not printed flat. Every other line
+            # in this card is bounded by the runtime width; this one was a
+            # constant, so it fitted the 74-cell ceiling and still overflowed
+            # the actual card on any narrow terminal — at 60 columns it was cut
+            # to "…subagent runs are", losing the clause that explains why the
+            # list is empty, which is the whole reason the wording changed.
+            # Wrapped rather than truncated for that reason: the explanation is
+            # the message, so it must survive the narrow case, not be the first
+            # thing dropped.
+            for index, line in enumerate(_wrap_cells(RESUME_EMPTY_NOTICE, width)):
+                if index:
+                    out.append("\n")
+                out.append(line, style=dim)
         elif not rows:
             # The header already echoes the query; repeating it here — and via
             # ``repr``, whose quoting flips on an apostrophe — said it twice in

@@ -737,6 +737,36 @@ class Editor(TextArea):
     async def _on_key(self, event: events.Key) -> None:
         """Handle chat keys before TextArea's insert path sees them."""
         key = event.key
+        # An advertised answer key, while a question is up and the buffer is
+        # empty, answers the question instead of being typed.
+        #
+        # Routed rather than implemented here: the app owns which prompt is
+        # live and which keys it advertises. This is the FIRST thing checked so
+        # the key never reaches TextArea's insert path, and it is scoped to an
+        # empty buffer, so the moment there is a draft the composer takes
+        # everything again.
+        #
+        # The alternative — moving FOCUS to the prompt whenever the composer was
+        # empty — is what this replaces, and it was worse than the defect it
+        # fixed: the composer is empty exactly when a user is about to type, so
+        # the first character of an intended steer landed on the card and `y`
+        # AUTHORISED a pending `rm -rf` (F3, agent review round 2).
+        # ...but the pickers own their keys first. `_sync_picker` has not run
+        # yet at this point, so an OPEN picker is asked directly: while a slash
+        # or model list is up, Tab COMPLETES the row and belongs to it. Routed
+        # ahead of that, the prompt's Tab swallow silently broke completion for
+        # as long as any question was live — `/mod` + Tab left `/mod` (found by
+        # driving the combination rather than reasoning about it).
+        picker_open = self._model_picker.is_open() or self._picker.is_open()
+        router = None if picker_open else getattr(self.app, "route_key_to_live_prompt", None)
+        if callable(router):
+            try:
+                if router(event):
+                    event.stop()
+                    event.prevent_default()
+                    return
+            except Exception:  # pragma: no cover - hosts with no prompt surface
+                pass
         # Re-derive the picker state from the buffer BEFORE routing. The
         # buffer is the only authority on whether a command word is open, and
         # syncing here means routing never depends on a queued Changed

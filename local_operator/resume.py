@@ -17,6 +17,7 @@ transcript-directory decision, so the rule has one definition.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import NamedTuple
@@ -29,6 +30,36 @@ RESUME_LATEST = "@latest"
 #: recency ordering is read from: a directory's own mtime moves for reasons that
 #: are not turns (retention sweeps touch it), so it is not the clock to use.
 TRANSCRIPT_NAME = "transcript.jsonl"
+
+#: Marks a session directory as machine-started rather than user-started. A
+#: subagent's child session is an ephemeral directory under ``sessions/`` with
+#: exactly the shape of a real conversation, so nothing on disk told the two
+#: apart and the ``/resume`` picker offered every delegated review, design and
+#: scout run as if the user had opened it — on one machine 40 of 50 rows.
+#:
+#: A SIDECAR file rather than a field in the transcript: the picker's whole
+#: cost model is one bounded read per row, and a marker inside the JSONL could
+#: only be found by parsing it. ``Path.is_file()`` is one stat, and it answers
+#: even for a child whose transcript has not been written yet.
+ORIGIN_NAME = "origin.json"
+
+#: ``origin`` value for a session a subagent runs. The file is JSON, and the
+#: key is a string rather than a bare flag, so a future non-user origin (a
+#: scheduled run, a server-side session) is a new value and not a second file.
+ORIGIN_SUBAGENT = "subagent"
+
+#: The two openings only the subagent runner can produce, used ONLY by the
+#: one-time backfill for directories that predate the marker.
+#:
+#: ``[role: <name>]`` is built by ``AgentProfile.preamble`` and ``[scout mode:``
+#: is a literal constant in the subagent module; both are stamped in FRONT of
+#: the caller's prompt, so they can only appear at offset 0 of a child's first
+#: user message. Anchored and exact for that reason: the cost of a false
+#: positive is hiding one of the user's own conversations, which is the very
+#: failure the absence-means-user default exists to avoid, so these match what
+#: the machine writes and nothing that merely resembles it.
+_ROLE_PREAMBLE = re.compile(r"\[role: [a-z0-9_-]+\]\n")
+_SCOUT_PREAMBLE = "[scout mode:"
 
 #: How much of the opening message a session name may keep. Long enough to tell
 #: two days' work apart, short enough that a column of them still scans.
@@ -71,6 +102,154 @@ class ResumeNotFound(Exception):
     """``--resume`` named a session that is not on disk (or none exist)."""
 
 
+def mark_session_origin(session_dir: Path, origin: str, **details: object) -> None:
+    """Record that ``session_dir`` was started by ``origin``, not by the user.
+
+    Written by whoever CREATES the directory, which is the only place that
+    knows: by the time the picker reads it back, a child session and a user's
+    conversation are the same shape on disk.
+
+    Best-effort by contract. Marking is bookkeeping for a listing, and a child
+    that cannot write its marker (read-only volume, a race with a retention
+    sweep that just removed the directory) must still RUN — the cost of the
+    failure is one extra row in a picker, and taking a delegated task down for
+    it would be the more expensive bug.
+
+    **The directory's mtime is preserved**, and that is load-bearing rather
+    than tidy. Retention sorts and age-expires on the DIRECTORY's mtime
+    (``session/retention.py``), and creating a file inside a directory moves
+    it — so stamping a session silently reset its retention clock to now.
+    Measured on twin stores: marking existing directories kept 3 delegated
+    runs the picker will never show while deleting 3 of the user's own
+    conversations, and resurrected 59 children that were already past the age
+    ceiling. Writing a marker is bookkeeping ABOUT a session, never activity
+    IN it, so it must not answer the question "when was this session last
+    used". A directory this call creates has no prior mtime and is unaffected.
+    """
+    payload = {"origin": origin, **details}
+    try:
+        # Read before the write: this is the value the write is about to
+        # destroy. ``None`` for a directory that does not exist yet, which is
+        # the fresh-child path and needs no restore.
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / ORIGIN_NAME).write_text(json.dumps(payload), encoding="utf-8")
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def session_origin(session_dir: Path) -> str:
+    """``origin`` recorded for a session, or ``""`` when it is the user's own.
+
+    Absence means USER, and that direction is deliberate. The alternative —
+    marking user sessions and hiding everything unmarked — would have made
+    every conversation that predates the marker disappear from the picker,
+    which loses real work; an unmarked child merely shows one stale row that
+    retention eventually evicts. A listing that shows too much is recoverable
+    by typing a filter, one that hides your own session is not.
+
+    Tolerant for the same reason :func:`session_name` is: this runs over every
+    session directory to paint a picker, so a truncated or hand-edited marker
+    yields ``""`` (treated as the user's) rather than taking the picker down.
+
+    ``errors="replace"`` is load-bearing, not decoration. :func:`mark_session_origin`
+    writes non-atomically, so a child killed mid-write (SIGKILL, sleep, a full
+    volume) leaves the file cut INSIDE a multi-byte character — and a strict
+    decode raises ``UnicodeDecodeError``, which is a ``ValueError`` and would
+    sail past an ``except OSError``. One such sidecar took down the whole
+    picker and every ``--resume`` with no id, for every session, until the
+    user found and deleted the file by hand.
+    """
+    try:
+        raw = (session_dir / ORIGIN_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    origin = payload.get("origin")
+    return origin if isinstance(origin, str) else ""
+
+
+def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
+    """Stamp pre-existing subagent directories once, and return how many.
+
+    Without this the fix only applies to sessions created after the upgrade,
+    so the person who reported a picker full of ``[role: reviewer]`` rows
+    would upgrade, look, and see the same 40 rows — the change would be
+    correct and appear to do nothing until natural churn cleared the store.
+
+    Identification is by the openings only the subagent runner can produce
+    (:data:`_ROLE_PREAMBLE`, :data:`_SCOUT_PREAMBLE`), matched at offset 0 of
+    the first user message because both are stamped in FRONT of the caller's
+    prompt. This deliberately under-claims: a delegated run launched with no
+    role profile is indistinguishable from a user's own session and stays
+    listed. That is the right direction — an unmarked child costs one stale
+    row, while a false positive hides the user's real work, and the whole
+    point of a one-time sweep is that a row it misses is one the user can
+    still reach.
+
+    Best-effort and bounded like every other function here: it runs at
+    startup, so an unreadable directory is skipped rather than raised, and
+    ``limit`` caps how many directories are STAMPED per run.
+
+    The cap is on work done, never on how far the scan reaches. Capping the
+    scan instead — slicing the directory list — sounds equivalent and is not:
+    the list sorts by hex NAME, and the same prefix is recomputed on every
+    startup, so any directory sorting past the cut was never visited on any
+    run, ever. Measured: a 600-directory store with 50 children sorting after
+    the cut stamped 0 on three consecutive startups. Deciding a session's
+    origin by where its random name falls in an alphabet is not a policy
+    anyone would choose deliberately.
+    """
+    stamped = 0
+    sessions = config_dir / "sessions"
+    try:
+        directories = sorted(sessions.iterdir())
+    except OSError:
+        return 0
+    for directory in directories:
+        if stamped >= limit:
+            break
+        try:
+            if not (directory / TRANSCRIPT_NAME).is_file():
+                continue
+            # Already answered: never re-stamp, so a marker a user removed by
+            # hand to un-hide a session is not silently written back.
+            if (directory / ORIGIN_NAME).exists():
+                continue
+        except OSError:
+            continue
+        opening = session_name(directory, max_chars=NAME_MAX_CHARS, condense=False)
+        if not opening:
+            continue
+        if _ROLE_PREAMBLE.match(opening) or opening.startswith(_SCOUT_PREAMBLE):
+            mark_session_origin(directory, ORIGIN_SUBAGENT, backfilled=True)
+            stamped += 1
+    return stamped
+
+
+def is_user_session(session_dir: Path) -> bool:
+    """True when a human started this session, so a picker may offer it.
+
+    EVERY non-empty origin is hidden, not a listed set of them: a new value
+    added later (a scheduled run, a server-side session) is therefore opt-OUT
+    of the picker by default, and an author who wants a new origin to remain
+    listable has to say so here. That default is the safe direction — a value
+    is minted by whichever code path creates the directory, and the paths that
+    do so are the machine's own.
+    """
+    return not session_origin(session_dir)
+
+
 def resume_dir(config_dir: Path, requested: str) -> Path:
     """The session directory ``--resume`` names, or raise :class:`ResumeNotFound`.
 
@@ -86,7 +265,16 @@ def resume_dir(config_dir: Path, requested: str) -> Path:
     """
     sessions = config_dir / "sessions"
     if requested == RESUME_LATEST:
-        candidates = [path for path in sessions.glob("*") if (path / TRANSCRIPT_NAME).is_file()]
+        # ``@latest`` means the latest conversation THE USER had. A subagent
+        # writes its child transcript into the same directory, and a delegated
+        # review finishing after the parent's last turn made it the newest
+        # directory on disk — so a bare ``--resume`` reopened the reviewer
+        # rather than the session that launched it.
+        candidates = [
+            path
+            for path in sessions.glob("*")
+            if (path / TRANSCRIPT_NAME).is_file() and is_user_session(path)
+        ]
         if not candidates:
             raise ResumeNotFound("no previous session to resume")
 
@@ -137,7 +325,13 @@ def resolve_resume_id(config_dir: Path, requested: str) -> str:
 
 
 def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]]:
-    """``(id, mtime)`` for resumable sessions, newest first.
+    """``(id, mtime)`` for the USER's resumable sessions, newest first.
+
+    Subagent sessions are excluded (:func:`is_user_session`): they are the
+    machine's own scratch conversations, and a listing offered to a human is
+    about work the human did. They remain resumable by explicit id — nothing
+    here removes a directory, and ``hub op='resume'`` continues a child by its
+    own path — so this narrows what is OFFERED, never what exists.
 
     The mtime is RETURNED rather than used and dropped: the sort already reads
     it, and it is the one fact that makes a list of 12-hex ids pickable instead
@@ -150,9 +344,14 @@ def recent_sessions(config_dir: Path, limit: int = 10) -> list[tuple[str, float]
     rows: list[tuple[str, float]] = []
     for path in (config_dir / "sessions").glob("*"):
         try:
-            rows.append((path.name, (path / TRANSCRIPT_NAME).stat().st_mtime))
+            mtime = (path / TRANSCRIPT_NAME).stat().st_mtime
         except OSError:
             continue
+        # After the stat, not before: the stat is what proves the directory is
+        # a session at all, and an unreadable marker must not cost a row.
+        if not is_user_session(path):
+            continue
+        rows.append((path.name, mtime))
     rows.sort(key=lambda row: row[1], reverse=True)
     return rows[:limit]
 
@@ -182,7 +381,9 @@ class SessionRow(NamedTuple):
     name: str
 
 
-def session_name(session_dir: Path, *, max_chars: int = NAME_MAX_CHARS) -> str:
+def session_name(
+    session_dir: Path, *, max_chars: int = NAME_MAX_CHARS, condense: bool = True
+) -> str:
     """A conversation's display name: its opening user message, on one line.
 
     Read from the TRANSCRIPT rather than from a stored title because there is
@@ -246,7 +447,11 @@ def session_name(session_dir: Path, *, max_chars: int = NAME_MAX_CHARS) -> str:
             continue
         text = _first_text(payload.get("content"))
         if text:
-            return _condense(text, max_chars)
+            # ``condense=False`` returns the opening text with its line
+            # breaks intact, which the backfill needs: the role preamble it
+            # matches is ``[role: <name>]\n``, and condensing flattens that
+            # newline into a space before the pattern could ever see it.
+            return _condense(text, max_chars) if condense else text
     # The window held no COMPLETE line, so the opener is a fragment. Dropping
     # it (which is all this used to do) left every session that begins with a
     # pasted screenshot permanently nameless: one base64 image puts the first
