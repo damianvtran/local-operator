@@ -628,6 +628,14 @@ class AuthStore:
         # cascade calls this once per credential tier with a different subset,
         # so popping the whole provider would let a one-row tier wipe the marks
         # belonging to rows it never saw.
+        #
+        # NOTE this branch is not reachable from :meth:`_resolve`'s cascade:
+        # ``_usable_key_rows`` drops demoted rows before this method is called,
+        # so an all-demoted tier arrives here as an EMPTY list and returns at the
+        # guard above. It is retained for direct callers that order a row set
+        # themselves, and it is NOT the cascade's safety net -- that is the
+        # ``ignore_demotions`` second pass in :meth:`_resolve`. Reasoning about
+        # the cascade's all-demoted behaviour from here gives the wrong answer.
         if not preferred:
             # Not under ``read_only``: clearing the marks is a routing DECISION,
             # and an isolated request running beside a user's turn must not be
@@ -666,7 +674,12 @@ class AuthStore:
             self._sticky[(provider, session_id)] = credential_id
 
     def _usable_key_rows(
-        self, provider: str, credential_type: str, source: str | None
+        self,
+        provider: str,
+        credential_type: str,
+        source: str | None,
+        *,
+        ignore_demotions: bool = False,
     ) -> list[StoredCredential]:
         rows = [
             r
@@ -694,10 +707,14 @@ class AuthStore:
         # row would then never yield, and an exported ANTHROPIC_API_KEY beside a
         # signed-in account became unreachable where it used to be the fallback.
         #
-        # The real safety net is :meth:`_selection_order`, which clears the
-        # marks as stale once every row it is shown is demoted -- so a pool that
-        # has been walked comes back rather than emptying.
-        demoted = self._active_demotions(provider)
+        # The safety net for the resulting empty tier is the second pass at the
+        # end of :meth:`_resolve`: if demotions are the ONLY reason the whole
+        # cascade came back empty, it resolves once more with
+        # ``ignore_demotions``, so a demoted lone row is still served rather
+        # than reported as no credential at all. ``_selection_order``'s
+        # all-demoted branch cannot be that net, because this filter runs first
+        # and hands it an empty list.
+        demoted = set() if ignore_demotions else self._active_demotions(provider)
         if demoted:
             remaining = [r for r in rows if r.id not in demoted]
             if remaining:
@@ -855,8 +872,15 @@ class AuthStore:
         *,
         force_refresh: bool = False,
         read_only: bool = False,
+        ignore_demotions: bool = False,
     ) -> tuple[str | None, StoredCredential | None]:
         """The 7-step cascade; returns ``(key, winning row or None)``.
+
+        ``ignore_demotions`` runs the cascade as if no credential were demoted.
+        It is set only by this method's own second pass (see the tail), where
+        demotions have been found to be the sole reason the cascade came back
+        empty. Because the second pass sets it, the tail's branch cannot re-arm
+        and the recursion terminates at depth two.
 
         ``read_only`` resolves WITHOUT making any routing decision: no
         credential blocked when its refresh fails, no session stickiness
@@ -888,7 +912,9 @@ class AuthStore:
             return config, None
 
         # 3. OAuth credential
-        oauth_rows = self._usable_key_rows(provider, "oauth", source=None)
+        oauth_rows = self._usable_key_rows(
+            provider, "oauth", source=None, ignore_demotions=ignore_demotions
+        )
         for row in self._selection_order(oauth_rows, provider, session_id, read_only=read_only):
             try:
                 creds = await self._ensure_oauth_fresh(row, force=force_refresh)
@@ -909,7 +935,9 @@ class AuthStore:
         # PR-15: with NO oauth rows, force_refresh falls through to tiers 4-7.
 
         # 4. API key persisted by interactive login
-        login_rows = self._usable_key_rows(provider, "api_key", source="login")
+        login_rows = self._usable_key_rows(
+            provider, "api_key", source="login", ignore_demotions=ignore_demotions
+        )
         for row in self._selection_order(login_rows, provider, session_id, read_only=read_only):
             key = row.data.get("key")
             if key:
@@ -929,7 +957,9 @@ class AuthStore:
         # 6. Stored api_key without source="login" (e.g. broker migration)
         stored_rows = [
             row
-            for row in self._usable_key_rows(provider, "api_key", source=None)
+            for row in self._usable_key_rows(
+                provider, "api_key", source=None, ignore_demotions=ignore_demotions
+            )
             if row.data.get("source") != "login"
         ]
         for row in self._selection_order(stored_rows, provider, session_id, read_only=read_only):
@@ -949,9 +979,25 @@ class AuthStore:
         # once more. Without this a sole demoted credential resolved to None and
         # the caller was told no credential was configured, which is exactly the
         # misdiagnosis this change set out to remove.
-        if not read_only and self._active_demotions(provider):
-            self.clear_deprioritized(provider)
-            return await self._resolve(provider, session_id, force_refresh=force_refresh)
+        #
+        # A ``read_only`` resolve takes this pass too. It must: dropping a
+        # demoted row from its tier is the destructive half of demotion, and a
+        # resolve that is forbidden from deciding anything about routing cannot
+        # be handed that half alone -- it would report "no credential" for a
+        # credential that is merely deprioritised, which is the misdiagnosis at
+        # issue. What it does NOT do is clear the marks: that is the routing
+        # decision, and it stays reserved for the caller who owns the turn.
+        # ``ignore_demotions`` gives the same answer without touching state.
+        if not ignore_demotions and self._active_demotions(provider):
+            if not read_only:
+                self.clear_deprioritized(provider)
+            return await self._resolve(
+                provider,
+                session_id,
+                force_refresh=force_refresh,
+                read_only=read_only,
+                ignore_demotions=True,
+            )
 
         return None, None
 

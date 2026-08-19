@@ -923,3 +923,107 @@ class TestADemotionSurvivesAMixedPool:
         assert await store.get_api_key("anthropic") == "oauth-down"
         store.deprioritize_credential("anthropic", row.id)
         assert await store.get_api_key("anthropic") == "env-fallback-key"
+
+    async def test_an_isolated_resolve_is_not_handed_only_the_destructive_half(
+        self, tmp_path: Any
+    ) -> None:
+        """A ``read_only`` resolve must serve a demoted lone row.
+
+        Demotion has a destructive half (``_usable_key_rows`` drops the row from
+        its tier) and a restorative half (the second pass that resolves again
+        once demotions are the only thing left standing in the way). The drop
+        carries no ``read_only`` gate, so gating only the restorative half gave
+        the isolated caller the destructive one alone: a lone credential with a
+        single provider-side fault resolved to ``None`` for it while the normal
+        path still returned the key. That reports "no credential configured" for
+        a credential that is merely deprioritised -- the misdiagnosis this whole
+        change set exists to remove -- and it silently stopped session titling
+        for the mark's full TTL.
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        row = store.upsert_credential(
+            "anthropic", {"type": "api_key", "key": "only-key", "source": "login"}
+        )
+        store.deprioritize_credential("anthropic", row.id)
+
+        assert await store.get_api_key("anthropic", read_only=True) == "only-key"
+
+    async def test_an_isolated_resolve_serves_a_demoted_row_without_clearing_it(
+        self, tmp_path: Any
+    ) -> None:
+        """...and it gets there WITHOUT taking the routing decision.
+
+        Clearing the marks is what the user's own turn does when it finds
+        nowhere left to route; an isolated request running beside that turn must
+        not be able to move it. So the second pass suppresses the clear under
+        ``read_only`` and re-resolves ignoring the marks instead: same answer,
+        no state touched. A demoted row that still has a healthy sibling must
+        also keep losing to it, or "ignore the marks" would become "resurrect
+        the failing account".
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        row = store.upsert_credential(
+            "anthropic", {"type": "api_key", "key": "only-key", "source": "login"}
+        )
+        store.deprioritize_credential("anthropic", row.id)
+
+        assert await store.get_api_key("anthropic", read_only=True) == "only-key"
+        assert store._active_demotions("anthropic") == {row.id}
+
+        # The normal path still owns the decision, and still clears.
+        assert await store.get_api_key("anthropic") == "only-key"
+        assert store._active_demotions("anthropic") == set()
+
+        # A healthy sibling still outranks a demoted row under read_only.
+        sibling_store = AuthStore(db_path=tmp_path / "sibling.db")
+        bad = sibling_store.upsert_credential(
+            "anthropic", {"type": "api_key", "key": "bad-key", "source": "login"}
+        )
+        sibling_store.upsert_credential(
+            "anthropic", {"type": "api_key", "key": "good-key", "source": "login"}
+        )
+        sibling_store.deprioritize_credential("anthropic", bad.id)
+
+        assert await sibling_store.get_api_key("anthropic", read_only=True) == "good-key"
+
+    async def test_the_second_pass_leaves_other_providers_marks_alone(self, tmp_path: Any) -> None:
+        """The second pass is provider-keyed.
+
+        It runs at the end of a cascade for ONE provider, so it may only speak
+        for that provider's marks: a concurrent turn on another provider is
+        mid-rotation and its demotions are load-bearing.
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        anthropic_row = store.upsert_credential(
+            "anthropic", {"type": "api_key", "key": "anthropic-key", "source": "login"}
+        )
+        openai_row = store.upsert_credential(
+            "openai", {"type": "api_key", "key": "openai-key", "source": "login"}
+        )
+        store.deprioritize_credential("anthropic", anthropic_row.id)
+        store.deprioritize_credential("openai", openai_row.id)
+
+        assert await store.get_api_key("anthropic") == "anthropic-key"
+        assert store._active_demotions("openai") == {openai_row.id}
+
+    async def test_a_provider_with_no_credential_still_resolves_to_none(
+        self, tmp_path: Any
+    ) -> None:
+        """The second pass must not invent a credential.
+
+        It only fires when marks exist, so an unconfigured provider (and a
+        blocked one, which the marks do not describe) still comes back ``None``
+        rather than being papered over by the retry.
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+
+        assert await store.get_api_key("anthropic") is None
+        assert await store.get_api_key("anthropic", read_only=True) is None
