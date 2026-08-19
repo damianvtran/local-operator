@@ -130,6 +130,7 @@ from local_operator.tui.widgets.editor import (
     ArgumentQueryOpened,
     Attachment,
     Editor,
+    EditorCopied,
     EditorQuit,
     EditorSubmitted,
     InterruptRequested,
@@ -2406,7 +2407,36 @@ class OperatorApp(App[None]):
         ``None`` for no selection at all, ``""`` for a selection over widgets
         that every one of them declined.
         """
-        text = self.screen.get_selected_text()
+        self._put_on_clipboard(self.screen.get_selected_text())
+
+    def on_editor_copied(self, message: EditorCopied) -> None:
+        """A drag over the COMPOSER copies too, and says so identically.
+
+        The composer is invisible to ``Screen.selections`` — ``TextArea`` clears
+        the screen selection on every caret move, and the mouse-down that starts
+        the drag is a caret move — so :meth:`on_text_selected` sees nothing to
+        copy and the highlight the user is looking at goes nowhere. The widget
+        therefore reports its own release (``Editor._copy_drag``), and it lands
+        HERE rather than writing the clipboard itself so that both gestures
+        share one clipboard write and one toast: a copy out of the input must be
+        indistinguishable from a copy out of the transcript, or the receipt
+        becomes evidence about which widget you dragged over.
+        """
+        self._put_on_clipboard(message.text)
+
+    def _put_on_clipboard(self, text: str | None) -> None:
+        """The one clipboard write, with the receipt that makes it visible.
+
+        Shared by the transcript's ``TextSelected`` and the composer's
+        :class:`EditorCopied` so the two gestures cannot drift apart in what
+        they write or what they claim. The write is OSC 52
+        (``App.copy_to_clipboard``), which is what carries a copy back to the
+        real clipboard over ssh and inside a multiplexer.
+
+        Empty is not an event: ``None`` (nothing selected) and ``""`` (a
+        selection nothing would give up) are both "no copy happened", and a
+        toast for either would be the same lie the silent copy was.
+        """
         if not text:
             return
         self.copy_to_clipboard(text)

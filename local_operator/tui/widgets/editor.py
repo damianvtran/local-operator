@@ -18,6 +18,10 @@ Key interception happens in :meth:`_on_key`, which runs BEFORE TextArea's
 document-insert path, so a handled key never reaches the buffer. Unhandled
 keys fall through to the stock editor behavior.
 
+Releasing a drag over the composer COPIES the highlighted text, the same rule
+the transcript follows and for the same reason — neither Ctrl+C nor cmd+C is
+available to bind here. See :meth:`Editor._copy_drag`.
+
 The caret is SOLID and never blinks, and on an EMPTY composer it gets a cell of
 its own to the left of the placeholder rather than inverting the placeholder's
 first letter; see ``cursor_blink`` in :meth:`__init__` and :meth:`render_line`.
@@ -343,6 +347,28 @@ class EditorSubmitted(Message):
         #: widget sees an empty map and silently drops the images (review round
         #: 19). Restores need the numbers, which the ordered list has lost.
         self.attachments = dict(attachments or {})
+
+
+class EditorCopied(Message):
+    """Posted when a drag over the composer finishes on a real selection.
+
+    Carries the text rather than leaving the app to re-read the widget: the
+    selection is live state, and by the time a message is delivered a later
+    keystroke may already have moved the caret — which, through
+    ``TextArea._watch_selection``, is exactly the thing that collapses it. The
+    same "ride the message" rule as :class:`EditorSubmitted`'s attachments.
+
+    Separate from ``TextSelected`` (the transcript's copy trigger) because the
+    composer never reaches ``Screen.selections`` at all; see
+    :meth:`Editor._copy_drag` for why. The app answers both with one
+    clipboard write and one toast, so the two gestures stay one behaviour.
+    """
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        #: The document text the drag covered, as ``TextArea.selected_text``
+        #: reports it at release.
+        self.text = text
 
 
 class InterruptRequested(Message):
@@ -1404,17 +1430,73 @@ class Editor(TextArea):
         Runs BEFORE ``TextArea._on_mouse_up`` (Editor is first on the MRO), so
         the base class still finalises ``_selecting`` and releases the mouse
         afterwards; it never touches the selection, so nothing overwrites this.
+
+        The release is also where a drag over the composer becomes a COPY, for
+        the same reason it is in the transcript — see :meth:`_copy_drag` and
+        ``OperatorApp.on_text_selected``.
         """
         pressed = self._pressed_marker
         self._pressed_marker = None
-        if pressed is None:
+        # A press that became a drag keeps the range ``_on_mouse_move`` built:
+        # that range is the user's, not ours.
+        if pressed is not None and self.selection.start == self.selection.end:
+            row, start, end = pressed
+            self.selection = Selection((row, start), (row, end))
+            # Not a copy. This selection is the app's own doing — the user
+            # clicked one marker, which means "act on this chip" (the gesture
+            # exists so backspace can delete it whole), not "take a copy of
+            # it". Copying here would put text on the clipboard and raise a
+            # receipt for it on a CLICK, which is precisely the noise
+            # :meth:`_copy_drag` avoids by ignoring collapsed selections.
             return
-        if self.selection.start != self.selection.end:
-            # The press became a drag — ``_on_mouse_move`` has been extending a
-            # range the whole time, and that range is the user's, not ours.
+        self._copy_drag()
+
+    def _copy_drag(self) -> None:
+        """Put a composer drag on the clipboard, exactly as the transcript does.
+
+        Reported from the field: text highlighted in the composer "doesn't copy
+        properly" — the drag paints a highlight and the clipboard keeps whatever
+        it held before. Both halves of the app's copy story miss this widget:
+
+        * **The release does not reach the app.** ``OperatorApp.on_text_selected``
+          copies ``Screen.get_selected_text()``, but a ``TextArea`` never
+          contributes to a screen selection. ``TextArea._watch_selection`` calls
+          ``app.clear_selection()`` on every caret move, and the mouse-down that
+          begins a composer drag moves the caret — so ``Screen.selections`` is
+          wiped on the first event of the gesture and stays empty for the rest
+          of it. Measured before this fix: after a drag over the composer,
+          ``editor.selected_text`` was ``'summarise the inges'`` while
+          ``screen.get_selected_text()`` was ``None`` and the clipboard was ``''``.
+          The base class also captures the mouse on press, so ``Screen``'s own
+          select machinery is bypassed and ``_select_state`` never leaves ``None``.
+
+        * **No key can rescue it.** ``TextArea`` binds ``ctrl+c,super+c`` to
+          ``action_copy``, and neither key arrives: cmd+C is eaten by the
+          terminal (Ghostty binds ``super+c=copy_to_clipboard:mixed`` without
+          ``performable:``), and Ctrl+C is consumed by :meth:`_on_key` as this
+          app's interrupt before any binding runs. That is deliberate — the
+          interrupt cannot become conditional on a live highlight — so the
+          composer is left with a highlight and no way to spend it.
+
+        The fix is the rule the transcript already states: **the release IS the
+        copy**. The gesture carries itself, the user gets the same toast, and no
+        key changes meaning.
+
+        Only a real range copies. A plain click leaves ``start == end`` and is
+        not a copy — nor is the marker click above, which the caller returns on
+        before reaching here because that selection is the app's, made so
+        backspace can delete the chip whole.
+
+        ``selected_text`` is the DOCUMENT's text, which is the right claim for
+        an input: what a user copies out of a field is what they typed and can
+        paste back, so an attachment marker copies as the ``[Image #1, …]`` text
+        that cites it — the same characters :meth:`_submit` would send, and the
+        ones that re-cite the image if pasted into another draft.
+        """
+        text = self.selected_text
+        if not text:
             return
-        row, start, end = pressed
-        self.selection = Selection((row, start), (row, end))
+        self.post_message(EditorCopied(text))
 
     # -- paste ----------------------------------------------------------------
     async def _on_paste(self, event: events.Paste) -> None:

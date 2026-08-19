@@ -920,3 +920,267 @@ async def test_the_highlight_outlives_the_copy() -> None:
         block = await _seeded(app, pilot)
         await _drag(app, pilot, (block.region.x, block.region.y), (79, 23))
         assert block in app.screen.selections
+
+
+# -- the composer ------------------------------------------------------------
+#
+# Reported from the field after the transcript copy shipped: text highlighted
+# in the COMPOSER "doesn't copy properly". Both halves of the copy story above
+# miss a `TextArea`, and neither is obvious from the transcript's code:
+#
+# * `TextArea._watch_selection` calls `app.clear_selection()` on EVERY caret
+#   move, and the mouse-down that begins a composer drag is a caret move. So
+#   `Screen.selections` is emptied on the first event of the gesture and is
+#   still empty at release — measured before the fix: `editor.selected_text`
+#   was `'summarise the inges'` while `screen.get_selected_text()` was `None`.
+#   `TextArea` also captures the mouse on press, so `Screen._select_state`
+#   never leaves `None` and the screen never sees a selection to begin with.
+# * `TextArea`'s own `ctrl+c,super+c` -> `action_copy` binding cannot save it:
+#   cmd+C is eaten by the terminal (the same Ghostty binding the transcript
+#   docstrings name) and Ctrl+C is consumed by `Editor._on_key` as this app's
+#   interrupt before any binding runs.
+#
+# So the composer reports its own release (`Editor._copy_drag` ->
+# `EditorCopied`) and the app answers it through the same clipboard write and
+# the same toast as the transcript.
+
+
+async def _composer_drag(
+    app: OperatorApp,
+    pilot: Any,
+    start: tuple[int, int],
+    end: tuple[int, int],
+) -> None:
+    """A drag over the composer, as `Screen._forward_event` receives it.
+
+    Separate from `_drag` only in that it does not assert a screen selection
+    afterwards: over a `TextArea` there is never going to be one, which is the
+    whole reason this path exists.
+    """
+    app.screen._forward_event(_mouse(app, events.MouseDown, *start))
+    await pilot.pause()
+    if start != end:
+        app.screen._forward_event(_mouse(app, events.MouseMove, *end))
+        await pilot.pause()
+    app.screen._forward_event(_mouse(app, events.MouseUp, *end))
+    await pilot.pause()
+    await pilot.pause()
+
+
+async def _composer(app: OperatorApp, pilot: Any, text: str) -> Editor:
+    """The composer holding `text`, settled and focused.
+
+    Settling matters for the same reason it does in `_seeded`: the editor's
+    region is read to aim the drag, and a region read before the first layout
+    aims at the wrong row.
+    """
+    editor = app.query_one(Editor)
+    editor.focus()
+    editor.load_text(text)
+    await pilot.pause()
+    await pilot.pause()
+    return editor
+
+
+def _cell(editor: Editor, row: int, column: int) -> tuple[int, int]:
+    """Screen coordinates of one document cell.
+
+    Computed from the widget's own gutter rather than written as
+    `region.x + column`: the composer inherits `padding: 0 1` (see the
+    stylesheet's note on the flush card-on-composer seam), so the naive form
+    aims one column left and every assertion below would be off by a character
+    — which is a test that passes while describing the wrong gesture.
+    """
+    return (
+        editor.region.x + editor.gutter.left + column,
+        editor.region.y + editor.gutter.top + row,
+    )
+
+
+@pytest.mark.asyncio
+async def test_releasing_a_composer_drag_copies_what_was_highlighted() -> None:
+    """The acceptance case: highlight your own draft, let go, it is copied.
+
+    Measured before the fix, this same gesture left `_clipboard` untouched
+    while the highlight sat on screen — the reported bug, in one assertion.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        app._clipboard = ""
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
+
+        assert editor.selected_text == "summarise the ingest"
+        # The clipboard IS the highlight — the property the transcript's
+        # `get_selection` gets from sharing one computation, and which this
+        # path has to get by taking the widget's own selected text.
+        assert app._clipboard == editor.selected_text
+        # ...and the screen still has no selection of its own, so this could
+        # only have come from the editor. If this ever starts passing through
+        # `Screen.selections`, the mechanism changed and these tests are stale.
+        assert not app.screen.selections
+
+
+@pytest.mark.asyncio
+async def test_a_composer_copy_says_so_in_the_same_words() -> None:
+    """One receipt for both gestures, or the toast becomes a tell.
+
+    A copy out of the input has to be indistinguishable from a copy out of the
+    transcript; a different wording (or a silent composer copy) would make the
+    user reason about which widget they dragged over.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "first line here\nsecond line here")
+        toast = app.query_one(Toast)
+        assert toast.message == ""
+
+        # Ends inside the second row, so the copy is a partial line — the
+        # count in the toast is rows spanned, not lines completed.
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 1, 11))
+
+        assert app._clipboard == "first line here\nsecond line"
+        assert toast.message == "copied 2 lines"
+        # Recomputed from the clipboard rather than restated, exactly as the
+        # transcript's test does: the card cannot drift from what was taken.
+        assert toast.message == f"copied {len(app._clipboard.splitlines())} lines"
+
+
+@pytest.mark.asyncio
+async def test_a_click_in_the_composer_copies_nothing() -> None:
+    """Placing the caret is not a copy, and must not announce one.
+
+    The common gesture in this widget by far. A click leaves `start == end`,
+    and a toast on every caret placement would be noise on top of a clipboard
+    the user did not ask to change.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        app._clipboard = "SOMETHING THE USER PUT THERE"
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 5), _cell(editor, 0, 5))
+
+        assert app._clipboard == "SOMETHING THE USER PUT THERE"
+        assert toast.message == ""
+
+
+@pytest.mark.asyncio
+async def test_a_drag_over_an_empty_composer_copies_nothing() -> None:
+    """The placeholder is not the user's text.
+
+    An empty composer still paints `Message Local Operator…`, and dragging
+    across it selects nothing — `selected_text` is `""`. Copying the invitation
+    would put words on the clipboard that the user never wrote.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "")
+        app._clipboard = "SOMETHING THE USER PUT THERE"
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 15))
+
+        assert editor.selected_text == ""
+        assert app._clipboard == "SOMETHING THE USER PUT THERE"
+        assert toast.message == ""
+
+
+@pytest.mark.asyncio
+async def test_clicking_an_attachment_marker_selects_it_without_copying() -> None:
+    """The chip gesture keeps its meaning: select to delete, not to copy.
+
+    `Editor._on_mouse_up` selects a whole marker on a click inside one so that
+    backspace removes it atomically. That selection is the APP's, not a range
+    the user dragged, so it must not reach the clipboard — otherwise reaching
+    for the delete gesture silently replaces whatever the user had copied, and
+    raises a receipt claiming they asked for it.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "[Image #1, 100x100] describe this")
+        app._clipboard = "SOMETHING THE USER PUT THERE"
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 3), _cell(editor, 0, 3))
+
+        assert app._clipboard == "SOMETHING THE USER PUT THERE"
+        assert toast.message == ""
+
+
+@pytest.mark.asyncio
+async def test_a_composer_drag_copies_a_marker_as_the_text_that_cites_it() -> None:
+    """Dragging ACROSS a marker copies the citation, not a decoration of it.
+
+    A marker is painted as a chip but it is document text — the same characters
+    `_submit` sends and `resolve_markers` reads. Copying what is on the row
+    means the paste re-cites the image in another draft, which is the only
+    behaviour that makes a copied prompt reusable.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "[Image #1, 100x100] describe this")
+        app._clipboard = ""
+
+        # `len("[Image #1, 100x100]")` exactly: the drag ends ON the cell
+        # after the closing bracket, and the selection end is exclusive, so
+        # this is the marker and not one character of the prose after it.
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 19))
+
+        assert app._clipboard == "[Image #1, 100x100]"
+
+
+@pytest.mark.asyncio
+async def test_a_composer_drag_leaves_the_draft_alone() -> None:
+    """Copying is not cutting, and the caret gesture still ends where it did.
+
+    Worth pinning because the copy is bolted onto the mouse-up that `TextArea`
+    also uses to finalise its selection: a copy path that touched the document,
+    or that collapsed the selection it had just taken, would corrupt a draft
+    mid-sentence.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
+
+        assert editor.text == "summarise the ingest path please"
+        # The highlight outlives the copy here for the same reason it does in
+        # the transcript: it is the only record of what was taken.
+        assert editor.selected_text == "summarise the ingest"
+
+
+@pytest.mark.asyncio
+async def test_a_composer_drag_still_leaves_ctrl_c_as_the_interrupt() -> None:
+    """The copy must not buy itself a key, least of all this one.
+
+    The transcript's copy was deliberately hung off the release so that Ctrl+C
+    could stay the interrupt and the first rung of the exit ladder. The
+    composer's copy is hung off the release for the same reason, and this is
+    the assertion that keeps a future "just bind ctrl+c in the editor" from
+    quietly reintroducing the swallowed-abort bug in the one widget that is
+    focused in essentially every frame.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
+        assert editor.selected_text, "the highlight must be live for this to mean anything"
+
+        session.aborts.clear()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert session.aborts == ["interrupted"]
