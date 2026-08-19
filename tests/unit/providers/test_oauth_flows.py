@@ -902,6 +902,9 @@ def test_only_browser_signin_flows_race_a_pasted_code_against_their_callback() -
 
     Two providers qualify, and both are browser sign-ins whose redirect lands on
     a loopback port: Anthropic, and Z.AI's GLM Coding Plan sign-in (which mirrors
+    the Anthropic wiring). A provider whose login is "paste your API key" is NOT
+    one of these -- that is ``paste_prompt_required``, asserted in the companion
+    test.
     the Anthropic wiring, as omp's `zai-coding-plan` does). A provider whose
     login is "paste your API key" is NOT one of these -- that is
     ``paste_prompt_required``, asserted in the companion test.
@@ -1133,10 +1136,23 @@ class TestZaiSignInMintsADurableKey:
         # The MINTED `id.secret` key, never the short-lived OAuth token.
         assert creds["access"] == "key-id.sec-ret"
         assert creds["email"] == "damian@example.com"
-        assert creds["account_id"] == "4242"
+        # The user id is recorded for display under its OWN key. It must not
+        # land on `account_id`, which is the dedupe identity: the `user` block
+        # it comes from is optional per response, so an identity sourced from it
+        # changes between sign-ins and the store writes a duplicate row.
+        assert creds["user_id"] == "4242"
         # `expires: None` is AuthStore's "static token" marker: no refresh is
         # ever attempted, so the row persists across sessions.
         assert creds["expires"] is None
+        # The dedupe identity, resolved on every sign-in because a key cannot be
+        # minted without an org and a project. See the alternating-`user` test.
+        assert creds["account_id"] == "org-1/proj-1"
+        assert creds["project_id"] == "proj-1"
+        # NOT `org_id`: on an OAuth row that field is a ROUTING signal, and a
+        # credential carrying one is sent to ChatGPT's private Codex Responses
+        # endpoint. Pinned because the obvious name for this value is the
+        # dangerous one. See `test_the_identity_does_not_route_to_codex`.
+        assert "org_id" not in creds
         # The secret always comes from the copy endpoint -- list entries mask it.
         assert any("/api_keys/copy/" in call for call in calls), calls
 
@@ -1227,3 +1243,367 @@ class TestZaiSignInMintsADurableKey:
         # identity that `_FETCHERS["zai-oauth"]` needs for quota reporting.
         assert access.kind == "oauth"
         assert access.email == "damian@example.com"
+
+    async def test_identity_survives_a_response_with_no_user_block(self) -> None:
+        """Z6: Z.AI's `user` block is optional PER RESPONSE, not per account.
+
+        Keying dedupe on `email`/`account_id` therefore gives an identity that
+        appears and disappears between logins: sign in five times with the block
+        arriving only every other time and the store writes a SECOND row for the
+        account it already holds, leaving a stale key in rotation.
+
+        Org and project are resolved on every sign-in -- key provisioning cannot
+        proceed without them -- so they are the stable identity, and
+        `_identity_key_for` reads `org_id` ahead of `email`.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.oauth.zai import ZaiOAuthFlow
+
+        store = AuthStore(db_path=Path(tempfile.mkdtemp()) / "auth.db")
+        for attempt in range(5):
+            calls: list[str] = []
+            transport = self._transport(calls, existing_key=True)
+            if attempt % 2:
+                # Strip the `user` block, as the provider sometimes does.
+                inner = transport
+
+                def handler(request: httpx.Request, _inner: Any = inner) -> httpx.Response:
+                    response = _inner.handler(request)
+                    if request.url.path.endswith("/oauth/token"):
+                        body = json.loads(response.content)
+                        body["data"].pop("user", None)
+                        return httpx.Response(200, json=body)
+                    return response
+
+                transport = httpx.MockTransport(handler)
+
+            flow = ZaiOAuthFlow(http_client=httpx.AsyncClient(transport=transport))
+            creds = await flow.exchange_token("c", "s", "http://localhost:54548/callback")
+            creds["authorized_at"] = attempt
+            store.upsert_credential("zai", creds)
+
+        rows = store.list_credentials("zai")
+        assert len(rows) == 1, [(r.id, r.data.get("email")) for r in rows]
+        assert await store.get_api_key("zai") == "key-id.sec-ret"
+
+    async def test_the_identity_does_not_route_to_codex(self) -> None:
+        """The identity must not be stored under `org_id`, however natural the name.
+
+        `OpenAICompatClient` treats an OAuth credential carrying an `org_id` as
+        a ChatGPT subscription grant: it sends the request to ChatGPT's private
+        Codex Responses endpoint and adds a `chatgpt-account-id` header. Storing
+        Z.AI's organization id under that key therefore breaks inference while
+        looking like a naming choice, so this asserts the wire result rather
+        than the field name alone.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from local_operator.harness.types import ChatRequest, Message, TextContent
+        from local_operator.model.configure import build_model_spec
+        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.clients import client_for_spec
+        from local_operator.providers.oauth.zai import ZaiOAuthFlow
+
+        calls: list[str] = []
+        flow = ZaiOAuthFlow(
+            http_client=httpx.AsyncClient(transport=self._transport(calls, existing_key=True))
+        )
+        creds = await flow.exchange_token("c", "s", "http://localhost:54548/callback")
+        creds["authorized_at"] = 1
+
+        store = AuthStore(db_path=Path(tempfile.mkdtemp()) / "auth.db")
+        store.upsert_credential("zai", creds)
+        access = await store.get_oauth_access("zai")
+        assert access is not None
+        assert access.org_id is None, "an org_id here routes Z.AI traffic to ChatGPT"
+
+        seen: dict[str, Any] = {}
+
+        def wire(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["codex_header"] = request.headers.get("chatgpt-account-id")
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=b'data: {"choices":[{"delta":{"content":"pong"}}]}\n\ndata: [DONE]\n\n',
+            )
+
+        spec = build_model_spec("zai", "glm-4.6")
+        client = client_for_spec(
+            spec, http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire))
+        )
+        request = ChatRequest(
+            model=spec, messages=[Message(role="user", content=[TextContent(text="ping")])]
+        )
+        events = [
+            event
+            async for event in client.stream(request, access.access_token, oauth_access=access)
+        ]
+
+        assert seen["url"] == "https://api.z.ai/api/coding/paas/v4/chat/completions"
+        assert seen["codex_header"] is None
+        assert "".join(getattr(e, "delta", "") for e in events) == "pong"
+
+
+class TestPastedCallbackParsing:
+    """Z2: the "paste the redirect URL" fallback has to accept a redirect URL.
+
+    This prompt is the escape hatch for a browser that cannot reach this
+    machine's loopback port (a remote or headless session), and what a user
+    copies in that situation is the address bar. The handler only understood
+    `code#state` and a bare code, so a pasted URL was forwarded to the token
+    endpoint verbatim AS the authorization code: the advertised fallback could
+    not complete a login at all.
+    """
+
+    def test_a_pasted_redirect_url_yields_its_code_and_state(self) -> None:
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        assert _parse_pasted_callback("http://localhost:54548/callback?code=abc123&state=st-1") == (
+            "abc123",
+            "st-1",
+        )
+
+    def test_a_url_without_state_still_yields_the_code(self) -> None:
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        assert _parse_pasted_callback("http://localhost:54548/callback?code=abc123") == (
+            "abc123",
+            "",
+        )
+
+    def test_state_carried_in_the_fragment_is_found(self) -> None:
+        """Some providers keep `state` out of the query so it stays out of logs."""
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        assert _parse_pasted_callback("https://example.com/cb?code=c1#state=s9") == ("c1", "s9")
+
+    def test_percent_encoding_is_decoded(self) -> None:
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        code, _ = _parse_pasted_callback("http://localhost:54548/callback?code=sp%20ace&state=s")
+        assert code == "sp ace"
+
+    def test_the_anthropic_code_hash_state_shape_is_unchanged(self) -> None:
+        """The regression guard: Anthropic renders one `code#state` copy target,
+        and adding URL parsing must not disturb it."""
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        assert _parse_pasted_callback("the-code#the-state") == ("the-code", "the-state")
+
+    def test_a_bare_code_is_unchanged(self) -> None:
+        from local_operator.providers.oauth.callback_server import (
+            _parse_pasted_callback,
+        )
+
+        assert _parse_pasted_callback("bare-code-only") == ("bare-code-only", "")
+
+    def test_an_error_redirect_is_reported_rather_than_sent_as_a_code(self) -> None:
+        """A denied grant redirects with `error` and no `code`. Forwarding that
+        URL as the code produces an opaque provider-side rejection a minute
+        later, naming nothing the user can act on.
+
+        The parser raises; the CALLER decides what that means. In the loopback
+        race it is reported and the task re-parks, which
+        `TestABadPasteDoesNotEndTheLogin` pins -- an unusable paste must not be
+        able to lose a login the browser can still finish."""
+        from local_operator.providers.oauth.callback_server import (
+            LoginError,
+            _parse_pasted_callback,
+        )
+
+        with pytest.raises(LoginError, match="access_denied"):
+            _parse_pasted_callback(
+                "http://localhost:54548/callback?error=access_denied"
+                "&error_description=User+said+no"
+            )
+
+    def test_a_url_with_no_code_at_all_is_reported(self) -> None:
+        from local_operator.providers.oauth.callback_server import (
+            LoginError,
+            _parse_pasted_callback,
+        )
+
+        with pytest.raises(LoginError, match="no authorization code"):
+            _parse_pasted_callback("http://localhost:54548/callback")
+
+
+class TestABadPasteDoesNotEndTheLogin:
+    """The paste prompt is a FALLBACK, so it must never be able to lose a login.
+
+    `_manual()` races the loopback callback: it exists for a browser that cannot
+    reach this machine, and the module already encodes that rule where a
+    DECLINED paste re-parks rather than failing. Reporting an unusable paste by
+    raising would break the same rule from the other side -- a mistyped or
+    half-copied URL would kill a sign-in the browser was about to complete.
+
+    These drive `_await_code` itself, with a simulated browser callback landing
+    shortly after the paste, because the property only exists in the race: a
+    direct call to the parser cannot see it.
+    """
+
+    @staticmethod
+    def _flow(paste: str | None, progress: list[str]) -> Any:
+        from local_operator.providers.oauth import callback_server as cs
+
+        class _Flow(cs.OAuthCallbackFlow):
+            provider_id = "test"
+
+            async def generate_auth_url(self, state: str, redirect_uri: str) -> str:
+                return "https://example.invalid/auth"
+
+            async def exchange_token(
+                self, code: str, state: str, redirect_uri: str
+            ) -> dict[str, Any]:
+                return {"access": code}
+
+        return _Flow(
+            cs.CallbackFlowOptions(preferred_port=54999, timeout_seconds=2.0),
+            cs.LoginCallbacks(
+                on_manual_code_input=lambda: paste,
+                on_progress=progress.append,
+            ),
+        )
+
+    async def _race(self, paste: str | None) -> tuple[tuple[str, str], list[str]]:
+        loop = asyncio.get_running_loop()
+        progress: list[str] = []
+        flow = self._flow(paste, progress)
+        flow._captured = loop.create_future()
+        flow._capture_error = loop.create_future()
+
+        async def browser() -> None:
+            await asyncio.sleep(0.05)
+            if not flow._captured.done():
+                flow._captured.set_result(("browser-code", "browser-state"))
+
+        task = asyncio.create_task(browser())
+        try:
+            return await flow._await_code(), progress
+        finally:
+            task.cancel()
+
+    async def test_an_error_redirect_paste_lets_the_browser_still_win(self) -> None:
+        got, progress = await self._race("http://localhost:54548/cb?error=access_denied")
+
+        assert got == ("browser-code", "browser-state")
+        # The reason is not swallowed: it reaches the user through the same
+        # channel as the flow's other status messages.
+        assert any("access_denied" in line for line in progress), progress
+
+    async def test_a_url_with_no_code_lets_the_browser_still_win(self) -> None:
+        got, progress = await self._race("http://localhost:54548/cb")
+
+        assert got == ("browser-code", "browser-state")
+        assert any("no authorization code" in line for line in progress), progress
+
+    async def test_a_usable_paste_still_wins_the_race(self) -> None:
+        """The control: re-parking on a BAD paste must not have broken a good one."""
+        got, _ = await self._race("http://localhost:54548/cb?code=good&state=s1")
+
+        assert got == ("good", "s1")
+
+    async def test_a_declined_paste_still_re_parks(self) -> None:
+        """Unchanged pre-existing behaviour, pinned because this change is
+        adjacent to it."""
+        got, _ = await self._race(None)
+
+        assert got == ("browser-code", "browser-state")
+
+    async def test_a_raising_host_sink_cannot_kill_the_login(self) -> None:
+        """Agent review round 4, Z8: a host whose reporting sink raises took the
+        sign-in down with it.
+
+        `on_warning` and `on_input_rejected` are REPORTING hooks -- they tell
+        the user what happened and take no part in deciding the login. Letting
+        one propagate out of `_manual` broke this class's premise from a third
+        direction: an embedder with a broken message sink would lose a grant
+        the browser callback was about to deliver. `on_manual_code_input` is
+        deliberately not covered by that guard, since its return value is acted
+        on.
+        """
+        from local_operator.providers.oauth import callback_server as cs
+
+        def _boom(*_args: Any) -> None:
+            raise RuntimeError("this host cannot render messages")
+
+        for hook in ("on_warning", "on_input_rejected", "on_progress"):
+            loop = asyncio.get_running_loop()
+            flow = self._flow("http://localhost:54548/cb?error=access_denied", [])
+            flow.callbacks = cs.LoginCallbacks(
+                on_manual_code_input=lambda: "http://localhost:54548/cb?error=access_denied",
+                **{hook: _boom},
+            )
+            flow._captured = loop.create_future()
+            flow._capture_error = loop.create_future()
+
+            async def browser() -> None:
+                await asyncio.sleep(0.05)
+                if not flow._captured.done():
+                    flow._captured.set_result(("browser-code", "browser-state"))
+
+            task = asyncio.create_task(browser())
+            try:
+                got = await asyncio.wait_for(flow._await_code(), timeout=5.0)
+            finally:
+                task.cancel()
+
+            assert got == ("browser-code", "browser-state"), hook
+
+    async def test_re_prompting_does_not_starve_the_event_loop(self) -> None:
+        """Design round 1 D1(a) re-prompts after a rejected paste, and the loop
+        that does it must yield.
+
+        `on_manual_code_input` may be written SYNCHRONOUSLY -- the contract
+        allows it and the CLI host does it -- and `maybe_await` does not
+        suspend on a plain value. A `while True:` with no other await point
+        therefore never returns control to the scheduler, so the loopback
+        callback future cannot be resolved and the flow's own timeout cannot
+        fire: one bad paste hangs the login forever instead of merely failing
+        it. This is the whole class's premise ("the browser can still win")
+        stated as a liveness property, which is why a re-prompt test that only
+        counts prompts would not catch it.
+
+        Driven on its OWN loop in a worker thread, and joined from this one,
+        because the failure it pins is total loop starvation: an
+        ``asyncio.wait_for`` placed on the starved loop can never fire its own
+        timeout either, so an in-loop timeout turns this regression into a hung
+        suite rather than a failing test. The thread gives the assertion an
+        observer the starvation cannot reach.
+        """
+        import threading
+
+        result: list[Any] = []
+
+        def drive() -> None:
+            try:
+                result.append(
+                    asyncio.run(self._race("http://localhost:54548/cb?error=access_denied"))
+                )
+            except BaseException as exc:  # pragma: no cover - diagnostic only
+                result.append(exc)
+
+        worker = threading.Thread(target=drive, daemon=True)
+        worker.start()
+        worker.join(timeout=10.0)
+
+        assert not worker.is_alive(), (
+            "the re-prompt loop starved its event loop: the browser callback "
+            "could not be delivered and the flow's timeout could not fire"
+        )
+        got, _ = result[0]
+        assert got == ("browser-code", "browser-state")

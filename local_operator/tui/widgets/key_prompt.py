@@ -193,10 +193,21 @@ class KeyPromptBlock(TranscriptBlock):
         self.instructions = strip_control_sequences(instructions or "")
         self._typed: list[str] = []
         self._settled = False
-        self._submitted: str | None = None
+        #: The LENGTH of the value handed over, or None when nothing was (a
+        #: cancel). Deliberately not the value: the receipt only ever needs how
+        #: many characters arrived, and a settled block outlives the login — it
+        #: sits in the transcript, and the app also retains the last one to
+        #: correct its receipt — so holding the key here would keep a
+        #: credential resident for the rest of the session. Same reason
+        #: ``_typed`` is dropped in :meth:`resolve`.
+        self._submitted_length: int | None = None
         #: Set when the prompt was retired because the login completed another
         #: way (see :meth:`resolve`), so the receipt does not claim a cancel.
         self._superseded = False
+        #: Set when the value this prompt handed over turned out to be unusable
+        #: (see :meth:`mark_unusable`), so the receipt does not claim a success
+        #: the flow rejected.
+        self._unusable = False
         # `get_running_loop`, not `get_event_loop`: the future must belong to the
         # loop that awaits it, and stating that precondition turns a construction
         # from a sync context into an immediate error rather than a future nobody
@@ -214,6 +225,17 @@ class KeyPromptBlock(TranscriptBlock):
     @property
     def answered(self) -> bool:
         return self._settled
+
+    @property
+    def submitted_length(self) -> int | None:
+        """How many characters were handed over, or None when nothing was.
+
+        The question "could this prompt still be owed a correction?" — only a
+        block that produced a value can be, since :meth:`mark_unusable` is a
+        no-op otherwise. Exposed so the app can ask it without reaching into
+        the private field, and never exposes the value itself.
+        """
+        return self._submitted_length
 
     @property
     def typed_length(self) -> int:
@@ -240,7 +262,7 @@ class KeyPromptBlock(TranscriptBlock):
             return
         self._settled = True
         self._superseded = superseded
-        self._submitted = value
+        self._submitted_length = None if value is None else len(value)
         # The buffer is dropped as soon as the value has been handed over, so a
         # settled block sitting in the transcript is not still holding the
         # user's key in memory for the rest of the session.
@@ -252,6 +274,32 @@ class KeyPromptBlock(TranscriptBlock):
         self.finalize()
         if self._on_settled is not None:
             self._on_settled()
+
+    def mark_unusable(self) -> None:
+        """Repaint a settled receipt to say the pasted value was NOT accepted.
+
+        Called after the fact, because only the login flow can tell: the block
+        hands over whatever was typed, and whether it parses into an
+        authorization code is decided one layer out in
+        ``_parse_pasted_callback``. Same after-the-fact correction as
+        ``superseded``, for the same reason — the block cannot know the outcome
+        from the value alone.
+
+        Without this, a rejected paste settled as ``✓ … code received (107
+        chars)``: a success glyph and the word "received" over a value the flow
+        had just thrown away, directly above the notice explaining why. The
+        count made it worse by looking like corroboration. The login is still
+        live when this fires (the flow re-prompts and the loopback callback is
+        still racing), so this is not a cancel and must not use the cancel
+        wording.
+
+        No-op on a prompt that is not settled or was cancelled: there is no
+        success claim to correct in either case.
+        """
+        if not self._settled or self._submitted_length is None:
+            return
+        self._unusable = True
+        self._refresh_row()
 
     # -- keys ---------------------------------------------------------------
     def action_submit(self) -> None:
@@ -473,7 +521,7 @@ class KeyPromptBlock(TranscriptBlock):
                 # Says only what this BLOCK knows: it stopped being needed. The
                 # login's own outcome notice, success or failure, follows it.
                 return row(("· ", dim), ("no longer needed ", muted), (self.provider_label, dim))
-            if self._submitted is None:
+            if self._submitted_length is None:
                 if not self.sole_path:
                     # Declining here does not end the login (see ``sole_path``):
                     # the browser flow is still live, so the receipt says what
@@ -485,10 +533,21 @@ class KeyPromptBlock(TranscriptBlock):
                         (f"{self.provider_label} — still waiting for the browser", dim),
                     )
                 return row(("✗ ", danger), (f"{self.provider_label} login cancelled", muted))
+            if self._unusable:
+                # A value was handed over and the flow could not use it (see
+                # ``mark_unusable``). Distinguishing word FIRST, as the two
+                # informational receipts above do and for the same truncation
+                # reason. The length is dropped: it read as evidence the paste
+                # was fine, which is the opposite of what happened.
+                return row(
+                    ("✗ ", danger),
+                    ("paste not usable ", muted),
+                    (f"{self.provider_label} — still waiting for the browser", dim),
+                )
             return row(
                 ("✓ ", success),
                 (f"{self.provider_label} {'key' if self.secret else 'code'} received ", muted),
-                (f"({len(self._submitted)} chars)", dim),
+                (f"({self._submitted_length} chars)", dim),
             )
 
         noun = "API key" if self.secret else "authorization code"

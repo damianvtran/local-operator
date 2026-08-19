@@ -1102,6 +1102,11 @@ class OperatorApp(App[None]):
         #: needed only by a login, and every interactive session imports this
         #: module).
         self._key_prompt: Any = None
+        #: The most recent login paste prompt, retained after it settles so a
+        #: rejected paste can have its receipt corrected (see
+        #: ``_request_login_key``). Distinct from ``_key_prompt``, which is
+        #: cleared the moment the prompt is answered.
+        self._last_login_prompt: Any = None
         self._approve_all: bool = False
         # What a NEW session opens in, read from config at mount and rewritten
         # by `/approvals default <mode>`. Held beside `_approve_all` rather than
@@ -3787,6 +3792,31 @@ class OperatorApp(App[None]):
         """
         block = self._key_prompt
         self._key_prompt = None
+
+        # Released unless a correction could still be owed, which is true only
+        # while the flow has not yet ruled on a value that was handed over.
+        # Deliberately OUTSIDE the `block is not None` check below: on the
+        # ordinary success path `_request_login_key`'s `finally` has already
+        # cleared `_key_prompt`, so a check nested in there would never run and
+        # the reference would survive every teardown.
+        #
+        # The retained block still holds the pasted secret. `resolve` drops
+        # `_typed` and keeps only `_submitted_length`, but it also resolves the
+        # future, and a future retains its result for as long as the block holds
+        # it -- so this reference is a credential lifetime, not just memory, and
+        # bounding it is the whole point of the retention fix.
+        #
+        # The window it still has to protect is narrow and real: between a paste
+        # being handed over (the block settles, its receipt provisionally reads
+        # "code received") and the flow resuming to parse it, an interrupt can
+        # reach this method. Releasing the reference there left the rejection
+        # nothing to correct and stranded a false success receipt -- design
+        # round 1's D1(b). `_key_prompt` is still set in exactly that window,
+        # which is what distinguishes it from the completed login.
+        pending = self._last_login_prompt
+        if pending is not None and not (block is pending and pending.submitted_length is not None):
+            self._last_login_prompt = None
+
         if block is not None:
             try:
                 block.resolve(None)
@@ -7672,12 +7702,32 @@ class OperatorApp(App[None]):
         def on_progress(message: str) -> None:
             self._append_block(NoticeBlock(message, "info"))
 
+        def on_warning(message: str) -> None:
+            # Something went wrong but the login is still running (see
+            # ``LoginCallbacks.on_warning``). Styled as a warning rather than
+            # progress because it is the line that explains why nothing
+            # happened, and in the `info` treatment it read as narration
+            # alongside "opening your browser…".
+            self._append_block(NoticeBlock(message, "warning"))
+
+        def on_input_rejected() -> None:
+            # The prompt settles into a receipt as soon as the value is handed
+            # over, so by the time the flow decides it cannot use the paste the
+            # transcript is already claiming "✓ … code received". Correct that
+            # block in place rather than appending another line: the false
+            # receipt is what the user is looking at.
+            block = self._last_login_prompt
+            if block is not None:
+                block.mark_unusable()
+
         # ``getattr`` rather than attribute access: ``definition`` is typed
         # ``object`` here because an embedding host may pass its own provider
         # record, and a host whose definitions predate this field must degrade
         # to "no prompt" rather than raising out of a login.
         if not getattr(definition, "accepts_paste_prompt", False):
-            return LoginCallbacks(on_auth_url=on_auth_url, on_progress=on_progress)
+            return LoginCallbacks(
+                on_auth_url=on_auth_url, on_progress=on_progress, on_warning=on_warning
+            )
 
         label = getattr(definition, "name", None) or getattr(definition, "id", "this provider")
         # WHICH value the prompt is reading, which decides both its wording and
@@ -7698,7 +7748,9 @@ class OperatorApp(App[None]):
 
         return LoginCallbacks(
             on_auth_url=on_auth_url,
+            on_warning=on_warning,
             on_progress=on_progress,
+            on_input_rejected=on_input_rejected,
             on_manual_code_input=on_manual_code_input,
         )
 
@@ -7727,6 +7779,13 @@ class OperatorApp(App[None]):
         self._close_aside()
         block = KeyPromptBlock(provider_label, secret=secret, sole_path=sole_path)
         self._key_prompt = block
+        # Kept BEYOND the `finally` that clears `_key_prompt`, because the flow
+        # only learns a paste was unusable after this method has returned the
+        # value and the block has settled. `_key_prompt` means "a prompt is
+        # awaiting an answer" and must stay None once answered; this means "the
+        # last prompt shown", which is the one whose receipt may need
+        # correcting (see ``on_input_rejected``).
+        self._last_login_prompt = block
         self._append_block(block)
         try:
             # SHIELDED, because the future is the app's to settle, not the

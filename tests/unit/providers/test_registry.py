@@ -40,6 +40,19 @@ def test_unknown_provider_returns_none() -> None:
     assert get_provider_definition("definitely-not-a-provider") is None
 
 
+def test_zai_oauth_shares_the_zai_credential_row_and_catalogue() -> None:
+    """The sign-in mints a durable key for the SAME provider, exactly as
+    ``xai-oauth`` does -- not a second catalogue."""
+    zai_oauth = get_provider_definition("zai-oauth")
+    zai = get_provider_definition("zai")
+    assert zai_oauth is not None and zai is not None
+    assert zai_oauth.store_credentials_as == "zai"
+    assert zai_oauth.base_url == zai.base_url
+    assert zai_oauth.login is not None
+    # No refresh: the minted key never expires, so there is nothing to refresh.
+    assert zai_oauth.refresh_token is None
+
+
 def test_registry_ids_unique() -> None:
     ids = [p.id for p in PROVIDER_REGISTRY]
     assert len(ids) == len(set(ids))

@@ -180,12 +180,20 @@ async def _business_login(http: httpx.AsyncClient, oauth_access_token: str) -> s
     return token
 
 
-async def mint_zai_api_key(http: httpx.AsyncClient, oauth_access_token: str) -> str:
+async def mint_zai_api_key(
+    http: httpx.AsyncClient, oauth_access_token: str
+) -> tuple[str, str, str]:
     """Provision the durable ``id.secret`` key from a short-lived OAuth token.
 
     business-login → default org/project → find-or-create this app's key →
     read its secret. Exposed (not private) so a test can exercise the
     provisioning sequence without driving a browser flow.
+
+    Returns ``(key, organization_id, project_id)``. The two ids come back with
+    the key because they are the only identity this flow resolves on EVERY
+    sign-in: the token response's ``user`` block is optional per response, so a
+    caller relying on it gets an identity sometimes and none other times, and
+    `AuthStore` then writes a second row for an account it already holds.
     """
     biz_token = await _business_login(http, oauth_access_token)
     auth = {"Authorization": f"Bearer {biz_token}"}
@@ -242,7 +250,7 @@ async def mint_zai_api_key(http: httpx.AsyncClient, oauth_access_token: str) -> 
     secret_key = _trimmed(copied.get("secretKey")) if isinstance(copied, dict) else None
     if not secret_key:
         raise LoginError("Z.AI key provisioning returned no secretKey")
-    return f"{api_key}.{secret_key}"
+    return f"{api_key}.{secret_key}", organization_id, project_id
 
 
 class ZaiOAuthFlow(OAuthCallbackFlow):
@@ -307,7 +315,7 @@ class ZaiOAuthFlow(OAuthCallbackFlow):
             if not access_token:
                 raise LoginError("Z.AI token response is missing an access token")
 
-            minted = await mint_zai_api_key(http, access_token)
+            minted, organization_id, project_id = await mint_zai_api_key(http, access_token)
         finally:
             if owns_client:
                 await http.aclose()
@@ -328,14 +336,37 @@ class ZaiOAuthFlow(OAuthCallbackFlow):
             # refresh is ever attempted and the row persists across sessions.
             "expires": None,
             "authorized_at": int(time.time() * 1000),
+            # The dedupe identity, and the reason it is these fields rather than
+            # the email below: key provisioning resolves an org and a project on
+            # EVERY sign-in (it cannot mint a key without them), while the token
+            # response's `user` block is optional per response. Keying on an
+            # optional field means an identity that appears and disappears
+            # between logins, and `AuthStore` writing a second row for an
+            # account it already holds -- leaving a stale key in rotation.
+            #
+            # Deliberately NOT stored as `org_id`, even though that is what Z.AI
+            # calls it. `org_id` is a ROUTING signal on an OAuth row: an OAuth
+            # credential carrying one is treated by `OpenAICompatClient` as a
+            # ChatGPT subscription grant, which sends this request to ChatGPT's
+            # private Codex Responses endpoint with Codex headers. The two
+            # fields below carry the same identity with no wire meaning, and
+            # `_identity_key_for` reads `account_id` and `project_id` too.
+            "account_id": f"{organization_id}/{project_id}",
+            "project_id": project_id,
         }
         if isinstance(user, dict):
+            # Identity fields from the OPTIONAL `user` block are recorded for
+            # display (whose account is this), and must not overwrite the
+            # dedupe identity above: this block is absent from some responses,
+            # so an `account_id` sourced from it changes between sign-ins and
+            # `AuthStore` writes a second row for the same account. `user_id`
+            # is therefore a separate key rather than a replacement.
             email = _trimmed(user.get("email"))
             if email:
                 creds["email"] = email
-            account_id = user.get("id")
-            if isinstance(account_id, (str, int)) and str(account_id).strip():
-                creds["account_id"] = str(account_id).strip()
+            user_id = user.get("id")
+            if isinstance(user_id, (str, int)) and str(user_id).strip():
+                creds["user_id"] = str(user_id).strip()
         return creds
 
 
