@@ -178,11 +178,20 @@ class PrintRenderer:
             summary = strip_control_sequences(event.intent or _args_summary(event.args))
             name = strip_control_sequences(event.tool_name)
             line = f"● {name} {summary}".rstrip()
-            self.console.print(f"[dim]{line[:_TOOL_LINE_WIDTH]}[/dim]", highlight=False)
+            # `markup=False` and the style passed as a style, for the reason the
+            # notice branch below states at length: the tool NAME is chosen by
+            # the model, and a `[` in it is Rich markup — `[/red]x` raises
+            # `MarkupError` here, which `session._emit` swallows, so the row
+            # vanishes and the operator watches a tool run with no line at all.
+            # Pre-existing on `main`; fixed here because the notice fix
+            # generalised the rule and it should hold for every branch that
+            # renders model-controlled text, not just the newest one (R14-2,
+            # agent review round 14).
+            self.console.print(line[:_TOOL_LINE_WIDTH], style="dim", highlight=False, markup=False)
         elif isinstance(event, ToolExecutionEndEvent):
             if event.is_error:
                 name = strip_control_sequences(event.tool_name)
-                self.console.print(f"[red]✗ {name} failed[/red]", highlight=False)
+                self.console.print(f"✗ {name} failed", style="red", highlight=False, markup=False)
         elif isinstance(event, NoticeEvent):
             style = {"error": "red", "warning": "yellow"}.get(event.kind, "dim")
             # A GLYPH carries the severity, not just the colour. This renderer

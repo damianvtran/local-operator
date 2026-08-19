@@ -2878,17 +2878,18 @@ async def test_the_expired_row_recounts_rather_than_restating_a_stale_number() -
 
 
 @pytest.mark.asyncio
-async def test_a_highlighted_composer_keeps_ctrl_c_as_the_interrupt() -> None:
-    """The draft rung must not capture a copy gesture.
+async def test_a_stale_highlight_does_not_divert_ctrl_c_from_the_draft() -> None:
+    """D17, design round 5. Gate on the GESTURE, not on the selection.
 
-    A user who has just highlighted text in the composer is mid-copy, not
-    scrapping a draft — and a highlighted composer always has text in it, so
-    without this the draft rung would take every such press. Two costs if it
-    did: Ctrl+C stops being the interrupt in the widget that is focused in
-    essentially every frame, and clearing the composer destroys the very text
-    the user was reaching for.
+    A selection is state that persists until the caret moves, so "the composer
+    has a highlight" stays true long after any copy ended. Gating on it meant a
+    composer holding a stale range took the interrupt, ARMED the exit ladder,
+    and a second reflexive tap quit the app with the draft never filed — the
+    exact hazard this rung was added to remove, reintroduced by its own guard.
 
-    The composer's own copy is hung off the mouse release for the same reason.
+    A real drag-copy is covered from the other side by
+    `test_a_composer_drag_still_leaves_ctrl_c_as_the_interrupt` in
+    `test_transcript_selection.py`, which this must not break.
     """
     session = SteerableSession()
     app = OperatorApp(lambda: _factory(session))
@@ -2897,19 +2898,25 @@ async def test_a_highlighted_composer_keeps_ctrl_c_as_the_interrupt() -> None:
         session.streaming = True
         editor = app.query_one(Editor)
         editor.focus()
-        editor.text = "summarise the ingest path please"
+        editor.text = "a half-typed prompt I do not want to lose"
         await pilot.pause()
 
-        # Highlight part of the draft, exactly as a drag would leave it.
-        editor.selection = Selection((0, 0), (0, 19))
+        # A highlight with no gesture in flight: the caret simply sits inside a
+        # range the user selected earlier.
+        editor.selection = Selection((0, 0), (0, 10))
         await pilot.pause()
-        assert editor.selected_text, "the highlight must be live for this to mean anything"
+        assert editor.selected_text, "the stale highlight must be live to mean anything"
+        assert not getattr(editor, "_selecting", False), "no drag should be in flight"
 
         await pilot.press("ctrl+c")
         await pilot.pause(0.1)
 
-        assert session.aborts == [
-            "interrupted"
-        ], "Ctrl+C under a live highlight was captured by the draft rung"
-        # And the text the user was copying is still there.
-        assert editor.text == "summarise the ingest path please"
+        # The draft rung takes it: filed, not aborted, ladder NOT armed.
+        assert session.aborts == [], "a stale highlight diverted the key to the interrupt"
+        assert editor.text == "", "the draft was not cleared"
+        assert "a half-typed prompt I do not want to lose" in editor.prompt_history()
+
+        # And the second press must not quit, which is the damage D17 named.
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+        assert app.is_running, "a second reflexive tap exited the app"

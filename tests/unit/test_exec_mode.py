@@ -473,6 +473,42 @@ def test_a_notice_cannot_forge_a_row_or_crash_the_renderer() -> None:
     assert forged.startswith("✗ ")
 
 
+def test_no_renderer_branch_interprets_a_tool_name_as_markup() -> None:
+    """Round 14, R14-2. The rule has to hold for every branch, not the newest.
+
+    The tool NAME is model-chosen, and a `[` in it is Rich markup: `[/red]x`
+    raises `MarkupError`, which the session's emit path swallows, so the row
+    vanishes and the operator watches a tool run with no line at all. The
+    notice branch was fixed for D14; the two tool-event branches above it had
+    the same defect (pre-existing on main) and the fix's own comment
+    generalised the rule further than the code did.
+    """
+    name = "[/red]oops"
+
+    def render(event: object) -> str:
+        buffer = io.StringIO()
+        console = Console(file=buffer, no_color=True, highlight=False, width=100)
+        PrintRenderer(json_mode=False, console=console).handle(event)  # type: ignore[arg-type]
+        return buffer.getvalue()
+
+    started = render(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name=name, args={}, intent="do it")
+    )
+    assert started == "● [/red]oops do it\n"
+
+    result = ToolResult(
+        tool_call_id="c1", tool_name=name, is_error=True, content=[TextContent(text="x")]
+    )
+    ended = render(
+        ToolExecutionEndEvent(tool_call_id="c1", tool_name=name, result=result, is_error=True)
+    )
+    assert ended == "✗ [/red]oops failed\n"
+
+    assert render(NoticeEvent(text=f"Tool not found: {name}", kind="error")) == (
+        "✗ Tool not found: [/red]oops\n"
+    )
+
+
 def test_renderer_tracks_failure() -> None:
     renderer = PrintRenderer(json_mode=False)
     renderer.handle(AgentEndEvent(error="boom"))

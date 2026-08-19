@@ -3272,18 +3272,35 @@ class OperatorApp(App[None]):
         aside and hands back the main-chat draft it borrowed.
         """
         editor = self._editor()
-        # A LIVE SELECTION in the composer is not a draft the user is scrapping.
-        # They highlighted text a moment ago, which is a copy gesture in
-        # progress, and Ctrl+C there has to keep its older meaning — the
-        # interrupt and the first rung of the exit ladder — rather than being
-        # captured by this rung. Clearing the composer under a live highlight
-        # would also destroy the very text they were reaching for.
+        # A COPY GESTURE IN FLIGHT is not a draft the user is scrapping, so
+        # Ctrl+C keeps its older meaning there — the interrupt and the first
+        # rung of the exit ladder — rather than being captured by this rung.
         #
-        # Checked BEFORE the draft branch, because a highlighted composer always
-        # has text in it and would otherwise take that branch every time. The
-        # composer's copy is hung off the mouse release for the same reason this
-        # defers to it: the copy must not buy itself this key.
-        if editor.text.strip() and not getattr(editor, "selected_text", ""):
+        # Gated on the GESTURE, never on ``selected_text``. A selection is STATE
+        # that persists until the caret moves, so "has a highlight" diverted the
+        # key long after any gesture ended: a composer holding a stale range
+        # took the interrupt, armed the ladder, and the second reflexive tap
+        # EXITED THE APP with the draft never filed to history — the precise
+        # hazard this rung exists to remove, reintroduced by its own guard (D17,
+        # design round 5). It also caught two things that are not copies at all,
+        # a shift+arrow selection and the app's own marker-click selection.
+        #
+        # Two flags, because a copy spans two moments and the key must defer
+        # through both:
+        #
+        # * ``_selecting`` — this widget is mid-drag. The same predicate
+        #   `Editor._copy_drag` gates on, for the same documented reason.
+        # * ``_copied`` — a drag-copy just completed and has not been edited
+        #   past. The composer's copy lands on mouse RELEASE, so by the time a
+        #   hand moves from mouse to keyboard `_selecting` is already False;
+        #   without this the copy would still buy itself the key back. The
+        #   editor retires this flag on the first edit, so it cannot go stale
+        #   the way a selection does.
+        #
+        # Checked BEFORE the draft branch, because a composer being dragged over
+        # always has text in it and would otherwise take that branch every time.
+        mid_copy = getattr(editor, "_selecting", False) or getattr(editor, "_copied", False)
+        if editor.text.strip() and not mid_copy:
             # `remember_draft` refuses while the aside owns the composer, and a
             # draft that cannot be filed must not be thrown away either.
             if not editor.remember_draft():
