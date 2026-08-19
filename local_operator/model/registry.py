@@ -299,6 +299,13 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     elif hosting == "alibaba":
         if model in qwen_models:
             return qwen_models[model]
+    elif hosting in ("alibaba-token-plan", "alibaba-token-plan-oauth"):
+        # Both login flavours serve the same catalogue; `store_credentials_as`
+        # already aliases the oauth id to `alibaba-token-plan` on the discovery
+        # path, but this chain is reachable directly (build_model_spec on a
+        # session config), so it must answer for both spellings itself.
+        if model in qwencloud_token_plan_models:
+            return qwencloud_token_plan_models[model]
     elif hosting == "kimi":
         if model in kimi_models:
             return kimi_models[model]
@@ -1481,6 +1488,106 @@ qwen_models: Dict[str, ModelInfo] = {
     ),
 }
 
+qwencloud_token_plan_models: Dict[str, ModelInfo] = {
+    # QwenCloud Token Plan (provider id `alibaba-token-plan`): the subscription
+    # gateway at token-plan.ap-southeast-1.maas.aliyuncs.com. Its `/models`
+    # listing was checked directly (2026-08-18) and returns ONLY ids — no
+    # context_window, no max_tokens, no pricing — so live discovery cannot
+    # correct these rows and this map is the sole source of the numbers the
+    # session runs on. Compaction thresholds derive from context_window, which
+    # is why these entries exist at all: without them the spec fell back to the
+    # 128k unknown default and a 1M-window model compacted (or 400'd) at 128k.
+    #
+    # Windows and output caps are transcribed from Alibaba's published model
+    # specs, cross-checked against OpenRouter's listing for the same upstream
+    # models (qwen/qwen3.8-max: 1,000,000 ctx / 131,072 out) — the two sources
+    # agree. Re-check both if Alibaba ships a new generation.
+    #
+    # Prices are deliberately 0.0: the Token Plan bills subscription CREDITS,
+    # not per-token dollars, so any USD rate written here would be an invention.
+    # 0.0 renders as "cost unavailable" rather than "free", per the registry's
+    # zero-means-unknown convention for keyed providers.
+    "qwen3.8-max": ModelInfo(
+        id="qwen3.8-max",
+        name="Qwen3.8 Max",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=False,
+        description="Alibaba's flagship Qwen3.8 model via the Token Plan subscription",
+        recommended=True,
+    ),
+    "qwen3.8-max-preview": ModelInfo(
+        id="qwen3.8-max-preview",
+        name="Qwen3.8 Max Preview",
+        max_tokens=131_072,
+        context_window=983_616,
+        supports_images=True,
+        supports_prompt_cache=False,
+        description="Preview channel of Qwen3.8 Max on the Token Plan",
+        recommended=False,
+    ),
+    "qwen3.7-max": ModelInfo(
+        id="qwen3.7-max",
+        name="Qwen3.7 Max",
+        max_tokens=65_536,
+        context_window=1_000_000,
+        supports_images=False,
+        supports_prompt_cache=False,
+        description="Previous-generation flagship Qwen model on the Token Plan",
+        recommended=False,
+    ),
+    "qwen3.7-plus": ModelInfo(
+        id="qwen3.7-plus",
+        name="Qwen3.7 Plus",
+        max_tokens=64_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=False,
+        description="Balanced Qwen model on the Token Plan",
+        recommended=False,
+    ),
+    "qwen3.6-flash": ModelInfo(
+        id="qwen3.6-flash",
+        name="Qwen3.6 Flash",
+        max_tokens=65_536,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=False,
+        description="Fast, lightweight Qwen model on the Token Plan",
+        recommended=False,
+    ),
+    "glm-5.2": ModelInfo(
+        id="glm-5.2",
+        # Suffixed because `zai/glm-5.2` already answers to the bare name and
+        # shipped names must be globally unique (see
+        # test_no_two_shipped_rows_share_a_curated_name) — without the suffix
+        # BOTH rows lose their name as ambiguous and fall back to colliding
+        # bare-id labels.
+        name="GLM-5.2 (Token Plan)",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=False,
+        supports_prompt_cache=False,
+        description="Zhipu's GLM-5.2 served through the Token Plan",
+        recommended=False,
+    ),
+    "deepseek-v4-pro": ModelInfo(
+        id="deepseek-v4-pro",
+        # Suffixed because `deepseek/deepseek-v4-pro` already answers to the
+        # bare name and shipped names must be globally unique (see
+        # test_no_two_shipped_rows_share_a_curated_name) — a band printing
+        # "DeepSeek V4 Pro" must say which endpoint is serving it.
+        name="DeepSeek V4 Pro (Token Plan)",
+        max_tokens=384_000,
+        context_window=1_000_000,
+        supports_images=False,
+        supports_prompt_cache=False,
+        description="DeepSeek V4 Pro served through the Token Plan",
+        recommended=False,
+    ),
+}
+
 mistral_models: Dict[str, ModelInfo] = {
     "mistral-large-latest": ModelInfo(
         id="mistral-large-latest",
@@ -2087,6 +2194,10 @@ _STATIC_MODEL_MAPS: Dict[str, Dict[str, "ModelInfo"]] = {
     "google": google_models,
     "deepseek": deepseek_models,
     "alibaba": qwen_models,
+    # Token Plan models are keyed under the canonical storage id only; the
+    # `alibaba-token-plan-oauth` login flavour reaches this map through
+    # `store_credentials_as`, the same way `xai-oauth` reaches `xai`.
+    "alibaba-token-plan": qwencloud_token_plan_models,
     "mistral": mistral_models,
     "kimi": kimi_models,
     "xai": xai_models,

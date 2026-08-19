@@ -7,6 +7,8 @@ from local_operator.model.registry import (
     anthropic_family_model_info,
     anthropic_models,
     get_model_info,
+    qwencloud_token_plan_models,
+    static_models,
 )
 
 
@@ -112,6 +114,51 @@ def test_get_model_info() -> None:
     # Test Unsupported hosting provider
     with pytest.raises(ValueError, match="Unsupported hosting provider: unknown"):
         get_model_info("unknown", "any")
+
+
+# -- QwenCloud Token Plan -----------------------------------------------------
+#
+# The Token Plan gateway's `/models` listing carries ONLY ids (checked live,
+# 2026-08-18): no context_window, no max_tokens, no prices. Discovery therefore
+# cannot correct these rows, and the registry is the sole source of the numbers
+# a session runs on. Before these rows existed, `build_model_spec` fell through
+# to the 128k unknown default and a 1M-window model compacted at 128k — the
+# status band read `113.9%/128k` mid-conversation.
+
+
+def test_token_plan_models_ship_their_real_windows() -> None:
+    """Transcribed from Alibaba's published specs and cross-checked against
+    OpenRouter's listing for the same upstream models (both said 1M/131k for
+    qwen3.8-max on 2026-08-18). A drift here is a wrong compaction threshold,
+    not a cosmetic gap."""
+    flagship = qwencloud_token_plan_models["qwen3.8-max"]
+    assert (flagship.context_window, flagship.max_tokens) == (1_000_000, 131_072)
+    assert flagship.supports_images is True
+
+    # Both the exact-id chain and the enumerable map must answer, because
+    # `build_model_spec` reaches the former and discovery merges over the
+    # latter — a row present in only one leaves the other path at 128k.
+    assert get_model_info("alibaba-token-plan", "qwen3.8-max").context_window == 1_000_000
+    assert get_model_info("alibaba-token-plan-oauth", "qwen3.8-max").context_window == 1_000_000
+    assert static_models("alibaba-token-plan")["qwen3.8-max"].context_window == 1_000_000
+
+    # Every chat row in the map carries a usable window: a zero or missing one
+    # would silently disable compaction for that model (see build_model_spec).
+    for model_id, info in qwencloud_token_plan_models.items():
+        assert info.context_window and info.context_window > 0, model_id
+        assert info.max_tokens and info.max_tokens > 0, model_id
+
+
+def test_token_plan_spec_carries_the_window_to_the_session() -> None:
+    """The spec IS what the session runs on — compaction thresholds derive from
+    `context_window` — so the assertion is on the end of the pipe, not the map."""
+    spec = build_model_spec("alibaba-token-plan", "qwen3.8-max")
+    assert spec.context_window == 1_000_000
+    assert spec.max_output_tokens == 131_072
+    # The oauth login flavour serves the same catalogue and must not regress to
+    # the 128k default just because the session config spelled the provider id
+    # the way `/login` did.
+    assert build_model_spec("alibaba-token-plan-oauth", "qwen3.8-max").context_window == 1_000_000
 
 
 # -- Anthropic family inheritance ---------------------------------------------
