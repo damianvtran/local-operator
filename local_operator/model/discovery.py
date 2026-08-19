@@ -47,6 +47,7 @@ from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
     WireFormat,
+    credential_provider_id,
     get_provider_definition,
 )
 
@@ -827,7 +828,7 @@ def _static_rows(provider_id: str) -> dict[str, ModelInfo]:
     definition = get_provider_definition(provider_id)
     if definition is None:
         return {}
-    return static_models(definition.store_credentials_as or definition.id)
+    return static_models(credential_provider_id(definition.id))
 
 
 def fetch_models(
@@ -1248,7 +1249,7 @@ def _available_models(
             "models": [dataclasses.asdict(row) for row in live],
         }
 
-    storage_id = definition.store_credentials_as or definition.id
+    storage_id = credential_provider_id(definition.id)
     # Derived ONCE and reused for both the document name and the pruning
     # decision, so the two cannot disagree about whether this listing is the
     # account's authoritative catalogue.

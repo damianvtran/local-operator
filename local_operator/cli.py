@@ -1184,10 +1184,11 @@ def _preflight_api_key(
         import asyncio
 
         from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.registry import credential_provider_id
 
         auth_store = AuthStore(credential_manager=credential_manager)
         try:
-            storage_provider = definition.store_credentials_as or canonical
+            storage_provider = credential_provider_id(canonical)
             if auth_store.list_credentials(provider=storage_provider):
                 return None
             api_key = asyncio.run(auth_store.get_api_key(canonical))

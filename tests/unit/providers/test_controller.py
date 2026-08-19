@@ -327,11 +327,31 @@ def test_an_api_key_cannot_reach_an_oauth_only_usage_endpoint(controller, monkey
     for provider in ("anthropic", "openai", "openai-device", "xai"):
         assert controller.is_usable(provider), f"{provider}: the key does run the model"
         assert not controller.can_report_usage(provider), f"{provider}: but not the quota"
-    # `xai-oauth` has no env var of its own and nothing stored under `xai`, so it
-    # never even reaches the finer check — it is unusable outright.
-    assert not controller.is_usable("xai-oauth")
+    # `xai-oauth` has no env var of its own, but its base's DOES authenticate it
+    # (same wire, same endpoint), so the stream-time cascade runs it and
+    # `is_usable` must agree — the status surfaces used to say "needs login"
+    # for a provider whose very next request succeeds. The finer usage check
+    # still excludes it: an API key cannot read the OAuth-only quota endpoint.
+    assert controller.is_usable("xai-oauth")
     assert not controller.can_report_usage("xai-oauth")
     assert controller.usage_reportable_providers() == []
+
+
+def test_is_usable_agrees_with_the_cascade_on_env_keyed_flavours(controller, monkeypatch) -> None:
+    """`is_usable` and the stream-time cascade are one question, one reader.
+
+    With only the base provider's var set, `get_api_key(flavour)` resolves the
+    env key, so every status surface built on `is_usable` (`/usage`'s warning,
+    the welcome screen, the provider row) must say usable too — and must keep
+    saying unusable when NO var is set, or the welcome screen would promise a
+    login that the cascade then fails."""
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "xai-test")
+    assert controller.is_usable("xai")
+    assert controller.is_usable("xai-oauth")
+    monkeypatch.delenv("XAI_API_KEY")
+    assert not controller.is_usable("xai-oauth")
 
 
 def test_an_env_api_key_does_reach_an_api_key_usage_endpoint(controller, monkeypatch) -> None:

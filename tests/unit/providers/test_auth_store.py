@@ -245,6 +245,56 @@ async def test_rotate_sibling_usage_limit_preserves_sticky(store: AuthStore) -> 
     assert sticky is not None
 
 
+async def test_rotate_sibling_finds_a_token_plan_row_by_its_wire_key(
+    store: AuthStore,
+) -> None:
+    """The failing bearer is the EXTRACTOR's output, not ``data["access"]``.
+
+    A QwenCloud row holds the management token in ``access`` and the ``sk-sp-…``
+    inference key in ``api_key``; the cascade authenticates with the latter, so
+    the key failover reports on failure is the latter. Matching the raw field
+    found no row and the failing credential was never blocked, demoted or
+    unstuck — the failover layer could not rotate away from it."""
+    row = store.upsert_credential(
+        "alibaba-token-plan",
+        {"type": "oauth", "access": "mgmt-token", "api_key": "sk-sp-wire"},
+    )
+    from local_operator.providers.failover import ProviderError
+
+    error = ProviderError(401, "invalid api key", auth_error=True)
+    # The management token is NOT the wire key: reporting it rotates nothing —
+    # no row matches, so the lone row is still its own untried sibling (True)
+    # and nothing is blocked.
+    assert store.rotate_sibling("alibaba-token-plan", None, error, api_key="mgmt-token") is True
+    assert store.is_blocked(row.id, "alibaba-token-plan") is False
+    # Asked under the flavour id, with the WIRE key the request actually
+    # carried: the row is found and blocked, and no sibling remains (False).
+    assert (
+        store.rotate_sibling("alibaba-token-plan-oauth", None, error, api_key="sk-sp-wire") is False
+    )
+    assert store.is_blocked(row.id, "alibaba-token-plan-oauth") is True
+
+
+async def test_rotate_sibling_survives_a_malformed_oauth_row(store: AuthStore) -> None:
+    """A hand-written row with neither ``access`` nor ``api_key`` must not turn
+    the failure path into a crash: the extractor raises KeyError on it, and
+    ``_row_matches_key`` has to swallow that and report "no match" so failover
+    still rotates. The healthy sibling must still be found and served."""
+    bad = store.upsert_credential("alibaba-token-plan", {"type": "oauth"})
+    failing = store.upsert_credential("alibaba-token-plan", {"key": "k-good", "type": "api_key"})
+    sibling = store.upsert_credential("alibaba-token-plan", {"key": "k-other", "type": "api_key"})
+    from local_operator.providers.failover import ProviderError
+
+    error = ProviderError(401, "invalid api key", auth_error=True)
+    # The bad row is walked FIRST and must read as "not the failing key", not
+    # raise; the real failing row is blocked and the sibling reported.
+    assert store.rotate_sibling("alibaba-token-plan", None, error, api_key="k-good") is True
+    assert store.is_blocked(failing.id, "alibaba-token-plan") is True
+    assert store.is_blocked(bad.id, "alibaba-token-plan") is False
+    assert await store.get_api_key("alibaba-token-plan") == "k-other"
+    _ = sibling
+
+
 async def test_invalidated_token_soft_deletes_row(store: AuthStore) -> None:
     """Only TRUE invalidation signals soft-delete (PR-03): an explicit
     revocation marker, never a generic expired/unauthorized 401."""
@@ -1085,3 +1135,105 @@ class TestADemotionSurvivesAMixedPool:
 
         assert await store.get_api_key("anthropic") is None
         assert await store.get_api_key("anthropic", read_only=True) is None
+
+
+class TestLoginFlavourAliases:
+    """A login flavour and its base provider are ONE credential.
+
+    ``xai-oauth``, ``openai-device`` and ``alibaba-token-plan-oauth`` write their
+    row under another provider's name (``store_credentials_as``), and the store's
+    SQL is exact. Before this, every lookup for the flavour id matched no row and
+    the cascade reported "No API key configured for provider 'xai-oauth'" at the
+    end of a successful OAuth login -- the one failure an OAuth login exists to
+    prevent, and one that told the user to go get an API key they should not need.
+    """
+
+    async def test_oauth_login_flavour_resolves_the_row_its_login_wrote(
+        self, store: AuthStore
+    ) -> None:
+        """The reported bug: log in with `/login xai-oauth`, then stream on it."""
+        store.upsert_credential("xai", _oauth(access="xai-access"))
+        assert await store.get_api_key("xai-oauth") == "xai-access"
+        access = await store.get_oauth_access("xai-oauth")
+        assert access is not None and access.kind == "oauth"
+        assert access.access_token == "xai-access"
+
+    async def test_every_registry_alias_resolves_not_just_xai(self, store: AuthStore) -> None:
+        """Fixed for the property, not for the one provider that was reported."""
+        for flavour, storage in (
+            ("xai-oauth", "xai"),
+            ("openai-device", "openai"),
+            ("alibaba-token-plan-oauth", "alibaba-token-plan"),
+            # The flavour the bug was actually reported for.
+            ("zai-oauth", "zai"),
+        ):
+            store.upsert_credential(storage, _oauth(access=f"{storage}-access"))
+            assert await store.get_api_key(flavour) == f"{storage}-access"
+
+    async def test_the_alias_and_its_base_share_one_backoff(self, store: AuthStore) -> None:
+        """One credential ⇒ one block: a 429 earned as `xai` is not evaded by
+        asking again as `xai-oauth`, which would spend a rate-limited account
+        twice and re-trip the limit."""
+        row = store.upsert_credential("xai", _oauth(access="xai-access"))
+        store.block_credential(row.id, "xai")
+        assert store.is_blocked(row.id, "xai-oauth") is True
+
+    async def test_the_alias_and_its_base_share_one_sticky_account(self, store: AuthStore) -> None:
+        """Stickiness pins an ACCOUNT, so it cannot depend on the spelling used.
+
+        Two DISTINCT identities: rows sharing one identity key collapse into a
+        single row on upsert, and with only one row to choose from every
+        selection path returns the same token whether stickiness was honoured or
+        not -- a test that cannot fail. ``session-1`` also hashes to index 0, so
+        the unsticky fallback would return the FIRST row, making the assertion
+        below sensitive to the pin rather than to luck.
+        """
+        store.upsert_credential(
+            "xai", {**_oauth(refresh="r1", access="a1"), "account_id": "acct-a"}
+        )
+        second = store.upsert_credential(
+            "xai", {**_oauth(refresh="r2", access="a2"), "account_id": "acct-b"}
+        )
+        store._set_sticky("xai-oauth", "session-1", second.id)
+        assert await store.get_api_key("xai", "session-1") == "a2"
+
+    async def test_the_base_providers_env_key_authenticates_the_flavour(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """There is no XAI_OAUTH_API_KEY: same wire, same endpoint, same key."""
+        monkeypatch.setenv("XAI_API_KEY", "env-xai")
+        assert await store.get_api_key("xai-oauth") == "env-xai"
+
+    async def test_token_plan_flavour_gets_the_inference_key_not_the_mgmt_token(
+        self, store: AuthStore
+    ) -> None:
+        """QwenCloud's row holds two tokens and only the STORAGE definition knows
+        which one the inference endpoint accepts; resolving the flavour by its own
+        definition would authenticate with the token that endpoint rejects."""
+        store.upsert_credential(
+            "alibaba-token-plan",
+            {**_oauth(access="mgmt-token"), "api_key": "sk-sp-inference"},
+        )
+        assert await store.get_api_key("alibaba-token-plan-oauth") == "sk-sp-inference"
+
+    async def test_logout_still_removes_the_row_through_either_name(self, store: AuthStore) -> None:
+        """list_credentials now aliases, so the logout path must not double-count
+        or miss the row it is asked to delete."""
+        store.upsert_credential("xai", _oauth())
+        assert store.delete_credentials_for_provider("xai-oauth") == 1
+        assert await store.get_api_key("xai-oauth") is None
+
+    async def test_a_row_written_under_the_flavour_id_is_still_findable(
+        self, store: AuthStore
+    ) -> None:
+        """Writes alias too, so no caller can strand a credential.
+
+        The reads above resolve to the storage id; if a write did not, a
+        credential saved under ``xai-oauth`` would live at an id no lookup
+        visits -- invisible to the cascade, to `/logout` and to the usage view
+        at once.
+        """
+        row = store.upsert_credential("xai-oauth", _oauth(access="flavour-write"))
+        assert row.provider == "xai"
+        assert await store.get_api_key("xai") == "flavour-write"
+        assert await store.get_api_key("xai-oauth") == "flavour-write"

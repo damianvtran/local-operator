@@ -32,6 +32,7 @@ from local_operator.providers.registry import (
     AGGREGATOR_PROVIDERS,
     PROVIDER_REGISTRY,
     ProviderDefinition,
+    credential_provider_id,
     get_provider_definition,
     list_login_providers,
     resolve_env_key,
@@ -150,8 +151,7 @@ class ProviderController:
 
     def has_any_credential(self, provider: str) -> bool:
         """Whether ``provider`` (or its storage id) has a stored credential."""
-        definition = get_provider_definition(provider)
-        storage = (definition.store_credentials_as or provider) if definition else provider
+        storage = credential_provider_id(provider)
         return any(c.provider == storage for c in self.auth_store.list_credentials(provider=None))
 
     def is_usable(self, provider: str) -> bool:
@@ -192,7 +192,7 @@ class ProviderController:
             return None
         usable: set[str] = set()
         for definition in PROVIDER_REGISTRY:
-            storage = definition.store_credentials_as or definition.id
+            storage = credential_provider_id(definition.id)
             if (
                 definition.allows_missing_api_key  # a local Ollama needs no credential
                 or storage in stored
@@ -360,8 +360,7 @@ class ProviderController:
         seen: set[str] = set()
         ordered: list[str] = []
         for provider in targets:
-            definition = get_provider_definition(provider)
-            storage = (definition.store_credentials_as or provider) if definition else provider
+            storage = credential_provider_id(provider)
             if storage in seen:
                 continue
             seen.add(storage)
@@ -538,8 +537,7 @@ class ProviderController:
         prefix -- the very ids this listing exists to stop presenting as
         current.
         """
-        definition = get_provider_definition(provider)
-        credential_id = (definition.store_credentials_as or provider) if definition else provider
+        credential_id = credential_provider_id(provider)
         access = await self.auth_store.get_oauth_access(credential_id)
         if access is not None and access.kind == "oauth" and access.access_token:
             return access.access_token, True, access.account_id or access.org_id
