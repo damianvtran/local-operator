@@ -946,7 +946,7 @@ class AskPickerScreen(Container):
         by DIFFERENT events, and the difference is the whole reason
         :meth:`remeasure` exists: a placed card gets ``on_resize``, while a
         hidden one is not laid out and therefore receives no ``Resize`` at all —
-        the app drives it from outside instead (round 2, F7). Measured, the
+        the app drives it from outside instead (round 3, F7). Measured, the
         fallback returns the same number the layout then assigns, because
         ``#prompt-host`` adds no horizontal padding.
         """
