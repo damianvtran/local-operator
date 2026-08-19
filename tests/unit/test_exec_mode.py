@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import json
 import sys
 from collections.abc import Callable, Sequence
@@ -19,6 +20,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from rich.console import Console
 
 from local_operator import exec_mode, exec_worker
 from local_operator.exec_mode import ExecArgs, build_worker_argv, slugify
@@ -33,6 +35,7 @@ from local_operator.harness.types import (
     MessageStartEvent,
     MessageUpdateEvent,
     ModelSpec,
+    NoticeEvent,
     TextContent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -383,6 +386,32 @@ def test_run_exec_prompt_raising_exits_one(fake_factory, capsys) -> None:
     code = exec_mode.run_exec("explode", ExecArgs())
     assert code == 1
     assert "turn blew up" in capsys.readouterr().err
+
+
+def test_an_error_notice_is_marked_by_a_glyph_not_only_by_colour() -> None:
+    """Design round 3, D11. Piped logs and NO_COLOR strip the only signal.
+
+    This renderer writes to a real terminal, but its output is also redirected
+    into logs and read with colour disabled — and there an error notice was
+    byte-identical to an informational one. It matters most for the line that
+    prompted it: an unrunnable tool call used to print `✗ <name> failed`, which
+    DID carry a marker, so moving that diagnostic onto a notice dropped one.
+
+    `info` stays bare on purpose: a marker on every routine line is noise, and
+    it is the one kind with nothing to warn about.
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, no_color=True, highlight=False, width=100)
+    renderer = PrintRenderer(json_mode=False, console=console)
+
+    renderer.handle(NoticeEvent(text="Tool not found: reed_file", kind="error"))
+    renderer.handle(NoticeEvent(text="running low on context", kind="warning"))
+    renderer.handle(NoticeEvent(text="compacted", kind="info"))
+
+    lines = buffer.getvalue().splitlines()
+    assert lines[0] == "✗ Tool not found: reed_file"
+    assert lines[1] == "! running low on context"
+    assert lines[2] == "compacted"
 
 
 def test_renderer_tracks_failure() -> None:

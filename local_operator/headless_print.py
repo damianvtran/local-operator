@@ -185,7 +185,26 @@ class PrintRenderer:
                 self.console.print(f"[red]✗ {name} failed[/red]", highlight=False)
         elif isinstance(event, NoticeEvent):
             style = {"error": "red", "warning": "yellow"}.get(event.kind, "dim")
-            self.console.print(f"[{style}]{event.text}[/{style}]", highlight=False)
+            # A GLYPH carries the severity, not just the colour. This renderer
+            # writes to a real terminal but its output is also piped into logs
+            # and read under NO_COLOR, where an ansi-stripped error notice was
+            # indistinguishable from an informational one — and the `✗` line it
+            # replaced for unrunnable tool calls did carry a marker, so dropping
+            # it was a regression in exactly the case that matters (D11, design
+            # round 3). `info` stays bare: a marker on every routine line is
+            # noise, and it is the one kind with nothing to warn about.
+            glyph = {"error": "✗ ", "warning": "! "}.get(event.kind, "")
+            # SANITIZED, like every other line this renderer writes. Notice text
+            # is no longer only ours: the unrunnable-call diagnostic carries a
+            # model-chosen tool name, so an erase-display escape inside it would
+            # clear the operator's terminal — and the `✗ <name> failed` line that
+            # diagnostic replaced was stripped for exactly that reason, two
+            # branches up. Moving the message onto a notice moved it off the
+            # guard (R7-1, agent review round 7). Applied to every notice rather
+            # than to that one call site, because the next notice to carry
+            # untrusted text should not have to remember this.
+            text = strip_control_sequences(event.text)
+            self.console.print(f"[{style}]{glyph}{text}[/{style}]", highlight=False)
         elif isinstance(event, RetryStartEvent):
             self.console.print(f"[dim]retry {event.attempt}: {event.error}[/dim]", highlight=False)
         elif isinstance(event, CompactionStartEvent):

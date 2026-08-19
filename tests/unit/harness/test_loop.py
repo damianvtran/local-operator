@@ -16,6 +16,7 @@ from local_operator.harness.loop import (
     ABORT_DRAIN_TIMEOUT_S,
     AgentLoop,
     LoopContext,
+    _consume_claim,
     validate_tool_arguments,
 )
 from local_operator.harness.types import (
@@ -1744,30 +1745,30 @@ async def test_a_call_that_never_ran_still_reports_itself_to_the_operator():
 
 
 def test_the_flush_suppression_counts_rather_than_matching():
-    """Review round 6, R6-2. Pin the mechanism R5-1 was about.
+    """Review round 6/7, R6-2 and R7-3. Pin the mechanism R5-1 was about.
 
-    The behavioural tests above cannot reach this: the source-side guard in
-    `park` means the flush's `claimed` bookkeeping is currently unreachable
-    (R6-1), so reverting it to a `set` leaves them all green. That is exactly
-    why it needs pinning directly — the next change that reintroduces an
-    interleaving would silently restore R5-1, where one id names both a call
-    that started and a duplicate that did not, and a set suppresses BOTH.
+    Exercises the REAL helper rather than a retyped copy of its logic. The
+    behavioural tests cannot reach this branch: the source-side guard in `park`
+    removes the collision it defends against (R6-1), so the code path is
+    unreachable and a revert to a plain `set` leaves every other test green.
+    A test that reproduced the rule inline had the same blind spot as the code
+    it was meant to guard (R7-3) — this calls the function the loop calls.
 
-    A unit test on the rule itself, not the loop: with N queued ends carrying
-    one id and K of them owed suppression, exactly N-K must survive.
+    The rule: with N queued ends carrying one id and K owed suppression,
+    exactly N-K survive. Matching by id instead of counting swallows both, and
+    the one it must not swallow is the started call's genuine end.
     """
-    # Two slots, one id: one started, one a duplicate that never did.
-    owed = Counter(["dup"])  # one suppression owed
-    queued = ["dup", "dup"]  # the twin's parked end, and the real one
+    # Two slots, one id: one started, one a duplicate that never did, so
+    # exactly one suppression is owed.
+    claimed: Counter[str] = Counter(["dup"])
 
-    survived = []
-    for call_id in queued:
-        if owed.get(call_id, 0):
-            owed[call_id] -= 1
-            continue
-        survived.append(call_id)
+    survived = [call_id for call_id in ("dup", "dup") if not _consume_claim(claimed, call_id)]
 
     assert survived == ["dup"], (
         "counting must swallow only what is owed; matching by id swallows the "
         "started call's genuine end event too, which is R5-1"
     )
+    # And the claim is spent, not standing: a later end for the same id lives.
+    assert _consume_claim(claimed, "dup") is False
+    # An id nobody claimed is never suppressed.
+    assert _consume_claim(Counter(), "other") is False

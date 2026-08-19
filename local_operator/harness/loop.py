@@ -140,6 +140,28 @@ STEERING_INTERRUPT_POLL_S = 0.25
 ABORT_DRAIN_TIMEOUT_S = 2.0
 
 
+def _consume_claim(claimed: Counter[str], call_id: str) -> bool:
+    """Spend one suppression owed for ``call_id``; say whether there was one.
+
+    Module level, and named, so a test can exercise THIS rule rather than a
+    retyped copy of it. The branch it serves is unreachable today (the
+    source-side guard in ``park`` removes the collision it defends against), so
+    no behavioural test can reach it — which is exactly why the rule needs a
+    handle a unit test can hold (R7-3, agent review round 7).
+
+    COUNTING, not membership, is the whole point. Call ids are not unique within
+    a batch: a duplicate id yields one slot that started and one that did not,
+    and matching by id suppressed the started call's genuine end event along
+    with its twin's parked one (R5-1). Spending one claim per event leaves
+    exactly the right number, and the events are identical to a consumer, so
+    which one survives does not matter.
+    """
+    if not claimed.get(call_id, 0):
+        return False
+    claimed[call_id] -= 1
+    return True
+
+
 @dataclass
 class LoopContext:
     """Mutable host context the loop reads and extends.
@@ -1034,6 +1056,19 @@ class AgentLoop:
         # tell an abort apart from a steering interrupt and label their
         # synthetic results correctly.
         aborting = False
+        # Slots whose ToolExecutionEndEvent has been emitted or queued. Keyed by
+        # SLOT, not call id, because ids collide within a batch — the same
+        # reason `results_by_slot` is. Read by the completeness sweep after the
+        # flush, which is what makes "every started call gets exactly one end"
+        # a guarantee rather than the outcome of a race.
+        announced: set[int] = set()
+        # call id -> the slots carrying it. A model can emit two calls with one
+        # id, so this is a one-to-many map; marking every slot for an id is safe
+        # because the duplicate slot is a planning failure that never starts and
+        # is skipped by the sweep on its own merits.
+        slot_of_call: dict[str, set[int]] = {}
+        for _slot, _item in enumerate(batch):
+            slot_of_call.setdefault(_item.call.id, set()).add(_slot)
 
         def park(slot: int, item: _PlannedCall, result: ToolResult) -> None:
             results_by_slot[slot] = result
@@ -1194,13 +1229,23 @@ class AgentLoop:
                     # the failure without claiming a lifecycle that never began.
                     # The model is unaffected either way — it still gets the
                     # `tool_result` parked above.
+                    #
+                    # The parked result's own text is the whole message, with
+                    # no tool-name prefix bolted on. Both failure kinds already
+                    # name what they need to ("Tool not found: reed_file",
+                    # "Duplicate call id 'c1' skipped."), so a prefix repeated
+                    # the name for an unknown tool and, worse, named the tool
+                    # that DID run for a duplicate id — reading as though the
+                    # user's real call had been dropped (D12/D13, design round
+                    # 3). The call id, not the name, is what distinguishes the
+                    # twins, and it is already in the duplicate's own text.
                     reason = " ".join(
                         block.text
                         for block in parked.content
                         if isinstance(block, TextContent) and block.text
                     ).strip()
                     yield NoticeEvent(
-                        text=f"{item.call.name}: {reason or 'tool not found'}",
+                        text=reason or f"{item.call.name}: tool not found",
                         kind="error",
                     )
                     continue
@@ -1276,6 +1321,14 @@ class AgentLoop:
                         # A per-tool receipt, or the abort watcher's nudge.
                         # Neither is an event a consumer should see.
                         continue
+                    if isinstance(event, ToolExecutionEndEvent):
+                        # EMITTED, so the completeness sweep must not add a
+                        # second one. Marked here rather than where the event is
+                        # queued: queuing is not delivering, and a slot whose
+                        # end is still sitting unread in the queue when the
+                        # batch settles is exactly the case the sweep exists to
+                        # repair.
+                        announced.update(slot_of_call.get(event.tool_call_id, ()))
                     yield event
 
             # Backfill any slot whose runner was cancelled before it could park
@@ -1338,6 +1391,7 @@ class AgentLoop:
                         # start event, so an end event for it would be the
                         # mirror image of this bug.
                         claimed[item.call.id] += 1
+                        announced.add(slot)
                         pending_ends.append(
                             ToolExecutionEndEvent(
                                 tool_call_id=item.call.id,
@@ -1374,12 +1428,42 @@ class AgentLoop:
                     break
                 if isinstance(queued, (_ToolDone, _BatchDone)):
                     continue
-                if isinstance(queued, ToolExecutionEndEvent) and claimed.get(
-                    queued.tool_call_id, 0
+                if isinstance(queued, ToolExecutionEndEvent) and _consume_claim(
+                    claimed, queued.tool_call_id
                 ):
-                    claimed[queued.tool_call_id] -= 1
                     continue
+                if isinstance(queued, ToolExecutionEndEvent):
+                    announced.update(slot_of_call.get(queued.tool_call_id, ()))
                 yield queued
+
+            # FINALLY, guarantee an end for every call that started, by slot.
+            # Neither half above can promise that on its own: a runner racing
+            # the drain's deadline may fill its slot and queue its end AFTER the
+            # flush has emptied the queue, so the backfill skips the slot (it is
+            # no longer `None`) and the flush never sees the event. The result
+            # is on the wire and the end is nowhere — a start with no end, which
+            # is the whole defect this code exists to prevent, surviving as a
+            # ~1-in-8 race rather than a certainty.
+            #
+            # Closed by asking the question that actually matters — "does this
+            # started call have an end yet?" — instead of trusting a queue drain
+            # to have won a race. `announced` tracks by SLOT because ids collide
+            # within a batch, the same reason `results_by_slot` does.
+            for slot, item in enumerate(batch):
+                if slot in announced or item.failure is not None or item.tool is None:
+                    continue
+                result = results_by_slot[slot]
+                if result is None:
+                    continue
+                announced.add(slot)
+                pending_ends.append(
+                    ToolExecutionEndEvent(
+                        tool_call_id=item.call.id,
+                        tool_name=item.tool.name,
+                        result=result,
+                        is_error=result.is_error,
+                    )
+                )
 
             results.extend(result for result in results_by_slot if result is not None)
             for end_event in pending_ends:
