@@ -499,17 +499,25 @@ async def test_a_stale_call_cannot_spend_the_new_models_quota_check() -> None:
         def is_blocked(self, *args, **kwargs):
             return False
 
-    stream = SessionStreamFn(cast(Any, FakeAuth()), {}, "session-x")
-    opened: list[str] = []
-    real_preflight = stream.preflight_usage
+    stream = SessionStreamFn(cast(Any, FakeAuth()), {"retry": {"usageAwareFallback": True}}, "s")
+    # Observe the CREDENTIAL LOOKUP the check body performs, never the flags the
+    # gate itself reads: a probe computed from that state passes even when the
+    # whole gate is deleted, which is the flaw review F12 found in the first
+    # version of this test.
+    checked: list[str] = []
 
-    async def spy(model: ModelSpec) -> None:
-        was_open = stream._message_boundary_pending or stream._quota_recheck_for is not None
-        await real_preflight(model)
-        if was_open:
-            opened.append(model.provider)
+    class WatchedAuth:
+        async def get_oauth_access(self, provider, *args, **kwargs):
+            checked.append(provider)
+            return None
 
-    stream.preflight_usage = spy  # type: ignore[method-assign]
+        def list_credentials(self, *args, **kwargs):
+            return []
+
+        def is_blocked(self, *args, **kwargs):
+            return False
+
+    stream._auth_store = cast(Any, WatchedAuth())
     first = ModelSpec(provider="pa", model_id="m")
     second = ModelSpec(provider="pb", model_id="m")
 
@@ -521,7 +529,7 @@ async def test_a_stale_call_cannot_spend_the_new_models_quota_check() -> None:
     # ...and must not have eaten the check the switched-to model is owed.
     await stream.preflight_usage(second)
 
-    assert "pb" in opened, opened
+    assert checked == ["pa", "pb"], checked
     await stream.close()
 
 

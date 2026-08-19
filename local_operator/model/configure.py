@@ -1576,12 +1576,12 @@ class SessionStreamFn:
         """The frozen auto-effort as a rung ``model`` actually accepts.
 
         The level chosen at the message boundary is a rung on the ladder of the
-        model in force AT THAT MOMENT, and ladders differ between models. When
-        the model changes mid-message the same coarse judgement (the classifier's
-        lo/med/hi tier) is re-fitted to the new ladder rather than the old level
-        being carried across — carrying it either sends a rung the new model
-        rejects (an HTTP 400 that reads as the switch having broken the session)
-        or silently re-tiers the request.
+        model in force AT THAT MOMENT, and ladders differ between models. A level
+        the current model accepts is passed through unchanged; one it does not is
+        replaced by re-fitting the same coarse judgement (the classifier's
+        lo/med/hi tier) to this model's ladder. What is never done is sending the
+        stored level blind, which is an HTTP 400 that reads as the switch having
+        broken the session.
 
         Re-fitting rather than re-classifying is the point (review F2). The
         classifier reads the newest ``role="user"`` message, and mid-turn that is
