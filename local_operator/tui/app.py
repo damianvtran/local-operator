@@ -2432,9 +2432,17 @@ class OperatorApp(App[None]):
         goes through the same clipboard write and must NOT be retired when the
         user turns to the composer and starts typing their next prompt (review
         round 2, F5; design round 2, D8).
+
+        The generation is read BEFORE the write and only adopted if it moved.
+        ``Toast.show`` declines the slot while an actionable notice is up, and
+        an unconditional read then pointed this at the FAILURE's card — so the
+        next keystroke dismissed the very notice the deference existed to
+        protect (review round 3). No card raised, nothing to withdraw.
         """
+        toast = self.query_one(Toast)
+        before = toast.generation
         self._put_on_clipboard(message.text)
-        self._copy_receipt = self.query_one(Toast).generation
+        self._copy_receipt = toast.generation if toast.generation != before else None
 
     def on_editor_copy_stale(self, message: EditorCopyStale) -> None:
         """The text a copy receipt describes was edited away — drop the card.

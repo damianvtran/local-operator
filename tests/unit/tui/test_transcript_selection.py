@@ -1632,3 +1632,33 @@ async def test_a_sub_line_transcript_copy_is_counted_in_characters_too() -> None
 
         assert "\n" not in app._clipboard
         assert toast.message == f"copied {len(app._clipboard)} characters"
+
+
+@pytest.mark.asyncio
+async def test_a_declined_receipt_does_not_adopt_the_notice_it_deferred_to() -> None:
+    """A copy that raised NO card has nothing to withdraw later.
+
+    `Toast.show` declines the slot while an actionable notice is up (D2), so a
+    copy made in that window paints nothing. Reading the generation
+    unconditionally then pointed the app at the FAILURE's card, and the next
+    keystroke dismissed the very notice the deference existed to protect
+    (review round 3) — the eviction bug arriving by the back door, one round
+    after it was closed at the front.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+        toast.show("mcp: failed: github — command not found: gh", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 9))
+        assert app._clipboard == "summarise", "the copy itself must still happen"
+        assert toast.message.startswith("mcp: failed")
+
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert toast.message.startswith("mcp: failed")
+        assert toast.display
