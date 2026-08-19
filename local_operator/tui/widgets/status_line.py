@@ -889,6 +889,12 @@ class StatusLine:
         #: attaches one, which keeps the band usable by the lightweight test
         #: hosts that have no terminal to write to.
         self._title: TerminalTitle | None = None
+        #: Cells of the trailing name's reserved box that the current title does
+        #: not fill. Paid out immediately before the seam that introduces the
+        #: title (see :meth:`_right_text`), which is what keeps the row flush to
+        #: the band's right edge without orphaning the chevron or letting the
+        #: title's length move any column to its left.
+        self._name_slack: int = 0
 
     def set_terminal_title(self, title: TerminalTitle | None) -> None:
         """Attach (or detach) the window-title writer and paint it once.
@@ -1510,6 +1516,9 @@ class StatusLine:
         caution), and the least volatile fields stay neutral. Green is not used
         at all — it belongs to the running indicator.
         """
+        # Reset per render: the reserve's unused cells are a property of THIS
+        # row, and a stale value would pay slack the current title does not have.
+        self._name_slack = 0
         parts: list[tuple[str, str, Style]] = []
         if self._subagent is not None and self._subagent.label:
             # Never dropped: it is what says whose numbers follow it, and a
@@ -1650,34 +1659,43 @@ class StatusLine:
             # of the user's opener, so it has no natural bound, and the band is a
             # fixed two-row box.
             #
-            # PADDED to its box, and RIGHT-aligned in it. The box is the
-            # reserved width, so the padding is what holds every sibling's
-            # column still while a model rewrites the string in it — that half
-            # is the reserve's whole purpose and is unchanged.
+            # The box's UNUSED cells are emitted as their own segment, BEFORE
+            # the seam, rather than as padding on either side of the title.
             #
-            # The alignment inside the box decides where the box's UNUSED cells
-            # sit, and they have to sit somewhere: the fit was decided against
-            # the full box, so those cells are already spoken for and cannot be
-            # given back to the layout without moving every column left of the
-            # name. `rjust` puts them before the title, which makes the title's
-            # last cell the band's right edge at every length.
+            # The reserve itself is unchanged and is still the point: the fit
+            # was decided against the full box, so those cells are spoken for
+            # and cannot be handed back to the layout without moving every
+            # column left of the name. What varies is only where they are
+            # painted, and both obvious answers put them somewhere a reader
+            # notices:
             #
-            # `ljust` put them after it instead, and `_compose` then stripped
-            # them — so the painted row simply ended early: flush for a long
-            # title and up to 35 cells short for a brief one, which reads as a
-            # rendering fault rather than as a band with less to say. (They are
-            # ordinary styled cells, so anything READING the row carried them
-            # too: the SVG export wrote all 35.)
+            # * `ljust` trailed them after the title. `_compose` stripped them,
+            #   so the painted row ended early — flush at the band's edge for a
+            #   long title and up to 35 cells short for a brief one, which reads
+            #   as a rendering fault. (They are ordinary styled cells, so
+            #   anything READING the row carried them too: the SVG export wrote
+            #   all 35.)
+            # * `rjust` moved them between the seam and the title, which fixed
+            #   the edge and orphaned the `‹`: every other seam on the row is
+            #   tight against what it introduces, so a lone chevron with 36
+            #   blanks after it reads as a missing segment (design review D1).
             #
-            # The cost is that the title's FIRST cell moves with its length.
-            # That is the right way round — the reserve exists to stop the
-            # SIBLINGS drifting (the `!` alarm holds its column at every width),
-            # and the alternative, measuring the group by its ink, moves the
-            # alarm itself, which is the defect the box was introduced to fix.
+            # Emitting them ahead of the seam keeps the seam glued to the title
+            # it introduces AND puts the title's last cell on the band's right
+            # edge, while the columns left of the name still cannot see the
+            # title's length. A blank segment renders as blanks either way; the
+            # only thing being chosen here is which side of the chevron the
+            # slack falls on.
+            # Carried on the SEAM's left so no extra separator is emitted: the
+            # blanks ride in front of the ` ‹ ` that introduces the title, which
+            # is one segment, not two.
+            self._name_slack = name_cells - cell_len(
+                truncate_name(self._conversation_name, name_cells)
+            )
             parts.append(
                 (
                     "",
-                    truncate_name(self._conversation_name, name_cells).rjust(name_cells),
+                    truncate_name(self._conversation_name, name_cells),
                     Style(color=theme_mod.semantic_color("muted")),
                 )
             )
@@ -1685,6 +1703,13 @@ class StatusLine:
         right = Text()
         for index, (icon, text, style) in enumerate(parts):
             if index:
+                # The name's unused reserve is paid out HERE, immediately before
+                # the seam that introduces the title, so the chevron stays tight
+                # against the text it points at (design review D1) while the
+                # cells themselves still sit inside the right group and cannot
+                # move any column to its left.
+                if index == len(parts) - 1 and self._name_slack:
+                    right.append(" " * self._name_slack, style=dim)
                 right.append(f" {_SEP_RIGHT} ", style=seam)
             if icon:
                 right.append(f"{icon} ", style=dim)

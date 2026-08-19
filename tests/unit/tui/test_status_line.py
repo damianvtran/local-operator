@@ -1044,11 +1044,11 @@ def test_the_alarm_sits_beside_the_name_rather_than_replacing_it() -> None:
     assert row.endswith("Add todo guardrails")
     assert "auto-approve" not in row, "the alarm's prose was crowding out the name"
     assert "always" not in row
-    # The glyph, immediately before the name's BOX and after its seam. The title
-    # is right-aligned in that box, so at a width this generous the reserve's
-    # unused cells sit between the seam and the title — the alarm is still the
-    # last thing before the name segment, which is what this pins.
-    assert re.search(r"! ‹ +Add todo guardrails$", row)
+    # The glyph, immediately before the name's BOX, whose unused cells sit
+    # between the alarm and the seam that introduces the title. The alarm is
+    # still the last INK before the name segment, which is what this pins; the
+    # seam stays tight against the title it points at.
+    assert re.search(r"! +‹ Add todo guardrails$", row)
 
 
 def test_an_unnamed_session_leaves_the_trailing_slot_to_whatever_is_left() -> None:
@@ -1176,12 +1176,12 @@ def _name_box(row: str, name: str, width: int) -> int:
     The box is what the layout is built on, and it is not the same number as the
     ink in it: a word-boundary cut can leave `Bulk export the…` in an 18-cell box.
 
-    Located from the SEAM that precedes the segment, not from the name's own
-    characters. The name is right-aligned in its box, so the unused cells are a
-    run of blanks BEFORE the title and the title's first cell moves with its
-    length — which is precisely what this helper must not measure. The seam is
-    the box's left edge and the band's right edge is its right one, so the span
-    between them is the reserve at every title length.
+    Located from the box's own left edge, which is where its UNUSED cells start
+    — not from the name's first character. The reserve's leftover is painted
+    just before the seam that introduces the title, so the title's first cell
+    moves with its length and measuring from it would return the ink instead of
+    the box. Everything from the end of the previous segment's ink to the band's
+    right edge is the reserve, seam included.
 
     Measured to ``width`` rather than to ``len(row)`` for the same reason: the
     row is laid out to exactly ``width``, so the edge is where the box ends, and
@@ -1189,7 +1189,10 @@ def _name_box(row: str, name: str, width: int) -> int:
     the ink instead of the layout's reserve.
     """
     seam = f" {_SEP_RIGHT} "
-    return width - (row.rindex(seam) + len(seam))
+    # The last seam is the title's. Walk left over the blanks in front of it to
+    # reach the box's first cell; the segment before them ends on real ink.
+    start = len(row[: row.rindex(seam)].rstrip())
+    return width - start - len(seam)
 
 
 def test_naming_a_session_never_costs_a_segment_for_nothing(monkeypatch) -> None:
@@ -1299,7 +1302,10 @@ def test_the_name_takes_every_cell_the_row_can_spare(monkeypatch) -> None:
     boxes = []
     for width in range(100, 181):
         row = status.render_text(width).plain
-        box = len(row) - row.index("! ‹ ") - len("! ‹ ")
+        # From the alarm's ink to the band's edge, blanks and seam included:
+        # the reserve's unused cells sit between the two, so a literal `! ‹ `
+        # is no longer contiguous.
+        box = len(row) - row.index("!") - len("! ‹ ")
         boxes.append(box)
         # Whatever is spare is IN the name's box, so the hole BETWEEN THE GROUPS
         # is the seam's own width until the box is full.
@@ -1382,6 +1388,35 @@ def test_a_brief_title_leaves_no_dead_run_at_the_bands_right_edge(monkeypatch) -
             # ...and the reserve behind that trimmed tail did not move with the
             # title's length, which is the property the padding used to provide.
             assert len(boxes) <= 1, f"{label} width={width}: the box moved with the title {boxes}"
+
+
+def test_the_titles_seam_stays_tight_against_the_title(monkeypatch) -> None:
+    """The `‹` introduces the name and has to touch it (design review D1).
+
+    The reserve's unused cells have to be painted somewhere, and the two obvious
+    places are both wrong. After the title, the row ends early (the defect above
+    this one). Between the seam and the title, the row is flush but the chevron
+    is orphaned: every other seam on the band is tight against what it
+    introduces, so a lone `‹` trailed by a run of blanks reads as a segment that
+    failed to render rather than as spacing.
+
+    So the cells go BEFORE the seam, and this pins that — at every width and for
+    titles short enough to leave a large leftover, which is where an orphan
+    would be most visible.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    for label, state in _LADDER_STATES.items():
+        status = _swept_band(state, alarm=True)
+        for width in (100, 120, 160):
+            for name in ("a", "short", "Bulk export the invoice columns"):
+                status.update(conversation_name=name)
+                row = status.render_text(width).plain
+                if not status.is_showing("name"):
+                    continue
+                where = f"{label} width={width} name={name!r}"
+                seam = f" {_SEP_RIGHT} "
+                tail = row[row.rindex(seam) + len(seam) :]
+                assert tail and not tail.startswith(" "), f"{where}: the seam was orphaned"
 
 
 def test_the_bands_cut_lands_on_a_word_like_the_excerpt_it_was_handed() -> None:
