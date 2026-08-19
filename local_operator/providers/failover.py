@@ -1407,6 +1407,17 @@ async def stream_with_failover(
         spec = request.model if target == primary_target else spec_for_target(request.model, target)
         route_key = (selector, target.effort)
         walked.add(route_key)
+        if (
+            looped_back
+            and server_faults_by_target.get(route_key, 0) >= MAX_SERVER_FAULT_REQUESTS_PER_TURN
+        ):
+            # A revisit must not become a top-up: this target already aimed the
+            # turn's whole server-fault allowance at its provider, and the
+            # loop-back exists to catch freed capacity, not to keep spending
+            # against an outage. Checked BEFORE the route-state activation
+            # below, so a target the sweep refuses to ask cannot capture the
+            # session's route pin on its way out (review R1-F1).
+            continue
         client = clients.get(route_key)
         if client is None:
             built = client_for(spec)
@@ -1438,14 +1449,10 @@ async def stream_with_failover(
         # chain. Each provider is a different service having a different day,
         # and the ceiling is about what ONE provider receives. Loaded from the
         # cross-sweep ledger so the loop-back sweep finishes the same ceiling
-        # instead of opening a second one.
+        # instead of opening a second one; a revisited target whose ledger is
+        # already spent was skipped at the top of this walk, before it could
+        # touch the route pin.
         server_fault_requests = server_faults_by_target.get(route_key, 0)
-        if looped_back and server_fault_requests >= MAX_SERVER_FAULT_REQUESTS_PER_TURN:
-            # A revisit must not become a top-up: this target already aimed the
-            # turn's whole server-fault allowance at its provider, and the
-            # loop-back exists to catch freed capacity, not to keep spending
-            # against an outage.
-            continue
         # Attempts this target's FIRST bearer spent before rotation started, so
         # the restore below can hand back the remainder of the user's budget
         # instead of a fresh one.
