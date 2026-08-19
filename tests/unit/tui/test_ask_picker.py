@@ -27,8 +27,6 @@ from textual.containers import Container
 from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import (
-    ASK_MAX_WIDTH,
-    ASK_PADDING_CELLS,
     MIN_TRANSCRIPT_ROWS,
     OTHER_LABEL,
     PROMPT_HEIGHT_SHARE,
@@ -406,13 +404,45 @@ async def test_no_row_overflows_the_card_at_any_width() -> None:
         async with app.run_test(size=(width, 30)) as pilot:
             screen = await app.open_picker()
             await pilot.pause()
-            # Derived from the card's own padding rather than written as a
-            # literal: the two are one measurement, and a hardcoded `width - 4`
-            # silently described the old modal's `padding: 1 2` after the
-            # docked card moved to the dock's one-cell rail.
-            budget = min(ASK_MAX_WIDTH, max(1, width - ASK_PADDING_CELLS * 2))
+            # The card's OWN content box, read back from the layout rather than
+            # re-derived here: recomputing the column from the terminal width
+            # would be a second opinion about the one number the widget is not
+            # free to be wrong about.
+            #
+            # This assertion guards OVERFLOW ONLY, which is all its name claims.
+            # Measured (agent review round 1, F4): forcing `_card_width` to
+            # over-return by 10 fails it, while UNDER-returning by 10 passes it
+            # silently — a card that went back to capping its text would satisfy
+            # every line here. `test_the_card_spends_the_whole_column_the_dock_
+            # gave_it` is the guard for that half, and it is the one verified to
+            # fail against the old 74-cell cap.
+            budget = screen.size.width
             for line in screen.render_lines_for_test():
                 assert cell_len(line) <= budget, (width, line)
+
+
+@pytest.mark.asyncio
+async def test_the_card_spends_the_whole_column_the_dock_gave_it() -> None:
+    """The card is laid out at the composer's width, so its ROWS have to reach
+    that width too.
+
+    The defect this pins is the one a clip test cannot see: every row fitted,
+    and the card still stopped 42 cells short of its own panel at 160 columns,
+    because a modal-era cap (74 cells less a floating margin) survived the move
+    into the dock. Under-spending the column is as wrong as overflowing it — the
+    rule under the title, the selected row's tint and the footer all ended in
+    the middle of a panel whose fill ran to the composer's full width.
+    """
+    for width in (80, 100, 120, 160, 200):
+        app = _AskHost([_question()])
+        async with app.run_test(size=(width, 30)) as pilot:
+            screen = await app.open_picker()
+            await pilot.pause()
+            column = screen.size.width
+            # The selected row is painted in its own ground for its full width
+            # (`_fit_row`), so it is the row that states the card's real reach.
+            rows = [line for line in screen.render_lines_for_test() if line.strip()]
+            assert max(cell_len(line) for line in rows) == column, (width, column)
 
 
 @pytest.mark.asyncio
@@ -927,8 +957,18 @@ async def test_the_footer_gives_up_words_before_it_gives_up_keys() -> None:
         assert screen.render_lines_for_test()[-1].strip() == "↑↓ · 1-9 · enter · esc"
 
     # Narrower than four keys: hints go in the same order, escape route last.
+    #
+    # 16 rather than the 18 this rung used to need, and the two cells are the
+    # point rather than a tolerance: the card spends the column it was given
+    # instead of a budget derived from the terminal, so every rung of this
+    # ladder now engages two cells LATER — the card reaches this one only when
+    # it is genuinely that narrow. The ORDER is what this test pins and it is
+    # unchanged; the widths are a consequence of the card's reach, which is why
+    # they move when its reach is corrected. This host has no stylesheet
+    # (`_AskHost` declares no `CSS_PATH`), so its card is the full terminal
+    # width; under the real sheet the same rung lands at 18 columns, measured.
     app = _AskHost([question])
-    async with app.run_test(size=(18, 24)) as pilot:
+    async with app.run_test(size=(16, 24)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
         footer = screen.render_lines_for_test()[-1].strip()
@@ -1810,3 +1850,38 @@ async def test_a_live_question_does_not_break_slash_completion() -> None:
             await asked
         except (asyncio.CancelledError, Exception):
             pass
+
+
+@pytest.mark.asyncio
+async def test_the_card_reaches_the_composer_at_every_width() -> None:
+    """Under the REAL stylesheet, the question's rows span the composer's column.
+
+    The regression: the card kept a modal-era text budget (74 cells, less a
+    margin held off the terminal edge) after it moved from a floating modal into
+    the dock, where the panel is `width: 1fr`. Nothing re-derived the cap, so
+    the wider the terminal the worse the disagreement — at 160 columns the ink
+    stopped at 74 cells inside a 156-cell panel, and the title's rule, the
+    selected row's tint and the footer all ended mid-slab while the composer
+    directly beneath ran the full width.
+
+    Asserted against `#input-shell` rather than against the terminal, because
+    "extends with the composer" is the actual contract: the two are stacked
+    surfaces of one dock, and the composer's own width already accounts for the
+    screen inset and the shell's padding. A test written against the terminal
+    width would have to restate that arithmetic and would then pass while the
+    two surfaces disagreed.
+    """
+    for size in ((60, 24), (80, 30), (100, 30), (120, 30), (160, 40), (200, 50)):
+        app, card = await _real_app_card(size, [_long_question()])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            composer = app.screen.query_one("#input-shell")
+            # The card's content box is the composer's: same column, same edges.
+            assert card.size.width == composer.size.width, (size, card.size.width)
+            # And the card SPENDS it. The selected row is drawn in its own
+            # ground for the full width (`_fit_row`), so the widest painted row
+            # is the card's real reach — the number the cap used to hold at 74.
+            rows = [row for row in card.render_lines_for_test() if row.strip()]
+            assert max(cell_len(row) for row in rows) == card.size.width, size
+            # Reaching further must not have cost the screen its geometry.
+            assert not app.screen.show_vertical_scrollbar, size

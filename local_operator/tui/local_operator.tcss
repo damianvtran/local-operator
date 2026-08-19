@@ -1301,9 +1301,13 @@ SessionPickerScreen .session-picker {
  * and is load-bearing: an auto-width card sizes to its widest LINE, so the
  * question's own wrapping decided how wide the panel was and the card visibly
  * changed width as the user moved between questions of a multi-question ask.
- * Full-width in the dock, the panel is stable and the card's own width budget
- * (`AskPickerScreen._card_width`) governs the TEXT, which is what should be
- * measured against the terminal. */
+ * Full-width in the dock, the panel is stable — and this rule is now the ONLY
+ * statement of how wide the question is. `AskPickerScreen._card_width` reads
+ * this column back rather than budgeting its own against the terminal: it used
+ * to cap the text at 74 cells, a modal-era figure that survived the move into
+ * the dock, so the ink stopped a third of the way short of the panel's own fill
+ * on a wide terminal while the composer directly beneath it ran the full width.
+ * One owner for the width, and it is this line. */
 AskPickerScreen {
     width: 1fr;
     height: auto;
