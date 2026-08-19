@@ -1701,15 +1701,24 @@ class StatusLine:
             )
 
         right = Text()
+        last = len(parts) - 1
         for index, (icon, text, style) in enumerate(parts):
+            # The name's unused reserve is paid out HERE, immediately before the
+            # seam that introduces the title, so the chevron stays tight against
+            # the text it points at (design review D1) while the cells still sit
+            # inside the right group and cannot move any column to their left.
+            #
+            # OUTSIDE the `if index:` seam guard, because the name is not always
+            # preceded by a sibling: a freshly-opened session has no counters, no
+            # context reading, no cost and no duration, so the title is the whole
+            # right group and lands at index 0. Emitting the slack only alongside
+            # a seam silently skipped it there, and the group then aligned by its
+            # INK — the alternative this design explicitly rejects. Measured at
+            # 100 cells, the title's first column walked 95 -> 78 -> 73 -> 63 as
+            # the title grew, on the very first band a user sees (review F1).
+            if index == last and self._name_slack:
+                right.append(" " * self._name_slack, style=dim)
             if index:
-                # The name's unused reserve is paid out HERE, immediately before
-                # the seam that introduces the title, so the chevron stays tight
-                # against the text it points at (design review D1) while the
-                # cells themselves still sit inside the right group and cannot
-                # move any column to its left.
-                if index == len(parts) - 1 and self._name_slack:
-                    right.append(" " * self._name_slack, style=dim)
                 right.append(f" {_SEP_RIGHT} ", style=seam)
             if icon:
                 right.append(f"{icon} ", style=dim)

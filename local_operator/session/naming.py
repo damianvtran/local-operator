@@ -301,10 +301,6 @@ def cut_on_a_word(text: str, max_chars: int) -> str:
     return cut.rstrip(" " + _TRAILING_PUNCTUATION) + "…"
 
 
-#: Module-private alias, so the store below reads as one operation.
-_cut_on_a_word = cut_on_a_word
-
-
 def _sentence_case(words: list[str]) -> str:
     """Capitalise the first word, leave every other word's casing alone.
 
@@ -522,7 +518,7 @@ class ConversationName:
         conversation name — every title reaching it had already been sliced by
         this line (design review round 2, D6).
         """
-        cleaned = _cut_on_a_word(" ".join((text or "").split()), MAX_TITLE_CHARS)
+        cleaned = cut_on_a_word(" ".join((text or "").split()), MAX_TITLE_CHARS)
         if not user_set and self.user_set:
             return self.text
         self.text = cleaned

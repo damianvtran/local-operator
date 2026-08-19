@@ -1379,6 +1379,15 @@ def test_a_brief_title_leaves_no_dead_run_at_the_bands_right_edge(monkeypatch) -
                 assert (
                     row == row.rstrip()
                 ), f"{where}: {len(row) - len(row.rstrip())} dead cells at the band's edge"
+                # THE property, and the one the assertion above cannot carry:
+                # the row must REACH the band's right edge, not merely end on a
+                # non-blank cell. A row whose trailing padding has been stripped
+                # satisfies `row == row.rstrip()` trivially while stopping up to
+                # 35 cells short — which is exactly what shipped, and why this
+                # test passed against the code it was written to pin (F2).
+                assert (
+                    cell_len(row) == width
+                ), f"{where}: the row stops {width - cell_len(row)} cells short of the edge"
                 # The ink really is the title's, not a coincidence of truncation.
                 assert row.endswith(truncate_name(name, _name_box(row, name, width))), where
                 boxes.add(_name_box(row, name, width))
@@ -1414,6 +1423,16 @@ def test_the_titles_seam_stays_tight_against_the_title(monkeypatch) -> None:
                 seam = f" {_SEP_RIGHT} "
                 tail = row[row.rindex(seam) + len(seam) :]
                 assert tail and not tail.startswith(" "), f"{where}: the seam was orphaned"
+                # Both halves together, because either alone is satisfied by a
+                # shape this test exists to reject: `ljust` + `rstrip` also
+                # leaves the seam tight (it just ends the row early), and
+                # `rjust` also reaches the edge (it just orphans the seam). Only
+                # asserting the pair pins the one arrangement that does both,
+                # and without this the test passed against the code it replaced
+                # (F2).
+                assert (
+                    cell_len(row) == width
+                ), f"{where}: the seam is tight but the row stops short of the edge"
 
 
 def test_a_double_width_title_never_overflows_the_band(monkeypatch) -> None:
@@ -1446,6 +1465,55 @@ def test_a_double_width_title_never_overflows_the_band(monkeypatch) -> None:
                         f"{label} alarm={alarm} width={width} name={name!r}: "
                         f"the row is {cell_len(row)} cells wide"
                     )
+                    if not status.is_showing("name"):
+                        # No name means no reserved box to fill, so the row is
+                        # whatever the surviving segments are — only the
+                        # overflow half of the contract applies here.
+                        continue
+                    # EQUAL, not merely `<=`. Both halves of the cell/character
+                    # mismatch are failures and only one of them is an overflow:
+                    # padding a double-width title by CHARACTERS overshoots the
+                    # box, and a row that then strips the excess lands SHORT of
+                    # the edge instead of over it (268 short rows measured that
+                    # way). Asserting the row is exactly its width catches the
+                    # mismatch in whichever direction it manifests — `<=` alone
+                    # passed against the very code this pins (F2).
+                    assert cell_len(row) == width, (
+                        f"{label} alarm={alarm} width={width} name={name!r}: "
+                        f"the row is {cell_len(row)} cells wide, not {width}"
+                    )
+
+
+def test_the_reserve_is_paid_even_when_the_name_is_the_only_segment(monkeypatch) -> None:
+    """The name is not always preceded by a sibling, and the slack must still land.
+
+    A freshly-opened session has no counters, no context reading, no cost and no
+    duration — ``format_jobs(0)``, ``format_agents(0)`` and
+    ``format_context_usage(0, …)`` all return "" and the duration is suppressed
+    at zero — so the title is the WHOLE right group and lands at index 0 of the
+    join loop. Emitting the reserve's slack only alongside a seam skipped it in
+    exactly that shape, and the group then aligned by its INK: the row stopped
+    short of the band's edge and the title's first column walked with its own
+    length, on the very first band a user sees (review round 1, F1).
+
+    This is the sparse band on purpose. Every other band test populates the row.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    for width in (80, 100, 120, 160):
+        for name in ("a", "Short", "Reduce agent RAM usage", "A much longer title than that"):
+            dock = _dock(width)
+            status = StatusLine(dock)
+            status.update(
+                model_label="anthropic/claude-opus-4",
+                cwd="/Users/tester/work/local-operator",
+                conversation_name=name,
+            )
+            row = status.render_text(width).plain
+            if not status.is_showing("name"):
+                continue
+            assert (
+                cell_len(row) == width
+            ), f"width={width} name={name!r}: the row stops {width - cell_len(row)} cells short"
 
 
 def test_the_bands_cut_lands_on_a_word_like_the_excerpt_it_was_handed() -> None:

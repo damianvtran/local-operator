@@ -287,13 +287,18 @@ async def test_a_slow_but_real_write_keeps_its_title(tmp_path, monkeypatch) -> N
     under the sum was cut off by the first half. One shared deadline keeps any
     append inside the budget and still bounds teardown.
     """
-    monkeypatch.setattr(session_mod, "_NAME_FLUSH_TIMEOUT_S", 0.6)
+    # NOT monkeypatched. The defect was a hard-coded per-half budget, so a test
+    # that patches the shared constant proves nothing about it: the patched name
+    # simply is not read by the broken code, and the test passes either way
+    # (review round 1, F4). The delay is therefore expressed against the REAL
+    # `_NAME_FLUSH_TIMEOUT_S` and placed where the two shapes disagree — past
+    # what a single half used to allow, comfortably inside the shared budget.
+    delay = session_mod._NAME_FLUSH_TIMEOUT_S * 0.6
+    assert delay > 2.0, "the delay must exceed the old per-half budget to discriminate"
 
     class SlowTranscript(Transcript):
         async def append_custom(self, custom_type: str, details: dict[str, Any]):
-            # Inside the shared budget, but past what either half would have
-            # allowed on its own.
-            await asyncio.sleep(0.45)
+            await asyncio.sleep(delay)
             return await super().append_custom(custom_type, details)
 
     session = Session(
