@@ -2509,7 +2509,7 @@ async def test_a_late_second_esc_is_acknowledged_rather_than_silently_ignored() 
         # so the press is visibly acknowledged.
         assert session.subagent_cancels == []
         assert any(
-            "press esc twice within" in row for row in rows(app)
+            "too slow; esc again within" in row for row in rows(app)
         ), "the late press repainted an identical row and read as a dropped key"
 
 
@@ -2705,7 +2705,7 @@ async def test_ctrl_c_says_where_the_draft_went() -> None:
 
         painted = rows(app)
         assert any(
-            "draft cleared" in row and "up to recover" in row for row in painted
+            "draft cleared" in row and "↑ to recover" in row for row in painted
         ), "the draft vanished with nothing to say it was recoverable"
         # And the exit ladder is still NOT armed by this press.
         assert not any("ctrl+c again" in row for row in painted)
@@ -2751,3 +2751,39 @@ async def test_an_armed_offer_never_outranks_a_waiting_approval() -> None:
         ), "Escape escalated past a waiting approval and killed the subagents"
         assert await asyncio.wait_for(pending, 2) is False, "the approval was not denied"
         pending.cancel()
+
+
+@pytest.mark.asyncio
+async def test_the_late_row_promises_the_number_of_presses_it_actually_costs() -> None:
+    """The re-armed offer must not overstate the cost by one (D9).
+
+    The late press itself re-arms the ladder, so by the time its row is painted
+    the offer is live and the very NEXT single press escalates. Saying "press
+    esc twice" there described the ladder in general rather than the state the
+    user is actually in — harmless to obey, but wrong on the one key this
+    change exists to make honest.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        # The window lapses, so this press cannot escalate — it re-arms.
+        app._stop_offered_at = time.monotonic() - (DOUBLE_STOP_WINDOW_S + 1)
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert session.subagent_cancels == []
+        assert any("esc again within" in row for row in rows(app))
+
+        # ONE further press, exactly as the row now promises.
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        assert session.subagent_cancels == [
+            "interrupted"
+        ], "the row promised one more press and one more press did not escalate"

@@ -3297,7 +3297,12 @@ class OperatorApp(App[None]):
                 # can discover is worth very little, because they retype it
                 # anyway (D6, design round 1). One quiet receipt, in the `note`
                 # weight that answers something the user just did.
-                self._append_block(NoticeBlock("draft cleared — up to recover", "note"))
+                #
+                # The GLYPH, not the word: every other arrow hint in the TUI
+                # renders one (`session_picker`, `usage_panel`, `aside_panel`,
+                # `subagent_view`), and "up to" garden-paths on the idiom before
+                # it resolves as a key name (D10, design round 2).
+                self._append_block(NoticeBlock("draft cleared — ↑ to recover", "note"))
                 return
 
         now = time.monotonic()
@@ -3580,6 +3585,11 @@ class OperatorApp(App[None]):
             # lying about what it did (D1, design round 1). The re-armed offer
             # therefore says so, which both acknowledges the press and states
             # the constraint that defeated it.
+            #
+            # "esc again", not "press esc twice": THIS press re-armed the offer,
+            # so the ladder is armed by the time the row is painted and the very
+            # next single press escalates. "Twice" overstated the cost by one on
+            # the one key this change exists to make honest (D9, design round 2).
             expired = self._stop_offered_at is not None
             self._stop_offered_at = now
             self._stop_offer_count = children
@@ -3587,7 +3597,7 @@ class OperatorApp(App[None]):
             self._replace_stop_notice(
                 (
                     f"{children} subagent{plural} still running "
-                    f"— press esc twice within {DOUBLE_STOP_WINDOW_S:g}s to stop them"
+                    f"— too slow; esc again within {DOUBLE_STOP_WINDOW_S:g}s to stop them"
                     if expired
                     else f"{children} subagent{plural} still running " "— esc again to stop them"
                 ),
