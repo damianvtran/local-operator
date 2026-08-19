@@ -749,8 +749,15 @@ class OpenAICompatClient:
         extra_headers: Mapping[str, str] | None = None,
         timeout: float = 600.0,
         openai_api: str | None = None,
+        oauth_base_url: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        # Some providers serve subscription OAuth and pay-as-you-go API keys
+        # from different hosts (see ``ProviderDefinition.oauth_base_url``). The
+        # client is built before the credential is resolved -- failover may
+        # rotate between kinds mid-turn -- so the host is chosen per REQUEST
+        # from the credential actually presented, not fixed at construction.
+        self._oauth_base_url = oauth_base_url.rstrip("/") if oauth_base_url else None
         if openai_api is None:
             # Direct construction remains useful in wire tests and extensions.
             # Only the canonical public base is safe to recognize implicitly;
@@ -766,6 +773,24 @@ class OpenAICompatClient:
     async def aclose(self) -> None:
         if self._owns_client:
             await self._http.aclose()
+
+    def _request_base_url(self, oauth_access: "OAuthAccess | None") -> str:
+        """The host this REQUEST goes to, given the credential it carries.
+
+        An OAuth bearer goes to ``oauth_base_url`` when the provider declares
+        one; everything else uses the ordinary base. Without this, listing a
+        subscription's models (which discovery now does against the OAuth host)
+        would advertise models that inference then sends to the API-key host,
+        where they 404 -- worse than not listing them at all.
+        """
+        if (
+            self._oauth_base_url
+            and oauth_access is not None
+            and oauth_access.kind == "oauth"
+            and oauth_access.access_token
+        ):
+            return self._oauth_base_url
+        return self._base_url
 
     def _headers(
         self, api_key: str | None, oauth_access: "OAuthAccess | None" = None
@@ -951,7 +976,7 @@ class OpenAICompatClient:
             ):
                 yield event
             return
-        url = f"{self._base_url}/chat/completions"
+        url = f"{self._request_base_url(oauth_access)}/chat/completions"
         finish_reason: str | None = None
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
@@ -1818,4 +1843,15 @@ def client_for_spec(
         http_client=http_client,
         extra_headers=extra_headers,
         openai_api=openai_api if spec.provider == "openai" else "chat_completions",
+        # Suppressed only when the spec names a base the registry did NOT
+        # supply, which is a deliberate endpoint override (a gateway, a proxy)
+        # and must not be second-guessed per credential. `build_model_spec`
+        # copies `definition.base_url` onto every spec, so testing
+        # `spec.base_url` alone would disable the OAuth host for every request
+        # and silently send the coding-plan bearer to the API-key platform.
+        oauth_base_url=(
+            definition.oauth_base_url
+            if not spec.base_url or spec.base_url == definition.base_url
+            else None
+        ),
     )

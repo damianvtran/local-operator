@@ -36,6 +36,7 @@ import os
 import sqlite3
 import time
 import zlib
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -53,6 +54,14 @@ logger = logging.getLogger("local_operator.providers.auth_store")
 
 OAUTH_REFRESH_SKEW_MS = 60_000  # pre-emptive refresh trigger
 DEFAULT_BLOCK_MS = 60_000  # rate-limit / 401 backoff
+
+#: How long a provider-fault demotion keeps a credential at the back of the pool
+#: (see ``AuthStore.deprioritize_credential``). Deliberately short: the mark says
+#: "this account was failing a moment ago", which stops being useful information
+#: quickly, and it cannot expire by being USED -- a demoted row sorts last, so it
+#: is not selected, so it never earns the success that would clear it. Two
+#: minutes outlives a burst of 529s without outliving the outage that caused it.
+DEPRIORITIZE_TTL_MS = 120_000
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS auth_credentials (
@@ -178,6 +187,24 @@ class AuthStore:
         self._fallback_resolvers: dict[str, Callable[[str], str | None]] = {}
         self._sticky: dict[tuple[str, str], int] = {}
         self._round_robin: dict[str, int] = {}
+        # Credentials that just failed on a PROVIDER-side fault, which is not
+        # their fault and so must not block them (see ``rotate_sibling``). They
+        # are merely sorted last, so an attempt moves to a sibling while the
+        # deprioritised row stays available as a last resort.
+        #
+        # Deliberately unpersisted: the condition it describes lasts seconds,
+        # and a mark surviving a restart would misroute a session for a fault
+        # that had long cleared.
+        #
+        # Deliberately keyed by PROVIDER rather than by session, and so shared
+        # by every session in the process — like ``_round_robin`` above. That is
+        # the correct scope for what it records: "this account was failing at
+        # this provider a moment ago" is a fact about the provider and the
+        # account, not about who observed it, so a sibling session benefits from
+        # the discovery instead of paying to repeat it. Nothing here can make a
+        # credential unusable, so the worst a stale mark can do is reorder a
+        # pool whose members are all equally valid.
+        self._deprioritized: dict[str, dict[int, int]] = {}
         self._refresh_locks: dict[int, asyncio.Lock] = {}
         self._conn = self._connect()
 
@@ -282,8 +309,21 @@ class AuthStore:
         Revives soft-deleted rows for the same identity (re-login).
         ``store_credentials_as`` aliasing happens at the caller (login path).
         """
+        # An EXPLICIT type wins; the structural guess is the fallback for the
+        # callers (and stored rows) that never declared one.
+        #
+        # The guess reads "has both refresh and access", which cannot see a
+        # credential that is OAuth-issued but has no refresh token because it
+        # never expires -- Z.AI's coding-plan sign-in mints exactly that. Such a
+        # row landed as `api_key` with its secret under `data["access"]`, where
+        # nothing can read it: tiers 4 and 6 read `data["key"]`, and tier 3 only
+        # walks `oauth`-typed rows. The login reported success and every request
+        # afterwards failed with no credential at all.
+        declared = credential.get("type")
         credential_type = (
-            "oauth" if credential.get("refresh") and credential.get("access") else "api_key"
+            declared
+            if declared in ("oauth", "api_key")
+            else ("oauth" if credential.get("refresh") and credential.get("access") else "api_key")
         )
         identity = _identity_key_for(provider, credential)
         payload = dict(credential)
@@ -498,11 +538,127 @@ class AuthStore:
 
     # -- selection: stickiness + round-robin -------------------------------------
 
+    def deprioritize_credential(self, provider: str, credential_id: int) -> None:
+        """Sort ``credential_id`` last for ``provider`` without blocking it.
+
+        The half of ``rotate_sibling`` that applies when the PROVIDER failed
+        rather than the credential: a 529 storm must move the next attempt onto
+        another account, but blocking would strand a healthy account (and,
+        repeated across the pool, strand every one of them).
+
+        The mark EXPIRES on its own after :data:`DEPRIORITIZE_TTL_MS`. Clearing
+        it on a successful request is not sufficient by itself, and the reason is
+        circular: a demoted credential sorts last, so it is not selected, so it
+        never gets the success that would clear it. Without a TTL a single 529
+        left an account bottom-of-pool for the life of the process -- the same
+        "healthy account effectively out of rotation" outcome this whole change
+        exists to prevent, arrived at the slow way.
+        """
+        marks = self._deprioritized.setdefault(provider, {})
+        marks[credential_id] = self._now_ms() + DEPRIORITIZE_TTL_MS
+
+    def clear_deprioritized(
+        self, provider: str, credential_id: int | Iterable[int] | None = None
+    ) -> None:
+        """Restore full priority for a credential, several, or all of them.
+
+        Takes an explicit id set rather than always clearing the provider,
+        because ``_selection_order`` runs once per cascade TIER with a different
+        subset of rows: a one-row tier finding its only row demoted must not
+        drop the marks belonging to rows in another tier that it never saw.
+        """
+        marks = self._deprioritized.get(provider)
+        if marks is None:
+            return
+        if credential_id is None:
+            self._deprioritized.pop(provider, None)
+            return
+        ids = {credential_id} if isinstance(credential_id, int) else {int(i) for i in credential_id}
+        for one in ids:
+            marks.pop(one, None)
+        if not marks:
+            self._deprioritized.pop(provider, None)
+
+    def _active_demotions(self, provider: str) -> set[int]:
+        """Ids still demoted, dropping any whose TTL has passed.
+
+        Expiry is evaluated on READ rather than by a timer: the marks are only
+        consulted here, so a lazy sweep is both sufficient and free of a
+        background task that would have to be owned and cancelled.
+        """
+        marks = self._deprioritized.get(provider)
+        if not marks:
+            return set()
+        now = self._now_ms()
+        for cid in [cid for cid, until in marks.items() if until <= now]:
+            marks.pop(cid, None)
+        if not marks:
+            self._deprioritized.pop(provider, None)
+            return set()
+        return set(marks)
+
     def _selection_order(
-        self, rows: list[StoredCredential], provider: str, session_id: str | None
+        self,
+        rows: list[StoredCredential],
+        provider: str,
+        session_id: str | None,
+        *,
+        read_only: bool = False,
     ) -> list[StoredCredential]:
         if not rows:
             return []
+        ordered = self._base_selection_order(rows, provider, session_id)
+        # Demotion is applied LAST, to the finished order.
+        #
+        # It used to run first, which did not work: both orderings below rotate
+        # the list (`rows[i:] + rows[:i]`), so a row moved to the back was
+        # rotated straight back towards the front. With three credentials and a
+        # session whose hash landed on index 1, the account that had just failed
+        # was tried SECOND -- the pool was never fully walked, which is the bug
+        # the demotion exists to fix. Applying it here cannot be undone by a
+        # later step, and because the partition is stable the relative order the
+        # sticky/hash/round-robin choice produced is otherwise preserved.
+        demoted = self._active_demotions(provider)
+        if not demoted:
+            return ordered
+        preferred = [r for r in ordered if r.id not in demoted]
+        # Every row demoted means the pool has been walked once, so the marks
+        # describe an outage rather than any one account: they are stale and the
+        # rows are equally good again. Only THIS tier's rows are cleared -- the
+        # cascade calls this once per credential tier with a different subset,
+        # so popping the whole provider would let a one-row tier wipe the marks
+        # belonging to rows it never saw.
+        #
+        # This branch is NOT the cascade's safety net, and exactly one pass
+        # reaches it. On :meth:`_resolve`'s FIRST pass ``_usable_key_rows`` has
+        # already dropped demoted rows, so an all-demoted tier arrives empty and
+        # returns at the guard above. On the second pass ``ignore_demotions``
+        # suppresses that filter, so the rows arrive whole and land here --
+        # meaning in practice this branch is reached only by a ``read_only``
+        # second pass, because the normal one cleared the marks before
+        # recursing and has no demotions left to find.
+        #
+        # That is precisely why the ``read_only`` gate below is load-bearing
+        # rather than dead: it is the last thing standing between an isolated
+        # request and a mark it is not entitled to clear. The net that makes a
+        # demoted lone row resolvable at all is the ``ignore_demotions`` pass in
+        # :meth:`_resolve`; do not reason about cascade-wide all-demoted
+        # behaviour from here.
+        if not preferred:
+            # Not under ``read_only``: clearing the marks is a routing DECISION,
+            # and an isolated request running beside a user's turn must not be
+            # able to move that turn's account. It still gets the same order --
+            # all rows demoted means no reordering either way -- so the only
+            # difference is that it decides nothing, which is the contract.
+            if not read_only:
+                self.clear_deprioritized(provider, [r.id for r in ordered])
+            return ordered
+        return preferred + [r for r in ordered if r.id in demoted]
+
+    def _base_selection_order(
+        self, rows: list[StoredCredential], provider: str, session_id: str | None
+    ) -> list[StoredCredential]:
+        """Stickiness, then a per-session hash, then round-robin."""
         if session_id:
             sticky_id = self._sticky.get((provider, session_id))
             sticky = next((r for r in rows if r.id == sticky_id), None)
@@ -526,16 +682,57 @@ class AuthStore:
             self._sticky[(provider, session_id)] = credential_id
 
     def _usable_key_rows(
-        self, provider: str, credential_type: str, source: str | None
+        self,
+        provider: str,
+        credential_type: str,
+        source: str | None,
+        *,
+        ignore_demotions: bool = False,
     ) -> list[StoredCredential]:
         rows = [
             r
             for r in self.list_credentials(provider)
             if r.credential_type == credential_type and not self.is_blocked(r.id, provider)
         ]
-        if source is None:
-            return rows
-        return [r for r in rows if r.data.get("source") == source]
+        if source is not None:
+            rows = [r for r in rows if r.data.get("source") == source]
+        # Drop demoted rows from the TIER, not merely sort them last, when some
+        # other credential is still reachable.
+        #
+        # Ordering alone is not enough here, because the cascade is a sequence
+        # of tiers and a tier is consulted whole: an OAuth row, or an api_key
+        # row with `source="login"`, wins its tier before a row in a later tier
+        # is ever looked at. So a demoted row that is ALONE in its tier kept
+        # winning the cascade -- and `rotate_sibling` kept reporting that a
+        # sibling existed, which told the driver rotation was progressing while
+        # the same failing bearer came back every time. A healthy credential one
+        # tier down never received a single request.
+        #
+        # Dropping is safe WITHOUT a "is anything else reachable?" guard, and
+        # deliberately has none. Such a guard could only count database ROWS,
+        # while the cascade also resolves from the env var (tier 5) and the
+        # fallback resolver (tier 7), which are not rows: a demoted lone stored
+        # row would then never yield, and an exported ANTHROPIC_API_KEY beside a
+        # signed-in account became unreachable where it used to be the fallback.
+        #
+        # The safety net for the resulting empty tier is the second pass at the
+        # end of :meth:`_resolve`: if demotions are the ONLY reason the whole
+        # cascade came back empty, it resolves once more with
+        # ``ignore_demotions``, so a demoted lone row is still served rather
+        # than reported as no credential at all. ``_selection_order``'s
+        # all-demoted branch cannot be that net: on the first pass this filter
+        # runs ahead of it and hands it an empty list, and on the second pass
+        # the net has already fired -- that is what suppressed this filter.
+        demoted = set() if ignore_demotions else self._active_demotions(provider)
+        if demoted:
+            remaining = [r for r in rows if r.id not in demoted]
+            if remaining:
+                return remaining
+            # Every row in THIS tier is demoted: yield the tier so the cascade
+            # moves on to whatever comes next -- another tier, the env var, or
+            # the resolver.
+            return []
+        return rows
 
     # -- the cascade ---------------------------------------------------------
 
@@ -684,8 +881,15 @@ class AuthStore:
         *,
         force_refresh: bool = False,
         read_only: bool = False,
+        ignore_demotions: bool = False,
     ) -> tuple[str | None, StoredCredential | None]:
         """The 7-step cascade; returns ``(key, winning row or None)``.
+
+        ``ignore_demotions`` runs the cascade as if no credential were demoted.
+        It is set only by this method's own second pass (see the tail), where
+        demotions have been found to be the sole reason the cascade came back
+        empty. Because the second pass sets it, the tail's branch cannot re-arm
+        and the recursion terminates at depth two.
 
         ``read_only`` resolves WITHOUT making any routing decision: no
         credential blocked when its refresh fails, no session stickiness
@@ -717,8 +921,10 @@ class AuthStore:
             return config, None
 
         # 3. OAuth credential
-        oauth_rows = self._usable_key_rows(provider, "oauth", source=None)
-        for row in self._selection_order(oauth_rows, provider, session_id):
+        oauth_rows = self._usable_key_rows(
+            provider, "oauth", source=None, ignore_demotions=ignore_demotions
+        )
+        for row in self._selection_order(oauth_rows, provider, session_id, read_only=read_only):
             try:
                 creds = await self._ensure_oauth_fresh(row, force=force_refresh)
             except AuthStoreError:
@@ -738,8 +944,10 @@ class AuthStore:
         # PR-15: with NO oauth rows, force_refresh falls through to tiers 4-7.
 
         # 4. API key persisted by interactive login
-        login_rows = self._usable_key_rows(provider, "api_key", source="login")
-        for row in self._selection_order(login_rows, provider, session_id):
+        login_rows = self._usable_key_rows(
+            provider, "api_key", source="login", ignore_demotions=ignore_demotions
+        )
+        for row in self._selection_order(login_rows, provider, session_id, read_only=read_only):
             key = row.data.get("key")
             if key:
                 pin(row.id)
@@ -758,10 +966,12 @@ class AuthStore:
         # 6. Stored api_key without source="login" (e.g. broker migration)
         stored_rows = [
             row
-            for row in self._usable_key_rows(provider, "api_key", source=None)
+            for row in self._usable_key_rows(
+                provider, "api_key", source=None, ignore_demotions=ignore_demotions
+            )
             if row.data.get("source") != "login"
         ]
-        for row in self._selection_order(stored_rows, provider, session_id):
+        for row in self._selection_order(stored_rows, provider, session_id, read_only=read_only):
             key = row.data.get("key")
             if key:
                 pin(row.id)
@@ -770,6 +980,33 @@ class AuthStore:
         resolver = self._fallback_resolvers.get(provider)
         if resolver is not None:
             return resolver(provider), None
+
+        # Nothing in the whole cascade -- but demotions are a ROUTING
+        # preference, never a statement that a credential is unusable. If they
+        # are the only reason this came back empty, they have outlived their
+        # purpose (there is nowhere else to route to), so clear them and resolve
+        # once more. Without this a sole demoted credential resolved to None and
+        # the caller was told no credential was configured, which is exactly the
+        # misdiagnosis this change set out to remove.
+        #
+        # A ``read_only`` resolve takes this pass too. It must: dropping a
+        # demoted row from its tier is the destructive half of demotion, and a
+        # resolve that is forbidden from deciding anything about routing cannot
+        # be handed that half alone -- it would report "no credential" for a
+        # credential that is merely deprioritised, which is the misdiagnosis at
+        # issue. What it does NOT do is clear the marks: that is the routing
+        # decision, and it stays reserved for the caller who owns the turn.
+        # ``ignore_demotions`` gives the same answer without touching state.
+        if not ignore_demotions and self._active_demotions(provider):
+            if not read_only:
+                self.clear_deprioritized(provider)
+            return await self._resolve(
+                provider,
+                session_id,
+                force_refresh=force_refresh,
+                read_only=read_only,
+                ignore_demotions=True,
+            )
 
         return None, None
 
@@ -819,6 +1056,7 @@ class AuthStore:
         """
         from local_operator.providers.failover import (
             is_invalidated_credential_error,
+            is_server_side_failure,
             is_usage_limit_error,
             retry_after_ms_from_error,
         )
@@ -834,9 +1072,23 @@ class AuthStore:
             failing = None
 
         usage_limited = is_usage_limit_error(error)
+        # A provider-wide fault (5xx/529 overload, timeout) is not evidence
+        # against the CREDENTIAL. Blocking it would take a healthy account out
+        # of the pool for a minute because the provider had a bad second, and
+        # under a sustained outage that walks the whole pool into the blocked
+        # state until the session has nothing left to try -- while every one of
+        # those accounts would have served the very next request. So the row is
+        # left usable and only the sticky pointer moves, which is enough to send
+        # THIS attempt to a sibling.
+        server_side = is_server_side_failure(error)
         if failing is not None:
-            retry_after = retry_after_ms_from_error(error)
-            self.block_credential(failing.id, provider, block_ms=max(block_ms, retry_after or 0))
+            if server_side:
+                self.deprioritize_credential(provider, failing.id)
+            else:
+                retry_after = retry_after_ms_from_error(error)
+                self.block_credential(
+                    failing.id, provider, block_ms=max(block_ms, retry_after or 0)
+                )
             if usage_limited:
                 # Sticky preserved: same account stays first after backoff.
                 pass
@@ -853,7 +1105,23 @@ class AuthStore:
             and not self.is_blocked(r.id, provider)
             and (credential_type is None or r.credential_type == credential_type)
         ]
-        return len(siblings) > 0
+        if siblings:
+            return True
+        # No untried sibling of the SAME TYPE remains -- which is not the same
+        # as "nothing else is reachable". The cascade has other tiers: another
+        # credential type, the env var, the fallback resolver. Clearing the
+        # demotion here erased the mark in the very call that set it whenever
+        # the failing row had no same-type sibling (an OAuth account beside a
+        # pasted key -- precisely the shape a Z.AI sign-in creates), so tier 3
+        # re-served the identical failing row and the healthy credential one
+        # tier down was never asked.
+        #
+        # So the mark STANDS. It is not permanent: it expires on its TTL, it is
+        # cleared when the credential next serves a request, and
+        # `_selection_order` drops the whole set as stale once every row it sees
+        # is demoted. Any of those returns this credential to service; none of
+        # them requires pretending here that the fault never happened.
+        return False
 
     @staticmethod
     def _row_matches_key(row: StoredCredential, api_key: str) -> bool:

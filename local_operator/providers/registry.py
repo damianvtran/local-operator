@@ -47,6 +47,16 @@ class ProviderDefinition:
     - ``allows_missing_api_key``: transport needs no bearer (local servers).
     - ``store_credentials_as``: alias the credential row under another
       provider id (xai-oauth ⇒ xai; openai-device ⇒ openai).
+    - ``oauth_base_url``: host to use when the resolved credential is an OAuth
+      token, for providers that serve subscription sign-ins and pay-as-you-go
+      API keys from DIFFERENT hosts. Kimi is the case that forced it: the
+      coding-plan OAuth grant is only accepted at ``api.kimi.com/coding/v1``
+      (which is where ``k3`` lives), while ``KIMI_API_KEY`` belongs to the
+      mainland ``api.moonshot.cn/v1`` platform and 401s there. One ``base_url``
+      per provider therefore cannot be right for both credential kinds, and the
+      symptom is silent: model discovery 401s, falls back to the static
+      registry, and the picker shows a years-old model list.
+      ``None`` means the provider serves both kinds from ``base_url``.
     - ``wire``: which wire client serves this provider.
     - ``search_aliases``: other names a USER would type for this provider —
       almost always the model family it is known by (``claude`` for anthropic,
@@ -81,6 +91,7 @@ class ProviderDefinition:
     callback_port: int | None = None
     paste_code_flow: bool = False
     base_url: str | None = None
+    oauth_base_url: str | None = None
     wire: WireFormat = "openai-compat"
     search_aliases: tuple[str, ...] = ()
     #: Whether this login cannot complete without reading text from the user.
@@ -306,6 +317,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         search_aliases=(
             "moonshot",
             "k2",
+            "k3",
         ),
         name="Kimi (Moonshot)",
         env_keys="KIMI_API_KEY",
@@ -313,6 +325,12 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         refresh_token=_lazy_refresh("local_operator.providers.oauth.kimi", "refresh_kimi_token"),
         get_api_key=_oauth_api_key,
         base_url="https://api.moonshot.cn/v1",
+        # The coding-plan host, used only for OAuth sign-ins. It is a different
+        # PLATFORM from the mainland API-key host above, not merely a different
+        # path: it is where the subscription's models live (`k3`, `k3-256k`,
+        # `kimi-for-coding`), and the mainland host rejects the OAuth bearer
+        # with 401 "Invalid Authentication". Confirmed live against both hosts.
+        oauth_base_url="https://api.kimi.com/coding/v1",
     ),
     ProviderDefinition(
         id="xai",
@@ -363,6 +381,32 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # account balance instead, which is the same key silently spending the
         # wrong budget. Mirrors omp's `zhipuCodingPlanModelManagerOptions`.
         base_url="https://api.z.ai/api/coding/paas/v4",
+    ),
+    ProviderDefinition(
+        id="zai-oauth",
+        search_aliases=(
+            "glm",
+            "zhipu",
+            "bigmodel",
+            "z-ai",
+        ),
+        name="Z.AI (GLM Coding Plan · Sign in)",
+        # Browser sign-in rather than a pasted key. The flow ends by minting a
+        # durable `id.secret` API key, which is what `access` holds and what the
+        # wire receives -- so this shares `zai`'s credential row, base URL and
+        # models, exactly as `xai-oauth` shares `xai`'s.
+        login=_lazy_login("local_operator.providers.oauth.zai", "login_zai"),
+        get_api_key=_oauth_api_key,
+        store_credentials_as="zai",
+        # Pinned by the provider's OAuth client registration; port fallback is
+        # refused, which `ZaiOAuthFlow` states again as `allow_port_fallback`.
+        callback_port=54548,
+        # Paste-the-redirect-URL fallback for when the browser cannot reach this
+        # machine (a remote or headless session), as for anthropic.
+        paste_code_flow=True,
+        base_url="https://api.z.ai/api/coding/paas/v4",
+        # No refresh_token: the minted key never expires, so there is nothing to
+        # refresh. `expires: None` stops AuthStore from ever trying.
     ),
     ProviderDefinition(
         id="google",

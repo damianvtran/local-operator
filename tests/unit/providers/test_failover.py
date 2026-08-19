@@ -32,6 +32,7 @@ from local_operator.providers.failover import (
     FallbackTarget,
     ProviderError,
     RetrySettings,
+    _request_has_rotated,
     backoff_delay_ms,
     classify_provider_error,
     expand_fallback_candidates,
@@ -647,9 +648,16 @@ async def test_transport_retries_honor_budget_same_key_first() -> None:
         async for _ in stream_with_failover(_request(), auth, settings, client_for):
             pass
     assert excinfo.value.status == 503
-    # Two same-key retries before rotation, then the sibling once.
+    # Two same-key retries before rotation, then the sibling gets the same --
+    # the sequence this test has always asserted, and the one `main` produces.
+    # The restore-once path hands back the REMAINDER of the configured budget
+    # rather than a fresh one, so it adds nothing here.
     assert attempts == ["k1", "k1", "k1", "k2", "k2", "k2"]
-    assert len(auth.rotations) == 1  # rotation only after the budget is spent
+    # Every credential in the pool is asked before the turn is declared dead: a
+    # 5xx is a PROVIDER fault, so the next ACCOUNT is the thing most likely to
+    # succeed. Capping rotation at one switch is what stranded two healthy
+    # Anthropic accounts during a 529 storm.
+    assert [key for _provider, key in auth.rotations] == ["k1", "k2"]
 
 
 async def test_long_rate_limit_retry_after_rotates_without_sleep(monkeypatch) -> None:
@@ -1863,3 +1871,702 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
         assert slept, "no backoff was spent"
         assert client.calls > 1, "only one attempt was made"
         assert state.active is not None, "no route was pinned"
+
+
+class TestProviderOutageWalksTheWholePool:
+    """A provider-side fault must ask every account, and blame none of them.
+
+    The reported incident: four Anthropic OAuth accounts, a 529
+    ``overloaded_error`` storm, and a turn that died reporting the 529 after
+    trying TWO of them. Two accounts with quota were never asked.
+    """
+
+    async def test_a_529_storm_tries_every_credential_in_the_pool(self) -> None:
+        """The regression: rotation stopped at the ordinary-401 switch cap."""
+        tried: list[str | None] = []
+
+        def overloaded(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            tried.append(api_key)
+            raise ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(overloaded)
+
+        auth = FakeAuth({"openai": ["acct-a", "acct-b", "acct-c", "acct-d"]})
+        settings = {"retry": {"baseDelayMs": 0, "maxRetries": 0, "fallbackChains": {}}}
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(_request(), auth, settings, client_for):
+                pass
+
+        assert excinfo.value.status == 529
+        assert set(tried) == {"acct-a", "acct-b", "acct-c", "acct-d"}, tried
+
+    async def test_an_ordinary_401_still_stops_after_one_switch(self) -> None:
+        """The cap is kept where it belongs: a rejected bearer is not a pool problem.
+
+        Cycling every sibling on a 401 only delays the login prompt the user has
+        to answer anyway, so widening rotation must not have widened this.
+        """
+        tried: list[str | None] = []
+
+        def unauthorized(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            tried.append(api_key)
+            raise ProviderError(401, "invalid bearer", retryable=False, auth_error=True)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(unauthorized)
+
+        auth = FakeAuth({"openai": ["acct-a", "acct-b", "acct-c", "acct-d"]})
+        settings = {"retry": {"baseDelayMs": 0, "maxRetries": 0, "fallbackChains": {}}}
+        with pytest.raises(ProviderError):
+            async for _ in stream_with_failover(_request(), auth, settings, client_for):
+                pass
+
+        assert len(tried) < 4, f"a 401 walked the whole pool: {tried}"
+
+
+class TestCredentialErrorSaysWhichProblemItIs:
+    """ "No API key configured" must not be said to a user who is signed in."""
+
+    async def test_a_rate_limited_oauth_account_is_not_reported_as_unconfigured(
+        self, tmp_path: Any
+    ) -> None:
+        """The reported frame: `No API key configured for provider 'openai'`
+        shown while an OAuth sign-in existed and was merely blocked."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        row = store.upsert_credential(
+            "openai",
+            {"type": "oauth", "access": "tok", "refresh": "r", "expires": None},
+        )
+        store.block_credential(row.id, "openai", block_ms=600_000)
+
+        def unreachable(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            raise AssertionError("no request should be sent without a bearer")
+
+        async def client_for(spec: ModelSpec) -> Any:
+            # Built before the credential is resolved, so the guard belongs on
+            # the STREAM rather than on construction.
+            return _FnClient(unreachable)
+
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(), store, {"retry": {"enabled": True}}, client_for
+            ):
+                pass
+
+        message = str(excinfo.value)
+        assert "No API key configured" not in message, message
+        assert "not usable right now" in message
+        # The three causes a present-but-unresolvable row can have. A message
+        # naming only the first two told an R21 user to wait for a limit that
+        # was never the problem.
+        assert "rate limited" in message
+        assert "token refresh" in message
+        assert "could not be read" in message
+        assert "OAuth sign-in" in message
+
+    async def test_a_provider_with_no_credential_still_says_so(self, tmp_path: Any) -> None:
+        """The original wording is correct when it is actually true."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+
+        def unreachable(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            raise AssertionError("no request should be sent without a bearer")
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(unreachable)
+
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request(), store, {"retry": {"enabled": True}}, client_for
+            ):
+                pass
+
+        assert "No API key configured for provider 'openai'" in str(excinfo.value)
+
+
+async def _clean_stream() -> AsyncIterator[Any]:
+    """A stream that completes without events: the attempt SUCCEEDED."""
+    return
+    yield
+
+
+class TestAnOverloadedProviderIsNotFloodedWhileRotating:
+    """Widening rotation must not multiply the load aimed at the outage.
+
+    Round 1 review (R2): the same-credential transport budget is spent once per
+    ACCOUNT, so the default `maxRetries: 10` became 10 x pool size requests sent
+    to a provider that had just answered "overloaded" -- measured at 44 requests
+    over ~190s for a four-account pool, against 22/~100s before the widening.
+    """
+
+    async def test_a_529_storm_is_bounded_per_account(self, tmp_path: Any) -> None:
+        sent: list[str | None] = []
+        slept: list[int] = []
+
+        def overloaded(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            sent.append(api_key)
+            raise ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            slept.append(delay_ms)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(overloaded)
+
+        # A REAL store: the cap only applies when the pool is enumerable and has
+        # more than one member, which is the condition it is justified by.
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        for i in range(1, 5):
+            store.upsert_credential(
+                "openai",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            # The DEFAULT budget, which is the configuration that misbehaved.
+            with pytest.raises(ProviderError):
+                async for _ in stream_with_failover(
+                    _request(), store, {"retry": {"enabled": True}}, client_for
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        # Every account is still tried -- the pool walk is the point.
+        assert set(sent) == {"k1", "k2", "k3", "k4"}, sent
+        # Each is asked a bounded number of times, not `maxRetries` times, and
+        # the TURN total is bounded too -- that is the quantity the provider
+        # actually receives.
+        for key in ("k1", "k2", "k3", "k4"):
+            assert sent.count(key) <= 4, (key, sent)
+        assert len(sent) <= 12, sent
+
+    async def test_a_timeout_storm_is_bounded_too(self, tmp_path: Any) -> None:
+        """R10: the cap was installed only on the `except ProviderError` arm.
+
+        Raw transport failures take the `except Exception` arm -- no client in
+        `clients.py` catches httpx, and `_guarded_chunks` deliberately raises
+        `ReadTimeout` on a stall -- which kept its own uncapped budget. That is
+        the failure kind a provider degradation most often produces, so the
+        bound was missing exactly where it was needed: 44 requests/~196s
+        measured, twice the pre-change behaviour.
+        """
+        import httpx
+
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        for i in range(4):
+            store.upsert_credential(
+                "openai",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+        sent: list[str | None] = []
+
+        def stalled(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            sent.append(api_key)
+            raise httpx.ReadTimeout("stream stalled")
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(stalled)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                async for _ in stream_with_failover(
+                    _request(), store, {"retry": {"enabled": True}}, client_for
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert len(sent) <= 12, f"a timeout storm sent {len(sent)} requests"
+
+    async def test_a_lone_credential_keeps_the_budget_the_user_configured(
+        self, tmp_path: Any
+    ) -> None:
+        """R11: the cap is justified by pool MULTIPLICATION, so it must not bite
+        where there is no pool. With one credential the earlier form failed a
+        500 blip that cleared on attempt 4 -- a regression against `main` for
+        the users least able to absorb one.
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        store.upsert_credential(
+            "openai",
+            {"type": "oauth", "access": "only", "refresh": "r", "expires": None},
+        )
+        attempts = [0]
+
+        def blip_then_recover(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts[0] += 1
+            if attempts[0] < 4:
+                raise ProviderError(500, "blip", retryable=True)
+            return _clean_stream()
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(blip_then_recover)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request(), store, {"retry": {"enabled": True}}, client_for
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        # The 4th attempt has to be REACHED; a cap of 2 would have stopped at 3.
+        assert attempts[0] == 4, attempts[0]
+
+
+class TestTheRetryCapAsksWhatRotationWouldAnswer:
+    """R16: the cap is justified by a sibling the turn can ACTUALLY rotate onto.
+
+    Counting raw credential rows claimed a pool in two configurations where
+    rotation reaches nothing, and the cap then removed retries with nowhere to
+    spend them -- R11's symptom through a different door.
+    """
+
+    @staticmethod
+    def _blip_client(attempts: list[int]) -> Any:
+        def blip_then_recover(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts[0] += 1
+            if attempts[0] < 4:
+                raise ProviderError(500, "blip", retryable=True)
+            return _clean_stream()
+
+        return blip_then_recover
+
+    async def _recovers(self, store: Any) -> int:
+        attempts = [0]
+        client = self._blip_client(attempts)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(client)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request(), store, {"retry": {"enabled": True}}, client_for, session_id="s"
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+        return attempts[0]
+
+    async def test_a_blocked_sibling_is_not_a_pool(self, tmp_path: Any) -> None:
+        """This PR's own headline shape: several accounts spent during a
+        degradation, one healthy. The survivor must keep its full budget."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        rows = [
+            store.upsert_credential(
+                "openai",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+            for i in range(4)
+        ]
+        for row in rows[1:]:
+            store.block_credential(row.id, "openai", block_ms=600_000)
+
+        assert await self._recovers(store) == 4
+
+    async def test_a_different_credential_type_is_not_a_sibling(self, tmp_path: Any) -> None:
+        """`rotate_sibling` only walks rows of the SAME credential_type, so an
+        OAuth sign-in beside a pasted API key is two rows and zero rotation."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        store.upsert_credential(
+            "openai", {"type": "oauth", "access": "o1", "refresh": "r", "expires": None}
+        )
+        store.upsert_credential("openai", {"type": "api_key", "key": "sk-1", "source": "login"})
+
+        assert await self._recovers(store) == 4
+
+
+class TestTheCapEngagesOnObservedRotation:
+    """Direct coverage for `_request_has_rotated`.
+
+    Five rounds of review each found the previous PREDICTION of "is there a
+    sibling?" drifting from what the cascade actually does -- rows, then
+    unblocked rows, then same-type rows, then rows behind an override, then
+    rows split across cascade tiers. Each drift cost a real user retries.
+
+    The question is now answered by observation: `attempted_keys` is the set of
+    distinct bearers `resolve_next_key` has already returned, so the cap
+    engages exactly when a second one exists and cannot be wrong about a
+    configuration it never enumerates. These tests pin that contract.
+    """
+
+    def test_no_bearer_yet_is_not_a_pool(self) -> None:
+        assert not _request_has_rotated(AuthRetryKeyState())
+
+    def test_one_bearer_is_not_a_pool(self) -> None:
+        """A lone credential, an override bearer, or a pool whose siblings are
+        all spent: whatever the table says, ONE bearer cannot multiply."""
+        state = AuthRetryKeyState(attempted_keys={"only"})
+        assert not _request_has_rotated(state)
+
+    def test_a_second_distinct_bearer_is_a_pool(self) -> None:
+        state = AuthRetryKeyState(attempted_keys={"k1", "k2"})
+        assert _request_has_rotated(state)
+
+
+class TestAnOverrideBearerKeepsItsBudget:
+    """End to end through the cascade tier no failover test previously used.
+
+    R20 was invisible because every failover test resolves through the stored
+    credential tiers. A user who pasted API keys and then pointed at a gateway
+    (`--api-key`) or exported `ANTHROPIC_API_KEY` got 3 requests where `main`
+    gave 11 -- the cap firing on a bearer with nothing to rotate to.
+    """
+
+    async def test_a_runtime_override_is_not_capped_by_the_rows_beside_it(
+        self, tmp_path: Any
+    ) -> None:
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        for i in range(2):
+            store.upsert_credential(
+                "openai", {"type": "api_key", "key": f"sk-{i}", "source": "login"}
+            )
+        store.set_runtime_api_key("openai", "gateway-key")
+
+        sent: list[str | None] = []
+
+        def overloaded(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            sent.append(api_key)
+            raise ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(overloaded)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                async for _ in stream_with_failover(
+                    _request(),
+                    store,
+                    {"retry": {"enabled": True, "maxRetries": 10, "baseDelayMs": 0}},
+                    client_for,
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        # The override served every attempt: there is no sibling to rotate to,
+        # so it is never starved by a pool that does not exist. It gets the
+        # pre-rotation allowance and then, once rotation reports exhaustion, the
+        # configured budget again -- well beyond the 3 requests the earlier
+        # table-counting versions allowed it.
+        assert set(sent) == {"gateway-key"}, sent
+        assert len(sent) >= 8, len(sent)
+
+
+class TestTheTurnWideCeiling:
+    """The per-credential cap bounds each account; this bounds their PRODUCT.
+
+    Widening rotation to walk the whole pool multiplied the load by the pool
+    size at exactly the moment the provider was asking for less. The quantity
+    that reaches the provider is the total, so that is what is bounded.
+    """
+
+    async def test_a_storm_never_exceeds_the_turn_ceiling(self, tmp_path: Any) -> None:
+        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.failover import MAX_SERVER_FAULT_REQUESTS_PER_TURN
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        for i in range(6):  # a pool larger than the ceiling would allow per-account
+            store.upsert_credential(
+                "openai",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+        sent: list[str | None] = []
+
+        def overloaded(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            sent.append(api_key)
+            raise ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(overloaded)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                async for _ in stream_with_failover(
+                    _request(), store, {"retry": {"enabled": True, "maxRetries": 10}}, client_for
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert len(sent) <= MAX_SERVER_FAULT_REQUESTS_PER_TURN + 1, len(sent)
+        # And it still rotated rather than hammering one account.
+        assert len(set(sent)) > 1, sent
+
+    async def test_api_key_rows_split_across_cascade_tiers_keep_their_budget(
+        self, tmp_path: Any
+    ) -> None:
+        """R22: `api_key` rows live in cascade tier 4 (`source == "login"`) and
+        tier 6, and a tier-4 row always wins -- so two rows of the same type can
+        still yield exactly one reachable bearer. Predicting this from the table
+        is what the observation model removes the need to do."""
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        store.upsert_credential(
+            "openai", {"type": "api_key", "key": "login-key", "source": "login"}
+        )
+        store.upsert_credential("openai", {"type": "api_key", "key": "migrated-key"})
+
+        attempts = [0]
+
+        def blip_then_recover(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts[0] += 1
+            if attempts[0] < 6:
+                raise ProviderError(500, "blip", retryable=True)
+            return _clean_stream()
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(blip_then_recover)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request(),
+                store,
+                {"retry": {"enabled": True, "maxRetries": 10}},
+                client_for,
+                session_id="s",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        # Reached attempt 6 rather than being capped at 3.
+        assert attempts[0] == 6, attempts[0]
+
+
+class TestTheCeilingIsPerProviderNotPerTurn:
+    """R23: a chain stops being a chain if the primary spends its allowance.
+
+    The server-fault ceiling was counted across the whole turn, so a primary
+    outage consumed all of it and every fallback target got ONE attempt with no
+    retries -- a fallback that would have succeeded on its second try never got
+    one. Each target is a different service having a different day.
+    """
+
+    async def test_a_fallback_gets_a_real_budget_after_a_primary_storm(self, tmp_path: Any) -> None:
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        for i in range(4):  # enough accounts to exhaust the primary's ceiling
+            store.upsert_credential(
+                "openai",
+                {
+                    "type": "oauth",
+                    "access": f"k{i}",
+                    "refresh": "r",
+                    "expires": None,
+                    "email": f"a{i}@example.com",
+                },
+            )
+        store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "fallback", "refresh": "r", "expires": None},
+        )
+
+        per_provider: dict[str, int] = {}
+
+        def overloaded_then_fallback_recovers(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            provider = request.model.provider
+            per_provider[provider] = per_provider.get(provider, 0) + 1
+            # The fallback succeeds on its SECOND attempt -- it must be given one.
+            if provider == "anthropic" and per_provider[provider] >= 2:
+                return _clean_stream()
+            raise ProviderError(529, "overloaded_error: Overloaded", retryable=True)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(overloaded_then_fallback_recovers)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request(),
+                store,
+                {
+                    "retry": {
+                        "enabled": True,
+                        "fallbackChains": {"default": ["anthropic/claude-opus-5"]},
+                    }
+                },
+                client_for,
+                session_id="s",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert per_provider.get("anthropic", 0) >= 2, per_provider
+
+
+class TestARestoredBudgetIsTheConfiguredOne:
+    """R24: the restore-once path must express the budget the user asked for.
+
+    Zeroing the counter but re-entering the predicate as "not yet rotated"
+    re-capped the restored pass at the first-bearer allowance: a lone credential
+    got the same 8 requests whatever `maxRetries` said -- short of a configured
+    10, and double a configured 2. Wrong in both directions, which is the tell
+    that the mechanism was not saying what it meant.
+    """
+
+    @staticmethod
+    async def _requests_for(store: Any, max_retries: int) -> int:
+        attempts = [0]
+
+        def always_500(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts[0] += 1
+            raise ProviderError(500, "blip", retryable=True)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(always_500)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                async for _ in stream_with_failover(
+                    _request(),
+                    store,
+                    {"retry": {"enabled": True, "maxRetries": max_retries}},
+                    client_for,
+                    session_id="s",
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+        return attempts[0]
+
+    @pytest.mark.parametrize("max_retries", list(range(0, 12)))
+    async def test_a_lone_credential_spends_exactly_its_configured_budget(
+        self, tmp_path: Any, max_retries: int
+    ) -> None:
+        """`max_retries + 1` requests -- the same total as before this change.
+
+        The restore-once path hands back the REMAINDER of the user's budget; it
+        neither zeroes the counter nor reopens the budget. An earlier form let
+        the token-change reset zero it first, so a lone credential spent
+        `2 x (max_retries + 1)` requests -- twice what was asked for, inside a
+        change whose whole purpose is to stop hammering a provider that is
+        already failing.
+
+        Swept across EVERY value rather than a sample. The first version of
+        this test checked 0/1/3/5/10 and stepped straight over the only setting
+        that was wrong: at `maxRetries: 4` the pre-rotation allowance lands
+        exactly ON the budget, and an exclusive `<` comparison skipped the
+        restore and cost the user their last request. A sampled sweep is how a
+        boundary bug survives a test written to catch boundary bugs.
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / f"auth-{max_retries}.db")
+        store.upsert_credential(
+            "openai",
+            {"type": "oauth", "access": "only", "refresh": "r", "expires": None},
+        )
+
+        assert await self._requests_for(store, max_retries) == max_retries + 1
