@@ -1325,10 +1325,21 @@ def main() -> int:
         if getattr(args, "resume", None) is not None:
             from local_operator.resume import (
                 ResumeNotFound,
+                backfill_session_origins,
                 format_age,
                 recent_sessions,
                 resolve_resume_id,
             )
+
+            # Classify pre-existing sessions BEFORE resolving, not after. The
+            # session factory also backfills, but it runs when a session is
+            # BUILT — and this branch answers `--resume` first, so on the first
+            # launch after an upgrade a bare `--resume` resolved `@latest`
+            # against an unclassified store and reopened whichever delegated
+            # run happened to finish last. Idempotent and stdlib-only, so it
+            # costs a directory scan on the one path that cannot afford to be
+            # wrong about which sessions are the user's.
+            backfill_session_origins(config_dir())
 
             try:
                 args.resume = resolve_resume_id(config_dir(), str(args.resume))

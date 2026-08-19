@@ -224,3 +224,48 @@ def test_directory_stays_under_budget_however_many_sessions_arrive(tmp_path, cei
         # +1 for the live directory, which is exempt from the ceiling.
         assert len(list(sessions.iterdir())) <= ceiling + 1
     assert live.exists()
+
+
+def test_an_aborted_child_leaves_nothing_worth_a_retention_slot(tmp_path):
+    """A session is stamped with its origin BEFORE its transcript exists, so a
+    run that aborts in between leaves a directory holding only the marker.
+
+    Such a directory used to be empty, and empty directories are always reaped
+    regardless of the ceilings — they carry nothing to lose. Counting the
+    marker's 43 bytes turned each one into an ordinary keep candidate holding a
+    slot: measured with a count ceiling of 3, two aborted children evicted two
+    of the user's real transcripts to keep two empty markers.
+    """
+    import os
+
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+
+    sessions = tmp_path / "sessions"
+    # The user's real work, older than the children that abort after it.
+    for i in range(3):
+        _session(sessions, f"user{i}", age_days=3 - i)
+    for i in range(2):
+        hollow = sessions / f"hollow{i}"
+        hollow.mkdir(parents=True)
+        mark_session_origin(hollow, ORIGIN_SUBAGENT, label="review")
+        now = time.time()
+        os.utime(hollow, (now, now))
+
+    sweep_sessions(sessions, max_sessions=3, max_bytes=0, max_age_days=0)
+
+    survivors = sorted(path.name for path in sessions.iterdir())
+    assert survivors == ["user0", "user1", "user2"], survivors
+
+
+def test_the_marker_is_not_charged_against_the_byte_ceiling(tmp_path):
+    """The marker is bookkeeping ABOUT a session, never session content, so it
+    is not what the ceilings are budgeting."""
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+
+    sessions = tmp_path / "sessions"
+    directory = _session(sessions, "one", size=100)
+    before = sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
+    mark_session_origin(directory, ORIGIN_SUBAGENT, label="review")
+    after = sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
+
+    assert before.bytes_remaining == after.bytes_remaining == 100
