@@ -857,12 +857,23 @@ async def test_a_completed_login_stops_holding_the_pasted_key(
         assert (
             app._last_login_prompt is None
         ), "a completed login left the pasted key reachable through the block"
-        # The value is the thing that must become unreachable, not just the
-        # attribute — assert on the credential itself.
-        assert block.wait().result() == "sk-real-key"  # the block still has it...
-        held = [
-            b
-            for b in (app._last_login_prompt,)
-            if b is not None and b.wait().done() and b.wait().result() == "sk-real-key"
+
+        # The block itself still holds the value — that is why the reference
+        # above has to go, and asserting it here is what stops this test from
+        # passing for the wrong reason if the block ever stops carrying it.
+        assert block.wait().result() == "sk-real-key"
+
+        # Scan the app's own attributes rather than re-reading the one already
+        # asserted None: agent review round 7 (Z14) pointed out that iterating
+        # `_last_login_prompt` again cannot fail independently, so it read as
+        # corroboration while proving nothing. This walks every attribute for
+        # any prompt block still holding the pasted key, and so would also
+        # catch the reference being parked somewhere new.
+        reachable = [
+            name
+            for name, value in vars(app).items()
+            if isinstance(value, KeyPromptBlock)
+            and value.wait().done()
+            and value.wait().result() == "sk-real-key"
         ]
-        assert held == [], "the app still reaches a block holding the pasted key"
+        assert reachable == [], f"the app still reaches a block holding the pasted key: {reachable}"
