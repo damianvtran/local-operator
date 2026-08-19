@@ -237,7 +237,9 @@ def render_block(skills: list[Skill]) -> str:
     if user_skills:
         lines = [
             "Skills are specialized knowledge. If one matches your task, you MUST read "
-            "`skill://<name>` before proceeding.",
+            "`skill://<name>` before proceeding. The skill body ends with its "
+            "reference files; read those with `skill://<name>/<path>`, never a "
+            "raw filesystem path.",
             "<skills>",
         ]
         lines.extend(f"- {skill.name}: {skill.description}" for skill in user_skills)

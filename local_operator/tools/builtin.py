@@ -1642,9 +1642,11 @@ class ReadParams(BaseModel):
     path: str = Field(
         description=(
             "File path (absolute or relative to the working directory), or an "
-            "internal URL: skill://<name>, or spill://<id> to expand an output "
-            "that was truncated (append '?q=<regex>' to search inside it "
-            "instead of paging through it)."
+            "internal URL: skill://<name> (its reference files via "
+            "skill://<name>/<relpath>, listed at the end of the skill body — "
+            "never via a raw filesystem path), or spill://<id> to expand an "
+            "output that was truncated (append '?q=<regex>' to search inside "
+            "it instead of paging through it)."
         )
     )
     range: str | None = Field(
