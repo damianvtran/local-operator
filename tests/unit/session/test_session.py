@@ -2396,3 +2396,134 @@ def test_paired_prefix_is_not_defeated_by_a_custom_message_in_the_tail():
         incident,
         incident,
     ]
+
+
+class TestASwitchedModelTakesEffectAtTheNextCall:
+    """``set_model`` reaches the RUNNING turn's next provider call.
+
+    The session's spec used to be snapshotted into ``LoopConfig`` once per
+    turn, so a ``/model`` switch made while the agent was working could not
+    reach any of that turn's remaining calls: the status band repainted, and
+    every remaining call still went to the old model. A user only reaches for
+    ``/model`` mid-turn because the running model is doing badly, so "it
+    applies on your next message" was the wrong boundary.
+    """
+
+    OTHER = ModelSpec(provider="test", model_id="other", context_window=100_000)
+
+    @staticmethod
+    def _labels(stream: ScriptedStream) -> list[str]:
+        return [f"{r.model.provider}/{r.model.model_id}" for r in stream.requests]
+
+    @staticmethod
+    def _tool_then_text() -> ScriptedStream:
+        return ScriptedStream(
+            [
+                [
+                    StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_switch_during_a_tool_reaches_the_next_call(self, tmp_path):
+        holder: dict[str, Session] = {}
+        stream = self._tool_then_text()
+
+        async def execute(tool_call_id, args, signal, on_update, context):
+            holder["session"].set_model(self.OTHER)
+            return ToolResult(
+                tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
+            )
+
+        tool = AgentTool(name="echo", parameters={"type": "object"}, execute=execute)
+        session = make_session(tmp_path, stream, tools=[tool])
+        holder["session"] = session
+        try:
+            await session.prompt("go")
+        finally:
+            await session.dispose()
+
+        assert self._labels(stream) == ["test/m", "test/other"]
+
+    @pytest.mark.asyncio
+    async def test_a_switch_mid_stream_never_re_targets_the_call_in_flight(self, tmp_path):
+        """The boundary is BETWEEN calls: one response is never split in two.
+
+        Without this, "read the model later" would be free to mean "read it
+        while a stream is already producing tokens", which would attribute a
+        half-finished response to a model that never produced it.
+        """
+        holder: dict[str, Session] = {}
+        seen: list[str] = []
+
+        class SwitchingStream:
+            def __call__(self, request, signal):
+                seen.append(f"{request.model.provider}/{request.model.model_id}")
+
+                async def gen():
+                    yield StreamTextDelta(delta="a")
+                    holder["session"].set_model(TestASwitchedModelTakesEffectAtTheNextCall.OTHER)
+                    yield StreamTextDelta(delta="b")
+                    yield StreamEndEvent(stop_reason="stop")
+
+                return gen()
+
+        session = make_session(tmp_path, SwitchingStream())
+        holder["session"] = session
+        try:
+            await session.prompt("go")
+            assert seen == ["test/m"]
+            # ...and the switch is not lost, it simply lands on the next call.
+            await session.prompt("again")
+        finally:
+            await session.dispose()
+
+        assert seen == ["test/m", "test/other"]
+
+    @pytest.mark.asyncio
+    async def test_a_real_switch_invalidates_state_frozen_for_the_old_model(self, tmp_path):
+        """Auto-effort and the quota memo are frozen per message, per MODEL."""
+        stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+        changed: list[ModelSpec] = []
+        stream.on_model_changed = changed.append  # type: ignore[attr-defined]
+        session = make_session(tmp_path, stream)
+        try:
+            session.set_model(self.OTHER)
+        finally:
+            await session.dispose()
+
+        assert [f"{m.provider}/{m.model_id}" for m in changed] == ["test/other"]
+
+    @pytest.mark.asyncio
+    async def test_changing_only_the_effort_does_not_invalidate_anything(self, tmp_path):
+        """``/effort`` and the server's sampling overrides write the spec constantly.
+
+        Treating those as a model change would re-classify effort on every one
+        of them — and re-classification is exactly what freezing exists to
+        prevent within a single user message.
+        """
+        stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+        changed: list[ModelSpec] = []
+        stream.on_model_changed = changed.append  # type: ignore[attr-defined]
+        session = make_session(tmp_path, stream)
+        try:
+            session.set_model(MODEL.model_copy(update={"reasoning_effort": "high"}))
+            session.set_model(MODEL.model_copy(update={"temperature": 0.9}))
+        finally:
+            await session.dispose()
+
+        assert changed == []
+
+    @pytest.mark.asyncio
+    async def test_a_stream_fn_without_the_hook_is_fine(self, tmp_path):
+        """Most stream fns are plain callables; the hook is optional."""
+        stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+        session = make_session(tmp_path, stream)
+        try:
+            session.set_model(self.OTHER)
+            assert session.model_label == "test/other"
+        finally:
+            await session.dispose()

@@ -1272,15 +1272,51 @@ class Session:
         return result
 
     def set_model(self, model: ModelSpec) -> None:
-        """Swap the model spec mid-session.
+        """Swap the model spec, in force from the very next provider call.
 
-        The loop reads ``config.model`` fresh on every turn, so the new spec
-        takes effect from the next turn onward. Hosts use this for per-request
-        overrides that are not part of the agent record — the FastAPI server
-        applies ``ChatRequest.options`` (temperature / top_p) this way, since
-        sampling rides on the spec (see ``model/configure.build_model_spec``).
+        Not "from the next turn": the running turn picks it up too. A turn is a
+        chain of provider calls with tool batches between them, and the loop
+        re-reads this spec at each of them (``LoopConfig.get_model``), so a
+        switch made while the agent is working lands at the next call boundary.
+        Anything already in flight finishes on the spec it was issued with — the
+        switch never splits one response across two models.
+
+        That boundary is the whole point of the feature. A user reaches for
+        ``/model`` mid-turn BECAUSE the running model is doing badly, and the
+        old "next turn" behaviour meant the switch was invisible for the rest of
+        a long tool-using turn: the band said the new model, every remaining
+        call went to the old one.
+
+        Also used for per-request overrides that are not part of the agent
+        record — the FastAPI server applies ``ChatRequest.options``
+        (temperature / top_p) this way, since sampling rides on the spec (see
+        ``model/configure.build_model_spec``).
+
+        Tells the stream fn the model changed, so state frozen per user message
+        against the OLD model — the auto-effort level, the quota preflight's
+        route — is re-fitted to the new one rather than carried across a switch
+        it was never computed for. That hook must be SYNCHRONOUS: this method is
+        sync and would discard a returned coroutine, which is the right contract
+        for what is only a cache re-fit.
         """
+        previous = self._model
         self._model = model
+        if (previous.provider, previous.model_id) == (model.provider, model.model_id):
+            # Same model, different knobs (effort, sampling): nothing routing
+            # or quota related has moved, so leave the frozen per-message state
+            # alone. `/effort` and the server's option overrides take this path
+            # on every call and must not each cost a re-fit.
+            #
+            # `base_url` is deliberately NOT part of the key. It is derived from
+            # the provider definition rather than chosen per call, so it cannot
+            # vary independently of the pair above; and the state this guards is
+            # itself selector-keyed (`SessionStreamFn._primary_selector`), so a
+            # third component here would invalidate more often than the thing
+            # being invalidated can actually change.
+            return
+        notify = getattr(self._stream_fn, "on_model_changed", None)
+        if callable(notify):
+            notify(model)
 
     @property
     def goal(self) -> str:
@@ -1924,6 +1960,10 @@ class Session:
 
             config = LoopConfig(
                 model=self._model,
+                # Re-read per provider call, so a ``set_model`` landing while
+                # this turn is running reaches its NEXT call instead of
+                # waiting for the turn to end (see ``set_model``).
+                get_model=lambda: self._model,
                 convert_to_llm=self._render_history,
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,
