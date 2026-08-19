@@ -205,8 +205,14 @@ def test_diff_counters_never_break_the_single_row() -> None:
 
 
 def _diff_card() -> ToolCard:
-    """A settled write card carrying a rendered unified diff in details."""
-    card = ToolCard("t", "edit", {"path": "notes.md"})
+    """A settled edit card carrying a rendered unified diff in details.
+
+    The args carry ``old_text``/``new_text`` deliberately: the expansion
+    contract is that these do NOT paint — the diff is the whole body.
+    """
+    card = ToolCard(
+        "t", "edit", {"path": "notes.md", "old_text": "old line", "new_text": "new line"}
+    )
     card.mark_done(
         "Edited notes.md: replaced 1 occurrence(s) of old_text.",
         {
@@ -258,7 +264,6 @@ def test_diff_lines_are_tinted_by_hunk_role() -> None:
     minus_style = _style_at(content, "-old line")
     ctx_style = _style_at(content, " a")
     hunk_style = _style_at(content, "@@ -1,4 +1,4 @@")
-    header_style = _style_at(content, "+++")
 
     # Build the expected triplet from the semantic hex (``#rrggbb``).
     def _expect(semantic: str) -> ColorTriplet:
@@ -269,10 +274,64 @@ def test_diff_lines_are_tinted_by_hunk_role() -> None:
     # the same two tints the summary pill uses for +N/-N.
     assert _triplet(plus_style.color) == _expect("success")
     assert _triplet(minus_style.color) == _expect("danger")
-    # Context rides dim; headers/hunks ride muted — neither success nor danger.
+    # Context rides dim; hunk markers ride muted — neither success nor danger.
     assert ctx_style != plus_style and ctx_style != minus_style
     assert hunk_style != plus_style and hunk_style != minus_style
-    assert header_style != plus_style and header_style != minus_style
+
+
+def test_a_settled_edit_expansion_is_the_diff_alone() -> None:
+    """No argument echo, no ``---/+++`` chrome — just the coloured diff.
+
+    Reported from the field: an expanded edit card led with ``path:`` and a
+    flattened ``edits: [{"old_text": "…\\n…"}]`` wall — the same change the
+    diff below it already showed readably — so the record was buried under
+    its own escape sequences. The settled diff branch now paints ONLY the
+    diff, and drops difflib's nameless file headers (the path is on the
+    summary row).
+    """
+    card = _diff_card()
+    card.toggle_expanded()
+    content = card._build_content(80).plain
+    # The diff itself is intact…
+    assert "+new line" in content
+    assert "-old line" in content
+    assert "@@ -1,4 +1,4 @@" in content
+    # …with no argument block above it…
+    assert "old_text:" not in content
+    assert "new_text:" not in content
+    assert "path:" not in content
+    # …and no blank-label file headers.
+    assert "---" not in content
+    assert "+++" not in content
+
+
+def test_a_running_edit_still_shows_its_arguments() -> None:
+    """Diff-only is a SETTLED-state rule; live cards keep the argument block.
+
+    While the call runs there is no diff yet, so the arguments are the only
+    account of what the tool was asked to do — exactly the frame a user
+    opens to answer "what is it editing?".
+    """
+    card = ToolCard("t", "edit", {"path": "notes.md", "old_text": "a", "new_text": "b"})
+    assert card.can_expand() is True
+    card.toggle_expanded()
+    content = card._build_content(80).plain
+    assert "path: notes.md" in content
+    assert "old_text:" in content
+
+
+def test_a_failed_edit_keeps_its_argument_block() -> None:
+    """A failed edit produced no diff; its args are the only record of intent.
+
+    The error ("old_text not found") only makes sense next to the old_text
+    that was searched for, so the diff-only rule must not reach this state.
+    """
+    card = ToolCard("t", "edit", {"path": "notes.md", "old_text": "missing", "new_text": "x"})
+    card.mark_failed("old_text not found", "old_text not found (exact and whitespace-tolerant)")
+    assert card._diff is None
+    card.toggle_expanded()
+    content = card._build_content(80).plain
+    assert "old_text: missing" in content
 
 
 def test_a_tool_without_a_diff_expands_to_its_raw_output() -> None:

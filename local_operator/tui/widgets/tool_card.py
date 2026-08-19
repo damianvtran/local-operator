@@ -1548,19 +1548,33 @@ class ToolCard(TranscriptBlock):
         row = self._build_row(width)
         if not self._expanded:
             return row
-        self._append_input_body(row, width)
         # A RUNNING card has no result to show and must not look like one that
         # came back empty. Its own block states the state and carries whatever
         # has streamed, and it takes precedence over the settled blocks, which
         # are empty at this point anyway.
         if self._state == "running":
+            self._append_input_body(row, width)
             self._append_live_body(row, width)
         elif self._diff:
+            # A settled write/edit expands to its DIFF ALONE. The arguments are
+            # the same change stated twice — `old_text`/`new_text` (or the
+            # whole `content`) escaped into flat `\n`-ridden lines above a
+            # unified diff that already shows every one of those bytes with
+            # markers and colour — and the path is on the summary row. Painting
+            # both buried the readable form under the unreadable one; the diff
+            # is the record, so it is the whole expansion. A FAILED edit takes
+            # the plain-output branch below (no diff was produced) and keeps
+            # its argument block: there the args are the only account of what
+            # was attempted, and the error only makes sense next to them.
             self._append_diff_body(row, width)
         elif self.tool_name.lower() == "web_search" and self._output:
+            self._append_input_body(row, width)
             self._append_search_body(row, width)
         elif self._output:
+            self._append_input_body(row, width)
             self._append_output_body(row, width)
+        else:
+            self._append_input_body(row, width)
         return row
 
     def _append_live_body(self, row: Text, width: int) -> None:
@@ -1722,11 +1736,12 @@ class ToolCard(TranscriptBlock):
         """The write/edit expansion: the unified diff, coloured by hunk line.
 
         ``+`` added in the success green, ``-`` removed in danger, ``@@``
-        hunk markers and ``---/+++`` headers muted, context lines dim — the
-        same ink law as the counters in the summary row, so the pill on the
-        one-line summary and the expanded body tell the same story. Only the
-        leading marker character is coloured here; the text rides the card's
-        default so a coloured line never reads as a wall of tint.
+        hunk markers muted, context lines dim — the same ink law as the
+        counters in the summary row, so the pill on the one-line summary and
+        the expanded body tell the same story. Only the leading marker
+        character is coloured here; the text rides the card's default so a
+        coloured line never reads as a wall of tint. The nameless ``---/+++``
+        file headers are filtered out below rather than tinted.
         """
         success = Style(color=theme_mod.semantic_color("success"))
         danger = Style(color=theme_mod.semantic_color("danger"))
@@ -1734,12 +1749,22 @@ class ToolCard(TranscriptBlock):
         dim = Style(color=theme_mod.semantic_color("dim"))
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
-        diff = self._diff or []
+        # The `---`/`+++` file headers are dropped: the tool diffs one file's
+        # before/after in memory, so difflib emits them NAMELESS (`--- ` /
+        # `+++ `) and the path already heads the summary row. Two blank-label
+        # rows above every diff were pure chrome. Bound to exactly the headers
+        # difflib produces — a `-`/`+` content line can never start `--- `/
+        # `+++ ` here because content rows carry a single marker cell.
+        diff = [
+            line
+            for line in (self._diff or [])
+            if not (line.startswith("--- ") or line.startswith("+++ ") or line in ("---", "+++"))
+        ]
         shown = diff[:EXPAND_MAX_LINES]
         for raw in shown:
             line = raw.rstrip()
             prefix = line[:1] if line else ""
-            if line.startswith("---") or line.startswith("+++") or prefix == "@":
+            if prefix == "@":
                 ink = muted
             elif prefix == "+":
                 ink = success
