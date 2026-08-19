@@ -437,6 +437,10 @@ def test_a_hollow_run_leaves_nothing_behind_once_it_is_past_the_grace_period(tmp
 def test_a_released_claim_reads_as_unclaimed_on_every_platform(tmp_path, monkeypatch):
     """Release must stop protecting the directory even where the pid probe is
     unavailable, since there nothing else can disprove a stale claim."""
+    # BOTH names, always: ``_LIVENESS_IS_VERIFIABLE`` is derived from
+    # ``_PLATFORM`` at import, so patching one alone builds a combination the
+    # real code never reaches and quietly stops testing the platform it names.
+    monkeypatch.setattr("local_operator.session.retention._PLATFORM", "win32")
     monkeypatch.setattr("local_operator.session.retention._LIVENESS_IS_VERIFIABLE", False)
 
     sessions = tmp_path / "sessions"

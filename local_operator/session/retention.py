@@ -26,10 +26,10 @@ ceilings, and the store's true size is the bounded dead history plus whatever
 the live sessions are holding. That residue is unbounded in principle (N
 concurrent sessions against append-only transcripts) and small in practice (a
 heavy 60-turn day is ~80 KB), but it is real: it is why
-:func:`sweep_sessions` logs when the store as a whole sits meaningfully over
-the byte ceiling rather than letting the overshoot pass silently, and why
-``SweepResult`` reports live bytes separately instead of folding them into a
-figure that reads as "what is on disk".
+:func:`sweep_sessions` logs when live sessions hold a large share of the byte
+ceiling rather than letting that pass silently, and why ``SweepResult`` reports
+live bytes separately instead of folding them into a figure that reads as
+"what is on disk".
 
 "Live" means *every* running session, not just the one doing the sweeping.
 The sweep runs at startup, and the ``live_dir`` the starting session knows
@@ -565,11 +565,12 @@ def sweep_sessions(
     if max_bytes > 0 and live_bytes > max_bytes * LIVE_BYTES_WARN_SHARE:
         logger.warning(
             "session retention: live sessions hold %.1f MB of the %.1f MB ceiling and are "
-            "exempt from eviction (%.1f MB on disk in total); the ceiling cannot bring the "
-            "store back under budget while they are running",
+            "exempt from eviction (%.1f MB on disk in total), so only %.1f MB is left for "
+            "history the sweep can actually reclaim",
             live_bytes / 1024 / 1024,
             max_bytes / 1024 / 1024,
             result.bytes_on_disk / 1024 / 1024,
+            max(max_bytes - live_bytes, 0) / 1024 / 1024,
         )
     # The other way the ceiling can fail to hold, and the one with a cause the
     # operator can act on: the sweep SELECTED directories and could not delete
@@ -578,9 +579,13 @@ def sweep_sessions(
     # trade, and at warning level because ``errors`` alone is a count nobody
     # reads — the bytes are what say the store is not shrinking.
     if stranded > 0:
+        # Phrased without reference to a ceiling: this fires whichever ceiling
+        # selected the directory, and the byte ceiling in particular may be
+        # switched off entirely. What is true in every case is that the sweep
+        # meant to reclaim these bytes and could not.
         logger.warning(
-            "session retention: could not delete %d session %s holding %.1f MB; the store "
-            "cannot be brought under its ceiling until that is resolved",
+            "session retention: could not delete %d session %s holding %.1f MB; that space "
+            "stays occupied until the cause is resolved (see debug logs for each path)",
             errors,
             "directory" if errors == 1 else "directories",
             stranded / 1024 / 1024,
