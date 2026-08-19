@@ -1501,6 +1501,7 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
     reach it: with one slot there is nothing to suspend on before it.
     """
     started = asyncio.Event()
+    parked = asyncio.Event()
 
     async def never_parks(tool_call_id, args, signal, on_update, context) -> ToolResult:
         started.set()
@@ -1516,7 +1517,13 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
             # Settles just past the drain budget: the batch has given up
             # waiting, so this lands while the backfill is mid-emit.
             with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 0.3)
+                # Parks just past the drain budget, and the CONSUMER below is
+                # slow enough that the batch is still emitting when it lands.
+                # Both halves matter: overshoot too far and the tool parks after
+                # the batch has settled entirely, which is a different (and
+                # untestable-from-here) shape that made this assertion flaky.
+                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 0.15)
+            parked.set()
             raise
         return ToolResult(
             tool_call_id=tool_call_id, tool_name="slow", content=[TextContent(text="late")]
@@ -1566,6 +1573,10 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
     await asyncio.wait_for(started.wait(), timeout=5)
     signal.abort("interrupted")
     await asyncio.wait_for(task, timeout=ABORT_DRAIN_TIMEOUT_S + 15)
+    # The scenario only exists once the slow tool has actually parked. Without
+    # this the assertion sometimes ran against a turn that ended BEFORE the
+    # cleanup finished — a different shape, and the source of a ~1-in-8 flake.
+    await asyncio.wait_for(parked.wait(), timeout=5)
 
     started_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)]
     ended_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionEndEvent)]

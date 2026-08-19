@@ -1056,19 +1056,6 @@ class AgentLoop:
         # tell an abort apart from a steering interrupt and label their
         # synthetic results correctly.
         aborting = False
-        # Slots whose ToolExecutionEndEvent has been emitted or queued. Keyed by
-        # SLOT, not call id, because ids collide within a batch — the same
-        # reason `results_by_slot` is. Read by the completeness sweep after the
-        # flush, which is what makes "every started call gets exactly one end"
-        # a guarantee rather than the outcome of a race.
-        announced: set[int] = set()
-        # call id -> the slots carrying it. A model can emit two calls with one
-        # id, so this is a one-to-many map; marking every slot for an id is safe
-        # because the duplicate slot is a planning failure that never starts and
-        # is skipped by the sweep on its own merits.
-        slot_of_call: dict[str, set[int]] = {}
-        for _slot, _item in enumerate(batch):
-            slot_of_call.setdefault(_item.call.id, set()).add(_slot)
 
         def park(slot: int, item: _PlannedCall, result: ToolResult) -> None:
             results_by_slot[slot] = result
@@ -1321,14 +1308,6 @@ class AgentLoop:
                         # A per-tool receipt, or the abort watcher's nudge.
                         # Neither is an event a consumer should see.
                         continue
-                    if isinstance(event, ToolExecutionEndEvent):
-                        # EMITTED, so the completeness sweep must not add a
-                        # second one. Marked here rather than where the event is
-                        # queued: queuing is not delivering, and a slot whose
-                        # end is still sitting unread in the queue when the
-                        # batch settles is exactly the case the sweep exists to
-                        # repair.
-                        announced.update(slot_of_call.get(event.tool_call_id, ()))
                     yield event
 
             # Backfill any slot whose runner was cancelled before it could park
@@ -1391,7 +1370,6 @@ class AgentLoop:
                         # start event, so an end event for it would be the
                         # mirror image of this bug.
                         claimed[item.call.id] += 1
-                        announced.add(slot)
                         pending_ends.append(
                             ToolExecutionEndEvent(
                                 tool_call_id=item.call.id,
@@ -1408,6 +1386,18 @@ class AgentLoop:
             # event is simply dropped, leaving a start with no end. That is the
             # half of R3-1 a snapshot alone does not fix: the loss happens
             # BEFORE the backfill runs, not during its emit.
+            #
+            # ONE BOUNDARY REMAINS, and it is inherent rather than unfixed: a
+            # cleanup that outruns the whole TURN, not just the drain budget,
+            # settles after this generator has closed. There is no longer a
+            # stream to emit into, so that call keeps its start and gets no end.
+            # Measured as intermittent at the very edge (a ~2.5s cleanup against
+            # a ~0.5s-per-event consumer) and unreachable below it. Closing it
+            # would mean holding the turn open for the cleanup, which is exactly
+            # what ABORT_DRAIN_TIMEOUT_S exists to refuse — the user pressed Esc
+            # and is owed their prompt back. A consumer that must reconcile such
+            # a record should do it at the turn boundary, as the TUI does when
+            # it retires orphaned cards.
             #
             # `claimed` is DEFENCE IN DEPTH, not a live guard. It was
             # load-bearing when the two halves could collide; the source-side
@@ -1432,38 +1422,7 @@ class AgentLoop:
                     claimed, queued.tool_call_id
                 ):
                     continue
-                if isinstance(queued, ToolExecutionEndEvent):
-                    announced.update(slot_of_call.get(queued.tool_call_id, ()))
                 yield queued
-
-            # FINALLY, guarantee an end for every call that started, by slot.
-            # Neither half above can promise that on its own: a runner racing
-            # the drain's deadline may fill its slot and queue its end AFTER the
-            # flush has emptied the queue, so the backfill skips the slot (it is
-            # no longer `None`) and the flush never sees the event. The result
-            # is on the wire and the end is nowhere — a start with no end, which
-            # is the whole defect this code exists to prevent, surviving as a
-            # ~1-in-8 race rather than a certainty.
-            #
-            # Closed by asking the question that actually matters — "does this
-            # started call have an end yet?" — instead of trusting a queue drain
-            # to have won a race. `announced` tracks by SLOT because ids collide
-            # within a batch, the same reason `results_by_slot` does.
-            for slot, item in enumerate(batch):
-                if slot in announced or item.failure is not None or item.tool is None:
-                    continue
-                result = results_by_slot[slot]
-                if result is None:
-                    continue
-                announced.add(slot)
-                pending_ends.append(
-                    ToolExecutionEndEvent(
-                        tool_call_id=item.call.id,
-                        tool_name=item.tool.name,
-                        result=result,
-                        is_error=result.is_error,
-                    )
-                )
 
             results.extend(result for result in results_by_slot if result is not None)
             for end_event in pending_ends:

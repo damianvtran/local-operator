@@ -414,6 +414,32 @@ def test_an_error_notice_is_marked_by_a_glyph_not_only_by_colour() -> None:
     assert lines[2] == "compacted"
 
 
+def test_a_notice_cannot_smuggle_control_sequences_to_the_terminal() -> None:
+    """Round 7, R7-1. Notice text is no longer only ours.
+
+    The unrunnable-call diagnostic carries a MODEL-CHOSEN tool name, so an
+    erase-display escape inside it reaches a real terminal and clears the
+    operator's screen. The `✗ <name> failed` line this diagnostic replaced was
+    stripped for exactly that reason; moving the message onto a notice moved it
+    off the guard.
+
+    Asserted on the RENDERER rather than the producer, because that is where
+    the guard now lives: the next notice to carry untrusted text should not
+    have to remember to sanitize itself.
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, no_color=True, highlight=False, width=100)
+    renderer = PrintRenderer(json_mode=False, console=console)
+
+    renderer.handle(NoticeEvent(text="Tool not found: ru\x1b[2Jn", kind="error"))
+
+    out = buffer.getvalue()
+    assert "\x1b" not in out, f"a control sequence reached the terminal: {out!r}"
+    assert "2J" not in out, f"an erase-display escape survived stripping: {out!r}"
+    # The message itself still arrives, with its severity marker.
+    assert out.startswith("✗ Tool not found: ")
+
+
 def test_renderer_tracks_failure() -> None:
     renderer = PrintRenderer(json_mode=False)
     renderer.handle(AgentEndEvent(error="boom"))
