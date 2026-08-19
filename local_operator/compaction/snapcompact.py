@@ -187,7 +187,7 @@ def frame_token_estimate_for(provider: str, model_id: str) -> int:
 
     - Anthropic: ceil(edge/28)² 28px patches, capped at 4,784 patches, +5%
       margin (1568px → 3,293; 1932px → 5,000 — 69² = 4,761 patches, under
-      the cap; the cap binds only for frames past ~1,937px).
+      the cap; the cap binds from 1,933px, where ceil(edge/28) reaches 70).
     - Google: flat 1,120 tokens per image (``media_resolution`` HIGH),
       regardless of pixel size.
     - OpenAI: ceil(edge/32)² 32px patches × 1.2 flagship multiplier, capped
@@ -630,35 +630,34 @@ def compact_to_archive(
         dropped = pages[: len(pages) - max_frames]
         truncated_chars = sum(len(p) for p in dropped)
         pages = pages[len(pages) - max_frames :]
-        text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
 
     # Token budget: drop oldest middle pages until the replayed archive fits a
     # reserve-adjusted share of the window. Frames are priced with the actual
     # provider's billing (frame_token_estimate_for), not the cross-provider
     # ceiling — the ceiling made a Gemini archive look 4.5x its billed size
     # and dropped history the window could afford. The text edges are
-    # tokenized ONCE outside the loop: they are fixed-size (the truncation
-    # marker aside), and the previous per-iteration re-estimate tokenized
-    # ~126k chars of unchanged text each round through tiktoken.
+    # tokenized ONCE outside the loop: they are fixed-size, and the previous
+    # per-iteration re-estimate tokenized ~126k chars of unchanged text each
+    # round through tiktoken.
     per_frame = frame_token_estimate_for(provider, model_id)
     if pages and context_window and context_window > 0:
         budget = max(per_frame, int(context_window * 0.5))
         edge_tokens = estimate_archive_tokens(
             Archive(frames=[], text_head=text_head, text_tail=text_tail)
         )
-        budget_dropped = 0
         while pages and edge_tokens + len(pages) * per_frame > budget:
-            budget_dropped += len(pages[0])
+            truncated_chars += len(pages[0])
             pages = pages[1:]
-        if budget_dropped:
-            # ONE cumulative marker for the whole budget pass, not one per
-            # dropped page: N markers say the same thing N times and each
-            # re-renders into every later archive via Archive.text.
-            truncated_chars += budget_dropped
-            text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
-        # The marker line is a handful of tokens; it is deliberately not
-        # folded back into edge_tokens — the budget is an estimate with a
-        # 2x reserve, not an invoice.
+
+    # ONE cumulative marker for everything both passes dropped, appended
+    # after both have run. One marker per pass double-counted: the budget
+    # pass's cumulative figure already included the frame-cap pass's, so a
+    # reader summing the two markers counted the first drop twice — and each
+    # marker re-renders into every later archive via Archive.text. The
+    # marker's few tokens are deliberately not folded back into edge_tokens;
+    # the budget is an estimate with a 2x reserve, not an invoice.
+    if truncated_chars:
+        text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
 
     frames = [render_frame(page, shape) for page in pages]
     # Pages carry no trailing newline; joining without one glues the last

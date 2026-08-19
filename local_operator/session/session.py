@@ -709,7 +709,14 @@ def _render_compaction_marker(marker: CustomMessage, entry_id: str | None = None
         edges = [edge for edge in (head, tail) if isinstance(edge, str) and edge.strip()]
         if edges:
             joined = "\n[...]\n".join(edges)
-            salvage = f"\n<archived-transcript-edges>\n{joined}\n</archived-transcript-edges>"
+            # The summary above may describe pixel-font frames; none are in
+            # this message, and a caption describing absent images is a claim
+            # the model would waste attention reconciling. Say so explicitly.
+            salvage = (
+                "\n[note: the archive's image frames could not be replayed here; "
+                "the plain-text edges below are what survives]"
+                f"\n<archived-transcript-edges>\n{joined}\n</archived-transcript-edges>"
+            )
     return _replayed_user_message(
         [
             TextContent(
