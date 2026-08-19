@@ -815,3 +815,54 @@ async def test_an_interrupt_mid_paste_still_lets_the_receipt_be_corrected(
         app._settle_key_prompt()
         await pilot.pause()
         assert app._last_login_prompt is None
+
+
+@pytest.mark.asyncio
+async def test_a_completed_login_stops_holding_the_pasted_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 6, Z12: the success path kept the credential reachable.
+
+    The block that retains a correction target still holds the pasted secret —
+    `resolve` drops `_typed`, but it also resolves the future, and a future
+    keeps its result for as long as the block holds it. So the retained
+    reference is a credential lifetime, not merely memory.
+
+    On a login that SUCCEEDS, `_request_login_key`'s `finally` has already
+    cleared `_key_prompt`, so a release nested behind "is a prompt live?" never
+    ran and the key survived `/clear` and unmount — reopening the retention
+    finding a previous round landed. The distinguishing signal is that
+    `_key_prompt` is still set during the narrow window a correction can be
+    owed, and cleared once the login is over.
+    """
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: True)
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(_LoginSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        block = KeyPromptBlock("Alibaba Cloud")
+        app._key_prompt = block
+        app._last_login_prompt = block
+        app._append_block(block)
+        await pilot.pause()
+        block.resolve("sk-real-key")
+        await pilot.pause()
+        # What `_request_login_key`'s `finally` does once the value is returned.
+        app._key_prompt = None
+
+        app._settle_key_prompt()  # reached by /clear, reload and unmount
+        await pilot.pause()
+
+        assert app._last_login_prompt is None, (
+            "a completed login left the pasted key reachable through the block"
+        )
+        # The value is the thing that must become unreachable, not just the
+        # attribute — assert on the credential itself.
+        assert block.wait().result() == "sk-real-key"  # the block still has it...
+        held = [
+            b
+            for b in (app._last_login_prompt,)
+            if b is not None and b.wait().done() and b.wait().result() == "sk-real-key"
+        ]
+        assert held == [], "the app still reaches a block holding the pasted key"

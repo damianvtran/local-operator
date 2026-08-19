@@ -3576,22 +3576,32 @@ class OperatorApp(App[None]):
         """
         block = self._key_prompt
         self._key_prompt = None
+
+        # Released unless a correction could still be owed, which is true only
+        # while the flow has not yet ruled on a value that was handed over.
+        # Deliberately OUTSIDE the `block is not None` check below: on the
+        # ordinary success path `_request_login_key`'s `finally` has already
+        # cleared `_key_prompt`, so a check nested in there would never run and
+        # the reference would survive every teardown.
+        #
+        # The retained block still holds the pasted secret. `resolve` drops
+        # `_typed` and keeps only `_submitted_length`, but it also resolves the
+        # future, and a future retains its result for as long as the block holds
+        # it -- so this reference is a credential lifetime, not just memory, and
+        # bounding it is the whole point of the retention fix.
+        #
+        # The window it still has to protect is narrow and real: between a paste
+        # being handed over (the block settles, its receipt provisionally reads
+        # "code received") and the flow resuming to parse it, an interrupt can
+        # reach this method. Releasing the reference there left the rejection
+        # nothing to correct and stranded a false success receipt -- design
+        # round 1's D1(b). `_key_prompt` is still set in exactly that window,
+        # which is what distinguishes it from the completed login.
+        pending = self._last_login_prompt
+        if pending is not None and not (block is pending and pending.submitted_length is not None):
+            self._last_login_prompt = None
+
         if block is not None:
-            # Dropped only when this call actually CANCELS a live prompt, so the
-            # reference does not outlive the paths that clear the transcript.
-            #
-            # Keyed on "was it still awaiting an answer?" rather than on the
-            # reference being set, because of the window between a paste being
-            # handed over and the flow resuming to parse it: in there the block
-            # is already settled (its receipt provisionally reads "code
-            # received") while this method can still be reached by an interrupt.
-            # Clearing unconditionally meant the rejection that followed found
-            # nothing to correct and the false success receipt stayed on screen
-            # -- the defect design round 1 filed as D1(b). An already-settled
-            # block may still be owed its correction; a live one never is,
-            # because no value was ever handed over.
-            if not block.answered:
-                self._last_login_prompt = None
             try:
                 block.resolve(None)
             except Exception:  # pragma: no cover - teardown races only

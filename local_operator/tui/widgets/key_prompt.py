@@ -227,6 +227,17 @@ class KeyPromptBlock(TranscriptBlock):
         return self._settled
 
     @property
+    def submitted_length(self) -> int | None:
+        """How many characters were handed over, or None when nothing was.
+
+        The question "could this prompt still be owed a correction?" — only a
+        block that produced a value can be, since :meth:`mark_unusable` is a
+        no-op otherwise. Exposed so the app can ask it without reaching into
+        the private field, and never exposes the value itself.
+        """
+        return self._submitted_length
+
+    @property
     def typed_length(self) -> int:
         """How many characters are held. The value itself is never exposed:
         tests and the renderer both need the length and neither needs the key."""
