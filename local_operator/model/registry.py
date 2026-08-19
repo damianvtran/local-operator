@@ -1598,11 +1598,12 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
         #
         # Deliberately NOT suffixed "(Token Plan)" like the two rows below, even
         # though `deepseek/deepseek-v4-flash-0731` also ships. The suffix exists
-        # to break a collision between two IDENTICAL curated names, and there is
-        # none here: the direct row is "DeepSeek V4 Flash (2026-07-31)". Adding
-        # a suffix would in fact make the label WORSE — `_drop_qualifier` would
-        # strip it, the bare form would then collide with the direct row, and
-        # the compact rung would fall back to the bare id.
+        # only to break a collision between two IDENTICAL curated names, and
+        # there is none here — the direct row is "DeepSeek V4 Flash (2026-07-31)"
+        # — so adding one would be ceremony rather than a fix. It would not be
+        # harmful either: verified against `naming.py`, a suffixed spelling
+        # strips to "DeepSeek V4 Flash 0731" where the direct row strips to
+        # "DeepSeek V4 Flash", so the two stay distinct in both label forms.
         name="DeepSeek V4 Flash 0731",
         max_tokens=393_216,
         context_window=1_000_000,

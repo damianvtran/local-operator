@@ -209,8 +209,9 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
     }
     # Same snapshot, same date: listed by the gateway but NOT chat models — they
     # return no chat payload (the image/TTS entries) or reject the route
-    # outright (the realtime one). Asserted against the map too, so an id that
-    # migrates between these two sets cannot be added twice or silently ignored.
+    # outright (the realtime one). Kept as a named set because it is the half of
+    # the listing this map deliberately omits, and a reader checking the map
+    # against the gateway needs to see that the omission was a decision.
     gateway_non_chat_models = {
         "wan2.7-image",
         "wan2.7-image-pro",
@@ -218,10 +219,24 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
         "qwen-audio-3.0-realtime-plus",
     }
     assert set(qwencloud_token_plan_models) == gateway_chat_models
+    # The two sets partition the listing. This is the only non-redundant claim
+    # left once the map is pinned above: it says the snapshot itself is
+    # coherent, so an id moved from one literal to the other without being
+    # removed from the first fails here rather than quietly widening the map.
     assert gateway_chat_models.isdisjoint(gateway_non_chat_models)
-    # The non-chat ids must not acquire rows: a window on a model that returns
-    # no chat payload would offer it in the picker as though it were selectable.
-    assert gateway_non_chat_models.isdisjoint(set(qwencloud_token_plan_models))
+    assert gateway_chat_models | gateway_non_chat_models == {
+        "qwen3.8-max",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-flash",
+        "glm-5.2",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash-0731",
+        "wan2.7-image",
+        "wan2.7-image-pro",
+        "qwen-audio-3.0-tts-plus",
+        "qwen-audio-3.0-realtime-plus",
+    }
 
 
 def test_token_plan_ships_no_row_the_gateway_serves_under_another_id() -> None:
