@@ -2527,6 +2527,8 @@ class TestASwitchedModelTakesEffectAtTheNextCall:
             assert session.model_label == "test/other"
         finally:
             await session.dispose()
+
+
 # ---------------------------------------------------------------------------
 # cancel_subagents: the second Esc press
 # ---------------------------------------------------------------------------

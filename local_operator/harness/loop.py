@@ -580,6 +580,7 @@ class AgentLoop:
         # A resolver returning None is the declared "host has nothing better to
         # say" case (see the field), handled the same as having no resolver.
         return live if live is not None else config.model
+
     # (``_abortable_stream`` is a module-level helper; see below the class.)
 
     async def _model_turn(

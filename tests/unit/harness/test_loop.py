@@ -1022,6 +1022,8 @@ class TestTheModelIsReadAtEveryCall:
             pass
 
         assert self._labels(stream) == ["test/m", "test/m"]
+
+
 # ---------------------------------------------------------------------------
 # Immediate abort: Esc must halt the turn NOW, not at the next natural boundary
 # ---------------------------------------------------------------------------
