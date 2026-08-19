@@ -13,7 +13,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from local_operator.harness.types import Message, TextContent
+from local_operator.harness.types import Message, MessageRole, TextContent
 from local_operator.session.search_index import (
     DIGEST_CHARS,
     INDEX_VERSION,
@@ -25,7 +25,7 @@ from local_operator.session.search_index import (
 from local_operator.session.transcript import Transcript
 
 
-def _write(session_dir: Path, *turns: tuple[str, str]) -> None:
+def _write(session_dir: Path, *turns: tuple[MessageRole, str]) -> None:
     """Build a real transcript through the real writer, not a hand-rolled file.
 
     Going through ``Transcript`` is deliberate: the index parses what the
