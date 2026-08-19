@@ -375,8 +375,13 @@ class OAuthCallbackFlow(ABC):
                         await self._respond(writer, 200, body)
                     else:
                         self._finish(code, state)
+                        # "Authorization complete", not "Signed in": this page is
+                        # served on CODE receipt, before the token exchange, and
+                        # its own detail line says the sign-in is still finishing.
+                        # Matches the register of the MCP surface's "Authorized"
+                        # (D1, PR #177 design round 1).
                         body = self._page(
-                            "Signed in",
+                            "Authorization complete",
                             "Local Operator has the authorization code and is "
                             "finishing the sign-in.",
                             tone="success",
@@ -411,6 +416,7 @@ class OAuthCallbackFlow(ABC):
                     "There is no sign-in waiting on this address. Start the "
                     "login again from Local Operator.",
                     closable=False,
+                    show_provider=False,
                 )
                 await self._respond(writer, 404, body)
         else:
@@ -420,6 +426,7 @@ class OAuthCallbackFlow(ABC):
                 "Nothing here",
                 "This address only answers the login redirect.",
                 closable=False,
+                show_provider=False,
             )
             await self._respond(writer, 404, body)
         try:
@@ -436,6 +443,7 @@ class OAuthCallbackFlow(ABC):
         tone: Tone = "neutral",
         provider_message: str | None = None,
         closable: bool = True,
+        show_provider: bool = True,
     ) -> bytes:
         """One outcome of this login, as the shared Local Operator page.
 
@@ -443,13 +451,17 @@ class OAuthCallbackFlow(ABC):
         user who authorizes a provider and an MCP server sees one product on
         both landings instead of a styled card on one and bare ``<h1>`` HTML
         on the other. The provider's display name rides along when the flow
-        knows it.
+        knows it — but only on real outcome pages. ``show_provider=False`` is
+        for the neutral 404s (a speculative favicon fetch, ``/launch`` with
+        nothing pending): a non-event given the outcome grammar of a labelled
+        provider trough would read as if something happened with that provider
+        (F2/D2, PR #177 round 1).
         """
         return render_callback_page(
             title,
             detail,
             tone=tone,
-            provider=self.options.provider_label,
+            provider=self.options.provider_label if show_provider else None,
             provider_message=provider_message,
             closable=closable,
         ).encode()

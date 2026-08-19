@@ -460,13 +460,17 @@ async def test_openai_exchange_omits_state() -> None:
 async def test_callback_pages_are_the_shared_branded_document() -> None:
     """The browser lands on the same Local Operator page the MCP flow serves.
 
-    Not a styling snapshot — what is pinned is that every outcome of the
-    loopback listener answers with the shared ``callback_page`` document
-    (identity mark + outcome heading), that the provider's display name rides
-    in its labelled trough, and that a provider error's own words land in the
-    data trough rather than in our sentence. A regression to the old bare
-    ``<h1>Login complete</h1>`` bodies passes every flow-mechanics test in
-    this file, which is exactly why these assertions exist.
+    Not a styling snapshot — what is pinned is that the listener's outcomes
+    answer with the shared ``callback_page`` document (identity mark + outcome
+    heading) and that the provider's display name rides in its labelled trough
+    on real outcomes only. This test covers success, state mismatch, code-less
+    redirect, and the favicon 404; the provider-denial trough is pinned in
+    ``test_provider_denial_lands_in_the_data_trough`` and the ``/launch``
+    no-pending 404 in
+    ``test_launch_with_no_pending_login_serves_the_branded_404``. A regression
+    to the old bare ``<h1>Login complete</h1>`` bodies passes every
+    flow-mechanics test in this file, which is exactly why these assertions
+    exist.
     """
     pages: dict[str, httpx.Response] = {}
 
@@ -486,6 +490,9 @@ async def test_callback_pages_are_the_shared_branded_document() -> None:
         async with httpx.AsyncClient() as client:
             # A speculative browser fetch is not an outcome and must not be.
             pages["favicon"] = await client.get(f"{base}/favicon.ico")
+            # /launch after run() has generated the auth URL redirects; the
+            # no-pending branch needs a flow that has not generated one, which
+            # drive_no_pending below covers.
             # The real redirect completes the flow.
             pages["success"] = await client.get(
                 f"{base}/callback",
@@ -509,11 +516,31 @@ async def test_callback_pages_are_the_shared_branded_document() -> None:
         with pytest.raises(LoginError, match="state mismatch"):
             await task
 
+    async def drive_no_code() -> None:
+        flow = _EchoFlow(
+            CallbackFlowOptions(preferred_port=0, provider_label="Anthropic"),
+            LoginCallbacks(),
+        )
+        task = asyncio.create_task(flow.run())
+        for _ in range(400):
+            if flow.bound_port is not None and flow.generated:
+                break
+            await asyncio.sleep(0.01)
+        async with httpx.AsyncClient() as client:
+            pages["no_code"] = await client.get(
+                f"http://127.0.0.1:{flow.bound_port}/callback", params={}
+            )
+        with pytest.raises(LoginError, match="neither a code nor an error"):
+            await task
+
     await asyncio.wait_for(drive_success(), timeout=10)
     await asyncio.wait_for(drive_mismatch(), timeout=10)
+    await asyncio.wait_for(drive_no_code(), timeout=10)
 
     success = pages["success"].text
-    assert "<h1>Signed in</h1>" in success
+    # "Authorization complete", not "Signed in": served on code receipt,
+    # before the token exchange (D1, PR #177 design round 1).
+    assert "<h1>Authorization complete</h1>" in success
     assert 'class="mark"' in success  # the shared branded document, not bare HTML
     assert 'class="label">Provider<' in success
     assert 'class="trough">Anthropic<' in success
@@ -523,9 +550,41 @@ async def test_callback_pages_are_the_shared_branded_document() -> None:
     assert "<h1>Sign-in failed</h1>" in mismatch
     assert 'class="mark"' in mismatch
 
+    no_code = pages["no_code"].text
+    assert "<h1>No authorization code</h1>" in no_code
+    assert 'class="mark"' in no_code
+
     favicon = pages["favicon"]
     assert favicon.status_code == 404
     assert "<h1>Nothing here</h1>" in favicon.text
+    # A non-event carries no provider trough: a speculative fetch given the
+    # outcome grammar would read as if something happened with that provider
+    # (F2/D2, PR #177 round 1).
+    assert 'class="label">Provider<' not in favicon.text
+
+
+async def test_launch_with_no_pending_login_serves_the_branded_404() -> None:
+    """/launch before an auth URL exists is a dead end, and it must say so in
+    the same branded document as every other page — without the provider
+    trough, because nothing happened with the provider (F1/F2, PR #177).
+
+    The window where the server is up but no auth URL is pending cannot be
+    reached through run() (it generates the URL immediately after binding), so
+    the server is started directly, the way run() starts it.
+    """
+    flow = _EchoFlow(
+        CallbackFlowOptions(preferred_port=0, provider_label="Anthropic"), LoginCallbacks()
+    )
+    await flow._start_server()
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://127.0.0.1:{flow.bound_port}/launch")
+        assert response.status_code == 404
+        assert "<h1>No login in progress</h1>" in response.text
+        assert 'class="mark"' in response.text
+        assert 'class="label">Provider<' not in response.text
+    finally:
+        await flow._stop_server()
 
 
 async def test_provider_denial_lands_in_the_data_trough() -> None:
