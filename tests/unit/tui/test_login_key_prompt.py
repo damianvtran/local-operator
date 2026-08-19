@@ -798,9 +798,9 @@ async def test_an_interrupt_mid_paste_still_lets_the_receipt_be_corrected(
         app._settle_key_prompt()  # the interrupt
         await pilot.pause()
 
-        assert app._last_login_prompt is settled, (
-            "the reference was dropped while a correction was still owed"
-        )
+        assert (
+            app._last_login_prompt is settled
+        ), "the reference was dropped while a correction was still owed"
         app._last_login_prompt.mark_unusable()
         await pilot.pause()
         assert "not usable" in _rendered(settled)
@@ -854,9 +854,9 @@ async def test_a_completed_login_stops_holding_the_pasted_key(
         app._settle_key_prompt()  # reached by /clear, reload and unmount
         await pilot.pause()
 
-        assert app._last_login_prompt is None, (
-            "a completed login left the pasted key reachable through the block"
-        )
+        assert (
+            app._last_login_prompt is None
+        ), "a completed login left the pasted key reachable through the block"
         # The value is the thing that must become unreachable, not just the
         # attribute — assert on the credential itself.
         assert block.wait().result() == "sk-real-key"  # the block still has it...
