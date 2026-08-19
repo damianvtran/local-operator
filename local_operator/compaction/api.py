@@ -108,6 +108,14 @@ TOOL_RESULT_MAX_CHARS = 2000
 #: Serialized tool-call arguments are truncated to this many characters.
 TOOL_ARGS_MAX_CHARS = 500
 
+#: Cap on the archived-history edges a snapcompact marker serializes into a
+#: text transcript (``_serialize_message``). Generous relative to the other
+#: slots because the edges ARE the content the marker stands for, but bounded
+#: because they can reach ~71k chars each and a direct consumer of
+#: ``serialize_conversation`` must be able to budget its prompt. Tail-biased
+#: on truncation: chaining wants the newest history most.
+ARCHIVE_EDGES_MAX_CHARS = 8000
+
 
 #: Hard cap on a generated summary (``MAX_SUMMARY_TOKENS``). The
 #: complete_fn has no max-tokens knob yet, so the cap is enforced post-hoc:
@@ -212,6 +220,37 @@ def _serialize_message(message: AgentMessage, drop_call_ids: set[str]) -> str | 
     """One transcript block, or None to drop the message entirely."""
     if isinstance(message, CustomMessage):
         if message.custom_type == "compaction_summary":
+            # A snapcompact marker's summary is reading instructions for its
+            # image frames, not a digest — chaining IT into a later text
+            # summarization would replace the archived history with constant
+            # boilerplate. The archive's text edges are the real transcript
+            # (newest and oldest slices), so serialize those instead. The
+            # session's own summarize path never reaches this branch (it
+            # converts markers to rendered content first); this guards direct
+            # consumers of serialize_conversation handed raw transcript
+            # vocabulary.
+            preserve = message.details.get("preserve_data") or {}
+            snap = preserve.get("snapcompact") if isinstance(preserve, dict) else None
+            if isinstance(snap, dict):
+                edges = [
+                    edge
+                    for edge in (snap.get("text_head"), snap.get("text_tail"))
+                    if isinstance(edge, str) and edge.strip()
+                ]
+                if edges:
+                    joined = "\n[...]\n".join(edges)
+                    # Bounded like every other free-text slot here, but far
+                    # more generously (the edges are up to ~71k chars EACH
+                    # under the Gemini shape, and this serializer's other
+                    # slots cap at 2,000): a direct consumer building a
+                    # prompt from a compacted conversation must not inherit
+                    # an unbounded ~36k-token block. Tail-biased, because
+                    # chaining wants the NEWEST history most.
+                    if len(joined) > ARCHIVE_EDGES_MAX_CHARS:
+                        kept = joined[-ARCHIVE_EDGES_MAX_CHARS:]
+                        dropped = len(joined) - ARCHIVE_EDGES_MAX_CHARS
+                        joined = f"[... {dropped} older characters truncated]\n{kept}"
+                    return f"[Previously archived history (edges)]\n{joined}"
             summary = message.details.get("summary", "")
             return f"[Previous compaction summary]\n{summary}"
         return f"[{message.custom_type}]"

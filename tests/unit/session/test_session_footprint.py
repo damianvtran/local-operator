@@ -241,7 +241,14 @@ async def test_real_compaction_then_resume_replays_the_kept_window(tmp_path):
     # DISTINCT paths on purpose: reads of the SAME path are superseded and
     # blanked by the prune pass, which drops the estimate back under the
     # threshold and means the fixture never reaches compaction at all.
-    small_model = ModelSpec(provider="test", model_id="m", context_window=2_000)
+    # Text-only on purpose: this fixture asserts on the LLM-summary path
+    # ("SUMMARY:" below). A vision model would take snapcompact, which makes
+    # no summarization call at all — the kept-window invariant it guards is
+    # strategy-independent, but the routing trick used to feed the summarizer
+    # is not.
+    small_model = ModelSpec(
+        provider="test", model_id="m", context_window=2_000, supports_images=False
+    )
     # The summarization call is routed by REQUEST SHAPE rather than by
     # position in a script: compaction fires whenever the estimate crosses
     # the threshold, which is not a fixed turn index, and a positional script

@@ -376,7 +376,26 @@ def _latest_user_query(transcript: Any) -> str:
         entry_type = getattr(entry, "type", None)
         payload = getattr(entry, "payload", None) or {}
         if not summary and entry_type == "compaction":
-            summary = str(payload.get("summary", "")).strip()
+            # A snapcompact entry's summary is reading instructions for the
+            # archive frames, not conversation content — as a selection query
+            # it is constant boilerplate that would drown the user's actual
+            # words. The archive's text_tail is the newest slice of the real
+            # transcript, so prefer it (bounded: selection wants a signal, not
+            # the whole edge).
+            preserve = payload.get("preserve_data") or {}
+            snap = preserve.get("snapcompact") if isinstance(preserve, dict) else None
+            # Prefer text_tail, then text_head: a small archive stores ALL its
+            # text in text_head with an empty tail, and falling straight
+            # through to the summary there re-created the boilerplate-noise
+            # defect for exactly the sessions with the least other signal.
+            edge = ""
+            if isinstance(snap, dict):
+                for key in ("text_tail", "text_head"):
+                    candidate = snap.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        edge = candidate.strip()[-2000:]
+                        break
+            summary = edge or str(payload.get("summary", "")).strip()
         if not user_text and entry_type == "message" and payload.get("role") == "user":
             content = payload.get("content") or []
             user_text = "".join(
