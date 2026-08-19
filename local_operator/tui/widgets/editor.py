@@ -591,6 +591,16 @@ class Editor(TextArea):
         #: user's copied draft on the widget buys nothing (review round 2, F9).
         #: See :meth:`edit` and :meth:`load_text`.
         self._copied = False
+        #: The GESTURE claim, distinct from the receipt flag above and with a
+        #: different lifetime. `_copied` answers "is the receipt on screen still
+        #: true?", which ends at the first EDIT to the copied text. This answers
+        #: "is a hand still completing a copy?", which ends as soon as the
+        #: highlight the copy took stops being the highlight on screen. Fusing
+        #: them gave one of the two the wrong lifetime in whichever direction
+        #: the fusion leaned (R18-1, agent review round 18).
+        self._copy_gesture = False
+        #: The selection `_copy_drag` took, while `_copy_gesture` holds.
+        self._copied_selection: Selection | None = None
         self.set_commands(commands or [])
 
     def render_line(self, y: int) -> Strip:
@@ -717,6 +727,35 @@ class Editor(TextArea):
         if stripped and self._history and self._history[-1] == stripped:
             self._history.pop()
         self._history_index = None
+
+    def remember_draft(self) -> bool:
+        """Push the CURRENT buffer into prompt history without submitting it.
+
+        For the paths that throw a draft away on the user's behalf — Ctrl+C on
+        a half-typed prompt. Discarding text the user typed should never be
+        final when making it recoverable costs one entry: after this, ``up``
+        brings it straight back.
+
+        History is the right home rather than a bespoke stash because it is
+        already the place a user looks for "what I typed a moment ago", and it
+        already de-duplicates, caps itself at ``HISTORY_LIMIT`` and drops
+        blanks. ``_record_history`` also resets ``_history_index``, so the next
+        ``up`` starts from this entry rather than from wherever an interrupted
+        history walk had got to.
+
+        HONOURS ``_records_history``, and returns whether it recorded. While
+        the aside owns the composer that flag is off, and it is a contract the
+        card states out loud — "off the record — nothing here joins the chat".
+        Recording there would put a question the user explicitly kept out of
+        the conversation one ``up`` and one Enter away from being sent to the
+        agent as a real turn, which is the exact failure
+        :meth:`set_records_history` exists to prevent. The caller uses the
+        return value to decide whether the draft is safe to discard.
+        """
+        if not self._records_history:
+            return False
+        self._record_history(self.text)
+        return True
 
     def set_commands(self, commands: list[SlashCommand]) -> None:
         """Slash commands offered to the picker (sync, no I/O).
@@ -1544,7 +1583,70 @@ class Editor(TextArea):
         if not text:
             return
         self._copied = True
+        self._copy_gesture = True
+        # WHICH range the copy took, so `watch_selection` can tell this copy's
+        # own highlight from any later one and retire the claim when it goes.
+        # Without that distinction a shift+arrow selection made after the copied
+        # range had been collapsed silently re-armed the app's Ctrl+C deferral,
+        # and the next two presses quit with the draft unfiled (D22, design
+        # round 7). `#:` is for attribute declarations, and this is an
+        # assignment in a method body (R17 NIT-1).
+        self._copied_selection = self.selection
         self.post_message(EditorCopied(text))
+
+    @property
+    def copy_in_flight(self) -> bool:
+        """Is a copy gesture still in progress or still visible on screen?
+
+        THE predicate the app's Ctrl+C rung asks, named once here rather than
+        duck-typed from outside. It was previously two `getattr` probes into
+        this class's privates, which a rename would have degraded silently to
+        "no copy in flight" — i.e. to always clearing the draft — with no test
+        failing (R17 MINOR-2). A property breaks loudly instead, and gives the
+        question a name that says what it means.
+
+        Two moments, because a copy spans both: the drag itself, and the window
+        after release in which the highlight it took is still the highlight on
+        screen. `watch_selection` ends the second the moment that stops being
+        true, so neither flag can outlive the gesture the way three earlier
+        predicates did.
+        """
+        return self._selecting or self._copy_gesture
+
+    def watch_selection(self, selection: Selection) -> None:
+        """Retire the copy receipt's GESTURE claim when the highlight changes.
+
+        ``_copied`` is edit-scoped: `edit` and `load_text` clear it, because the
+        receipt on screen is a claim about text the user can still see. But the
+        app's Ctrl+C rung asks a GESTURE-scoped question — "is a hand still
+        completing a copy?" — and an edit-scoped flag answers it wrongly in two
+        directions that each cost a user their draft (D20, then D22).
+
+        Retiring here makes the flag answer both questions with one lifetime:
+        the copy's claim ends when the highlight it took stops being the
+        highlight on screen, whether that is a caret move collapsing it or a new
+        selection replacing it. `_copied_selection` is what makes "the same
+        highlight" checkable rather than merely "a highlight".
+
+        Deliberately NOT posting ``EditorCopyStale``: moving the caret is not
+        the user editing the text their receipt describes, so the toast remains
+        true and stays up. Only ``_copy_gesture`` ends here, and it is a
+        SEPARATE field from ``_copied`` for exactly that reason — pointing the
+        receipt flag at this lifetime left a receipt on screen asserting a copy
+        of characters the user had since deleted, which is design round 1's D3
+        verbatim (R18-1, agent review round 18).
+        """
+        super_watch = getattr(super(), "watch_selection", None)
+        if super_watch is not None:
+            super_watch(selection)
+        # `getattr` with a default because a reactive watcher can fire during
+        # base-class construction, before this subclass has set its own
+        # attributes — an AttributeError there takes the whole widget down.
+        if getattr(self, "_copy_gesture", False) and selection != getattr(
+            self, "_copied_selection", None
+        ):
+            self._copy_gesture = False
+            self._copied_selection = None
 
     # -- paste ----------------------------------------------------------------
     async def _on_paste(self, event: events.Paste) -> None:
@@ -1744,6 +1846,8 @@ class Editor(TextArea):
         result = super().edit(edit)
         if stale_receipt:
             self._copied = False
+            self._copy_gesture = False
+            self._copied_selection = None
             self.post_message(EditorCopyStale())
         self._sync_picker()
         if touched:
@@ -1813,6 +1917,8 @@ class Editor(TextArea):
         up, is about a copy that remains perfectly true.
         """
         self._copied = False
+        self._copy_gesture = False
+        self._copied_selection = None
         super().load_text(text)
         self._sync_picker()
 

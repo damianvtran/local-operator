@@ -4,12 +4,21 @@ interrupts, validation errors back to the model, gates, follow-ups."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import time
+from collections import Counter
 from typing import Any, Literal
 
 import pytest
 
-from local_operator.harness.loop import AgentLoop, LoopContext, validate_tool_arguments
+from local_operator.harness.loop import (
+    ABORT_DRAIN_TIMEOUT_S,
+    AgentLoop,
+    LoopContext,
+    _consume_claim,
+    validate_tool_arguments,
+)
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -21,6 +30,7 @@ from local_operator.harness.types import (
     LoopConfig,
     Message,
     ModelSpec,
+    NoticeEvent,
     StreamEndEvent,
     StreamEvent,
     StreamTextDelta,
@@ -29,6 +39,7 @@ from local_operator.harness.types import (
     ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
     ToolResult,
 )
 from local_operator.providers.failover import ProviderError
@@ -1011,3 +1022,801 @@ class TestTheModelIsReadAtEveryCall:
             pass
 
         assert self._labels(stream) == ["test/m", "test/m"]
+
+
+# ---------------------------------------------------------------------------
+# Immediate abort: Esc must halt the turn NOW, not at the next natural boundary
+# ---------------------------------------------------------------------------
+
+
+def _blocking_tool(
+    name: str,
+    started: asyncio.Event,
+    *,
+    interruptible: bool,
+    outcome: dict[str, str],
+) -> AgentTool:
+    """A tool that parks forever and records how its run ended.
+
+    ``outcome`` is written by the tool itself, so a test can tell "the abort
+    cancelled it" apart from "the tool finished on its own and the loop merely
+    stopped waiting" — a distinction the loop's own events cannot make.
+    """
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            outcome[name] = "cancelled"
+            raise
+        outcome[name] = "completed"
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name=name, content=[TextContent(text="late")]
+        )
+
+    return AgentTool(
+        name=name,
+        parameters={"type": "object", "properties": {}},
+        interruptible=interruptible,
+        execute=execute,
+    )
+
+
+@pytest.mark.parametrize("interruptible", [False, True])
+@pytest.mark.asyncio
+async def test_abort_cancels_a_running_tool_whatever_its_interruptible_flag(interruptible):
+    """Esc stops a tool mid-run even when it never opted into interruption.
+
+    ``interruptible`` means "steering may redirect this", which is a different
+    and weaker permission than "the user may stop this". Before this, a batch
+    of non-interruptible calls ignored the abort completely and the turn ended
+    only when the slowest one finished; the user's stop appeared to do nothing.
+    """
+    started = asyncio.Event()
+    outcome: dict[str, str] = {}
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="block", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(
+        tools=[_blocking_tool("block", started, interruptible=interruptible, outcome=outcome)]
+    )
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    signal.abort("interrupted")
+    # Generous relative to the ~0s the fix achieves, but far below the 30 s the
+    # tool would otherwise run: the assertion is "promptly", not a stopwatch.
+    await asyncio.wait_for(task, timeout=5)
+
+    assert outcome == {"block": "cancelled"}
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is True
+    # Still paired: an abort must not leave a tool_use without its tool_result,
+    # or the next request is rejected outright by the provider.
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert [m.tool_call_id for m in tool_messages] == ["c1"]
+    assert all(m.is_error for m in tool_messages)
+
+
+@pytest.mark.asyncio
+async def test_abort_cancels_every_tool_in_a_parallel_batch():
+    """One press stops the whole batch, not just the call that noticed first."""
+    started_a, started_b = asyncio.Event(), asyncio.Event()
+    outcome: dict[str, str] = {}
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="a", args="{}"),
+                tool_call_delta(1, id="c2", name="b", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(
+        tools=[
+            _blocking_tool("a", started_a, interruptible=False, outcome=outcome),
+            _blocking_tool("b", started_b, interruptible=True, outcome=outcome),
+        ]
+    )
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    async def run() -> None:
+        async for _ in loop.run([Message.user("go")], context, config, signal):
+            pass
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(asyncio.gather(started_a.wait(), started_b.wait()), timeout=5)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=5)
+
+    assert outcome == {"a": "cancelled", "b": "cancelled"}
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert {m.tool_call_id for m in tool_messages} == {"c1", "c2"}
+
+
+@pytest.mark.asyncio
+async def test_abort_cuts_a_stalled_model_stream():
+    """A model that has gone quiet is dropped on abort, not waited out.
+
+    The provider stream sits in an ``await`` between tokens, so an abort used
+    to take effect only when the NEXT event arrived. On a stalled or
+    slow-reasoning stream that is seconds of a UI painting a turn the user has
+    already stopped.
+    """
+    reached_second_token = False
+    first_token = asyncio.Event()
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        async def gen():
+            nonlocal reached_second_token
+            yield StreamTextDelta(delta="thinking")
+            first_token.set()
+            await asyncio.sleep(30)  # the model goes quiet
+            reached_second_token = True
+            yield StreamTextDelta(delta="never")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    context = LoopContext(tools=[])
+    config = make_config(stream_fn, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(first_token.wait(), timeout=5)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=5)
+
+    assert not reached_second_token, "the stalled stream was waited out instead of dropped"
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is True
+    # The text produced BEFORE the abort survives: a stop keeps what was said.
+    assistant = next(
+        m for m in context.messages if isinstance(m, Message) and m.role == "assistant"
+    )
+    assert assistant.text == "thinking"
+
+
+@pytest.mark.asyncio
+async def test_an_unaborted_stream_is_untouched_by_the_abort_wrapper():
+    """The abort-aware pull must not drop, reorder or duplicate events."""
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="a"),
+                StreamTextDelta(delta="b"),
+                tool_call_delta(0, id="c1", name="echo", args='{"text":"x"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    executed: list[str] = []
+    context = LoopContext(tools=[echo_tool(executed)])
+    signal = AbortSignal()  # present but never fired
+    loop = AgentLoop()
+
+    events = []
+    async for event in loop.run([Message.user("go")], context, make_config(stream), signal):
+        events.append(event)
+
+    assert executed == ["echo"]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is False
+    assistants = [m for m in context.messages if isinstance(m, Message) and m.role == "assistant"]
+    assert assistants[0].text == "ab"
+    assert assistants[-1].text == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_failure_still_surfaces_through_the_abort_wrapper():
+    """The stream wrapper must not swallow errors.
+
+    It drains the provider on a pump task, so a failure now reaches the loop as
+    that task's exception rather than as a raise from the ``async for``. If it
+    were dropped, a dead provider would look like a clean empty turn — the loop
+    would report success and the user would see a turn that did nothing.
+    """
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        async def gen():
+            yield StreamTextDelta(delta="partial")
+            raise ProviderError(500, "upstream exploded", retryable=False)
+
+        return gen()
+
+    context = LoopContext(tools=[])
+    signal = AbortSignal()  # present but never fired
+    loop = AgentLoop()
+
+    events = []
+    async for event in loop.run([Message.user("go")], context, make_config(stream_fn), signal):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is False, "a provider failure is an error, not a user abort"
+    assert end.error is not None and "upstream exploded" in end.error
+
+
+@pytest.mark.asyncio
+async def test_a_signal_aborted_before_the_run_does_not_wedge_the_turn():
+    """Review round 1, B1. An abort that has ALREADY fired must end the run.
+
+    The stream is drained by a pump task, and ``ensure_future`` only SCHEDULES
+    it — so a cancel landing before the body runs executed no statement inside
+    it, ``finally`` included. Waking the consumer from that ``finally`` left
+    the drain parked on a notification nobody would ever send, and the turn
+    never ended: `is_streaming` stayed True and every later prompt was
+    rejected, from the very keypress this feature is about.
+
+    Reachable without touching internals: `Session._emit` awaits every handler,
+    so an Esc during `turn_end` delivery lands after the loop's post-batch
+    abort check and before the next model call.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="hi"), StreamEndEvent(stop_reason="stop")]])
+    context = LoopContext(tools=[])
+    signal = AbortSignal()
+    signal.abort("interrupted")  # fired BEFORE the run starts
+    loop = AgentLoop()
+
+    events = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, make_config(stream), signal):
+            events.append(event)
+
+    # The bug was an infinite hang; the timeout IS the assertion.
+    await asyncio.wait_for(run(), timeout=5)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is True
+
+
+@pytest.mark.parametrize("interruptible", [False, True])
+@pytest.mark.asyncio
+async def test_an_aborted_tool_still_emits_its_end_event(interruptible):
+    """Review round 1, B2. Every start event needs its end event.
+
+    The batch-wide abort watcher cancels the runner coroutine from OUTSIDE.
+    ``interruptible_runner``'s handler only caught its INNER task's
+    cancellation, so an outer cancel unwound past ``park`` — which is what
+    emits ``tool_execution_end``. The backfill kept the wire legal, but it
+    emits no events, so every consumer other than the TUI was left with a tool
+    that never finished: the API server holds the record IN_PROGRESS forever
+    and never publishes a TOOL_END. It hits bash, eval, wait, hub, ask, web
+    search and every MCP tool, which set ``interruptible=True``.
+    """
+    started = asyncio.Event()
+    outcome: dict[str, str] = {}
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="block", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(
+        tools=[_blocking_tool("block", started, interruptible=interruptible, outcome=outcome)]
+    )
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=10)
+
+    starts = [e for e in events if isinstance(e, ToolExecutionStartEvent)]
+    ends = [e for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert len(starts) == 1
+    assert len(ends) == len(starts), "a started tool card was never settled"
+    assert {e.tool_call_id for e in ends} == {e.tool_call_id for e in starts}
+
+
+@pytest.mark.asyncio
+async def test_a_slow_tool_unwind_does_not_hold_the_turn_open():
+    """Review round 1, M1. ``ABORT_DRAIN_TIMEOUT_S`` must actually bound.
+
+    A cancelled tool is entitled to unwind — bash kills its process group — but
+    not to hold the turn while it does. The first implementation bounded the
+    wrong wait: the drain sat until every task had settled, so the ``finally``
+    budget had nothing left to bound and a six-second unwind still cost six
+    seconds. That is this feature's own bug, moved from the tool body into its
+    cleanup.
+    """
+    started = asyncio.Event()
+    unwind = 6.0
+
+    async def execute(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(unwind)  # a process group refusing to die
+            raise
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="stubborn", content=[TextContent(text="late")]
+        )
+
+    tool = AgentTool(
+        name="stubborn",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="stubborn", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    async def run() -> None:
+        async for _ in loop.run([Message.user("go")], context, config, signal):
+            pass
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    began = time.monotonic()
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=unwind + 10)
+    elapsed = time.monotonic() - began
+
+    assert elapsed < unwind - 1, (
+        f"the turn waited {elapsed:.1f}s for a {unwind}s unwind despite a "
+        f"{ABORT_DRAIN_TIMEOUT_S}s budget"
+    )
+    # Still paired, even though the tool never parked its own result.
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert [m.tool_call_id for m in tool_messages] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_unwind_still_reports_the_tool_as_ENDED():
+    """Review round 2, R2. The drain timeout must not swallow the end event.
+
+    A tool whose cleanup outruns ``ABORT_DRAIN_TIMEOUT_S`` had its start event
+    announced and no end event ever: the backfill repaired the RESULTS so the
+    wire stayed legal, but emitted nothing, so a consumer holding execution
+    records by id kept that one IN_PROGRESS forever and never published a
+    TOOL_END on its stream. The TUI survives it by retiring orphaned cards at
+    the turn boundary; the API server does not.
+
+    That is the same damage ``interruptible_runner``'s cancellation handler
+    exists to prevent — it closes the fast path, and this closes the slow one.
+    """
+    started = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 2)  # outruns the budget
+            raise
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="stubborn", content=[TextContent(text="late")]
+        )
+
+    tool = AgentTool(
+        name="stubborn",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="stubborn", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=ABORT_DRAIN_TIMEOUT_S + 10)
+
+    starts = [e for e in events if isinstance(e, ToolExecutionStartEvent)]
+    ends = [e for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert len(starts) == 1, "the tool never announced its start"
+    assert len(ends) == 1, (
+        "the tool was announced as started and never as ended, so a consumer "
+        "holding it by id keeps that execution IN_PROGRESS forever"
+    )
+    assert ends[0].tool_call_id == starts[0].tool_call_id
+    assert ends[0].is_error, "an aborted tool must not be reported as a clean success"
+
+
+@pytest.mark.asyncio
+async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill():
+    """Review round 3, R3-1. The backfill must decide before it emits.
+
+    A generator suspends at every ``yield``, handing control to a consumer that
+    may await. A runner whose cleanup lands in one of those windows parks its
+    own result — writing its end event to the queue nobody reads any more — and
+    an interleaved backfill then saw the filled slot and emitted nothing. That
+    call kept its start event and never got an end, which is the exact damage
+    the backfill exists to prevent.
+
+    Needs BOTH a multi-call batch (so there is an earlier slot to suspend on)
+    and a consumer that actually awaits. The single-tool guard above cannot
+    reach it: with one slot there is nothing to suspend on before it.
+    """
+    started = asyncio.Event()
+    parked = asyncio.Event()
+
+    async def never_parks(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        started.set()
+        await asyncio.sleep(30)
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="stuck", content=[TextContent(text="late")]
+        )
+
+    async def parks_late(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            # Settles just past the drain budget: the batch has given up
+            # waiting, so this lands while the backfill is mid-emit.
+            with contextlib.suppress(asyncio.CancelledError):
+                # Parks past the drain budget by enough that the event lands on
+                # a queue the drain loop has already abandoned — which is the
+                # window the FLUSH exists to cover, and the only window in which
+                # this test can detect the flush going missing.
+                #
+                # A RIDGE, NOT A FLOOR: moving this value in EITHER direction
+                # blinds the test. Swept against a tree with the flush deleted,
+                # it detects at +0.30 and is blind at +0.15, +0.35, +0.40, +0.45
+                # and +0.60 (R10/R11).
+                #
+                # Detection is PROBABILISTIC — roughly 3 runs in 4 (measured
+                # 7/8, 9/12, 11/16, 12/16 red). Anyone spot-checking by deleting
+                # the flush must repeat the run: a single green one proves
+                # nothing and would wrongly suggest the test is already dead.
+                #
+                # Too short and the park lands in the range the
+                # backfill already handles; too long and it lands after the
+                # batch has stopped emitting. Both ends pass with the flush
+                # gone, which means the test silently stops testing the thing it
+                # is named for. The flakiness this once had is fixed by the
+                # `parked` gate below, not by moving this.
+                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 0.3)
+            parked.set()
+            raise
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="slow", content=[TextContent(text="late")]
+        )
+
+    tools = [
+        AgentTool(
+            name="stuck",
+            parameters={"type": "object", "properties": {}},
+            execute=never_parks,
+        ),
+        AgentTool(
+            name="slow",
+            parameters={"type": "object", "properties": {}},
+            execute=parks_late,
+        ),
+    ]
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="stuck", args="{}"),
+                tool_call_delta(1, id="c2", name="slow", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=tools)
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+            # A consumer that awaits — the TUI paints, the API server writes.
+            # Without this the generator never suspends and the loss is not
+            # reachable at all.
+            #
+            # The duration is deliberate and must not be shortened to settle a
+            # flake: the tool has to park AFTER the drain gives up at
+            # ABORT_DRAIN_TIMEOUT_S but while the consumer still owes the
+            # generator a resume, and that window is what the flush covers.
+            # Moving either number moves the park out of that window — see the
+            # ridge measurements on the tool's own sleep above — and the test
+            # then passes with the flush deleted, i.e. it stops testing the
+            # thing it is named for. Waiting on the park event instead was tried
+            # and is worse (3/40): it lets the generator finish before the park
+            # it is supposed to be racing.
+            #
+            # The IDENTICAL literal `ABORT_DRAIN_TIMEOUT_S + 0.3` appears once
+            # more in this file, in the duplicate-call-id suppression test —
+            # grep `does_not_suppress_the_real_calls` — and that is the copy a
+            # search-and-replace would collide with. It is INDEPENDENT of this
+            # one: it exercises the suppression rule, not the flush window, so
+            # nothing about it needs to move if this does.
+            #
+            # (The slow-unwind test — grep `still_reports_the_tool_as_ENDED` —
+            # overshoots by `+ 2` and is independent for the same reason. Only
+            # the identical literal is a real hazard.)
+            await asyncio.sleep(0.3)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=ABORT_DRAIN_TIMEOUT_S + 15)
+    # The scenario only exists once the slow tool has actually parked. Without
+    # this the assertion sometimes ran against a turn that ended BEFORE the
+    # cleanup finished — a different shape, and the source of a ~1-in-8 flake.
+    await asyncio.wait_for(parked.wait(), timeout=5)
+
+    started_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)]
+    ended_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert sorted(started_ids) == ["c1", "c2"]
+    for call_id in started_ids:
+        assert ended_ids.count(call_id) == 1, (
+            f"{call_id} was announced as started and ended {ended_ids.count(call_id)} "
+            f"times; every started call needs exactly one end (ends={ended_ids})"
+        )
+    # And the wire is still legal: one tool_result per tool_use.
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert sorted(str(m.tool_call_id) for m in tool_messages) == ["c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_never_started_is_never_announced_as_ended():
+    """Review round 4, R4-1. The flush must share the backfill's own guard.
+
+    A planning failure — an unknown tool name, a duplicate call id — is parked
+    up front by ``park()``, which queues an end event for a call that never
+    emitted a START. That was harmless only because nothing drained the queue
+    afterwards; the flush added for R3-1 reads it and announces the end of a
+    call no consumer ever saw begin, which is the mirror image of the bug the
+    flush exists to fix and is what the backfill a few lines below explicitly
+    refuses to do.
+
+    Reachable from a hallucinated tool name alone: no abort, no timing window.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="no_such_tool", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    loop = AgentLoop()
+
+    events: list[Any] = []
+    async for event in loop.run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    started_ids = {e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)}
+    ended_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert started_ids == set(), "a call with no resolvable tool must never start"
+    assert [
+        c for c in ended_ids if c not in started_ids
+    ] == [], f"end event(s) {ended_ids} announced for calls that never started"
+    # The wire is still paired: the failure's result reaches the model.
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert [str(m.tool_call_id) for m in tool_messages] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_call_id_does_not_suppress_the_real_calls_end_event():
+    """Review round 5, R5-1. The flush's suppression must not be keyed by id.
+
+    Call ids are NOT unique within a batch: a model can emit two calls with one
+    id, and the loop keeps the first and turns the second into a planning
+    failure. That leaves one id owned by two slots — one that STARTED and one
+    that never did — so a suppression set keyed by id cannot tell them apart
+    and swallows the genuine end event along with the parked one. The started
+    call then keeps its start forever with no end, which is the same consumer
+    damage the flush exists to prevent, arrived at from the other side.
+
+    Counting per id is what makes it exact: swallow as many as are owed, no
+    more. This asserts the invariant that survives either implementation —
+    every call that STARTED gets exactly one end.
+    """
+    started = asyncio.Event()
+
+    async def slow(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 0.3)
+            raise
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="slow", content=[TextContent(text="late")]
+        )
+
+    tool = AgentTool(
+        name="slow",
+        parameters={"type": "object", "properties": {}},
+        execute=slow,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                # One id, twice: the second is dropped to a planning failure.
+                tool_call_delta(0, id="dup", name="slow", args="{}"),
+                tool_call_delta(1, id="dup", name="slow", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+            await asyncio.sleep(0.05)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=ABORT_DRAIN_TIMEOUT_S + 15)
+
+    started_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)]
+    ended_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert started_ids == ["dup"], "exactly one of the colliding calls should run"
+    assert ended_ids.count("dup") >= 1, (
+        "the started call's end event was suppressed along with the duplicate's, "
+        "leaving a start with no end"
+    )
+    # The duplicate never started, so it must not add an end of its own.
+    assert ended_ids.count("dup") == len(
+        started_ids
+    ), f"expected one end per started call, got ends={ended_ids} starts={started_ids}"
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_never_ran_still_reports_itself_to_the_operator():
+    """Review round 6, R6-3. Suppressing the end event must not mean silence.
+
+    `park` withholds the end event for a call that never started, which is
+    right — but the headless renderer printed `✗ <name> failed` off exactly
+    that event, so withholding it alone turned a visible diagnostic into
+    nothing at all: an operator watching a hallucinated tool name saw the run
+    simply produce no output about it.
+
+    A notice is the honest carrier. It reports the failure without claiming a
+    lifecycle that never began, and the model is unaffected either way because
+    it still receives the parked `tool_result`.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="echo", args='{"text":"hi"}'),
+                tool_call_delta(1, id="c2", name="no_such_tool", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[echo_tool(executed)])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    loop = AgentLoop()
+
+    events: list[Any] = []
+    async for event in loop.run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    notices = [e.text for e in events if isinstance(e, NoticeEvent)]
+    assert any(
+        "no_such_tool" in text for text in notices
+    ), f"the unresolvable call produced no operator-visible diagnostic: {notices}"
+    # Still no orphan end event, which is what R4-1/R5-1 fixed.
+    started_ids = {e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)}
+    ended_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert [c for c in ended_ids if c not in started_ids] == []
+    # And the model still gets both results, so the wire stays legal.
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert sorted(str(m.tool_call_id) for m in tool_messages) == ["c1", "c2"]
+
+
+def test_the_flush_suppression_counts_rather_than_matching():
+    """Review round 6/7, R6-2 and R7-3. Pin the mechanism R5-1 was about.
+
+    Exercises the REAL helper rather than a retyped copy of its logic. The
+    behavioural tests cannot reach this branch: the source-side guard in `park`
+    removes the collision it defends against (R6-1), so the code path is
+    unreachable and a revert to a plain `set` leaves every other test green.
+    A test that reproduced the rule inline had the same blind spot as the code
+    it was meant to guard (R7-3) — this calls the function the loop calls.
+
+    The rule: with N queued ends carrying one id and K owed suppression,
+    exactly N-K survive. Matching by id instead of counting swallows both, and
+    the one it must not swallow is the started call's genuine end.
+    """
+    # Two slots, one id: one started, one a duplicate that never did, so
+    # exactly one suppression is owed.
+    claimed: Counter[str] = Counter(["dup"])
+
+    survived = [call_id for call_id in ("dup", "dup") if not _consume_claim(claimed, call_id)]
+
+    assert survived == ["dup"], (
+        "counting must swallow only what is owed; matching by id swallows the "
+        "started call's genuine end event too, which is R5-1"
+    )
+    # And the claim is spent, not standing: a later end for the same id lives.
+    assert _consume_claim(claimed, "dup") is False
+    # An id nobody claimed is never suppressed.
+    assert _consume_claim(Counter(), "other") is False

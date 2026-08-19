@@ -20,10 +20,12 @@ placeholder results so tool_use/tool_result pairing stays legal.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -61,6 +63,7 @@ from local_operator.harness.types import (
     RenderedStreamError,
     StaleAside,
     StreamEndEvent,
+    StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
@@ -95,7 +98,21 @@ class _ToolDone:
     __slots__ = ()
 
 
+class _BatchDone:
+    """Sentinel pushed ONCE, after every runner task in a batch has settled.
+
+    It is what ends the drain, and it exists because ``_ToolDone`` cannot do
+    that job under cancellation: a runner cancelled before its body ran emits
+    no receipt at all, so counting receipts against the number of tasks can
+    wait forever. This is posted by a closer that has already awaited the
+    tasks, so its arrival is proof there is nothing left to come.
+    """
+
+    __slots__ = ()
+
+
 _TOOL_DONE = _ToolDone()
+_BATCH_DONE = _BatchDone()
 
 # Type adapters used to validate tool arguments against JSON-schema scalars.
 _TYPE_ADAPTERS: dict[str, TypeAdapter[Any]] = {
@@ -115,6 +132,34 @@ SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
 EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 # Steering-interrupt poll interval for ``interruptible`` tools mid-run.
 STEERING_INTERRUPT_POLL_S = 0.25
+# How long the batch waits for tools to unwind after an ABORT before it stops
+# waiting and settles the turn anyway. An abort is a user pressing Esc, so the
+# turn must end on a human timescale; a tool whose cleanup is slower than this
+# (a process group refusing to die) keeps unwinding in the background while the
+# turn it belonged to is already over.
+ABORT_DRAIN_TIMEOUT_S = 2.0
+
+
+def _consume_claim(claimed: Counter[str], call_id: str) -> bool:
+    """Spend one suppression owed for ``call_id``; say whether there was one.
+
+    Module level, and named, so a test can exercise THIS rule rather than a
+    retyped copy of it. The branch it serves is unreachable today (the
+    source-side guard in ``park`` removes the collision it defends against), so
+    no behavioural test can reach it — which is exactly why the rule needs a
+    handle a unit test can hold (R7-3, agent review round 7).
+
+    COUNTING, not membership, is the whole point. Call ids are not unique within
+    a batch: a duplicate id yields one slot that started and one that did not,
+    and matching by id suppressed the started call's genuine end event along
+    with its twin's parked one (R5-1). Spending one claim per event leaves
+    exactly the right number, and the events are identical to a consumer, so
+    which one survives does not matter.
+    """
+    if not claimed.get(call_id, 0):
+        return False
+    claimed[call_id] -= 1
+    return True
 
 
 @dataclass
@@ -158,6 +203,112 @@ def _batches_shared(item: _PlannedCall) -> bool:
     forces a batch of one.
     """
     return item.tool is None or item.tool.concurrency == "shared"
+
+
+async def _abortable_stream(
+    stream: AsyncIterator[StreamEvent], signal: AbortSignal | None
+) -> AsyncIterator[StreamEvent]:
+    """Yield from ``stream`` but stop as soon as ``signal`` aborts.
+
+    A provider stream is an ``async for`` parked in ``await``: between two
+    tokens the loop is inside the socket read, and nothing there consults the
+    abort flag. Aborting mid-stream therefore did nothing until the model's
+    NEXT event arrived - for a model that had gone quiet (a long reasoning
+    block, a stalled connection, a slow first token) that is seconds of a UI
+    still painting a turn the user has already stopped, and on a wedged
+    connection it is the read timeout.
+
+    The stream is drained by a PUMP TASK feeding a queue, and the abort cancels
+    that task. The cancellation lands inside the socket read, which is what
+    actually releases the provider connection; the consumer here is woken by
+    the same event and simply stops. Ending quietly rather than raising is what
+    keeps the caller simple - the loop sees the stream finish, and its existing
+    ``signal.aborted`` check labels the turn ``aborted``, pairs every dangling
+    tool call, and emits the events a stopped turn owes the UI.
+
+    A pump rather than the obvious "race each pull against the signal": racing
+    per event costs two tasks and an ``asyncio.wait`` per token. Over a
+    4000-delta response (an ordinary long answer), measured on an M-series Mac:
+    a bare ``async for`` takes single-digit milliseconds, this pump takes
+    single-digit milliseconds too, and the per-event race takes roughly **1.5
+    SECONDS** - three orders of magnitude worse, and a visible stutter in the
+    very stream this function exists to make more responsive. The pump pays one
+    task for the whole stream instead of one per token.
+
+    The queue is unbounded, which is safe for a reason specific to this caller:
+    ``_model_turn`` already accumulates every delta of the response in
+    ``text_parts``, so a transient second reference to data the loop is holding
+    anyway cannot change the memory profile. In practice the queue stays near
+    empty - the producer is network-bound and the consumer is not.
+    """
+    if signal is None:
+        async for event in stream:
+            yield event
+        return
+
+    queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
+    finished = asyncio.Event()
+
+    async def pump() -> None:
+        async for event in stream:
+            queue.put_nowait(event)
+
+    task = asyncio.ensure_future(pump())
+    # A DONE CALLBACK, not the pump's own ``finally``. ``ensure_future`` only
+    # SCHEDULES the coroutine, so a cancel landing before the body runs — which
+    # is exactly the pre-aborted fast path below — never executes any statement
+    # inside ``pump``, ``finally`` included. Waking the consumer from a
+    # ``finally`` therefore deadlocked the turn permanently: the queue stayed
+    # empty, the event was never set, and the drain parked forever on a wake-up
+    # nobody was going to send. A done callback fires for a task cancelled
+    # before it starts, which is the whole difference. (Same hazard the batch
+    # drain documents and defends against; this is the second instance of it.)
+    task.add_done_callback(lambda _task: finished.set())
+    watcher = asyncio.ensure_future(_cancel_when_aborted(signal, task))
+    # An abort that has ALREADY fired must not be missed: the watcher only gets
+    # to run on the next loop pass, by which time the pump could have consumed
+    # the whole stream and spent a request the user had stopped.
+    if signal.aborted:
+        task.cancel()
+
+    try:
+        while True:
+            if not queue.empty():
+                yield queue.get_nowait()
+                continue
+            if task.done():
+                # Drained AND the producer is finished. Surface a provider
+                # failure the way an unwrapped ``async for`` would, so the
+                # caller's error handling is unchanged by this wrapper; a
+                # cancellation is the abort and is deliberately not re-raised.
+                with contextlib.suppress(asyncio.CancelledError):
+                    task.result()
+                return
+            getter = asyncio.ensure_future(queue.get())
+            ended = asyncio.ensure_future(finished.wait())
+            try:
+                done, _pending = await asyncio.wait(
+                    {getter, ended}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                for pending in (getter, ended):
+                    if not pending.done():
+                        pending.cancel()
+            if getter in done:
+                yield getter.result()
+    finally:
+        watcher.cancel()
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+
+
+async def _cancel_when_aborted(signal: AbortSignal, task: asyncio.Task[None]) -> None:
+    """Cancel ``task`` when ``signal`` fires. Split out so the watcher holds no
+    reference to the generator frame it belongs to."""
+    await signal.wait()
+    task.cancel()
 
 
 class AgentLoop:
@@ -304,6 +455,22 @@ class AgentLoop:
                             yield event
                         self._append_results(context, tool_results, new_messages)
 
+                    if signal is not None and signal.aborted:
+                        # The abort landed while the batch was running. Its
+                        # results are already appended above (every call paired,
+                        # cancelled ones as synthetic ``aborted`` results), so
+                        # the context is legal — but the loop must NOT feed them
+                        # back for another model call. Continuing would spend a
+                        # request, and the reply to it, on a turn the user
+                        # stopped: the stop would read as "it kept going, and
+                        # then answered".
+                        yield TurnEndEvent(message=assistant, tool_results=tool_results)
+                        yield AgentEndEvent(
+                            messages=new_messages, aborted=True, generation=generation
+                        )
+                        self._discard_pending_custom(pending)
+                        return
+
                     yield TurnEndEvent(message=assistant, tool_results=tool_results)
                     has_more_tool_calls = bool(assistant.tool_calls)
                     if has_more_tool_calls and config.on_turn_end is not None:
@@ -414,6 +581,8 @@ class AgentLoop:
         # say" case (see the field), handled the same as having no resolver.
         return live if live is not None else config.model
 
+    # (``_abortable_stream`` is a module-level helper; see below the class.)
+
     async def _model_turn(
         self,
         context: LoopContext,
@@ -457,7 +626,7 @@ class AgentLoop:
         yield MessageStartEvent(message=assistant)
 
         try:
-            stream = config.stream_fn(request, signal)
+            stream = _abortable_stream(config.stream_fn(request, signal), signal)
             async for event in stream:
                 if isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
@@ -567,6 +736,16 @@ class AgentLoop:
             )
             stop_reason = "aborted" if (signal is not None and signal.aborted) else "error"
             error = error or str(exc)
+
+        if signal is not None and signal.aborted:
+            # A stream CUT by the abort ends without its ``StreamEndEvent``, so
+            # the local default ("stop") would otherwise stand and the turn
+            # would read as a clean finish — the loop would go on to make
+            # another model call for a turn the user has already stopped.
+            # Recording the truth here is what lets the single ``("error",
+            # "aborted")`` branch upstream pair the dangling calls and end the
+            # run, instead of the abort having to be re-detected in each place.
+            stop_reason = "aborted"
 
         assistant.tool_calls = [
             self._assemble_tool_call(state) for _, state in sorted(tool_states.items())
@@ -724,7 +903,7 @@ class AgentLoop:
         item: _PlannedCall,
         context: LoopContext,
         signal: AbortSignal | None,
-        queue: asyncio.Queue[AgentEvent | _ToolDone],
+        queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone],
     ) -> ToolResult:
         """Execute one planned call and return its result.
 
@@ -847,29 +1026,65 @@ class AgentLoop:
         On generator cancellation (GeneratorExit) every runner task is
         cancelled before this generator returns.
 
+        An ABORT is different from steering and stronger than both: a watcher
+        cancels EVERY runner in the batch the instant the signal fires, whether
+        or not the tool declared itself ``interruptible``. Steering is a
+        redirect and may only interrupt a tool that opted in; an abort is the
+        user pressing Esc, and a stop that waits for the slowest call in the
+        batch is not a stop. Before this, a batch of non-interruptible tools
+        (a `read` of a huge tree, an `edit`, an MCP call) ignored the signal
+        entirely and the turn ended only when the last one finished — measured
+        at multiple seconds after the keypress, with the UI still painting the
+        work as live.
+
+        ``interruptible`` therefore keeps exactly one meaning — "steering may
+        interrupt this" — instead of quietly doubling as "the user may stop
+        this", which is not a property any tool should get to decline.
+
         Results are keyed by BATCH SLOT, not call id: a model can emit two
         calls with the same id in one batch, and keying by id made the two
         slots collide into one result (duplicate tool_result ids on the wire,
         which Anthropic rejects). A slot whose call failed planning never
         runs; its synthetic result is parked in its slot up front.
         """
-        queue: asyncio.Queue[AgentEvent | _ToolDone] = asyncio.Queue()
+        queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone] = asyncio.Queue()
         results_by_slot: list[ToolResult | None] = [None] * len(batch)
         tasks: list[asyncio.Task[None]] = []
         poll_interruptible = (
             config.interrupt_mode == "immediate" and config.has_steering_messages is not None
         )
+        # Set by the abort watcher so the runners' cancellation handlers can
+        # tell an abort apart from a steering interrupt and label their
+        # synthetic results correctly.
+        aborting = False
 
         def park(slot: int, item: _PlannedCall, result: ToolResult) -> None:
             results_by_slot[slot] = result
-            queue.put_nowait(
-                ToolExecutionEndEvent(
-                    tool_call_id=item.call.id,
-                    tool_name=item.tool.name if item.tool is not None else item.call.name,
-                    result=result,
-                    is_error=result.is_error,
+            # A call that never STARTED never gets an end. Planning failures —
+            # an unknown tool, or a duplicate id whose twin won the slot — are
+            # parked up front with no task and no `ToolExecutionStartEvent`, so
+            # announcing their end describes a lifecycle no consumer ever saw
+            # begin: the API server matches by id and either resurrects a record
+            # that was never opened or, when a duplicate id collides, closes the
+            # REAL call's record early and publishes two TOOL_ENDs for one
+            # TOOL_START.
+            #
+            # Suppressed HERE, at the single source, rather than downstream.
+            # The event has two readers — the drain loop while the batch is live
+            # and the post-abort flush after it gives up — and a guard in either
+            # one alone leaves the other emitting it (R4-1 fixed the flush, R5-1
+            # was the drain doing the same thing a moment earlier). The result
+            # still parks, so the WIRE stays paired; only the event is withheld.
+            started = item.failure is None and item.tool is not None
+            if started:
+                queue.put_nowait(
+                    ToolExecutionEndEvent(
+                        tool_call_id=item.call.id,
+                        tool_name=item.tool.name if item.tool is not None else item.call.name,
+                        result=result,
+                        is_error=result.is_error,
+                    )
                 )
-            )
             queue.put_nowait(_TOOL_DONE)
 
         async def runner(slot: int, item: _PlannedCall) -> None:
@@ -910,43 +1125,116 @@ class AgentLoop:
             )
             tool_task = asyncio.ensure_future(self._runner_result(item, context, signal, queue))
             try:
-                while True:
-                    done, _pending = await asyncio.wait(
-                        {tool_task}, timeout=STEERING_INTERRUPT_POLL_S
-                    )
-                    if tool_task in done:
-                        break
-                    if signal is not None and signal.aborted:
-                        break
-                    if self._peek_steering(config):
+                try:
+                    while True:
+                        done, _pending = await asyncio.wait(
+                            {tool_task}, timeout=STEERING_INTERRUPT_POLL_S
+                        )
+                        if tool_task in done:
+                            break
+                        if signal is not None and signal.aborted:
+                            break
+                        if self._peek_steering(config):
+                            tool_task.cancel()
+                            break
+                finally:
+                    if not tool_task.done():
                         tool_task.cancel()
-                        break
-            finally:
-                if not tool_task.done():
-                    tool_task.cancel()
-            try:
-                result = await tool_task
+                try:
+                    result = await tool_task
+                except asyncio.CancelledError:
+                    # The INNER task was cancelled (steering, or the run
+                    # aborting): synthesize a skipped/aborted result so the
+                    # call stays paired.
+                    text = (
+                        SKIPPED_RESULT_TEXT
+                        if not (signal is not None and signal.aborted)
+                        else ABORTED_RESULT_TEXT
+                    )
+                    result = self._synthetic_result(item.call, text)
+                park(slot, item, result)
             except asyncio.CancelledError:
-                # Cancelled for steering (or by the run aborting): synthesize a
-                # skipped/aborted result so the call stays paired.
-                text = (
-                    SKIPPED_RESULT_TEXT
-                    if not (signal is not None and signal.aborted)
-                    else ABORTED_RESULT_TEXT
-                )
-                result = self._synthetic_result(item.call, text)
-            park(slot, item, result)
+                # THIS coroutine was cancelled from outside — which is what the
+                # batch-wide abort watcher does. Without this the cancellation
+                # unwound straight out and ``park`` was never reached, so the
+                # call got a start event and no END event. The backfill below
+                # keeps the WIRE legal, but it does not emit events: every
+                # consumer other than the TUI (which retires orphaned cards at
+                # the turn boundary) was left with a tool that never finished —
+                # the API server holds the execution record IN_PROGRESS forever
+                # and never publishes a TOOL_END on its SSE stream.
+                #
+                # It matters far more here than for the plain ``runner``:
+                # ``interruptible`` covers bash, eval, wait, hub, ask, web
+                # search and EVERY MCP tool, i.e. most of a real batch.
+                park(slot, item, self._synthetic_result(item.call, ABORTED_RESULT_TEXT))
+                raise
 
+        async def abort_watcher() -> None:
+            """Cancel every runner the moment the abort signal fires.
+
+            The runners' own ``CancelledError`` handlers park a synthetic
+            ``aborted`` result for each call, so the batch still comes back
+            fully paired — cancelling here changes WHEN the turn ends, never
+            whether the wire stays legal.
+            """
+            nonlocal aborting
+            assert signal is not None
+            await signal.wait()
+            aborting = True
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            # WAKE THE DRAIN. It is parked in ``queue.get()``, which the abort
+            # does not disturb, so without this nudge it only re-evaluates
+            # ``aborting`` when a runner happens to emit something — and a
+            # batch whose tools are all stuck in a slow unwind emits nothing.
+            # The deadline would then be armed only after the cleanup it is
+            # supposed to bound had already finished. The sentinel is ignored
+            # by the drain's own branches; its only job is to end the wait.
+            queue.put_nowait(_TOOL_DONE)
+
+        watcher: asyncio.Task[None] | None = None
+        # Declared before the ``try`` because ``finally`` reads it: an
+        # exception raised while scheduling the runners must not turn into a
+        # NameError that hides the real failure.
+        close_task: asyncio.Task[None] | None = None
         try:
             for slot, item in enumerate(batch):
                 if item.failure is not None or item.tool is None:
                     # Duplicate-id and resolution failures never execute: the
                     # synthetic result parks in the slot without a task, so
                     # two slots can never collide on one results entry.
-                    park(
-                        slot,
-                        item,
-                        item.failure or self._synthetic_result(item.call, "Tool not found."),
+                    parked = item.failure or self._synthetic_result(item.call, "Tool not found.")
+                    park(slot, item, parked)
+                    # SAY SO, since the end event no longer does. `park` withholds
+                    # the end event for a call that never started, which is right
+                    # — but the headless renderer printed `✗ <name> failed` off
+                    # that event, so suppressing it alone would turn a visible
+                    # diagnostic into silence and leave an operator watching a
+                    # hallucinated tool name produce nothing at all (R6-3, agent
+                    # review round 6). A notice is the honest carrier: it reports
+                    # the failure without claiming a lifecycle that never began.
+                    # The model is unaffected either way — it still gets the
+                    # `tool_result` parked above.
+                    #
+                    # The parked result's own text is the whole message, with
+                    # no tool-name prefix bolted on. Both failure kinds already
+                    # name what they need to ("Tool not found: reed_file",
+                    # "Duplicate call id 'c1' skipped."), so a prefix repeated
+                    # the name for an unknown tool and, worse, named the tool
+                    # that DID run for a duplicate id — reading as though the
+                    # user's real call had been dropped (D12/D13, design round
+                    # 3). The call id, not the name, is what distinguishes the
+                    # twins, and it is already in the duplicate's own text.
+                    reason = " ".join(
+                        block.text
+                        for block in parked.content
+                        if isinstance(block, TextContent) and block.text
+                    ).strip()
+                    yield NoticeEvent(
+                        text=reason or f"{item.call.name}: tool not found",
+                        kind="error",
                     )
                     continue
                 interruptible = item.tool.interruptible
@@ -957,22 +1245,230 @@ class AgentLoop:
                         else runner(slot, item)
                     )
                 )
-            finished = 0
-            while finished < len(tasks):
-                item = await queue.get()
-                if isinstance(item, _ToolDone):
-                    finished += 1
+            # Started AFTER the runner tasks exist, so it can see all of them,
+            # and only when there is a signal to watch. An already-aborted
+            # signal is handled by the same path: ``wait()`` returns at once.
+            if signal is not None and tasks:
+                watcher = asyncio.ensure_future(abort_watcher())
+
+            # Termination is keyed on the TASKS settling, not on counting one
+            # ``_TOOL_DONE`` per task, and that is what makes cancellation
+            # safe. ``ensure_future`` only SCHEDULES a runner: a cancel landing
+            # in the same event-loop turn (which is exactly what the abort
+            # watcher does) means the body never runs, so it parks nothing and
+            # a counting drain would wait forever for a receipt no one will
+            # ever send. The closer posts one sentinel after every task has
+            # settled; the queue is FIFO, so everything the runners emitted is
+            # already ahead of it and still drains in order.
+            async def closer() -> None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                queue.put_nowait(_BATCH_DONE)
+
+            close_task = asyncio.ensure_future(closer()) if tasks else None
+            if close_task is not None:
+                # The deadline is armed by the ABORT, not at entry, and it
+                # bounds THIS loop rather than the cleanup in ``finally``. The
+                # first version bounded the wrong wait: the drain sat here
+                # until every task had settled, so by the time ``finally`` ran
+                # its ``wait_for`` there was nothing left to wait for and the
+                # budget was a no-op — a tool with a six-second unwind still
+                # held the turn open for six seconds. That is the very failure
+                # this PR exists to remove, moved from the tool body into its
+                # cleanup.
+                deadline: float | None = None
+                while True:
+                    if aborting and deadline is None:
+                        deadline = asyncio.get_running_loop().time() + ABORT_DRAIN_TIMEOUT_S
+                    if deadline is None:
+                        event = await queue.get()
+                    else:
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            logger.warning(
+                                "tool cleanup still running %ss after abort; "
+                                "settling the turn without it",
+                                ABORT_DRAIN_TIMEOUT_S,
+                            )
+                            break
+                        getter = asyncio.ensure_future(queue.get())
+                        try:
+                            event = await asyncio.wait_for(getter, timeout=remaining)
+                        except TimeoutError:
+                            # The tasks are left running: they own their own
+                            # resources, log their own failures, and the
+                            # backfill below pairs whatever they never parked.
+                            logger.warning(
+                                "tool cleanup still running %ss after abort; "
+                                "settling the turn without it",
+                                ABORT_DRAIN_TIMEOUT_S,
+                            )
+                            break
+                    if isinstance(event, _BatchDone):
+                        break
+                    if isinstance(event, _ToolDone):
+                        # A per-tool receipt, or the abort watcher's nudge.
+                        # Neither is an event a consumer should see.
+                        continue
+                    yield event
+
+            # Backfill any slot whose runner was cancelled before it could park
+            # its own result. Every call MUST come back paired or the next
+            # request carries a ``tool_use`` with no ``tool_result`` and the
+            # provider rejects the whole conversation — so an abort that races
+            # a runner's first line must not be able to break the wire.
+            #
+            # The backfill also EMITS the end event, which it previously did
+            # not. Repairing `results_by_slot` alone keeps the wire legal but
+            # tells no consumer anything: a tool whose cleanup outran
+            # ``ABORT_DRAIN_TIMEOUT_S`` had its start event announced and no end
+            # event ever, so the API server holds that execution record
+            # IN_PROGRESS forever and never publishes a TOOL_END on its SSE
+            # stream (R2, agent review round 2). That is the same consumer
+            # damage `interruptible_runner`'s own cancellation handler exists to
+            # prevent — it closes the fast path, and the slow-cleanup path here
+            # reopened it. The TUI happens to survive either way because it
+            # retires orphaned cards at the turn boundary; nothing else does.
+            #
+            # Yielded rather than queued: the drain loop above has already
+            # broken out and nothing will read the queue again.
+            #
+            # DECIDED IN ONE PASS, EMITTED IN ANOTHER, and the split is load
+            # bearing. A generator suspends at every `yield`, handing control to
+            # a consumer that may await; a runner whose cleanup lands in one of
+            # those windows calls `park()`, which writes its end event to the
+            # queue nobody reads any more and fills the slot. A single
+            # interleaved loop then saw the now-filled slot and emitted nothing,
+            # so that call kept its start event and never got an end — the very
+            # damage this backfill exists to prevent, reachable only when the
+            # consumer is slow enough to suspend us (R3-1, agent review round 3).
+            # Snapshotting first means the decision is made while no await can
+            # intervene, so it cannot be invalidated by what happens mid-emit.
+            pending_ends: list[ToolExecutionEndEvent] = []
+            # HOW MANY queued end events to swallow per call id — a count, not a
+            # set, because call ids are NOT unique within a batch. A model can
+            # emit two calls with one id; the loop keeps the first and turns the
+            # second into a planning failure, so one id can name both a slot
+            # that started and one that did not. A set keyed by id cannot tell
+            # them apart and suppresses BOTH, dropping the genuine end event of
+            # the call that really ran (R5-1, agent review round 5). This is the
+            # same collision that makes `results_by_slot` keyed by slot.
+            #
+            # Counting is exact even though the events are indistinguishable:
+            # with N carrying one id and K owed suppression, swallowing any K
+            # leaves the right number, and they are identical to a consumer.
+            #
+            # Not seeded from the batch: `park` no longer queues an end for a
+            # call that never started, so the only entries here are the ones
+            # this backfill is about to emit itself.
+            claimed: Counter[str] = Counter()
+            for slot, item in enumerate(batch):
+                if results_by_slot[slot] is None:
+                    result = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
+                    results_by_slot[slot] = result
+                    if item.failure is None and item.tool is not None:
+                        # Only for calls that actually STARTED. A planning
+                        # failure parked its result up front and never emitted a
+                        # start event, so an end event for it would be the
+                        # mirror image of this bug.
+                        claimed[item.call.id] += 1
+                        pending_ends.append(
+                            ToolExecutionEndEvent(
+                                tool_call_id=item.call.id,
+                                tool_name=item.tool.name,
+                                result=result,
+                                is_error=result.is_error,
+                            )
+                        )
+
+            # THEN drain whatever the runners queued that nobody read. A tool
+            # that parked between the drain loop giving up and this point put a
+            # real end event on the queue and filled its own slot, so the
+            # backfill above correctly skipped it — and without this flush that
+            # event is simply dropped, leaving a start with no end. That is the
+            # half of R3-1 a snapshot alone does not fix: the loss happens
+            # BEFORE the backfill runs, not during its emit.
+            #
+            # ONE BOUNDARY REMAINS, and it is accepted rather than closed: a
+            # cleanup that outruns the whole TURN, not just the drain budget,
+            # settles after this generator has closed. There is no longer a
+            # stream to emit into, so that call keeps its start and gets no end.
+            #
+            # NOT confined to some extreme corner. It is intermittent wherever a
+            # tool's unwind overshoots ABORT_DRAIN_TIMEOUT_S while a consumer is
+            # slow enough to still owe this generator a resume — observed around
+            # a 2.3s cleanup against a 0.3s-per-event consumer, and an earlier
+            # comment here claiming it was unreachable below ~2.5s/~0.5s was
+            # simply wrong (R9 MAJOR-2). The honest statement is: rare in
+            # practice, reachable in principle, and not bounded by a threshold
+            # anyone should rely on.
+            #
+            # Accepted anyway, because the alternative is worse: closing it
+            # means holding the turn open until the cleanup finishes, which is
+            # exactly what ABORT_DRAIN_TIMEOUT_S exists to refuse — the user
+            # pressed Esc and is owed their prompt back, which is this whole
+            # change's purpose. A consumer holding execution records by id must
+            # therefore reconcile them at the TURN boundary rather than trusting
+            # every start to be followed by an end; the TUI already does exactly
+            # that when it retires orphaned cards.
+            #
+            # `claimed` is DEFENCE IN DEPTH, not a live guard. It was
+            # load-bearing when the two halves could collide; the source-side
+            # withholding in `park` removes that collision, and `park` is
+            # synchronous, so a slot is filled and its end queued atomically
+            # with respect to the event loop and no `await` separates this
+            # backfill from the flush below. There is therefore no interleaving
+            # in which the flush meets an end for a slot the backfill claimed —
+            # measured: 0 suppressions across the whole harness suite (R6-1,
+            # agent review round 6). It stays as a belt, and it counts rather
+            # than matching because ids collide within a batch, so a future
+            # change that reintroduces an interleaving cannot resurrect R5-1 by
+            # suppressing a started call's end along with its twin's.
+            while True:
+                try:
+                    queued = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if isinstance(queued, (_ToolDone, _BatchDone)):
                     continue
-                yield item
-            await asyncio.gather(*tasks, return_exceptions=True)
+                if isinstance(queued, ToolExecutionEndEvent) and _consume_claim(
+                    claimed, queued.tool_call_id
+                ):
+                    continue
+                yield queued
+
             results.extend(result for result in results_by_slot if result is not None)
+            for end_event in pending_ends:
+                yield end_event
         finally:
+            if watcher is not None and not watcher.done():
+                watcher.cancel()
             # GeneratorExit / abort: never leave runner tasks behind.
             for task in tasks:
                 if not task.done():
                     task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            if aborting:
+                # Deliberately NOT awaited. The drain above already gave the
+                # cleanup its budget, and the whole point of that deadline is
+                # that the turn ends on a human timescale; awaiting here would
+                # hand the time straight back. The tasks are cancelled, own
+                # their own resources (bash kills its process group, eval tears
+                # down its worker) and cannot write to this batch any more —
+                # every slot is paired by the backfill above. ``gather``
+                # retrieves their exceptions so a raising cleanup cannot
+                # surface as an unobserved-task warning.
+                if tasks:
+                    detached = asyncio.gather(*tasks, return_exceptions=True)
+                    detached.add_done_callback(lambda task: task.exception())
+                if close_task is not None and not close_task.done():
+                    close_task.cancel()
+            else:
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                if close_task is not None:
+                    if not close_task.done():
+                        close_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await close_task
 
     # ------------------------------------------------------------------
     # Helpers

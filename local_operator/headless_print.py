@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 from rich.console import Console
 
-from local_operator.ansi import strip_control_sequences
+from local_operator.ansi import sanitize_prompt_line, strip_control_sequences
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -178,14 +178,63 @@ class PrintRenderer:
             summary = strip_control_sequences(event.intent or _args_summary(event.args))
             name = strip_control_sequences(event.tool_name)
             line = f"● {name} {summary}".rstrip()
-            self.console.print(f"[dim]{line[:_TOOL_LINE_WIDTH]}[/dim]", highlight=False)
+            # `markup=False` and the style passed as a style, for the reason the
+            # notice branch below states at length: the tool NAME is chosen by
+            # the model, and a `[` in it is Rich markup — `[/red]x` raises
+            # `MarkupError` here, which `session._emit` swallows, so the row
+            # vanishes and the operator watches a tool run with no line at all.
+            # Pre-existing on `main`; fixed here because the notice fix
+            # generalised the rule and it should hold for every branch that
+            # renders model-controlled text, not just the newest one (R14-2,
+            # agent review round 14).
+            self.console.print(line[:_TOOL_LINE_WIDTH], style="dim", highlight=False, markup=False)
         elif isinstance(event, ToolExecutionEndEvent):
             if event.is_error:
                 name = strip_control_sequences(event.tool_name)
-                self.console.print(f"[red]✗ {name} failed[/red]", highlight=False)
+                self.console.print(f"✗ {name} failed", style="red", highlight=False, markup=False)
         elif isinstance(event, NoticeEvent):
             style = {"error": "red", "warning": "yellow"}.get(event.kind, "dim")
-            self.console.print(f"[{style}]{event.text}[/{style}]", highlight=False)
+            # A GLYPH carries the severity, not just the colour. This renderer
+            # writes to a real terminal but its output is also piped into logs
+            # and read under NO_COLOR, where an ansi-stripped error notice was
+            # indistinguishable from an informational one — and the `✗` line it
+            # replaced for unrunnable tool calls did carry a marker, so dropping
+            # it was a regression in exactly the case that matters (D11, design
+            # round 3). `info` stays bare: a marker on every routine line is
+            # noise, and it is the one kind with nothing to warn about.
+            glyph = {"error": "✗ ", "warning": "! "}.get(event.kind, "")
+            # SANITIZED, like every other line this renderer writes. Notice text
+            # is no longer only ours: the unrunnable-call diagnostic carries a
+            # model-chosen tool name, so an erase-display escape inside it would
+            # clear the operator's terminal — and the `✗ <name> failed` line that
+            # diagnostic replaced was stripped for exactly that reason, two
+            # branches up. Moving the message onto a notice moved it off the
+            # guard (R7-1, agent review round 7). Applied to every notice rather
+            # than to that one call site, because the next notice to carry
+            # untrusted text should not have to remember this.
+            # `sanitize_prompt_line`, not bare stripping, and the style applied
+            # as a Rich STYLE rather than as inline markup. Three hazards, and
+            # the tool name inside this text is model-chosen (D14/D15, design
+            # round 4):
+            #
+            # 1. Control sequences repaint the terminal — what `strip` covered.
+            # 2. Newlines SURVIVE stripping by design (tool output is
+            #    multi-line and the renderers want it), so a name containing one
+            #    forges a second, unmarked row that can read as a clean success.
+            #    `sanitize_prompt_line` collapses whitespace runs, which is the
+            #    same reason it exists for approval prompts.
+            # 3. Square brackets are Rich MARKUP: `[bold]x` silently renders the
+            #    wrong name, and `[/red]oops` raises `MarkupError` inside the
+            #    renderer, which `session._emit` swallows — so the notice
+            #    vanishes entirely. That is precisely the silence this
+            #    diagnostic was added to prevent, reachable from a hallucinated
+            #    tool name. `markup=False` makes the text data rather than code.
+            #
+            # Pre-existing on the `✗ <name> failed` line this replaced; fixed
+            # here rather than deferred because the notice is now the only
+            # report an operator gets.
+            text = sanitize_prompt_line(event.text)
+            self.console.print(f"{glyph}{text}", style=style, highlight=False, markup=False)
         elif isinstance(event, RetryStartEvent):
             self.console.print(f"[dim]retry {event.attempt}: {event.error}[/dim]", highlight=False)
         elif isinstance(event, CompactionStartEvent):

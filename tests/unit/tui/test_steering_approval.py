@@ -18,6 +18,7 @@ routes messages internally.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -25,6 +26,7 @@ from typing import Any, cast
 import pytest
 from rich.cells import cell_len
 from textual.binding import Binding
+from textual.document._document import Selection
 
 from local_operator.harness.types import (
     ImageContent,
@@ -35,7 +37,11 @@ from local_operator.harness.types import (
 )
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.resume import TRANSCRIPT_NAME
-from local_operator.tui.app import DOUBLE_INTERRUPT_WINDOW_S, OperatorApp
+from local_operator.tui.app import (
+    DOUBLE_INTERRUPT_WINDOW_S,
+    DOUBLE_STOP_WINDOW_S,
+    OperatorApp,
+)
 from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
@@ -62,10 +68,12 @@ from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
     TranscriptView,
+    UserBlock,
     WorkingBlock,
 )
 
 from .test_app_pilot import FakeSession, _factory
+from .test_transcript_selection import _cell, _composer_drag
 
 
 class SteerableSession(FakeSession):
@@ -2156,3 +2164,822 @@ async def test_nothing_takes_the_keyboard_from_someone_mid_sentence() -> None:
                     await future
                 except (asyncio.CancelledError, Exception):
                     pass
+
+
+# ---------------------------------------------------------------------------
+# The Esc ladder: stop the turn, then (on a second press) the subagents
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_esc_stops_the_turn_and_offers_to_stop_the_subagents() -> None:
+    """One press stops the parent and SAYS that children are still running.
+
+    The offer is the load-bearing half. A stop that silently left three agents
+    burning tokens is the defect this ladder exists to fix, and a user has no
+    way to discover the wider stop unless the first press names it.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        assert session.aborts == ["interrupted"]
+        # The children are NOT stopped by the first press.
+        assert session.subagent_cancels == []
+        assert any("2 subagents still running" in row for row in rows(app))
+        assert any("esc again to stop them" in row for row in rows(app))
+
+
+@pytest.mark.asyncio
+async def test_a_second_esc_stops_the_subagents_and_confirms_it() -> None:
+    """The escalation press cancels the children and reports the count."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        assert session.subagent_cancels == ["interrupted"]
+        assert any("stopped 2 subagents" in row for row in rows(app))
+        # One line, not two: the stale "still running" row would read as current.
+        assert not any("still running" in row for row in rows(app))
+
+
+@pytest.mark.asyncio
+async def test_a_slow_second_esc_does_not_stop_the_subagents() -> None:
+    """The offer expires, so a much later Esc is a fresh first press.
+
+    Without the window, an Esc pressed minutes after an unrelated stop would
+    silently kill every child — the expensive, unrecoverable action arriving
+    with no warning attached to the keystroke that triggered it.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 1
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        # Age the offer past its window without waiting for it.
+        assert app._stop_offered_at is not None, "the first press must make the offer"
+        app._stop_offered_at -= DOUBLE_STOP_WINDOW_S + 1
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        assert session.subagent_cancels == [], "an expired offer must not escalate"
+
+
+@pytest.mark.asyncio
+async def test_esc_with_no_children_says_nothing_about_subagents() -> None:
+    """The common case stays silent: no ladder, no line, no second rung."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        assert session.aborts == ["interrupted"]
+        assert not any("subagent" in row for row in rows(app))
+        assert app._stop_offered_at is None
+
+
+@pytest.mark.asyncio
+async def test_esc_stops_subagents_even_when_the_parent_turn_has_ended() -> None:
+    """Children outlive the turn that launched them, so Esc must still reach
+    them when the parent is already idle — that is the exact state a user is
+    in when they notice work still running and press Esc."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = False  # the parent finished; children did not
+        session.running_children = 3
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert any("3 subagents still running" in row for row in rows(app))
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert session.subagent_cancels == ["interrupted"]
+        assert any("stopped 3 subagents" in row for row in rows(app))
+
+
+@pytest.mark.asyncio
+async def test_esc_with_nothing_running_still_never_clears_the_composer() -> None:
+    """The rule the ladder must not break: Esc is not a way to lose a draft."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.load_text("a half-typed prompt")
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        assert editor.text == "a half-typed prompt"
+        assert session.aborts == []
+
+
+# ---------------------------------------------------------------------------
+# The Ctrl+C ladder: a draft is cleared before the exit ladder starts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_clears_a_draft_before_arming_the_exit_ladder() -> None:
+    """Ctrl+C on a half-typed prompt means "scrap that", not "start exiting".
+
+    This also removes the ladder's sharpest edge: the quitting press used to be
+    two taps away while the user was typing, so a reflexive double-tap at the
+    composer could close the app with a drafted prompt on screen.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.load_text("draft to be scrapped")
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+
+        assert editor.text == ""
+        assert not any("ctrl+c again to exit" in row for row in rows(app))
+        # The ladder was NOT armed: the press was spent on the composer.
+        assert app._last_interrupt_at == 0.0
+        assert app.is_running
+        # And the text is recoverable rather than destroyed.
+        assert "draft to be scrapped" in editor.prompt_history()
+
+
+@pytest.mark.asyncio
+async def test_two_ctrl_c_presses_from_a_draft_do_not_exit() -> None:
+    """The first press clears; the SECOND is a first press for the ladder."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app.query_one(Editor).load_text("draft")
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+
+        assert app.is_running, "a double-tap from a draft must never quit"
+        assert any("ctrl+c again to exit" in row for row in rows(app))
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_on_an_empty_composer_keeps_the_exit_ladder() -> None:
+    """The existing gesture is unchanged when there is no draft to clear."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+        assert session.aborts == ["interrupted"]
+        assert any("ctrl+c again to exit" in row for row in rows(app))
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.3)
+        assert not app.is_running
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_draft_is_not_treated_as_a_draft() -> None:
+    """Spaces and newlines are not something a user asked to keep, so the key
+    keeps its interrupt meaning rather than being silently swallowed."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        app.query_one(Editor).load_text("   \n  ")
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+
+        assert session.aborts == ["interrupted"]
+        assert any("ctrl+c again to exit" in row for row in rows(app))
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_transcript_disarms_the_stop_offer() -> None:
+    """`/clear` removes the offer's line, so the offer must go with it.
+
+    Two failures at once otherwise: `_replace_stop_notice` would try to remove
+    a block the transcript no longer holds, and an escalation would stay armed
+    whose terms the user can no longer read.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert app._stop_offered_at is not None
+
+        app.action_clear_transcript()
+        await pilot.pause(0.1)
+        assert app._stop_offered_at is None
+        assert app._stop_notice is None
+
+        # And the next Esc is a FIRST press, not an escalation.
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert session.subagent_cancels == []
+
+
+@pytest.mark.asyncio
+async def test_a_stop_offer_does_not_survive_into_a_new_session() -> None:
+    """The sharpest cross-session leak in this family: an armed escalation.
+
+    Carried across a session swap, an Esc pressed just after `/new` would take
+    up an offer made about the OLD conversation's children and cancel the NEW
+    session's subagents — destroying work on the strength of a count the user
+    was shown for a different conversation.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert app._stop_offered_at is not None, "the offer must be armed first"
+
+        await app._reload_session()
+        await pilot.pause(0.1)
+
+        assert app._stop_offered_at is None
+        assert app._stop_notice is None
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_never_files_an_aside_question_in_prompt_history() -> None:
+    """Review round 1, M2. The aside's "off the record" is a contract.
+
+    The card prints "off the record — nothing here joins the chat", and
+    `set_records_history(False)` is how that is enforced. `remember_draft`
+    bypassed the flag, so Ctrl+C filed a question the user deliberately kept
+    out of the conversation into the recallable history — one `up` and one
+    Enter from being sent to the agent as a real turn.
+
+    The press closes the card instead, which is the path that already means
+    "done with this aside" and hands back the borrowed main-chat draft.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        app._open_aside()
+        await pilot.pause(0.1)
+        editor.load_text("is my salary competitive?")
+        await pilot.pause(0.1)
+        assert editor._records_history is False, "the aside must suppress recording"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.15)
+
+        assert not any(
+            "salary" in entry for entry in editor.prompt_history()
+        ), "the off-the-record question reached the recallable history"
+        assert app.is_running
+
+
+# ---------------------------------------------------------------------------
+# Design review round 1: what the ladder SAYS when its own state has moved on.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_late_second_esc_is_acknowledged_rather_than_silently_ignored() -> None:
+    """A press that misses the window must not repaint an identical row.
+
+    Past DOUBLE_STOP_WINDOW_S the press falls through to the ordinary stop,
+    which re-arms the offer. Reprinting the same string there made the press
+    indistinguishable from a dropped keystroke — the rendered frame was byte
+    for byte the same — on the very key this change exists to stop making
+    silent promises (D1). The re-armed offer now states the constraint that
+    defeated the press, so the user learns why nothing was stopped.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert any("esc again to stop them" in row for row in rows(app))
+
+        # The window lapses without a second press.
+        app._stop_offered_at = time.monotonic() - (DOUBLE_STOP_WINDOW_S + 1)
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        # Nothing was stopped — that part is by design — but the row CHANGED,
+        # so the press is visibly acknowledged.
+        assert session.subagent_cancels == []
+        assert any(
+            "too slow; esc again within" in row for row in rows(app)
+        ), "the late press repainted an identical row and read as a dropped key"
+
+
+@pytest.mark.asyncio
+async def test_children_finishing_between_presses_is_not_reported_as_a_denial() -> None:
+    """ "no subagents were running" must not contradict the offer (D2).
+
+    `cancel_subagents` recounts at press time, so children that settle inside
+    the window return zero. Printing a flat denial there replaces a row that
+    just said "2 subagents still running" and reads as "the first message was
+    wrong" — re-raising the credibility problem this change exists to fix,
+    when what actually happened is better news than the offer implied.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        # They finish on their own before the user's second press lands.
+        session.running_children = 0
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        painted = rows(app)
+        assert any(
+            "finished before the stop landed" in row for row in painted
+        ), "the confirmation did not explain that the children had finished"
+        assert not any(
+            "no subagents were running" in row for row in painted
+        ), "the confirmation flatly denied the offer the user had just read"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_that_spares_background_jobs_says_so() -> None:
+    """Escalating reads as "stop all of it", and `bash` jobs deliberately
+    survive it (D3). The one moment that is worth a word is the confirmation,
+    and only when such a job actually exists."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 1
+        session.running_bash_jobs = 1
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        app._stop_offered_at = time.monotonic()
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        painted = rows(app)
+        assert any("stopped 1 subagent" in row for row in painted)
+        assert any(
+            "background job" in row and "jobs cancel" in row for row in painted
+        ), "the spared background job was not named"
+
+
+@pytest.mark.asyncio
+async def test_the_confirmation_stays_quiet_when_nothing_was_spared() -> None:
+    """The `bash` clause is conditional: unconditional, it would be noise on
+    every stop (D3)."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 1
+        session.running_bash_jobs = 0
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        app._stop_offered_at = time.monotonic()
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        assert not any("background job" in row for row in rows(app))
+
+
+@pytest.mark.asyncio
+async def test_the_offer_retires_its_promise_when_the_window_closes() -> None:
+    """An instruction that no key will honour must not stand (D4).
+
+    Nothing cleared the row, so a transcript kept a warning-amber
+    "esc again to stop them" for the rest of the session, scrolling up through
+    the history with no visible expiry. The FACT survives — the children really
+    are still running — only the promise goes, and it drops out of the warning
+    weight because it is no longer something to act on within a window.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert any("esc again to stop them" in row for row in rows(app))
+
+        # Wait out the real window rather than reaching into the timer.
+        await pilot.pause(DOUBLE_STOP_WINDOW_S + 0.5)
+
+        painted = rows(app)
+        assert not any(
+            "esc again to stop them" in row for row in painted
+        ), "the expired offer went on advertising an escalation no key honours"
+        assert any(
+            "2 subagents still running" in row for row in painted
+        ), "the surviving fact was dropped along with the promise"
+
+
+@pytest.mark.asyncio
+async def test_taking_the_offer_is_not_undone_by_the_expiry_timer() -> None:
+    """The timer is keyed on the stamp it was armed with, so it can never
+    retire an offer that was already taken, nor a newer one armed since."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        app._stop_offered_at = time.monotonic()
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert session.subagent_cancels == ["interrupted"]
+
+        # The first press's timer fires somewhere in here and must do nothing.
+        await pilot.pause(DOUBLE_STOP_WINDOW_S + 0.5)
+
+        assert any(
+            "stopped 2 subagents" in row for row in rows(app)
+        ), "the expiry timer overwrote the confirmation of a stop that happened"
+
+
+@pytest.mark.asyncio
+async def test_the_ladder_row_keeps_its_place_in_the_transcript() -> None:
+    """Replacing the row must not move it (D5).
+
+    `_replace_stop_notice` used to remove and re-append, so the row jumped to
+    the transcript end and landed BELOW notices that had arrived after it —
+    a row the user had already read reordering itself past later ones. The
+    replacement now restates in place, which keeps both the replace-don't-stack
+    decision and a chronological transcript.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        # A notice arrives after the offer, as the aborted turn's own does.
+        app._append_block(NoticeBlock("interrupted", "info"))
+        await pilot.pause()
+
+        app._stop_offered_at = time.monotonic()
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        painted = [row for row in rows(app) if row.strip()]
+        ladder = next(i for i, row in enumerate(painted) if "stopped 2 subagents" in row)
+        later = next(i for i, row in enumerate(painted) if "interrupted" in row)
+        assert ladder < later, "the restated ladder row jumped below a later notice"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_says_where_the_draft_went() -> None:
+    """Filing the draft into history is the point of this rung, but all the
+    user sees is their sentence vanishing — and recoverability nobody can
+    discover gets retyped instead of recalled (D6)."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "a half-typed prompt I do not want to lose"
+        await pilot.pause()
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+
+        painted = rows(app)
+        assert any(
+            "draft cleared" in row and "↑ to recover" in row for row in painted
+        ), "the draft vanished with nothing to say it was recoverable"
+        # And the exit ladder is still NOT armed by this press.
+        assert not any("ctrl+c again" in row for row in painted)
+        assert app.is_running
+
+
+@pytest.mark.asyncio
+async def test_an_armed_offer_never_outranks_a_waiting_approval() -> None:
+    """A permission gate takes Escape ahead of the escalation (R1).
+
+    Round 1's F5 was the ask picker outranking an approval; the escalation
+    branch was a second door to the same inversion. With the offer armed and
+    an `rm -rf /` approval on screen, Escape has to answer the PROMPT — the
+    thing the engine is blocked on and the most recently raised surface — not
+    silently destroy every delegated child on a press the user could
+    reasonably have aimed at the approval in front of them.
+
+    The offer survives unspent, so the next press still escalates.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        ask = await _booted_gate(pilot, session)
+        session.streaming = True
+        session.running_children = 2
+
+        pending = asyncio.ensure_future(ask("bash", "run: rm -rf /"))
+        for _ in range(100):
+            if isinstance(app.screen.focused, ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
+        assert app._live_prompt() is app._approval, "the approval is not the live prompt"
+
+        # Arm the ladder exactly as a first Esc during the turn would.
+        app._stop_offered_at = time.monotonic()
+        app._stop_offer_count = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+
+        assert (
+            session.subagent_cancels == []
+        ), "Escape escalated past a waiting approval and killed the subagents"
+        assert await asyncio.wait_for(pending, 2) is False, "the approval was not denied"
+        pending.cancel()
+
+
+@pytest.mark.asyncio
+async def test_the_late_row_promises_the_number_of_presses_it_actually_costs() -> None:
+    """The re-armed offer must not overstate the cost by one (D9).
+
+    The late press itself re-arms the ladder, so by the time its row is painted
+    the offer is live and the very NEXT single press escalates. Saying "press
+    esc twice" there described the ladder in general rather than the state the
+    user is actually in — harmless to obey, but wrong on the one key this
+    change exists to make honest.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        # The window lapses, so this press cannot escalate — it re-arms.
+        app._stop_offered_at = time.monotonic() - (DOUBLE_STOP_WINDOW_S + 1)
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert session.subagent_cancels == []
+        assert any("esc again within" in row for row in rows(app))
+
+        # ONE further press, exactly as the row now promises.
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        assert session.subagent_cancels == [
+            "interrupted"
+        ], "the row promised one more press and one more press did not escalate"
+
+
+@pytest.mark.asyncio
+async def test_a_buried_ladder_row_moves_to_where_the_user_is_looking() -> None:
+    """Review round 3, R3-2. Restating in place must not repaint off-screen.
+
+    `_stop_notice` outlives the turn that created it, so a later press can find
+    it far up in scrollback. D5's unconditional in-place restate repainted it
+    there and left the visible frame unchanged — the silent no-op D1 was filed
+    for, reintroduced on a different axis. When the row is no longer the
+    transcript's tail it is dropped and re-appended, which keeps both the
+    replace-don't-stack promise and the guarantee that a press is visible.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        first = app._stop_notice
+        assert first is not None
+
+        # The conversation carries on until the row is genuinely off screen —
+        # asserted, not assumed, since a short transcript would not scroll and
+        # the test would then be exercising the visible path by accident.
+        for turn in range(30):
+            app._append_block(UserBlock(f"another question {turn}"))
+            prose = AssistantBlock()
+            prose.update_text(f"another answer {turn} " + "padding " * 20)
+            app._append_block(prose)
+        await pilot.pause()
+        await pilot.pause()
+        assert not app._is_on_screen(first), "the row never scrolled out of sight"
+
+        # A later press must produce a row the user can actually see.
+        session.streaming = True
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        # The append scrolls the transcript; let the layout settle before
+        # asking where the row landed.
+        for _ in range(5):
+            await pilot.pause()
+
+        blocks = app._transcript_view().blocks()
+        assert blocks[-1] is app._stop_notice, "the ladder row did not move to the tail"
+        assert first not in blocks, "the buried row was left behind as a duplicate"
+        # And the new row is where the user is actually looking, which is the
+        # whole point: a press that repaints only off-screen rows is a press
+        # the user cannot tell from a dropped keystroke.
+        moved = app._stop_notice
+        assert moved is not None
+        assert app._is_on_screen(moved), "the moved row is still not visible"
+
+
+@pytest.mark.asyncio
+async def test_the_expired_row_recounts_rather_than_restating_a_stale_number() -> None:
+    """Review round 3, R3-3. The surviving row is present tense, so it must be
+    presently true.
+
+    The expiry used to restate the count captured when the offer was ARMED, in
+    the calm receipt weight — so children that finished during the 4s window
+    left the transcript asserting "2 subagents still running" as settled fact.
+    Better than leaving an amber offer up forever, but one step short.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert any("2 subagents still running" in row for row in rows(app))
+
+        # They finish on their own inside the window.
+        session.running_children = 0
+        await pilot.pause(DOUBLE_STOP_WINDOW_S + 0.5)
+
+        painted = rows(app)
+        assert not any(
+            "still running" in row for row in painted
+        ), "the expired row asserted running subagents that had already finished"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_highlight_does_not_divert_ctrl_c_from_the_draft() -> None:
+    """D17, design round 5. Gate on the GESTURE, not on the selection.
+
+    A selection is state that persists until the caret moves, so "the composer
+    has a highlight" stays true long after any copy ended. Gating on it meant a
+    composer holding a stale range took the interrupt, ARMED the exit ladder,
+    and a second reflexive tap quit the app with the draft never filed — the
+    exact hazard this rung was added to remove, reintroduced by its own guard.
+
+    A real drag-copy is covered from the other side by
+    `test_a_composer_drag_still_leaves_ctrl_c_as_the_interrupt` in
+    `test_transcript_selection.py`, which this must not break.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "a half-typed prompt I do not want to lose"
+        await pilot.pause()
+
+        # A highlight with no gesture in flight: the caret simply sits inside a
+        # range the user selected earlier.
+        editor.selection = Selection((0, 0), (0, 10))
+        await pilot.pause()
+        assert editor.selected_text, "the stale highlight must be live to mean anything"
+        assert not getattr(editor, "_selecting", False), "no drag should be in flight"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+
+        # The draft rung takes it: filed, not aborted, ladder NOT armed.
+        assert session.aborts == [], "a stale highlight diverted the key to the interrupt"
+        assert editor.text == "", "the draft was not cleared"
+        assert "a half-typed prompt I do not want to lose" in editor.prompt_history()
+
+        # And the second press must not quit, which is the damage D17 named.
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+        assert app.is_running, "a second reflexive tap exited the app"
+
+
+@pytest.mark.asyncio
+async def test_moving_the_caret_after_a_copy_gives_ctrl_c_back_to_the_draft() -> None:
+    """D20, design review round 6. The deferral must retire when the copy does.
+
+    `_copied` alone retires only on an EDIT, so clicking elsewhere or pressing
+    an arrow left it set with nothing on screen: the user saw a plain draft,
+    got the interrupt instead, and the second reflexive tap quit with the draft
+    lost. That is the D17 damage again, reached by swapping one invisible
+    long-lived flag for another.
+
+    The guard is therefore `_copied` AND a live highlight. The pair is
+    self-retiring and, more to the point, VISIBLE — the key means "interrupt"
+    exactly while the highlight the copy took is on screen, which is the same
+    window in which the user perceives a copy at all.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "a half-typed prompt I do not want to lose"
+        await pilot.pause()
+        await pilot.pause()
+
+        # A REAL drag-copy, driven through the widget's own mouse path rather
+        # than by hand-setting flags. Round 19 (MAJOR-1) caught the hand-set
+        # stand-in going vacuous when `copy_in_flight` moved from `_copied` to
+        # `_copy_gesture`: the stand-in never armed the deferral, so the test
+        # verified that a caret move retires something already retired. Driving
+        # the real gesture ties this guard to whatever predicate the widget
+        # actually arms, so a future re-pointing cannot silently disarm it.
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 10))
+        assert editor.copy_in_flight, "the drag must arm the deferral for this test to bite"
+        assert editor.selected_text, "the copy's own highlight must be on screen"
+
+        # Moving the caret collapses the highlight — the copy is over, and the
+        # user can see that it is.
+        await pilot.press("right")
+        await pilot.pause()
+        assert not editor.selected_text, "the highlight should be gone"
+        # The GESTURE claim retires with the highlight it took; the RECEIPT
+        # flag does not, because the toast it drives is still true (the text
+        # really is on the clipboard). Asserting both is what keeps the two
+        # lifetimes from being fused again — doing so cost a stale receipt once
+        # already (R18-1).
+        assert not editor._copy_gesture, "the gesture claim should retire with its highlight"
+        assert editor._copied, "the receipt is still true and must not be retired here"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+
+        assert session.aborts == [], "a retired copy still diverted the key"
+        assert editor.text == "", "the draft was not cleared"
+        assert "a half-typed prompt I do not want to lose" in editor.prompt_history()
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+        assert app.is_running, "the second tap quit with the draft lost"

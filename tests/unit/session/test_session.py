@@ -2527,3 +2527,129 @@ class TestASwitchedModelTakesEffectAtTheNextCall:
             assert session.model_label == "test/other"
         finally:
             await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# cancel_subagents: the second Esc press
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_subagents_stops_children_and_spares_background_bash(tmp_path):
+    """The wider stop cancels delegated agents ONLY.
+
+    ``task`` jobs are the parent's own work, delegated: a stop the user aimed
+    at the agent must reach them, and before this it did not — ``abort`` only
+    ever touched the parent's turn signal, so children carried on calling the
+    provider after the turn that launched them had ended.
+
+    ``bash`` jobs are the opposite case and must survive. ``background=true``
+    exists precisely so a build or a deploy outlives the turn that started it;
+    killing one on a keypress meant for the agent destroys work the user asked
+    to be insulated from the agent.
+    """
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    child_cancelled = asyncio.Event()
+    bash_running = asyncio.Event()
+    started = asyncio.Event()
+
+    async def child(job_id, signal, report_progress):
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+        return "never"
+
+    async def build(job_id, signal, report_progress):
+        bash_running.set()
+        await asyncio.sleep(0.4)
+        return "build finished"
+
+    child_id = session.jobs.register("task", "child", child)
+    bash_id = session.jobs.register("bash", "build", build)
+    await asyncio.wait_for(asyncio.gather(started.wait(), bash_running.wait()), timeout=5)
+
+    stopped = session.cancel_subagents()
+
+    assert stopped == 1, "the running child should be reported as stopped"
+    await asyncio.wait_for(child_cancelled.wait(), timeout=5)
+    child_job = session.jobs.get(child_id)
+    assert child_job is not None and child_job.status == "cancelled"
+    # The build is untouched and still runs to completion.
+    await asyncio.sleep(0.6)
+    bash_job = session.jobs.get(bash_id)
+    assert bash_job is not None
+    assert bash_job.status == "completed"
+    assert bash_job.result_text == "build finished"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_subagents_reports_zero_when_nothing_is_delegated(tmp_path):
+    """The count is what the UI prints, so "nothing was running" must be
+    distinguishable from "children were stopped"."""
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    assert session.cancel_subagents() == 0
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_abort_alone_leaves_subagents_running(tmp_path):
+    """The FIRST Esc press is deliberately narrow.
+
+    A delegated child can be minutes into useful work, and the key that quiets
+    the foreground should not destroy it by reflex — that is why stopping the
+    children is a separate, explicitly offered second press rather than a
+    silent consequence of the first.
+    """
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    started = asyncio.Event()
+
+    async def child(job_id, signal, report_progress):
+        started.set()
+        await asyncio.sleep(0.3)
+        return "finished anyway"
+
+    job_id = session.jobs.register("task", "child", child)
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    session.abort("interrupted")
+
+    await asyncio.sleep(0.5)
+    job = session.jobs.get(job_id)
+    assert job is not None and job.status == "completed"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_offered_count_and_the_stopped_count_agree(tmp_path):
+    """Review round 1, M3. One predicate behind both numbers.
+
+    The count a host OFFERS ("2 still running — esc again") and the count the
+    stop REPORTS must come from the same filter. They did not: the TUI counted
+    with a filter that excludes jobs parked at the capacity gate while the
+    cancel took every ``running`` row including those. The confirmation
+    contradicted the offer, and — worse — a press that found only queued
+    children showed nothing and armed nothing, leaving children the second
+    press would happily have cancelled unreachable from the keyboard.
+    """
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+
+    async def child(job_id, signal, report_progress):
+        await asyncio.sleep(30)
+        return "never"
+
+    session.jobs.register("task", "running-child", child)
+    # Parked at the capacity gate: `status == "running"` while `queued` is set.
+    session.jobs.register("task", "queued-child", child, queued=True)
+    await asyncio.sleep(0.2)
+
+    offered = session.running_subagents()
+    stopped = session.cancel_subagents()
+
+    assert offered == 2, "a queued child is still a child the user asked to stop"
+    assert stopped == offered, "the confirmation must not contradict the offer"
+    await asyncio.sleep(0.3)
+    await session.dispose()
