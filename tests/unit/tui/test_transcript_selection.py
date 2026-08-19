@@ -1853,3 +1853,67 @@ async def test_a_new_selection_after_a_copy_does_not_rearm_the_interrupt() -> No
         await pilot.press("ctrl+c")
         await pilot.pause()
         assert app.is_running, "the second tap quit with the draft unfiled"
+
+
+@pytest.mark.asyncio
+async def test_a_blurred_composer_still_paints_the_copy_it_is_deferring_to() -> None:
+    """D25, design review round 8. "On screen" must not quietly become "focused".
+
+    Ctrl+C hands the key to a copy while the highlight that copy took is still
+    VISIBLE, and the user learns that rule from the pixels. Blur is the one
+    place where "on screen" and "focused" come apart: the composer can lose
+    focus with its selection still painted, and the deferral correctly follows
+    the paint rather than the focus.
+
+    That makes the promise true today by a property nothing pins — a future
+    change to blurred-selection styling would silently turn this into the fifth
+    lost draft in this rung's history. This asserts the paint, so such a change
+    fails here loudly instead.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
+        assert editor._copied, "the drag should have copied"
+
+        def selection_is_painted() -> bool:
+            """Is the composer's selection tint anywhere on its row?
+
+            Text alone would not catch a regression here — a composer that
+            stopped HIGHLIGHTING its selection still paints the same
+            characters, so the STYLE is the whole subject. The tint is read
+            from the live paint while focused rather than hard-coded, so a
+            theme change cannot turn this into a false alarm.
+            """
+            row = editor.region.y
+            strip = app.screen._compositor.render_strips()[row]
+            return tint in {
+                str(segment.style.bgcolor)
+                for segment in strip
+                if segment.style is not None and segment.style.bgcolor is not None
+            }
+
+        row = editor.region.y
+        focused_strip = app.screen._compositor.render_strips()[row]
+        tints = [
+            str(segment.style.bgcolor)
+            for segment in focused_strip
+            if segment.style is not None and segment.style.bgcolor is not None
+        ]
+        assert tints, "the focused composer painted no selection tint at all"
+        tint = tints[0]
+
+        # Blur the composer WITHOUT touching the selection.
+        app.set_focus(None)
+        await pilot.pause()
+        assert not editor.has_focus, "the composer should be blurred"
+        assert editor.selected_text, "blur must not clear the selection itself"
+
+        # The highlight the deferral promises the user is still on screen, so
+        # the rule the comment states still describes what they can see.
+        assert selection_is_painted(), (
+            "a blurred composer stopped painting the copy's highlight, so the "
+            "Ctrl+C deferral now rests on state the user cannot see"
+        )
