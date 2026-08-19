@@ -942,9 +942,13 @@ class AskPickerScreen(Container):
           reports a zero-width box. A terminal that shrinks past the card and
           then grows back re-measures through here (agent review round 2, F6).
 
-        Both frames are replaced by ``on_resize`` as soon as there is a real
-        column to read — measured, the fallback returns the same number the
-        layout then assigns, because ``#prompt-host`` adds no horizontal padding.
+        Both frames are replaced as soon as there is a real column to read, but
+        by DIFFERENT events, and the difference is the whole reason
+        :meth:`remeasure` exists: a placed card gets ``on_resize``, while a
+        hidden one is not laid out and therefore receives no ``Resize`` at all —
+        the app drives it from outside instead (round 2, F7). Measured, the
+        fallback returns the same number the layout then assigns, because
+        ``#prompt-host`` adds no horizontal padding.
         """
         mine = self.size.width if self.is_mounted else 0
         if mine:
