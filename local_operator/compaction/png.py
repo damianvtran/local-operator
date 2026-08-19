@@ -40,10 +40,16 @@ __all__ = ["encode_grayscale_png"]
 #: CRLF/LF pair let readers detect corrupting transfers.
 _SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
-#: DEFLATE level. 9 is affordable here: frames are two-tone and compress almost
-#: instantly, and archive payloads ride in the model context, where every byte
-#: is billed.
-_COMPRESS_LEVEL = 9
+#: DEFLATE level. 6, not 9, and the difference is the user's wait: on a full
+#: 1932px frame level 9 spends ~390 ms against level 6's ~37 ms (measured on
+#: the raw scanline stream of a typical page) for ~11% fewer bytes. The bytes
+#: are the wrong thing to optimize — providers bill images by their pixel
+#: dimensions, not their file size, so the smaller file saves request payload
+#: only, while the encode time sits directly on the compaction pass the user
+#: is watching. The one byte ceiling that matters (FRAME_DATA_BYTES_BUDGET,
+#: 3 MB per request) is nowhere near binding at either level: a full archive
+#: replay is ~6 frames × ~130 KB base64.
+_COMPRESS_LEVEL = 6
 
 
 def _chunk(kind: bytes, payload: bytes) -> bytes:

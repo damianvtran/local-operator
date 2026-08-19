@@ -103,11 +103,21 @@ async def talk(session: Session, turns: int = 3) -> None:
 async def test_a_vision_model_compacts_into_a_snapcompact_archive(tmp_path):
     """``supports_images`` picks snapcompact, and the pass proves it took that
     branch by storing an archive — the same ``preserve_data['snapcompact']``
-    payload the automatic pass stores, because it is the same code."""
+    payload the automatic pass stores, because it is the same code.
+
+    The pass must also make NO provider call: that is snapcompact's contract
+    (the archive replaces a summary), and the call it used to make — the whole
+    discarded history shipped out for a caption — is where a manual /compact
+    spent 20–50 of its ~60 seconds. ``_one_shot_complete`` raising proves the
+    branch never reaches for it."""
     stream = ScriptedStream(["reply"] * 4)
     session = make_session(tmp_path, stream, model=VISION_MODEL)
     await talk(session)
 
+    async def no_llm_calls(system: str, prompt: str) -> str:
+        raise AssertionError("snapcompact must not make a provider call")
+
+    session._one_shot_complete = no_llm_calls  # type: ignore[method-assign]
     outcome = await session.compact_now()
 
     assert outcome.ran is True
@@ -238,9 +248,10 @@ async def test_the_manual_strategy_is_the_automatic_one(tmp_path):
 
 @pytest.mark.asyncio
 async def test_the_receipt_reports_a_real_reduction(tmp_path):
-    """tokens_before/after are measured by ONE ruler either side of the pass, so
-    their difference is a saving a receipt can quote — and the end EVENT carries
-    the same pair, which is what the TUI notice renders."""
+    """tokens_before is the figure the gate acted on and tokens_after the
+    estimate of the rebuilt history, so their difference is a saving a receipt
+    can quote — and the end EVENT carries the same pair, which is what the TUI
+    notice renders."""
     stream = ScriptedStream(["reply"] * 4)
     session = make_session(tmp_path, stream, model=TEXT_MODEL)
     await talk(session, turns=4)
@@ -262,6 +273,30 @@ async def test_the_receipt_reports_a_real_reduction(tmp_path):
         outcome.tokens_before,
         outcome.tokens_after,
     )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_quotes_the_figure_the_gate_acted_on(tmp_path):
+    """When the provider has reported a context size larger than the local
+    estimate, the receipt's "before" is THAT figure — the one on the status
+    band the user is comparing against. Quoting the local estimate instead
+    made a pass that fired at a provider-reported 600k print "319.4k → …",
+    which reads as the band and the receipt disagreeing about what happened.
+    """
+    from local_operator.harness.types import Usage
+
+    stream = ScriptedStream(["reply"] * 4)
+    session = make_session(tmp_path, stream, model=TEXT_MODEL)
+    await talk(session, turns=4)
+    # A provider reading far above anything the tiny fixture history could
+    # estimate locally, as after a long real session.
+    session._last_usage = Usage(input_tokens=1, context_tokens=600_080)
+
+    outcome = await session.compact_now()
+
+    assert outcome.ran is True
+    assert outcome.tokens_before == 600_080
     await session.dispose()
 
 

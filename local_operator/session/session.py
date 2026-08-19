@@ -2951,27 +2951,49 @@ class Session:
             # baked in here as a plain user message is past both of the guards
             # that expire it.
             self._context.messages = [marker, *kept]
-            # Measured with the SAME ruler as ``plan.tokens_before`` (the local
-            # estimate over the converted history), so the difference is a real
-            # saving a receipt can quote and the recovery band below compares
-            # like with like. The provider's own figure is not available until
-            # the next request.
             tokens_after = await self._offloaded(
                 compaction_api, "estimate_messages_tokens", self._render_for_compaction()
             )
+            # The local ruler prices every image at a flat IMAGE_TOKEN_ESTIMATE
+            # (1200), but the archive frames the marker just replayed are billed
+            # by the PROVIDER's formula — ~5,000 visual tokens for an Anthropic
+            # 1932px frame. Correct the after-figure by the difference so the
+            # receipt prices the archive the way the next bill will. Measured on
+            # the live session that motivated this: the uncorrected figure read
+            # 60.1k against a provider-reported 137.5k on the next request.
+            snap_payload = (preserve_data or {}).get("snapcompact")
+            if isinstance(snap_payload, dict):
+                try:
+                    from local_operator.compaction.snapcompact import (
+                        frame_token_estimate_for,
+                    )
+
+                    frame_count = len(snap_payload.get("frames") or [])
+                    per_frame = frame_token_estimate_for(self._model.provider, self._model.model_id)
+                    tokens_after += frame_count * (per_frame - IMAGE_TOKEN_ESTIMATE)
+                except Exception:  # noqa: BLE001 - a receipt must not fail the pass
+                    logger.debug("frame pricing correction failed", exc_info=True)
+            # ``tokens_before`` is the figure the GATE acted on —
+            # ``max(provider-reported, local estimate)`` — not the bare local
+            # estimate. The user compares the receipt against the status band,
+            # and the band shows the provider's number: a pass that fired at a
+            # provider-reported 600k and then printed "319.4k → …" (the local
+            # estimate) read as the band and the receipt disagreeing about
+            # what just happened. omp quotes the provider figure for the same
+            # reason (``calculateContextTokens(lastUsage)``).
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,
                     success=True,
                     strategy=plan.strategy,
-                    tokens_before=plan.tokens_before,
+                    tokens_before=plan.context_tokens,
                     tokens_after=tokens_after,
                 )
             )
             return CompactionOutcome(
                 ran=True,
                 strategy=plan.strategy,
-                tokens_before=plan.tokens_before,
+                tokens_before=plan.context_tokens,
                 tokens_after=tokens_after,
             )
         except Exception as exc:
@@ -3015,22 +3037,39 @@ class Session:
         replaying it as text while the frames are dropped means the pass
         reduces nothing and re-fires on the next turn. Any error — including
         ImportError — falls back to the one-shot LLM summary.
+
+        The snapcompact branch makes NO provider call — that is its contract
+        (omp: "Archive history onto dense bitmap images the model reads back
+        (no LLM call)"), and for a while this method broke it: the archive was
+        built locally and then the whole discarded history was ALSO shipped to
+        the provider for a written digest of frames that already carry the
+        real thing. On a 600k-token session that call was 20–50 s of the
+        ~60 s a manual ``/compact`` took, with the archive render spending the
+        rest — against omp's near-instant pass. The text slot is now the
+        deterministic reading-instructions digest (``archive_summary``), whose
+        every fact derives from the archive itself.
+
+        ``compact_to_archive`` runs in a worker thread: it is pure CPU
+        (serialize → tokenize → rasterize → deflate) on the order of half a
+        second, and the one event loop it would otherwise stall is shared
+        with every subagent and the TUI repaint — the same reasoning as
+        :meth:`_offloaded`, at a call site that cannot use it (this is not a
+        ruler on the module).
         """
         if strategy == "snapcompact":
             try:
                 from local_operator.compaction import snapcompact
 
-                archive = snapcompact.compact_to_archive(
+                archive = await asyncio.to_thread(
+                    snapcompact.compact_to_archive,
                     to_summarize,
                     self._model.provider,
                     self._model.model_id,
                     self._previous_archive_text(),
                     context_window=self._model.context_window,
                 )
-                # The frames are the durable record; the text slot is a
-                # compact digest for hosts that render summaries as text.
-                summary = await compaction_api.summarize_messages(
-                    to_summarize, self._one_shot_complete
+                summary = snapcompact.archive_summary(
+                    archive, self._model.provider, self._model.model_id
                 )
                 return summary or " ", {"snapcompact": _archive_to_json(archive)}
             except Exception:

@@ -46,17 +46,34 @@ from .tokens import estimate_tokens
 # Constants (snapcompact)
 # ---------------------------------------------------------------------------
 
-#: Upper bound on archive frames carried per compaction
-#: (``MAX_FRAMES_DEFAULT``). Oldest middle frames are dropped first.
+#: Hard upper bound on archive frames carried per compaction. Oldest middle
+#: frames are dropped first. This is a ceiling, not the default: see
+#: :data:`DEFAULT_MAX_FRAMES` for why the pass renders far fewer.
 MAX_FRAMES = 80
 
 #: Conservative per-frame token estimate used for context budgeting — the
-#: upper bound across shapes (``FRAME_TOKEN_ESTIMATE``).
+#: upper bound across shapes (``FRAME_TOKEN_ESTIMATE``). Prefer
+#: :func:`frame_token_estimate_for` when the reader is known: providers bill
+#: images very differently (a Gemini frame is 1,120 tokens, an Anthropic
+#: 1932px frame ~5,000), and budgeting every frame at the ceiling makes the
+#: pass drop history it could afford to keep.
 FRAME_TOKEN_ESTIMATE = 5024
 
 #: High-quality frames kept at each chronological edge of a foveated archive
 #: (``HQ_EDGE_FRAMES``).
 HQ_EDGE_FRAMES = 3
+
+#: Default frame budget for a compaction pass — the number of frames replay
+#: will actually send. ``history_blocks`` foveates any archive middle beyond
+#: ``2 * HQ_EDGE_FRAMES + 2`` frames down to the HQ edges, so a pass that
+#: renders more than this spends ~430 ms of raster+deflate per frame on
+#: pages no model ever sees. Measured on a live 600k-token session: 80 frames
+#: rendered (~35 s), 6 replayed. Content beyond the budget is dropped from
+#: the archive text with an explicit ``[... N chars of oldest history
+#: dropped]`` marker — the same fate omp gives it ("About N characters of
+#: older middle history dropped to fit archive budget"), and strictly more
+#: honest than rendering it into frames that are then silently elided.
+DEFAULT_MAX_FRAMES = 2 * HQ_EDGE_FRAMES + 2
 
 #: Maximum snapcompact image base64 carried in every rebuilt provider request
 #: (``FRAME_DATA_BYTES_BUDGET``).
@@ -68,6 +85,7 @@ TOOL_CALL_MAX_CHARS = 2000
 
 __all__ = [
     "MAX_FRAMES",
+    "DEFAULT_MAX_FRAMES",
     "FRAME_TOKEN_ESTIMATE",
     "HQ_EDGE_FRAMES",
     "FRAME_DATA_BYTES_BUDGET",
@@ -80,6 +98,7 @@ __all__ = [
     "history_blocks",
     "strategy_for_model",
     "estimate_archive_tokens",
+    "frame_token_estimate_for",
 ]
 
 
@@ -153,6 +172,37 @@ def resolve_shape(provider: str, model_id: str) -> Shape:
     if "openai" in p or "codex" in p or "azure" in p:
         return _shape(8, 13, 8, 22, 1568)
     return _shape(8, 13, 8, 22, 1568)
+
+
+def frame_token_estimate_for(provider: str, model_id: str) -> int:
+    """What ONE archive frame costs in the named provider's visual tokens.
+
+    Providers do not bill images alike, and pricing every frame at the
+    cross-provider ceiling (:data:`FRAME_TOKEN_ESTIMATE` = 5024) is not
+    conservative — it is wrong in a user-visible way: the compaction receipt
+    and the status band price the replayed archive with this number, so a
+    Gemini archive of six 1,120-token frames was reported as 30k tokens of
+    context that the provider then billed at 6.7k. Formulas mirror omp's
+    ``familyBilling``, which verified them against live bills:
+
+    - Anthropic: ceil(edge/28)² 28px patches, capped at 4,784 visual tokens,
+      +5% margin (1568px → 3,293; 1932px → 5,024).
+    - Google: flat 1,120 tokens per image (``media_resolution`` HIGH),
+      regardless of pixel size.
+    - OpenAI: ceil(edge/32)² 32px patches × 1.2 flagship multiplier, capped
+      at 10,000 patches (1568px → 2,882).
+    - Unknown families: Anthropic's formula, the safe ceiling.
+    """
+    shape = resolve_shape(provider, model_id)
+    edge = shape.page_width_px
+    p = (provider or "").lower()
+    if "google" in p or "gemini" in p or "vertex" in p:
+        return 1120
+    if "openai" in p or "codex" in p or "azure" in p:
+        patches = min((-(-edge // 32)) ** 2, 10_000)
+        return -(-(patches * 12) // 10)  # ceil(patches * 1.2)
+    patches = min((-(-edge // 28)) ** 2, 4784)
+    return -(-(patches * 105) // 100)  # ceil(patches * 1.05)
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +575,7 @@ def compact_to_archive(
     model_id: str,
     previous_text: str | None = None,
     *,
-    max_frames: int = MAX_FRAMES,
+    max_frames: int = DEFAULT_MAX_FRAMES,
     context_window: int | None = None,
 ) -> Archive:
     """Run one snapcompact pass over discarded ``messages``.
@@ -536,9 +586,19 @@ def compact_to_archive(
     When the imaged middle overflows the frame budget, the OLDEST middle pages
     are dropped (with a marker) — mirrors how iterative summaries fade the
     oldest detail. ``context_window`` caps the archive by TOKENS as well as
-    frame count: 80 frames at ~5024 visual tokens each is twice a 200k window,
-    so without the cap the pass that exists to get under the threshold can
+    frame count, so the pass that exists to get under the threshold cannot
     itself overflow it on the next turn.
+
+    ``max_frames`` defaults to :data:`DEFAULT_MAX_FRAMES` — exactly the
+    number of frames ``history_blocks`` will replay before foveation elides
+    the interior. The pass used to render up to :data:`MAX_FRAMES` (80) and
+    let replay throw 74 of them away, which is where a manual ``/compact``
+    spent most of its minute: ~430 ms of raster + deflate per frame, on the
+    event loop, for pages no model ever saw — plus ~10 MB of dead base64 in
+    the transcript entry. The dropped content is not lost silently: it leaves
+    the archive text with an explicit ``[... N chars of oldest history
+    dropped]`` marker, and the un-imaged source is what ``Archive.text``
+    carries forward for the next pass.
     """
     shape = resolve_shape(provider, model_id)
     max_frames = max(1, min(max_frames, MAX_FRAMES))
@@ -571,27 +631,27 @@ def compact_to_archive(
         pages = pages[len(pages) - max_frames :]
         text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
 
-    # Token budget: the frame COUNT cap alone allows 80 * FRAME_TOKEN_ESTIMATE
-    # visual tokens, which exceeds most windows. Drop oldest middle pages
-    # until the replayed archive fits a reserve-adjusted share of the window.
-    if context_window and context_window > 0:
-        budget = max(FRAME_TOKEN_ESTIMATE, int(context_window * 0.5))
-        while (
-            pages
-            and estimate_archive_tokens(
-                Archive(
-                    frames=[],
-                    text=text_head + "\n".join(pages) + text_tail,
-                    text_head=text_head,
-                    text_tail=text_tail,
-                )
-            )
-            + len(pages) * FRAME_TOKEN_ESTIMATE
-            > budget
-        ):
+    # Token budget: drop oldest middle pages until the replayed archive fits a
+    # reserve-adjusted share of the window. Frames are priced with the actual
+    # provider's billing (frame_token_estimate_for), not the cross-provider
+    # ceiling — the ceiling made a Gemini archive look 4.5x its billed size
+    # and dropped history the window could afford. The text edges are
+    # tokenized ONCE outside the loop: they are fixed-size (the truncation
+    # marker aside), and the previous per-iteration re-estimate tokenized
+    # ~126k chars of unchanged text each round through tiktoken.
+    per_frame = frame_token_estimate_for(provider, model_id)
+    if pages and context_window and context_window > 0:
+        budget = max(per_frame, int(context_window * 0.5))
+        edge_tokens = estimate_archive_tokens(
+            Archive(frames=[], text_head=text_head, text_tail=text_tail)
+        )
+        while pages and edge_tokens + len(pages) * per_frame > budget:
             truncated_chars += len(pages[0])
             pages = pages[1:]
             text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
+        # The marker lines appended above are a handful of tokens; they are
+        # deliberately not folded back into edge_tokens — the budget is an
+        # estimate with a 2x reserve, not an invoice.
 
     frames = [render_frame(page, shape) for page in pages]
     # Pages carry no trailing newline; joining without one glues the last
@@ -668,6 +728,57 @@ def history_blocks(
 def strategy_for_model(model_spec: ModelSpec) -> Literal["snapcompact", "context-full"]:
     """snapcompact iff the model can read images back; else context-full."""
     return "snapcompact" if model_spec.supports_images else "context-full"
+
+
+def archive_summary(archive: Archive, provider: str, model_id: str) -> str:
+    """Deterministic summary text for a snapcompact pass — NO LLM call.
+
+    This is the text slot of the compaction entry when the archive carries the
+    real history. It mirrors omp's ``snapcompact-summary.md``: instructions
+    for reading the replayed archive (text edges verbatim, the middle as
+    pixel-font frames), not a paraphrase of the content. The paraphrase is
+    what the frames replace — producing one anyway meant shipping the whole
+    discarded history to a provider and waiting on the reply, which made the
+    "no LLM call, no network" pass 20–50 s slower than the local work it
+    fronted, and is exactly why ``/compact`` here took a minute while omp's
+    is near-instant.
+
+    Deliberately structural (frame count, grid geometry, truncation note):
+    every fact is derivable from the archive, so the summary can never
+    contradict it, and hosts that render the text slot get an honest caption
+    rather than an unlabelled apology.
+    """
+    shape = resolve_shape(provider, model_id)
+    middle = (
+        ", with the middle rendered as pixel-font image frames"
+        if archive.frames
+        else ", all as plain text"
+    )
+    lines = [
+        "Resume prior conversation. Earlier turns are archived below, oldest to",
+        f"newest{middle}.",
+        "",
+        "Reading the archive:",
+        "- Plain text: verbatim transcript; rely on it exactly.",
+    ]
+    if archive.frames:
+        plural = "s" if len(archive.frames) != 1 else ""
+        lines.append(
+            f"- {len(archive.frames)} image frame{plural}: each is one page of the"
+            f" transcript, a grid up to {shape.chars_per_line} characters wide and"
+            f" {shape.lines_per_frame} rows tall, read left to right, top to bottom."
+            " No word wrap; words may break across rows."
+        )
+    if archive.truncated_chars:
+        lines.append(
+            f"- About {archive.truncated_chars:,} characters of the oldest middle"
+            " history were dropped to fit the archive budget (marked inline)."
+        )
+    lines.append(
+        "- If an exact earlier detail matters and a section is unclear, re-derive"
+        " it from the workspace (re-read files, re-run commands) rather than guess."
+    )
+    return "\n".join(lines)
 
 
 def estimate_archive_tokens(archive: Archive) -> int:

@@ -48,11 +48,13 @@ class CompactionOutcome:
     than in each host so the TUI, exec mode and the server cannot each invent
     their own wording for the same refusal.
 
-    ``tokens_before``/``tokens_after`` are the conversation's size measured by
-    the SAME local ruler on both sides of the pass (compaction's own
-    estimator over the LLM-visible history), so their difference is the saving
-    a receipt can quote. They exclude the system blocks and tool schemas,
-    which a compaction does not touch.
+    ``tokens_before`` is the figure the compaction gate acted on —
+    ``max(provider-reported context, local estimate)`` — so the receipt agrees
+    with the status band the user was just looking at. ``tokens_after`` is the
+    local estimate of the rebuilt history, with archive frames re-priced at
+    the provider's own image billing rather than the estimator's flat rate.
+    Both exclude the system blocks and tool schemas, which a compaction does
+    not touch.
     """
 
     ran: bool
