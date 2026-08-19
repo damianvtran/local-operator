@@ -629,13 +629,21 @@ class AuthStore:
         # so popping the whole provider would let a one-row tier wipe the marks
         # belonging to rows it never saw.
         #
-        # NOTE this branch is not reachable from :meth:`_resolve`'s cascade:
-        # ``_usable_key_rows`` drops demoted rows before this method is called,
-        # so an all-demoted tier arrives here as an EMPTY list and returns at the
-        # guard above. It is retained for direct callers that order a row set
-        # themselves, and it is NOT the cascade's safety net -- that is the
-        # ``ignore_demotions`` second pass in :meth:`_resolve`. Reasoning about
-        # the cascade's all-demoted behaviour from here gives the wrong answer.
+        # This branch is NOT the cascade's safety net, and exactly one pass
+        # reaches it. On :meth:`_resolve`'s FIRST pass ``_usable_key_rows`` has
+        # already dropped demoted rows, so an all-demoted tier arrives empty and
+        # returns at the guard above. On the second pass ``ignore_demotions``
+        # suppresses that filter, so the rows arrive whole and land here --
+        # meaning in practice this branch is reached only by a ``read_only``
+        # second pass, because the normal one cleared the marks before
+        # recursing and has no demotions left to find.
+        #
+        # That is precisely why the ``read_only`` gate below is load-bearing
+        # rather than dead: it is the last thing standing between an isolated
+        # request and a mark it is not entitled to clear. The net that makes a
+        # demoted lone row resolvable at all is the ``ignore_demotions`` pass in
+        # :meth:`_resolve`; do not reason about cascade-wide all-demoted
+        # behaviour from here.
         if not preferred:
             # Not under ``read_only``: clearing the marks is a routing DECISION,
             # and an isolated request running beside a user's turn must not be
@@ -712,8 +720,9 @@ class AuthStore:
         # cascade came back empty, it resolves once more with
         # ``ignore_demotions``, so a demoted lone row is still served rather
         # than reported as no credential at all. ``_selection_order``'s
-        # all-demoted branch cannot be that net, because this filter runs first
-        # and hands it an empty list.
+        # all-demoted branch cannot be that net: on the first pass this filter
+        # runs ahead of it and hands it an empty list, and on the second pass
+        # the net has already fired -- that is what suppressed this filter.
         demoted = set() if ignore_demotions else self._active_demotions(provider)
         if demoted:
             remaining = [r for r in rows if r.id not in demoted]
