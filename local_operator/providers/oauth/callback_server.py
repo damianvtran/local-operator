@@ -415,7 +415,28 @@ class OAuthCallbackFlow(ABC):
             while pasted is None:
                 await asyncio.Future()  # declined; keep waiting for the browser
             pasted = pasted.strip()
-            return _parse_pasted_callback(pasted)
+            try:
+                return _parse_pasted_callback(pasted)
+            except LoginError as exc:
+                # A paste this task cannot use must NOT end the login. This
+                # prompt only ever races the loopback callback -- it is the
+                # fallback for a browser that cannot reach this machine, not the
+                # sole path -- and the module already encodes that rule one line
+                # above, where a DECLINED paste re-parks instead of failing.
+                # Raising here would let a mistyped or half-copied URL kill a
+                # sign-in the browser was about to complete on its own, which is
+                # strictly worse than the silence the user would have got by
+                # pasting nothing.
+                #
+                # The reason still reaches the user: it goes to `on_progress`,
+                # which is where the flow's other "here is what just happened"
+                # messages go, and then this task parks so the callback (or the
+                # timeout) decides the login.
+                report = self.callbacks.on_progress
+                if report is not None:
+                    await maybe_await(report(str(exc)))
+                await asyncio.Future()  # park; the browser callback may still win
+                raise AssertionError("unreachable")  # pragma: no cover
 
         async def _abort_watch() -> tuple[str, str]:
             assert self._signal is not None
