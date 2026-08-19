@@ -24,7 +24,7 @@ from PIL import Image
 
 from local_operator.imaging import (
     _REBOUND_CACHE,
-    _REBOUND_CACHE_MAX,
+    _REBOUND_CACHE_MAX_BYTES,
     IMAGE_MAX_EDGE,
     IMAGE_MAX_PIXELS,
     bound_image_for_model,
@@ -43,6 +43,16 @@ MANY_IMAGE_PIXEL_LIMIT = 2000
 def _png(size: tuple[int, int]) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", size, (10, 60, 120)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _noise_png(size: tuple[int, int]) -> bytes:
+    """An INCOMPRESSIBLE PNG. A flat fill compresses to a few KB whatever its
+    dimensions, so it cannot exercise anything that is measured in bytes."""
+    import os
+
+    buffer = io.BytesIO()
+    Image.frombytes("RGB", size, os.urandom(size[0] * size[1] * 3)).save(buffer, format="PNG")
     return buffer.getvalue()
 
 
@@ -371,11 +381,73 @@ def test_the_repair_is_memoized_so_a_resize_is_not_paid_every_turn() -> None:
 
 
 def test_the_memo_cannot_grow_without_bound() -> None:
-    """Keyed by content, so an unbounded map would grow for the life of the
-    process on a session that pastes many distinct oversized frames."""
+    """Bounded in BYTES, because the values are whole images whose sizes differ
+    by orders of magnitude — an entry count would bound the wrong quantity and
+    let the map retain tens of MB for the life of the process."""
     _REBOUND_CACHE.clear()
-    for index in range(_REBOUND_CACHE_MAX + 2):
-        # Distinct sizes, so every one is a distinct cache key.
-        source = _png((2100 + index, 300))
+    for index in range(40):
+        # Distinct sizes, so every one is a distinct cache key. Photographic
+        # noise, so each result is genuinely large rather than a flat PNG that
+        # compresses to nothing and would never reach the cap.
+        source = _noise_png((2100 + index, 2000))
         rebound_oversize_image(base64.b64encode(source).decode("ascii"))
-    assert len(_REBOUND_CACHE) <= _REBOUND_CACHE_MAX
+    retained = sum(len(data) for data, _ in _REBOUND_CACHE.values())
+    assert retained <= _REBOUND_CACHE_MAX_BYTES
+    assert _REBOUND_CACHE, "the cap evicted so aggressively that nothing is ever cached"
+
+
+# ---------------------------------------------------------------------------
+# Snapcompact archive frames
+#
+# These are the one image source that does NOT come through
+# ``bound_image_for_model`` on the way in: compaction renders them to a
+# per-provider geometry that is a deliberate billing decision. The repair walks
+# over them like any other block, so it must be measured against a REAL frame —
+# a synthetic ``Image.new("RGB", ...)`` shares neither their mode nor their
+# content, and it was exactly that gap that let a 55x size regression and a
+# silent rewrite of the high-res shape pass a green suite (review round 1, F4).
+# ---------------------------------------------------------------------------
+
+
+def _archive_frame(provider: str, model: str) -> bytes:
+    from local_operator.compaction.snapcompact import render_frame, resolve_shape
+
+    page = ("the quick brown fox jumps over the lazy dog 0123456789 " * 40 + "\n") * 40
+    return render_frame(page, resolve_shape(provider, model))
+
+
+def test_an_in_spec_high_res_archive_frame_is_left_alone() -> None:
+    """The Anthropic high-res shape is 1932px: over ``IMAGE_MAX_EDGE`` but UNDER
+    the 2000px ceiling, so no provider would refuse it.
+
+    1932 is a costed choice ("sweet spot under the 4,784 visual-token cap").
+    Repairing it would silently re-decide a billing trade that belongs to the
+    compaction layer, which is the trade this module's docstring promises to
+    leave alone.
+    """
+    frame = _archive_frame("anthropic", "claude-opus-4.7")
+    assert max(Image.open(io.BytesIO(frame)).size) == 1932, "the fixture is not the high-res shape"
+    assert rebound_oversize_image(base64.b64encode(frame).decode("ascii")) is None
+
+
+def test_an_oversized_archive_frame_is_repaired_without_going_lossy() -> None:
+    """The Google shape is 2048px and IS refusable, so it must be repaired —
+    but archive frames are grayscale renderings of a 5x7 bitmap font, and the
+    whole point of that font is that it stays crisp and deterministic.
+
+    Widening the mode to RGB tripled the PNG, blew ``IMAGE_MAX_BYTES`` and
+    dropped the frame onto the lossy JPEG rung, putting ringing artifacts on
+    pixel-font text and inflating one measured frame 55x.
+    """
+    frame = _archive_frame("google", "gemini-2.5-pro")
+    source = Image.open(io.BytesIO(frame))
+    assert max(source.size) > MANY_IMAGE_PIXEL_LIMIT, "the fixture is not refusable"
+    assert source.mode == "L", "the fixture is not the grayscale render"
+
+    rebound = rebound_oversize_image(base64.b64encode(frame).decode("ascii"))
+    assert rebound is not None, "a refusable frame was left in the history"
+    data, mime = rebound
+    assert mime == "image/png", "a pixel-font frame was re-encoded lossily"
+    repaired = Image.open(io.BytesIO(base64.b64decode(data)))
+    assert repaired.mode == "L", "grayscale was widened, which is what forces the JPEG rung"
+    assert max(repaired.size) <= IMAGE_MAX_EDGE

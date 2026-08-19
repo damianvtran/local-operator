@@ -92,6 +92,7 @@ from local_operator.harness.wake import (
     WakeScheduler,
     format_wake_delivery_text,
 )
+from local_operator.imaging import rebound_oversize_image
 from local_operator.incidents import SESSION_INCIDENT_MESSAGE_TYPE
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
@@ -455,8 +456,6 @@ def _rebound_history_images(messages: list[Message]) -> list[Message]:
     corrupt bytes, a format the provider dislikes, or the same bytes being
     accepted for hours and then refused.
     """
-    from local_operator.imaging import rebound_oversize_image
-
     out: list[Message] = []
     for message in messages:
         if not any(isinstance(block, ImageContent) for block in message.content):

@@ -46,14 +46,19 @@ the invariant is total:
 
 - ``compaction/snapcompact.py`` renders its own frames and does not come
   through :func:`bound_image_for_model`. Their geometry is a per-provider
-  billing decision rather than a paste, and under the Google shape they are
-  2048x2046 — over the many-image ceiling. That is reachable on another
-  provider, since ``session.set_model`` can swap mid-session and a
-  Gemini-shaped archive then replays to whatever is current (review round 1,
-  F4). The billing trade is still not re-decided here; those frames are now
-  caught by the render-time repair like any other oversized block, so the
-  archive is rendered for the provider it was measured against and shrunk only
-  when it would actually be refused.
+  billing decision rather than a paste: 1568px, 1932px for high-res Claude
+  lines, and 2048x2046 under the Google shape. Only the last is over the
+  many-image ceiling, and it is reachable on another provider because
+  ``session.set_model`` can swap mid-session and a Gemini-shaped archive then
+  replays to whatever is current (review round 1, F4).
+
+  The billing trade is genuinely not re-decided here, and that is why the
+  render-time repair triggers at :data:`IMAGE_REFUSAL_MAX_EDGE` rather than at
+  :data:`IMAGE_MAX_EDGE`: the 1932px frame is under the ceiling, so it is left
+  exactly as compaction rendered it, and only the 2048px frame — which a
+  provider would actually refuse — is shrunk. Gating on 1568 instead rewrote
+  every high-res frame on every render, which is the trade this exception
+  exists to leave alone.
 - ``_forward_undecoded`` cannot resize at all, because on that host there is no
   decoder. See its own docstring for what it does enforce.
 """
@@ -87,6 +92,18 @@ from local_operator.optional import missing_extra_error
 #: passes any byte cap easily — costs 16,257 tokens untouched against 2,459
 #: resized (6.6x).
 IMAGE_MAX_EDGE = 1568
+#: The provider ceiling a REPAIR is measured against, which is deliberately not
+#: :data:`IMAGE_MAX_EDGE`. Anything this module CREATES is bounded to 1568 for
+#: the cost reasons above; but a block that already exists is only worth
+#: rewriting when it would actually be refused, and the refusal line is the
+#: many-image limit of 2000 (see the module docstring).
+#:
+#: Conflating the two silently re-decided a billing trade that is not this
+#: module's to make: snapcompact renders Anthropic high-res archive frames at
+#: 1932px — under 2000, never refused — and repairing at 1568 rewrote every one
+#: of them on every render (review round 1, F1). The ingest bound and the repair
+#: bound answer different questions and only coincide by accident.
+IMAGE_REFUSAL_MAX_EDGE = 2000
 #: Refuse to DECODE above this pixel count (~200 MB of RGBA at 4 bytes/pixel).
 #: Checked against the header dimensions BEFORE the decode allocates, because a
 #: decompression bomb is small on disk by construction: a byte cap cannot see
@@ -330,17 +347,33 @@ def bound_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str
 
         # Palette and high-bit-depth modes are legal PNG but not legal JPEG,
         # and rung 3 must not be the first place a mode problem shows up.
-        image = image.convert("RGBA" if image.mode in ("RGBA", "LA", "PA", "P") else "RGB")
+        #
+        # ``L`` is deliberately NOT widened. It is legal in both PNG and JPEG,
+        # and promoting it to RGB triples the PNG for no visible gain — which is
+        # not a rounding error on the images that are actually grayscale here.
+        # Snapcompact renders its archive frames as ``L`` pixel-font text, and
+        # widening one measured 19,073 B -> 1,055,335 B (55x) because the
+        # inflated PNG blew IMAGE_MAX_BYTES and fell through to the lossy JPEG
+        # rung, putting ringing artifacts on a 5x7 bitmap font chosen precisely
+        # for being crisp and deterministic (review round 1, F2). Keeping the
+        # mode keeps that frame on the lossless rung at a twentieth of the size.
+        if image.mode not in ("L", "LA", "RGB", "RGBA"):
+            image = image.convert("RGBA" if image.mode in ("PA", "P") else "RGB")
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         payload, wire_mime = buffer.getvalue(), "image/png"
 
         if len(payload) > IMAGE_MAX_BYTES:
-            if image.mode == "RGBA":
+            if image.mode in ("RGBA", "LA"):
                 # JPEG has no alpha channel. Compositing onto white rather than
                 # dropping the channel keeps a transparent-background diagram
-                # legible instead of rendering it onto black.
-                flat = image_module.new("RGB", image.size, (255, 255, 255))
+                # legible instead of rendering it onto black. ``LA`` is included
+                # because grayscale is no longer widened to RGBA above, so it can
+                # now reach this rung still carrying alpha; the flat image keeps
+                # the source's own channel count so a gray frame stays gray.
+                flat_mode = "RGB" if image.mode == "RGBA" else "L"
+                fill = (255, 255, 255) if flat_mode == "RGB" else 255
+                flat = image_module.new(flat_mode, image.size, fill)
                 flat.paste(image, mask=image.getchannel("A"))
                 image = flat
             buffer = io.BytesIO()
@@ -385,20 +418,33 @@ def bound_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str
 #: payload so the cache holds hashes and results instead of a second copy of
 #: every image in the conversation.
 #:
-#: ``None`` results are memoized too, and that is the case that matters most for
-#: cost: it is the answer for every in-bounds block, so this also buys the
-#: ordinary session out of re-hashing... nothing. In-bounds blocks are settled by
-#: a header read before they reach here, so only decisions that cost a decode
-#: are stored.
+#: In-bounds blocks never reach the cache at all — they are settled by a header
+#: read — so only decisions that actually cost a decode are stored, and an
+#: ordinary session of legal screenshots cannot evict the one entry that is
+#: expensive to recompute.
+#:
+#: NOT synchronized, which is safe only because rendering is loop-bound: the
+#: agent loop calls ``convert_to_llm`` on the event loop, and the token-count
+#: path renders on the loop before it crosses to a thread. Anything that moves
+#: this walk into a worker must revisit that, though the failure mode under the
+#: GIL would be duplicated work rather than a corrupt entry (dict get/set are
+#: atomic).
 _REBOUND_CACHE: dict[str, tuple[str, str]] = {}
 
-#: Cap on :data:`_REBOUND_CACHE` entries. A session that legitimately holds this
-#: many DISTINCT oversized images has bigger problems than a cache miss, and an
-#: unbounded dict keyed by content would otherwise grow for the life of the
-#: process. Cleared wholesale rather than evicted by age: the entries are
-#: equally valuable, the map is tiny, and a correct-but-cold cache costs one
-#: resize while a subtle LRU here would cost a reader's afternoon.
-_REBOUND_CACHE_MAX = 64
+#: Cap on :data:`_REBOUND_CACHE` measured in PAYLOAD BYTES, not entries. The
+#: values are full base64 images and their sizes differ by orders of magnitude,
+#: so an entry count bounds the wrong quantity: 64 resized phone photos at
+#: ~1.3 MB each retain ~81 MB for the life of the PROCESS, shared across every
+#: session and subagent in it (review round 1, F5). 32 MB is chosen to hold a
+#: realistic session's worth of repaired frames — the observed 1568x189 repair
+#: is 46 KB, and even a 1.3 MB worst case leaves room for two dozen — while
+#: staying an order of magnitude under what the images themselves cost in
+#: context.
+#:
+#: Cleared wholesale rather than evicted by age: the entries are equally
+#: valuable, a cold cache costs exactly one resize, and a subtle LRU here would
+#: cost a reader's afternoon for no measurable gain.
+_REBOUND_CACHE_MAX_BYTES = 32 * 1024 * 1024
 
 
 def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
@@ -426,6 +472,15 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
     starts being refused — so the repair has to be able to run BEFORE any
     refusal has happened, which rules out driving it from the error text.
 
+    The trigger is :data:`IMAGE_REFUSAL_MAX_EDGE` and NOT
+    :data:`IMAGE_MAX_EDGE`. Repairing is a rewrite of somebody else's decision,
+    so it earns its keep only on a block that would otherwise be refused; a
+    block between the two numbers is one this module would not have created but
+    which the provider accepts, and rewriting it would silently overrule the
+    caller that chose that size (review round 1, F1). Blocks that ARE repaired
+    come back bounded to ``IMAGE_MAX_EDGE``, because once a re-encode is
+    unavoidable the cost argument for 1568 applies in full.
+
     A block this cannot decode is returned unchanged rather than dropped. It may
     be perfectly acceptable to the provider (a HEIF whose dimensions this cannot
     read, a host with no Pillow), and the ``is_image_rejection`` degrade in the
@@ -440,7 +495,7 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
     if info is None or info.width is None or info.height is None:
         # Unreadable header: cannot prove it is oversized, so do not touch it.
         return None
-    if max(info.width, info.height) <= IMAGE_MAX_EDGE:
+    if max(info.width, info.height) <= IMAGE_REFUSAL_MAX_EDGE:
         return None
     # Only oversized blocks reach the cache, so the common path never pays for
     # it. The digest covers the bytes alone, which is the whole key: the result
@@ -461,7 +516,9 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
         # session's image-rejection degrade removes it on the refusal.
         return None
     result = (base64.b64encode(payload).decode("ascii"), wire_mime)
-    if len(_REBOUND_CACHE) >= _REBOUND_CACHE_MAX:
+    if sum(len(data) for data, _ in _REBOUND_CACHE.values()) + len(result[0]) > (
+        _REBOUND_CACHE_MAX_BYTES
+    ):
         _REBOUND_CACHE.clear()
     _REBOUND_CACHE[key] = result
     return result
