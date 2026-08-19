@@ -962,12 +962,17 @@ class CompactionStartEvent(AgentEvent[Literal["compaction_start"]]):
 class CompactionEndEvent(AgentEvent[Literal["compaction_end"]]):
     """A compaction pass settled.
 
-    ``tokens_before``/``tokens_after`` size the LLM-visible history either side
-    of the pass, by the same local ruler, so a host can report what the pass
-    ACHIEVED — compaction is slow and its effect is invisible in the
-    transcript, so "context compacted" alone asks the user to take it on faith.
-    Both are zero when the pass failed, and ``strategy`` is the concrete
-    mechanism that ran (``snapcompact`` or ``context-full``).
+    ``tokens_before`` is the figure the gate acted on (``max(provider
+    context, local estimate)``); ``tokens_after`` is that figure minus the
+    history-only saving, measured by one local ruler on both sides with
+    archive frames priced at the provider's image billing — so a host can
+    report what the pass ACHIEVED in numbers that agree with the status band
+    and the next provider bill, and can subtract the pair from its own
+    reading without double-counting the request overhead the pass never
+    touched. Compaction is slow and its effect is invisible in the
+    transcript, so "context compacted" alone asks the user to take it on
+    faith. Both are zero when the pass failed, and ``strategy`` is the
+    concrete mechanism that ran (``snapcompact`` or ``context-full``).
     """
 
     type: Literal["compaction_end"] = "compaction_end"

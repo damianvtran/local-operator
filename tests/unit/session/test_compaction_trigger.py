@@ -170,13 +170,15 @@ async def test_a_200k_session_still_compacts_at_80_percent(tmp_path, monkeypatch
 @pytest.mark.asyncio
 async def test_the_gate_measures_the_provider_figure_not_just_the_estimate(tmp_path, monkeypatch):
     """``compaction_context_tokens`` is ``max(provider-reported, local)``, and
-    the gate acts on that maximum while the receipt quotes the local estimate.
-
-    This is why the reported pass PRINTED 234.8k: the receipt's "before" is the
-    local estimate (``_CompactionPlan.tokens_before``), while the figure that
-    cleared the threshold was the provider's larger one
-    (``_CompactionPlan.context_tokens``). Pinning them apart keeps that split
-    documented instead of surprising the next reader of a receipt.
+    the gate acts on that maximum. The plan carries BOTH figures: the maximum
+    (``context_tokens``, what the gate compared, what the transcript entry
+    records, and what the receipt quotes as "before") and the bare local
+    estimate (``tokens_before``, the pre-pass half of the same-ruler saving
+    the commit subtracts from the maximum to get "after"). They used to be
+    printed crosswise — the receipt quoted the local estimate while the band
+    showed the provider figure, so a pass that fired at a provider-reported
+    600k printed "319.4k → …" and read as the two disagreeing about what just
+    happened. Pinning the fields apart keeps the split documented.
     """
     session = make_session(tmp_path)
     await talk(session)

@@ -103,11 +103,21 @@ async def talk(session: Session, turns: int = 3) -> None:
 async def test_a_vision_model_compacts_into_a_snapcompact_archive(tmp_path):
     """``supports_images`` picks snapcompact, and the pass proves it took that
     branch by storing an archive — the same ``preserve_data['snapcompact']``
-    payload the automatic pass stores, because it is the same code."""
+    payload the automatic pass stores, because it is the same code.
+
+    The pass must also make NO provider call: that is snapcompact's contract
+    (the archive replaces a summary), and the call it used to make — the whole
+    discarded history shipped out for a caption — is where a manual /compact
+    spent 20–50 of its ~60 seconds. ``_one_shot_complete`` raising proves the
+    branch never reaches for it."""
     stream = ScriptedStream(["reply"] * 4)
     session = make_session(tmp_path, stream, model=VISION_MODEL)
     await talk(session)
 
+    async def no_llm_calls(system: str, prompt: str) -> str:
+        raise AssertionError("snapcompact must not make a provider call")
+
+    session._one_shot_complete = no_llm_calls  # type: ignore[method-assign]
     outcome = await session.compact_now()
 
     assert outcome.ran is True
@@ -181,12 +191,23 @@ async def test_an_archive_with_frames_replays_as_valid_pngs(tmp_path):
 def test_a_malformed_archive_degrades_to_the_text_summary():
     """A frames list that is not base64 is now a validation error, and the
     marker renderer's degrade path is what keeps that from ending the turn:
-    the summary text still reaches the model, minus the frames."""
+    the summary text still reaches the model, minus the frames — plus the
+    archive's plain-text edges. The snapcompact summary is reading
+    instructions for the frames, not a digest, so without the salvage the
+    fallback replayed a caption describing images that are not there while
+    the actual history vanished."""
     marker = CustomMessage(
         custom_type="compaction_summary",
         details={
             "summary": "what happened earlier",
-            "preserve_data": {"snapcompact": {"frames": ["not base64 at all!!"], "text": "t"}},
+            "preserve_data": {
+                "snapcompact": {
+                    "frames": ["not base64 at all!!"],
+                    "text": "t",
+                    "text_head": "OLDEST: the user asked about parsers",
+                    "text_tail": "NEWEST: the fix landed in commit abc123",
+                }
+            },
         },
     )
 
@@ -195,6 +216,9 @@ def test_a_malformed_archive_degrades_to_the_text_summary():
     assert not any(isinstance(block, ImageContent) for block in rendered.content)
     texts = [block.text for block in rendered.content if isinstance(block, TextContent)]
     assert texts and "what happened earlier" in texts[0]
+    # The real transcript edges survive the frame corruption.
+    assert "the user asked about parsers" in texts[0]
+    assert "the fix landed in commit abc123" in texts[0]
 
 
 @pytest.mark.asyncio
@@ -238,9 +262,10 @@ async def test_the_manual_strategy_is_the_automatic_one(tmp_path):
 
 @pytest.mark.asyncio
 async def test_the_receipt_reports_a_real_reduction(tmp_path):
-    """tokens_before/after are measured by ONE ruler either side of the pass, so
-    their difference is a saving a receipt can quote — and the end EVENT carries
-    the same pair, which is what the TUI notice renders."""
+    """tokens_before is the figure the gate acted on and tokens_after the
+    estimate of the rebuilt history, so their difference is a saving a receipt
+    can quote — and the end EVENT carries the same pair, which is what the TUI
+    notice renders."""
     stream = ScriptedStream(["reply"] * 4)
     session = make_session(tmp_path, stream, model=TEXT_MODEL)
     await talk(session, turns=4)
@@ -262,6 +287,42 @@ async def test_the_receipt_reports_a_real_reduction(tmp_path):
         outcome.tokens_before,
         outcome.tokens_after,
     )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_quotes_the_figure_the_gate_acted_on(tmp_path):
+    """When the provider has reported a context size larger than the local
+    estimate, the receipt's "before" is THAT figure — the one on the status
+    band the user is comparing against. Quoting the local estimate instead
+    made a pass that fired at a provider-reported 600k print "319.4k → …",
+    which reads as the band and the receipt disagreeing about what happened.
+
+    The SAVING, though, is measured with one local ruler on both sides: the
+    provider figure includes system blocks and tool schemas the pass never
+    touches, so ``after`` must be ``before - (history saving)`` rather than
+    the bare history estimate — otherwise the receipt counts the fixed
+    overhead as removed and a band that subtracts the pair understates the
+    next request by exactly that overhead.
+    """
+    from local_operator.harness.types import Usage
+
+    stream = ScriptedStream(["reply"] * 4)
+    session = make_session(tmp_path, stream, model=TEXT_MODEL)
+    await talk(session, turns=4)
+    # A provider reading far above anything the tiny fixture history could
+    # estimate locally, as after a long real session.
+    session._last_usage = Usage(input_tokens=1, context_tokens=600_080)
+
+    outcome = await session.compact_now()
+
+    assert outcome.ran is True
+    assert outcome.tokens_before == 600_080
+    # The tiny fixture's whole history is a few hundred tokens, so the
+    # history-only saving is far below the provider figure: an after-figure
+    # anywhere near zero would prove the overhead was double-counted.
+    assert outcome.tokens_after > 590_000
+    assert outcome.tokens_after < outcome.tokens_before
     await session.dispose()
 
 

@@ -12,13 +12,16 @@ from pydantic import ValidationError
 
 from local_operator.compaction.api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from local_operator.compaction.snapcompact import (
+    DEFAULT_MAX_FRAMES,
     FRAME_DATA_BYTES_BUDGET,
     FRAME_TOKEN_ESTIMATE,
     HQ_EDGE_FRAMES,
     MAX_FRAMES,
     Archive,
+    archive_summary,
     compact_to_archive,
     estimate_archive_tokens,
+    frame_token_estimate_for,
     history_blocks,
     render_frame,
     resolve_shape,
@@ -258,15 +261,31 @@ def test_compact_large_history_frames_and_edges():
     assert again.text.startswith(archive.text[:200])
 
 
-def test_compact_caps_frames_at_max():
-    """Oldest middle pages drop with a marker once the frame budget overflows."""
+def test_compact_caps_frames_at_default_budget():
+    """Oldest middle pages drop with a marker once the frame budget overflows.
+
+    The default budget is DEFAULT_MAX_FRAMES — the number replay actually
+    sends — not the MAX_FRAMES ceiling: rendering 80 frames so foveation
+    could throw 74 of them away is where a manual /compact spent ~35 of its
+    60 seconds."""
     shape = resolve_shape("openai", "gpt-5.5")
-    # Far more text than MAX_FRAMES frames can hold.
-    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(MAX_FRAMES + 40)]
+    # Far more text than the default budget's frames can hold.
+    messages = [
+        Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(DEFAULT_MAX_FRAMES + 40)
+    ]
     archive = compact_to_archive(messages, "openai", "gpt-5.5")
-    assert len(archive.frames) == MAX_FRAMES
+    assert len(archive.frames) == DEFAULT_MAX_FRAMES
     assert archive.truncated_chars > 0
     assert "oldest history dropped]" in archive.text_head
+
+
+def test_compact_max_frames_is_a_ceiling_an_explicit_ask_can_reach():
+    """An explicit ``max_frames`` above the default still renders (bounded by
+    MAX_FRAMES) — the knob exists for archives meant to be read exhaustively."""
+    shape = resolve_shape("openai", "gpt-5.5")
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(20)]
+    archive = compact_to_archive(messages, "openai", "gpt-5.5", max_frames=MAX_FRAMES)
+    assert DEFAULT_MAX_FRAMES < len(archive.frames) <= MAX_FRAMES
 
 
 def test_compact_frames_are_valid_pngs():
@@ -314,13 +333,19 @@ def test_history_blocks_elides_over_budget():
 
 
 def test_history_blocks_foveates_long_middle():
-    """Interior frames beyond the HQ edges collapse to an elision marker."""
+    """Interior frames beyond the HQ edges collapse to an elision marker.
+
+    Reached with an explicit over-default ``max_frames``: a fresh pass renders
+    only what replay sends, but archives PERSISTED by older builds carry up to
+    80 frames, and replaying one of those must still foveate rather than ship
+    them all."""
     shape = resolve_shape("anthropic", "claude-sonnet-4-5")
     page = "f" * (shape.capacity // 2)
     archive = compact_to_archive(
         [Message.user(f"t{i} {page}") for i in range(200)],
         "anthropic",
         "claude-sonnet-4-5",
+        max_frames=MAX_FRAMES,
     )
     assert len(archive.frames) > 2 * HQ_EDGE_FRAMES + 2
     blocks = history_blocks(archive)
@@ -399,6 +424,59 @@ def test_malformed_persisted_frame_is_a_validation_error():
 # ---------------------------------------------------------------------------
 # Integration helpers
 # ---------------------------------------------------------------------------
+
+
+def test_frame_token_estimate_follows_provider_billing():
+    """Per-family image billing (mirrors omp's ``familyBilling``, verified
+    against live bills there): Anthropic patch pricing capped at 4,784 visual
+    tokens +5%, OpenAI 32px patches x1.2, Gemini a flat 1,120 per image. The
+    cross-provider ceiling (5024) stays exported for callers with no reader
+    at hand, but pricing a Gemini frame at it overstated the archive 4.5x."""
+    # 1932px: 69^2 = 4,761 patches, UNDER the 4,784 cap; x1.05 -> 5,000.
+    assert frame_token_estimate_for("anthropic", "claude-fable-5") == 5000
+    assert frame_token_estimate_for("anthropic", "claude-sonnet-4-5") == 3293  # 1568px
+    assert frame_token_estimate_for("openai", "gpt-5.5") == 2882  # 49^2 * 1.2
+    assert frame_token_estimate_for("google", "gemini-3") == 1120  # flat HIGH budget
+    # Unknown families take Anthropic's formula at 1568px: the safe ceiling.
+    assert frame_token_estimate_for("mystery", "model-x") == 3293
+    # Every estimate stays under the exported ceiling.
+    for provider, model in [
+        ("anthropic", "claude-fable-5"),
+        ("openai", "gpt-5.5"),
+        ("google", "gemini-3"),
+    ]:
+        assert frame_token_estimate_for(provider, model) <= FRAME_TOKEN_ESTIMATE
+
+
+def test_archive_summary_is_deterministic_and_structural():
+    """The snapcompact text slot is built locally from the archive — no LLM
+    call (the branch's contract, and the 20-50s the manual pass used to spend).
+    Every claim in it derives from the archive, so it can never contradict
+    the frames it captions."""
+    archive = _large_archive()
+    summary = archive_summary(archive, "anthropic", "claude-sonnet-4-5")
+    assert summary == archive_summary(archive, "anthropic", "claude-sonnet-4-5")
+    assert str(len(archive.frames)) in summary
+    assert "image frame" in summary
+    shape = resolve_shape("anthropic", "claude-sonnet-4-5")
+    assert str(shape.chars_per_line) in summary
+
+    # A text-only archive does not describe frames it does not have.
+    small = compact_to_archive(
+        _conversation_messages(2, payload=50), "anthropic", "claude-sonnet-4-5"
+    )
+    text_only = archive_summary(small, "anthropic", "claude-sonnet-4-5")
+    assert "image frame" not in text_only
+
+    # A truncated archive says so.
+    shape_o = resolve_shape("openai", "gpt-5.5")
+    big = compact_to_archive(
+        [Message.user(f"t{i} " + "w" * shape_o.capacity) for i in range(DEFAULT_MAX_FRAMES + 40)],
+        "openai",
+        "gpt-5.5",
+    )
+    assert big.truncated_chars > 0
+    assert "dropped" in archive_summary(big, "openai", "gpt-5.5")
 
 
 def test_strategy_for_model_both_branches():
