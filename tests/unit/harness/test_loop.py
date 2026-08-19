@@ -910,3 +910,104 @@ async def test_a_late_call_id_does_not_change_the_compose_key():
         if isinstance(event, ToolCallComposeEvent)
     ]
     assert len({event.tool_call_id for event in composes}) == 1
+
+
+class TestTheModelIsReadAtEveryCall:
+    """A model switched mid-run reaches the run's NEXT provider call.
+
+    A run is a chain of provider calls with tool batches between them, and
+    ``LoopConfig.model`` is bound once when the host builds the config. On its
+    own that pinned every call of a run to the model it started on, so a user
+    switching model while the agent worked saw the switch ignored until their
+    next message. ``get_model`` is asked once per call instead.
+    """
+
+    @staticmethod
+    def _two_call_stream() -> ScriptedStream:
+        return ScriptedStream(
+            [
+                [
+                    tool_call_delta(0, id="c1", name="echo", args="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+    @staticmethod
+    def _labels(stream: ScriptedStream) -> list[str]:
+        return [f"{r.model.provider}/{r.model.model_id}" for r in stream.requests]
+
+    @pytest.mark.asyncio
+    async def test_a_switch_between_calls_lands_on_the_next_one(self):
+        """The point of the feature: the second call of the SAME run switches."""
+        new = ModelSpec(provider="test", model_id="new")
+        current = [MODEL]
+        stream = self._two_call_stream()
+
+        async def execute(tool_call_id, args, signal, on_update, context):
+            # The user runs /model while this tool is in flight.
+            current[0] = new
+            return ToolResult(
+                tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
+            )
+
+        tool = AgentTool(name="echo", parameters={"type": "object"}, execute=execute)
+        context = LoopContext(system_blocks=["sys"], tools=[tool])
+        config = make_config(stream, get_model=lambda: current[0])
+
+        async for _ in AgentLoop().run([Message.user("go")], context, config, None):
+            pass
+
+        assert self._labels(stream) == ["test/m", "test/new"]
+
+    @pytest.mark.asyncio
+    async def test_a_config_without_a_resolver_still_runs(self):
+        """Every embedder and test double builds a LoopConfig with no ``get_model``."""
+        stream = self._two_call_stream()
+        executed: list[str] = []
+        context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+
+        async for _ in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+            pass
+
+        assert self._labels(stream) == ["test/m", "test/m"]
+
+    @pytest.mark.asyncio
+    async def test_a_broken_resolver_does_not_lose_the_turn(self, caplog):
+        """A host accessor that raises is a host bug, not a reason to bin the work.
+
+        Discriminating: it asserts the run COMPLETED on the snapshot model, so a
+        resolver that raised into the loop would fail this rather than be
+        silently tolerated by a test that only checked the label.
+        """
+        stream = self._two_call_stream()
+        executed: list[str] = []
+        context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+
+        def broken() -> ModelSpec:
+            raise RuntimeError("host accessor exploded")
+
+        config = make_config(stream, get_model=broken)
+        ends = []
+        with caplog.at_level(logging.ERROR):
+            async for event in AgentLoop().run([Message.user("go")], context, config, None):
+                if isinstance(event, AgentEndEvent):
+                    ends.append(event)
+
+        assert self._labels(stream) == ["test/m", "test/m"]
+        assert ends and ends[-1].error is None and not ends[-1].aborted
+        assert "host accessor exploded" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_resolver_returning_none_falls_back_to_the_snapshot(self):
+        """``None`` means "nothing better to say", not "call a model of None"."""
+        stream = self._two_call_stream()
+        executed: list[str] = []
+        context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+        config = make_config(stream, get_model=lambda: None)
+
+        async for _ in AgentLoop().run([Message.user("go")], context, config, None):
+            pass
+
+        assert self._labels(stream) == ["test/m", "test/m"]

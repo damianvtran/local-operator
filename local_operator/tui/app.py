@@ -240,6 +240,19 @@ RESTORED_COST_PREFIX = "≥"
 #: made the reader translate. All four now describe what the user observes.
 QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
 SENT_STEER_NOTICE = "sent — the agent has it now"
+#: Printed under a ``/model`` switch made WHILE a turn is running, and only
+#: then. The request already streaming cannot be re-targeted, so for a few
+#: seconds the band names the new model while the old one is visibly still
+#: working — which reads as the switch having been ignored, the complaint the
+#: mid-turn switch was built to answer.
+#:
+#: Its own row rather than a third clause on the receipt: that line is already
+#: two clauses and a hint, and measured at the widths this app supports,
+#: folding the timing into its scope parenthetical pushed it from two wrapped
+#: lines to three — the run-on the receipt's own comment exists to prevent.
+#: Same "step" noun as the steering pair above, for the same reason: one word
+#: for one observable boundary.
+MODEL_SWITCH_MID_TURN_NOTICE = "applies from the next step — this one finishes on the old model"
 #: The turn ended without ever reaching a boundary to drain at — interrupted,
 #: failed, or simply answered with no further tool calls. ONE string for all
 #: three, because they are one fact from the user's side: the message is waiting
@@ -5681,6 +5694,13 @@ class OperatorApp(App[None]):
                 f"model: {old_label} → {session.model_label} "
                 f"(this session){suffix} — {PERSIST_HINT}"
             )
+            # MID-TURN is the one moment "starting when" is a live question, and
+            # the next receipt cannot answer it because the answer is visible
+            # before then: the agent goes on working on the old model until the
+            # step in flight ends. On its own row and only while streaming — see
+            # MODEL_SWITCH_MID_TURN_NOTICE for why it is not a third clause.
+            if session.is_streaming:
+                notice(MODEL_SWITCH_MID_TURN_NOTICE, "note")
         if warning:
             notice(warning, "warning")
 

@@ -56,6 +56,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ModelSpec,
     NoticeEvent,
     RenderedStreamError,
     StaleAside,
@@ -381,6 +382,38 @@ class AgentLoop:
     # Model streaming
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _current_model(config: LoopConfig) -> "ModelSpec":
+        """The spec to call RIGHT NOW, re-read at every provider call.
+
+        ``config.model`` is bound once when the host builds the config, so on
+        its own it pins a whole run — model, tools, model, tools — to whichever
+        model the run started on. A user switching model mid-turn is switching
+        precisely because the running model is doing badly, and their switch
+        used to reach nothing until the turn ended. ``get_model`` is the host's
+        answer to "which model now", asked once per call.
+
+        Falls back to the snapshot when the host supplies no resolver (every
+        embedder and test double that builds a ``LoopConfig`` by hand), which
+        is what keeps this backwards compatible.
+
+        A resolver that RAISES falls back too, rather than killing the run. The
+        host is reading its own state, so a failure here is a host bug, and the
+        useful behaviour is to keep the turn alive on the model it already had
+        instead of losing the work in flight to a bad accessor.
+        """
+        resolver = config.get_model
+        if resolver is None:
+            return config.model
+        try:
+            live = resolver()
+        except Exception:  # host accessor bug — never fatal to a running turn
+            logger.exception("get_model resolver failed; using the run's model")
+            return config.model
+        # A resolver returning None is the same "host has nothing better to
+        # say" case as having no resolver at all.
+        return live if live is not None else config.model
+
     async def _model_turn(
         self,
         context: LoopContext,
@@ -388,7 +421,11 @@ class AgentLoop:
         signal: AbortSignal | None,
     ) -> AsyncIterator[AgentEvent | _ModelTurnResult]:
         """One provider call: build the request, stream it, assemble the
-        assistant message, emitting message_start/update/end events."""
+        assistant message, emitting message_start/update/end events.
+
+        The model is resolved HERE, per call, not once per run — see
+        :meth:`_current_model`.
+        """
         shaped = list(context.messages)
         if config.transform_context is not None:
             outcome = config.transform_context(shaped)
@@ -399,7 +436,10 @@ class AgentLoop:
         if inspect.isawaitable(converted):
             converted = await converted
         request = ChatRequest(
-            model=config.model,
+            # Resolved after `transform_context`/`convert_to_llm`, which can
+            # await: the spec is read as late as possible so a switch made
+            # while this call was being prepared still catches it.
+            model=self._current_model(config),
             system_blocks=list(context.system_blocks),
             messages=list(converted),
             tools=list(context.tools),

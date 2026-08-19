@@ -118,5 +118,90 @@ async def test_session_stream_fn_freezes_effort_for_one_tool_loop(monkeypatch) -
     await stream.close()
 
 
+@pytest.mark.asyncio
+async def test_a_mid_message_model_switch_reclassifies_effort(monkeypatch) -> None:
+    """A model switched mid-message must not inherit the old model's rung.
+
+    The auto-effort level is frozen for one user message so a tool loop
+    reasons at one depth, but it is mapped onto a PARTICULAR model's ladder.
+    Carrying it across a switch either sends a rung the new model rejects
+    (an HTTP 400 that reads as a broken switch) or silently re-tiers the
+    request, so ``on_model_changed`` drops the freeze.
+    """
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers import failover
+
+    captured: list[ChatRequest] = []
+
+    async def fake_stream(request, *args, **kwargs):
+        captured.append(request)
+        yield StreamEndEvent(stop_reason="stop")
+
+    monkeypatch.setattr(failover, "stream_with_failover", fake_stream)
+
+    class FakeAuth:
+        async def get_oauth_access(self, *args, **kwargs):
+            return None
+
+    stream = SessionStreamFn(cast(Any, FakeAuth()), {"effort": {"auto": True}}, "session-x")
+
+    async def _preflight(model) -> None:
+        # Faithful to prod: the real `preflight_usage` is what CONSUMES the
+        # message boundary (it clears the flag before its own early returns),
+        # and the freeze under test only exists once the boundary is spent. A
+        # stub that skipped this would leave every call reclassifying, and the
+        # test would pass whether or not the invalidation works.
+        stream._message_boundary_pending = False
+
+    monkeypatch.setattr(stream, "preflight_usage", _preflight)
+    wide = ModelSpec(
+        provider="test",
+        model_id="wide",
+        reasoning_efforts=("minimal", "low", "medium", "high", "max"),
+    )
+    # A DIFFERENT ladder, and deliberately one that does not contain the rung
+    # the first classification picks: this is the 400 the invalidation avoids.
+    narrow = ModelSpec(provider="test", model_id="narrow", reasoning_efforts=("medium", "high"))
+
+    stream.begin_message()
+    _ = [
+        event
+        async for event in stream(
+            ChatRequest(model=wide, messages=[Message.user("show status")]), None
+        )
+    ]
+    assert captured[-1].model.reasoning_effort == "low"
+
+    # The user switches model without sending a new message.
+    stream.on_model_changed(narrow)
+    _ = [
+        event
+        async for event in stream(
+            ChatRequest(model=narrow, messages=[Message.user("show status")]), None
+        )
+    ]
+    landed = captured[-1].model.reasoning_effort
+    assert landed in narrow.reasoning_efforts, landed
+    await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_a_model_switch_reopens_the_quota_preflight(monkeypatch) -> None:
+    """The preflight's 60s memo is per selector; a switch must not be skipped by it."""
+    from local_operator.model.configure import SessionStreamFn
+
+    class FakeAuth:
+        async def get_oauth_access(self, *args, **kwargs):
+            return None
+
+    stream = SessionStreamFn(cast(Any, FakeAuth()), {}, "session-x")
+    stream._usage_checked_at = 1234.0
+    stream._message_boundary_pending = False
+    stream.on_model_changed(ModelSpec(provider="test", model_id="other"))
+    assert stream._usage_checked_at == 0.0
+    assert stream._message_boundary_pending is True
+    await stream.close()
+
+
 async def _noop() -> None:
     return None

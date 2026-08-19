@@ -1517,6 +1517,31 @@ class SessionStreamFn:
         self._message_boundary_pending = True
         self._message_effort = None
 
+    def on_model_changed(self, model: ModelSpec) -> None:
+        """The session switched model mid-message; drop what was frozen for the old one.
+
+        Two pieces of state are deliberately frozen for the duration of one
+        user message, and both are frozen AGAINST A PARTICULAR MODEL:
+
+        * ``_message_effort`` — the auto-classified reasoning level, mapped onto
+          the old model's effort ladder. Ladders differ between models, so
+          carrying the level across a switch either sends a rung the new model
+          rejects (an HTTP 400 that reads as a broken switch) or silently
+          re-tiers the request. It is re-classified for the new model instead.
+        * the quota preflight's cooldown memo — keyed on the selector, so a
+          switch already invalidates the route via ``_primary_selector``. The
+          check timestamp is cleared here too so the new model is actually
+          preflighted rather than skipped by the old one's 60s TTL.
+
+        Only called when the provider/model pair genuinely changed — ``/effort``
+        and per-request sampling overrides write the spec constantly and must
+        not each pay for a re-classification (see ``Session.set_model``).
+        """
+        del model  # the next request carries it; this is a cache invalidation
+        self._message_boundary_pending = True
+        self._message_effort = None
+        self._usage_checked_at = 0.0
+
     async def _notice(self, text: str, kind: str = "warning") -> None:
         if self._notice_handler is None:
             return

@@ -26,6 +26,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_LAYOUT_CLASS,
     COMPOSER_FOCUSED_CLASS,
+    MODEL_SWITCH_MID_TURN_NOTICE,
     PERSIST_HINT,
     SLASH_COMMANDS,
     OperatorApp,
@@ -70,6 +71,10 @@ class FakeSession:
         )
         self.preflight_calls = 0
         self.preflight_notice: str | None = None
+        #: Whether a turn is running. Settable because the `/model` receipt now
+        #: reads it: a switch made mid-turn says when it starts applying, and a
+        #: hard-coded False could never exercise that branch.
+        self.streaming = False
         # The REAL holder, not a bare string: `user_set` precedence (a human
         # rename outranks every generated title, forever) is behaviour the TUI
         # relies on, and a fake that reimplements it as a plain assignment
@@ -86,7 +91,7 @@ class FakeSession:
 
     @property
     def is_streaming(self) -> bool:
-        return False
+        return self.streaming
 
     @property
     def model_label(self) -> str:
@@ -3221,6 +3226,55 @@ async def test_every_model_default_surface_says_it_the_same_way() -> None:
     assert _unwrapped("(this session)") in switch_line, switch_line
     assert _unwrapped("from the next turn") not in _unwrapped(receipt), receipt
     assert _unwrapped("anthropic logged in") in _unwrapped(receipt), receipt
+
+
+@pytest.mark.asyncio
+async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
+    """Switched while the agent is working, the receipt says WHEN it applies.
+
+    Mid-turn is the one moment "starting when" is a live question: the request
+    already streaming cannot be re-targeted, so for a few seconds the user
+    watches the OLD model keep working after the band has repainted to the new
+    one. Without a word here that reads as the switch having been ignored,
+    which is the complaint this whole change exists to fix.
+    """
+    session = _SwitchableSession()
+    session.streaming = True
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+
+    assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
+    # On its OWN row: the receipt keeps its two-clause budget, which is what
+    # keeps it to two wrapped lines at the widths this app supports. Folding the
+    # timing into the scope parenthetical measured three.
+    assert _unwrapped("(this session)") in text, text
+    assert _unwrapped("/model default") in text, text
+
+
+@pytest.mark.asyncio
+async def test_an_idle_switch_does_not_talk_about_steps() -> None:
+    """Between turns there is no step to wait for, so the timing clause is noise.
+
+    Paired with the test above: together they pin that the clause is
+    CONDITIONAL, not that it was simply added to the string.
+    """
+    session = _SwitchableSession()
+    session.streaming = False
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+
+    assert _unwrapped("(this session)") in text, text
+    assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) not in text, text
 
 
 @pytest.mark.asyncio

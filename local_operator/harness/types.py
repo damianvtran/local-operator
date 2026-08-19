@@ -1007,8 +1007,33 @@ class LoopConfig(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    # The model to call (see providers registry).
+    # The model to call (see providers registry). A SNAPSHOT: hosts that can
+    # change the model while a run is in flight supply ``get_model`` as well,
+    # and this stays the value the run started on.
     model: "ModelSpec"
+
+    # The model to call NOW, re-read immediately before every provider call.
+    #
+    # A run is not one provider call, it is a chain of them: model, tools,
+    # model, tools. ``model`` above is bound once when the host builds this
+    # config, so a switch made while a turn is running — the TUI's ``/model``
+    # and the picker, which a user reaches precisely BECAUSE the current model
+    # is doing badly — could not reach any call in that turn, however many
+    # remained. It landed on the session, the status band repainted, and the
+    # agent went on calling the old model until the user's next message, which
+    # reads as the switch having been ignored.
+    #
+    # A callback rather than a mutable field because the model lives on the
+    # host (``Session._model``) and this config is a per-run value object: the
+    # host would otherwise have to hold a reference to the config of whatever
+    # run happens to be live and write through it. The loop asks instead, so
+    # the session stays the single owner of which model is current.
+    #
+    # The boundary is deliberately BETWEEN calls, never inside one. An
+    # in-flight request keeps the spec it was issued with, so a switch cannot
+    # tear down a stream that is already producing tokens or split one response
+    # across two models.
+    get_model: Callable[[], "ModelSpec"] | None = Field(default=None, exclude=True)
 
     # Required: render transcript messages (incl. custom entries) into the
     # LLM-visible list sent to the provider.
