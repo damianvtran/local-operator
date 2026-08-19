@@ -1617,3 +1617,79 @@ async def test_a_call_that_never_started_is_never_announced_as_ended():
     # The wire is still paired: the failure's result reaches the model.
     tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
     assert [str(m.tool_call_id) for m in tool_messages] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_call_id_does_not_suppress_the_real_calls_end_event():
+    """Review round 5, R5-1. The flush's suppression must not be keyed by id.
+
+    Call ids are NOT unique within a batch: a model can emit two calls with one
+    id, and the loop keeps the first and turns the second into a planning
+    failure. That leaves one id owned by two slots — one that STARTED and one
+    that never did — so a suppression set keyed by id cannot tell them apart
+    and swallows the genuine end event along with the parked one. The started
+    call then keeps its start forever with no end, which is the same consumer
+    damage the flush exists to prevent, arrived at from the other side.
+
+    Counting per id is what makes it exact: swallow as many as are owed, no
+    more. This asserts the invariant that survives either implementation —
+    every call that STARTED gets exactly one end.
+    """
+    started = asyncio.Event()
+
+    async def slow(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 0.3)
+            raise
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="slow", content=[TextContent(text="late")]
+        )
+
+    tool = AgentTool(
+        name="slow",
+        parameters={"type": "object", "properties": {}},
+        execute=slow,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                # One id, twice: the second is dropped to a planning failure.
+                tool_call_delta(0, id="dup", name="slow", args="{}"),
+                tool_call_delta(1, id="dup", name="slow", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+            await asyncio.sleep(0.05)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=ABORT_DRAIN_TIMEOUT_S + 15)
+
+    started_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)]
+    ended_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert started_ids == ["dup"], "exactly one of the colliding calls should run"
+    assert ended_ids.count("dup") >= 1, (
+        "the started call's end event was suppressed along with the duplicate's, "
+        "leaving a start with no end"
+    )
+    # The duplicate never started, so it must not add an end of its own.
+    assert ended_ids.count("dup") == len(
+        started_ids
+    ), f"expected one end per started call, got ends={ended_ids} starts={started_ids}"

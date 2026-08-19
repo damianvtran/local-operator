@@ -25,6 +25,7 @@ import inspect
 import json
 import logging
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -1036,14 +1037,31 @@ class AgentLoop:
 
         def park(slot: int, item: _PlannedCall, result: ToolResult) -> None:
             results_by_slot[slot] = result
-            queue.put_nowait(
-                ToolExecutionEndEvent(
-                    tool_call_id=item.call.id,
-                    tool_name=item.tool.name if item.tool is not None else item.call.name,
-                    result=result,
-                    is_error=result.is_error,
+            # A call that never STARTED never gets an end. Planning failures —
+            # an unknown tool, or a duplicate id whose twin won the slot — are
+            # parked up front with no task and no `ToolExecutionStartEvent`, so
+            # announcing their end describes a lifecycle no consumer ever saw
+            # begin: the API server matches by id and either resurrects a record
+            # that was never opened or, when a duplicate id collides, closes the
+            # REAL call's record early and publishes two TOOL_ENDs for one
+            # TOOL_START.
+            #
+            # Suppressed HERE, at the single source, rather than downstream.
+            # The event has two readers — the drain loop while the batch is live
+            # and the post-abort flush after it gives up — and a guard in either
+            # one alone leaves the other emitting it (R4-1 fixed the flush, R5-1
+            # was the drain doing the same thing a moment earlier). The result
+            # still parks, so the WIRE stays paired; only the event is withheld.
+            started = item.failure is None and item.tool is not None
+            if started:
+                queue.put_nowait(
+                    ToolExecutionEndEvent(
+                        tool_call_id=item.call.id,
+                        tool_name=item.tool.name if item.tool is not None else item.call.name,
+                        result=result,
+                        is_error=result.is_error,
+                    )
                 )
-            )
             queue.put_nowait(_TOOL_DONE)
 
         async def runner(slot: int, item: _PlannedCall) -> None:
@@ -1277,18 +1295,23 @@ class AgentLoop:
             # Snapshotting first means the decision is made while no await can
             # intervene, so it cannot be invalidated by what happens mid-emit.
             pending_ends: list[ToolExecutionEndEvent] = []
-            # Seeded with the calls that NEVER STARTED. A planning failure
-            # (unknown tool, duplicate id) is parked up front by `park()`, which
-            # queues an end event for it — harmless while nothing drained the
-            # queue, but the flush below reads it and would announce the end of
-            # a call no consumer ever saw begin. That is the same mirror-image
-            # defect the backfill refuses to commit a few lines down, and the
-            # flush has to share the guard rather than sit beneath it (R4-1,
-            # agent review round 4). Reachable from a hallucinated tool name
-            # alone: no abort, no timing window.
-            claimed: set[str] = {
-                item.call.id for item in batch if item.failure is not None or item.tool is None
-            }
+            # HOW MANY queued end events to swallow per call id — a count, not a
+            # set, because call ids are NOT unique within a batch. A model can
+            # emit two calls with one id; the loop keeps the first and turns the
+            # second into a planning failure, so one id can name both a slot
+            # that started and one that did not. A set keyed by id cannot tell
+            # them apart and suppresses BOTH, dropping the genuine end event of
+            # the call that really ran (R5-1, agent review round 5). This is the
+            # same collision that makes `results_by_slot` keyed by slot.
+            #
+            # Counting is exact even though the events are indistinguishable:
+            # with N carrying one id and K owed suppression, swallowing any K
+            # leaves the right number, and they are identical to a consumer.
+            #
+            # Not seeded from the batch: `park` no longer queues an end for a
+            # call that never started, so the only entries here are the ones
+            # this backfill is about to emit itself.
+            claimed: Counter[str] = Counter()
             for slot, item in enumerate(batch):
                 if results_by_slot[slot] is None:
                     result = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
@@ -1298,7 +1321,7 @@ class AgentLoop:
                         # failure parked its result up front and never emitted a
                         # start event, so an end event for it would be the
                         # mirror image of this bug.
-                        claimed.add(item.call.id)
+                        claimed[item.call.id] += 1
                         pending_ends.append(
                             ToolExecutionEndEvent(
                                 tool_call_id=item.call.id,
@@ -1327,7 +1350,10 @@ class AgentLoop:
                     break
                 if isinstance(queued, (_ToolDone, _BatchDone)):
                     continue
-                if isinstance(queued, ToolExecutionEndEvent) and queued.tool_call_id in claimed:
+                if isinstance(queued, ToolExecutionEndEvent) and claimed.get(
+                    queued.tool_call_id, 0
+                ):
+                    claimed[queued.tool_call_id] -= 1
                     continue
                 yield queued
 
