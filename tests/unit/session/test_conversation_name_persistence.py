@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import StreamEndEvent
+from local_operator.session import session as session_mod
 from local_operator.session.naming import CONVERSATION_NAME_CUSTOM_TYPE
 from local_operator.session.session import _NAME_CHASE_ATTEMPTS, Session
 from local_operator.session.transcript import Transcript
@@ -256,12 +257,23 @@ async def test_a_failing_journal_write_is_logged_not_raised(tmp_path, caplog) ->
     await session.async_init()
     with caplog.at_level("WARNING"):
         session.set_conversation_name("A title nobody can store", user_set=True)
+        # The BACKGROUND task fails here, before any dispose runs. Asserting
+        # after dispose instead is what made the first version of this test
+        # vacuous: the flush's own error path logs a near-identical line, so
+        # the assertion passed against the unguarded code while asyncio still
+        # printed the traceback (review round 2, F11).
         await asyncio.sleep(0.05)
-        # The session survives, and dispose does too — a decoration failure may
-        # not take teardown down with it.
+        background_logs = [r for r in caplog.records if "conversation name" in r.message]
+        assert background_logs, "the background write's failure was not logged"
+        # And the task really did finish, so nothing is left holding an
+        # unretrieved exception for the GC to complain about.
+        task = session._conversation_name_task
+        assert task is not None and task.done()
+        assert task.exception() is None, "the failure escaped the guard"
+
+        # Teardown still succeeds — a decoration failure may not take it down.
         await session.dispose()
 
-    assert any("conversation name" in record.message for record in caplog.records)
     assert session.conversation_name == "A title nobody can store"
 
 
@@ -301,17 +313,28 @@ async def test_a_title_that_keeps_moving_cannot_spin_the_journal(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_slow_write_is_not_duplicated_by_the_dispose_flush(tmp_path) -> None:
+async def test_a_slow_write_is_not_duplicated_by_the_dispose_flush(tmp_path, monkeypatch) -> None:
     """Dispose must not re-append a row a slow write already put on disk.
 
     The flush waits on the in-flight write and then retried whenever the dirty
     flag was still set — which a slow append holds for its whole duration, so
     the identical payload was written twice (review round 1, F5).
+
+    The append must outlast ``_NAME_FLUSH_TIMEOUT_S``, or the flush's wait
+    simply completes and the ordinary "not dirty" return does the work — the
+    branch under test is never entered and the test passes against the broken
+    code. The first version of this test slept 0.3 s against a 2 s timeout and
+    did exactly that (review round 2, F10), so the delay is derived from the
+    timeout rather than hard-coded, and the timeout itself is monkeypatched
+    down so the test does not pay for it in wall clock.
     """
+    monkeypatch.setattr(session_mod, "_NAME_FLUSH_TIMEOUT_S", 0.2)
 
     class SlowTranscript(Transcript):
         async def append_custom(self, custom_type: str, details: dict[str, Any]):
-            await asyncio.sleep(0.3)
+            # Comfortably PAST the flush's patience, so the shield-wait times
+            # out with the write still in flight — the state F9 was about.
+            await asyncio.sleep(0.5)
             return await super().append_custom(custom_type, details)
 
     session = Session(
@@ -324,8 +347,41 @@ async def test_a_slow_write_is_not_duplicated_by_the_dispose_flush(tmp_path) -> 
     await session.async_init()
     session.set_conversation_name("Slow write", user_set=True)
     await session.dispose()
+    # The shielded write outlives dispose by design; give it a moment to land.
+    await asyncio.sleep(0.5)
 
     assert _name_entries(tmp_path) == [{"text": "Slow write", "user_set": True}]
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_write_cannot_hang_dispose(tmp_path, monkeypatch) -> None:
+    """ctrl+d must return even when the volume never answers.
+
+    The flush's timeout used to bound only the WAIT for an in-flight write; the
+    retry it fell through to was an unbounded await on the same wedged append,
+    and ``dispose`` awaits the flush directly — so a hung filesystem hung the
+    app on exit, for decoration (review round 2, F9).
+    """
+    monkeypatch.setattr(session_mod, "_NAME_FLUSH_TIMEOUT_S", 0.2)
+
+    class WedgedTranscript(Transcript):
+        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+            await asyncio.sleep(3600)  # never answers
+            raise AssertionError("unreachable: the sleep outlives the test")
+
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=WedgedTranscript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+    await session.async_init()
+    session.set_conversation_name("Never lands", user_set=True)
+    # The bound applies to the wait AND the retry, so dispose returns in about
+    # two budgets rather than never. Generous ceiling: the assertion is
+    # "bounded", not a stopwatch on the scheduler.
+    await asyncio.wait_for(session.dispose(), timeout=5.0)
 
 
 @pytest.mark.asyncio

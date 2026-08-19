@@ -21,6 +21,7 @@ from typing import cast
 
 from textual.widgets import Static
 
+from local_operator.session.naming import ConversationName
 from local_operator.tui.terminal_title import (
     BRAND,
     MAX_LABEL_CHARS,
@@ -151,6 +152,27 @@ def test_an_over_long_label_is_cut_on_a_word_with_an_ellipsis() -> None:
     assert label == "Investigate why the nightly importer drops rows silently and reconcile the…"
     # A name that already fits is returned untouched — no stray ellipsis.
     assert sanitize_label("Reduce agent RAM usage") == "Reduce agent RAM usage"
+
+
+def test_a_renamed_conversation_reaches_the_tab_cut_on_a_word() -> None:
+    """The cut has to happen where the LENGTH is decided, not on the tab.
+
+    ``MAX_TITLE_CHARS`` and ``MAX_LABEL_CHARS`` are both 80, so a title arrives
+    at ``sanitize_label`` already sliced by the store and the tab-side word cut
+    could never fire for a conversation name — the OSC still ended mid-word
+    (`…and reconcile the ledge`) with the tab-side fix in place. Shortening in
+    ``ConversationName.set`` is what actually reaches the surface, and this
+    drives the real path to prove it (design review round 2, D6).
+    """
+    name = ConversationName()
+    stored = name.set(
+        "Investigate why the nightly importer drops rows silently "
+        "and reconcile the ledger totals",
+        user_set=True,
+    )
+    assert stored.endswith("…"), "the stored title was sliced mid-word"
+    assert not stored.endswith("ledge…"), "cut mid-word rather than on a boundary"
+    assert build_title(sanitize_label(stored), "idle").endswith("and reconcile the…")
 
 
 def test_cwd_stands_in_for_a_conversation_that_has_no_name_yet() -> None:

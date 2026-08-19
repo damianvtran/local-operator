@@ -136,11 +136,19 @@ _MAX_CONTINUATIONS = 8
 #: unwritten afterwards is left for the dispose flush rather than spun on.
 _NAME_CHASE_ATTEMPTS = 3
 
-#: How long ``dispose`` waits for an in-flight title write before giving up on
-#: it. Bounded because teardown must not hang on a wedged filesystem, and short
-#: because the title is decoration; the write is shielded, so it continues on
-#: its own and the wait only stops BLOCKING on it.
-_NAME_FLUSH_TIMEOUT_S = 2.0
+#: Budget for landing the title at teardown — applied to the wait for an
+#: in-flight write AND to the retry behind it, so neither half can hold dispose
+#: open on its own.
+#:
+#: Bounded at all because teardown must not hang on a wedged filesystem: an
+#: unbounded retry meant a ctrl+d never returned, for decoration. Not TIGHT,
+#: because the other failure is losing the name: an append is sub-millisecond
+#: on a local disk, so anything in seconds is already pathological (a stalled
+#: network mount, a volume under extreme load) — and in that state a user is
+#: better served by a few seconds of teardown than by a resume that opens
+#: nameless. Five seconds is comfortably above any real append and still a
+#: bound a person will sit through once.
+_NAME_FLUSH_TIMEOUT_S = 5.0
 
 #: The builtin tools whose createIf gate reads a field only a SESSION can fill
 #: (``subagent_launcher``, ``jobs``, ``wake_scheduler``, ``subagent_comms``, the
@@ -1410,10 +1418,21 @@ class Session:
                 "text": self._conversation_name.text,
                 "user_set": self._conversation_name.user_set,
             }
-            await self._transcript.append_custom(CONVERSATION_NAME_CUSTOM_TYPE, payload)
-            # What is now ON DISK, recorded before the comparison below so the
-            # dispose flush can tell "the flag is stale" from "the title moved".
+            # Recorded BEFORE the append, not after, and the ordering is the
+            # whole point: the dispose flush reads this while the append is
+            # still in flight (that is precisely when it gives up waiting), so
+            # a value assigned afterwards is still `None` at the moment it is
+            # consulted and the flush writes the same row a second time.
+            # Measured at exactly the flush timeout — a 2.1 s append gave two
+            # identical rows, a 1.9 s append gave one (review round 2, F9).
+            #
+            # "In flight or on disk" is the right claim for this field anyway:
+            # its only reader asks whether the title in the holder is already
+            # being written, and an append that is under way answers yes. A
+            # write that dies mid-append leaves the flag dirty, which is what
+            # the flush's retry is for.
             self._conversation_name_journalled = (payload["text"], payload["user_set"])
+            await self._transcript.append_custom(CONVERSATION_NAME_CUSTOM_TYPE, payload)
             if (self._conversation_name.text, self._conversation_name.user_set) == (
                 payload["text"],
                 payload["user_set"],
@@ -1442,12 +1461,20 @@ class Session:
 
         The wait is SHIELDED — the write must not be cancelled by the timeout,
         or the flush would be racing the thing it is trying to complete — and
-        the retry is gated on the payload actually differing rather than on the
-        dirty flag alone. A slow append still holds the flag while it runs, so
-        gating on the flag re-appended a byte-identical row and dispose took the
-        write's full duration anyway (measured: a 3 s append gave a 5 s dispose
-        and two identical rows). Now a write that is merely slow is waited for
-        once and never duplicated (review round 1, F5).
+        the retry is gated on the title already being IN FLIGHT OR ON DISK
+        rather than on the dirty flag alone. A slow append holds that flag for
+        its whole duration, so gating on the flag re-appended a byte-identical
+        row (review round 1, F5; the guard's ordering, review round 2, F9).
+
+        The retry is itself bounded, and that is the second half of F9. The
+        timeout above bounds only the WAIT: falling through to an unbounded
+        ``_persist_conversation_name`` put the full write back in front of
+        teardown, so a wedged filesystem hung dispose forever — on ctrl+d, for
+        decoration. Both halves are now bounded by the same budget, and a title
+        that cannot be written inside it is dropped with a warning rather than
+        holding the session open. The transcript is append-only and the name is
+        the least important thing in it; a resume that opens nameless is a far
+        better outcome than a session that will not close.
         """
         task = self._conversation_name_task
         if task is not None and not task.done():
@@ -1461,11 +1488,15 @@ class Session:
             self._conversation_name.text,
             self._conversation_name.user_set,
         ):
-            # A slow write already put THIS title on disk; the flag is still set
+            # This title is already in flight or on disk; the flag is still set
             # only because that write has not reached its own clear yet.
             return
         try:
-            await self._persist_conversation_name()
+            await asyncio.wait_for(self._persist_conversation_name(), timeout=_NAME_FLUSH_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "gave up journalling the conversation name after %.1fs", _NAME_FLUSH_TIMEOUT_S
+            )
         except Exception:
             # Decoration must never be the reason a dispose fails: losing the
             # name is survivable, losing the conversation is not.

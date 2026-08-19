@@ -277,6 +277,34 @@ def parse_title(raw: str) -> str | None:
     return _sentence_case(words)
 
 
+def cut_on_a_word(text: str, max_chars: int) -> str:
+    """``text`` shortened to ``max_chars``, on a word boundary, with an ellipsis.
+
+    The one definition of "shorten a title" in the product, so the band, the
+    terminal tab and the stored name all cut the same string the same way. Three
+    places grew their own version of this and two of them disagreed; a title
+    that reads `…reconcile the ledge` on the tab and `…reconcile the…` on the
+    band is a bug report waiting to be filed.
+
+    The boundary is only taken when it costs less than a third of the budget: a
+    single enormous token (a URL, a base64 blob) is cut mid-token instead,
+    because returning almost nothing for a string that plainly had content is
+    the worse failure. The ellipsis is counted, so the result never exceeds
+    ``max_chars``.
+    """
+    if len(text) <= max_chars:
+        return text
+    cut = text[: max_chars - 1]
+    spaced = cut.rsplit(" ", 1)[0]
+    if len(spaced) >= (max_chars - 1) * 2 // 3:
+        cut = spaced
+    return cut.rstrip(" " + _TRAILING_PUNCTUATION) + "…"
+
+
+#: Module-private alias, so the store below reads as one operation.
+_cut_on_a_word = cut_on_a_word
+
+
 def _sentence_case(words: list[str]) -> str:
     """Capitalise the first word, leave every other word's casing alone.
 
@@ -480,8 +508,21 @@ class ConversationName:
 
         Returns what is stored afterwards (which may be the previous value
         when a generated title lost to a user-set one).
+
+        An over-long title is cut on a WORD boundary with an ellipsis rather
+        than sliced mid-word. Only ``/rename`` can reach this — a model's
+        over-long answer is REJECTED by :func:`parse_title` rather than
+        truncated — and a name the user typed is worth keeping legible: sliced,
+        an 88-character rename ended `…and reconcile the ledge` on both the band
+        and the terminal tab, which reads as a string that ran out of buffer.
+
+        The cut lives HERE rather than in either display surface because this is
+        where the length is actually decided: ``MAX_TITLE_CHARS`` and the tab's
+        ``MAX_LABEL_CHARS`` are both 80, so a tab-side cut could never fire for a
+        conversation name — every title reaching it had already been sliced by
+        this line (design review round 2, D6).
         """
-        cleaned = " ".join((text or "").split())[:MAX_TITLE_CHARS]
+        cleaned = _cut_on_a_word(" ".join((text or "").split()), MAX_TITLE_CHARS)
         if not user_set and self.user_set:
             return self.text
         self.text = cleaned
