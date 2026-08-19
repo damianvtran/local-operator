@@ -45,11 +45,19 @@ would fail offline, and would spend money per keystroke. Substring over the
 conversation body already answers the reported case — "retention" now finds the
 session — and it never returns a confident wrong answer, which a similarity
 score over 200 short digests very much does.
+
+**What this does NOT do.** It is not a full-text index. :data:`SCAN_BYTES`
+bounds how much of each conversation is represented, so a phrase that appears
+only deep inside a long session may not be found; see that constant for the
+measured recall and why the bound is where it is. The guarantee offered here
+is "findable by what the conversation was about", not "findable by any word
+ever typed in it".
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +73,21 @@ DIGEST_CHARS = 4_000
 #: than :data:`DIGEST_CHARS`: transcripts carry tool calls, results and base64
 #: payloads between the turns, so the prose is sparse within the file and a
 #: window this size typically yields the first few dozen turns.
+#:
+#: **This bounds RECALL, and the bound is real.** On a 204-session store, 35 of
+#: 58 transcripts exceed it, and measured against a full parse the index finds
+#: 3 of 5 sessions containing "retention" and 4 of 16 containing "screenshot" —
+#: a word that recurs late in long sessions is the case it misses. The digest
+#: is therefore "what this conversation was ABOUT", taken from its opening
+#: stretch, not a full-text index of everything said.
+#:
+#: Deliberate rather than conceded: the picker builds this synchronously when
+#: it opens, and the whole store has to be digestible inside a frame. Raising
+#: the window trades that budget for recall of words that appear only deep in a
+#: long conversation, which is the weaker half of the reported problem — the
+#: reported failure was not being able to find a session by its SUBJECT. If
+#: full-text recall is wanted later it belongs in a real index built off the
+#: hot path, not in a bigger synchronous read.
 SCAN_BYTES = 256_000
 
 #: Where the index is written, under the cache directory rather than in any
@@ -182,10 +205,17 @@ def _save(path: Path, entries: dict[str, Any]) -> None:
     (costing a needless rebuild) on every open until someone rewrote it.
     Best-effort because an unwritable cache directory must cost the SPEED of
     the next search and never the search itself.
+
+    The temp file carries the WRITER'S PID. A fixed name is shared by every
+    process, so two sessions opening a picker at once wrote the same path and
+    one ``replace``d a document the other was still filling — measured at 15
+    torn reads in 1668 across three real processes. The consequence was bounded
+    (a torn document is discarded and rebuilt, never read as data), but it is a
+    needless cost for one interpolation.
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(
             json.dumps({"version": INDEX_VERSION, "entries": entries}),
             encoding="utf-8",

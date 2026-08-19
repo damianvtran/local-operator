@@ -115,6 +115,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: How many times the title writer will chase a name that moved under its own
+#: append before giving up and leaving the rest to the dispose flush. A cap
+#: rather than "until it settles" so the bound is structural: the chase is a
+#: loop over a value another coroutine can keep changing, and the unbounded
+#: form raised ``RecursionError`` after ~3000 passes when driven adversarially.
+#: Three is far above what a human renaming a conversation can produce, and the
+#: cost of exhausting it is one stale row that the next write corrects.
+_NAME_PERSIST_MAX_PASSES = 3
+
 #: Self-prompt scheduled after a compaction pass that cleared the recovery
 #: band, so the model resumes where the summary left off.
 _CONTINUATION_PROMPT = (
@@ -1286,11 +1295,36 @@ class Session:
         if task is not None and not task.done():
             return
         try:
-            self._conversation_name_task = asyncio.ensure_future(self._persist_conversation_name())
+            task = asyncio.ensure_future(self._persist_conversation_name())
+            # Consume the exception explicitly. The failure is already intended
+            # to be swallowed (a title must never cost a turn), but nothing
+            # retrieves the result of a task that finishes BEFORE the dispose
+            # flush looks at it, and asyncio then reports "Task exception was
+            # never retrieved" on the loop's error handler at GC time — log
+            # noise blaming the session for a disk error it deliberately
+            # tolerated. Logged at debug because the dispose flush retries.
+            task.add_done_callback(self._on_conversation_name_written)
+            self._conversation_name_task = task
         except RuntimeError:
             # No running loop (a session constructed and named outside one).
             # The dispose flush is the backstop; the name is not lost.
             self._conversation_name_task = None
+
+    @staticmethod
+    def _on_conversation_name_written(task: "asyncio.Future[None]") -> None:
+        """Retrieve the title write's outcome so asyncio does not report it.
+
+        The write is fire-and-forget by design, so a failure here is expected
+        to be tolerated rather than raised — but an exception nobody reads is
+        reported by the loop at collection time, which blames the session for a
+        failure it chose to survive. Reading it is the whole job; the dispose
+        flush is what actually retries.
+        """
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.debug("conversation name write failed; will retry at dispose", exc_info=error)
 
     def _load_conversation_name(self) -> None:
         """Adopt the title journalled by the session this one resumes.
@@ -1341,23 +1375,30 @@ class Session:
         Left dirty, the write is re-driven by the flush at dispose, so the last
         title a user chose is the one on disk.
         """
-        payload = {
-            "text": self._conversation_name.text,
-            "user_set": self._conversation_name.user_set,
-        }
-        await self._transcript.append_custom(CONVERSATION_NAME_CUSTOM_TYPE, payload)
-        if (self._conversation_name.text, self._conversation_name.user_set) == (
-            payload["text"],
-            payload["user_set"],
-        ):
-            self._conversation_name_dirty = False
-            return
-        # The title moved under the append. Chase it now rather than leaving the
-        # newer name to the dispose flush: a session can run for hours after a
-        # rename, and "correct only if you quit" is not a property worth having
-        # when the retry is one more append. Recursion is bounded by renames
-        # actually landing inside a write, and each pass narrows the window.
-        await self._persist_conversation_name()
+        # A LOOP with a hard cap, not recursion. The chase below is bounded in
+        # practice by renames actually landing inside a write, but that is a
+        # behavioural assumption about how fast a human types rather than a
+        # structural one — driven by a title that always moves, the recursive
+        # form raised ``RecursionError`` after ~3000 appends. A cap makes the
+        # bound structural, and the cost of hitting it is one stale title on
+        # disk that the dispose flush will still correct.
+        for _ in range(_NAME_PERSIST_MAX_PASSES):
+            payload = {
+                "text": self._conversation_name.text,
+                "user_set": self._conversation_name.user_set,
+            }
+            await self._transcript.append_custom(CONVERSATION_NAME_CUSTOM_TYPE, payload)
+            if (self._conversation_name.text, self._conversation_name.user_set) == (
+                payload["text"],
+                payload["user_set"],
+            ):
+                self._conversation_name_dirty = False
+                return
+            # The title moved under the append. Chase it now rather than leaving
+            # the newer name to the dispose flush: a session can run for hours
+            # after a rename, and "correct only if you quit" is not a property
+            # worth having when the retry is one more append. Each pass narrows
+            # the window.
 
     async def _flush_conversation_name(self) -> None:
         """Land an outstanding title write before the session tears down.
@@ -1383,10 +1424,20 @@ class Session:
         if not self._conversation_name_dirty:
             return
         try:
-            await self._persist_conversation_name()
+            # BOUNDED, like the shielded wait above it. ``_persist_conversation_name``
+            # takes the transcript lock, and dispose's turn-abort wait is itself
+            # shielded — so a turn that outruns its 5 s budget keeps running and
+            # keeps holding that lock. An unbounded await here made dispose hang
+            # behind it indefinitely (measured blocking >3 s and still going),
+            # which trades a missing title for a session that will not close.
+            # Every other await on this path is bounded; this one has no claim
+            # to be the exception.
+            await asyncio.wait_for(self._persist_conversation_name(), timeout=2.0)
         except Exception:
             # Decoration must never be the reason a dispose fails: losing the
-            # name is survivable, losing the conversation is not.
+            # name is survivable, losing the conversation is not. A timeout is
+            # one of these — ``TimeoutError`` is an ``Exception`` — so a lock
+            # held past the budget costs the title and nothing more.
             logger.warning("failed to persist the conversation name", exc_info=True)
 
     @property

@@ -112,3 +112,57 @@ def test_a_long_title_is_condensed_for_the_row_but_not_for_a_caller(tmp_path: Pa
     session = _session(tmp_path, "opening", (long_title, True))
     assert session_name(session, condense=False) == long_title
     assert session_name(session).endswith("…")
+
+
+def test_a_title_written_early_survives_a_long_conversation(tmp_path: Path):
+    """The case a tail-only scan missed on 78% of a real store.
+
+    The title is journalled when the session is auto-named -- turn 2, near the
+    HEAD -- and every turn after it pushes it further from the tail. Scanning
+    only the tail therefore reverted most real sessions to their opening
+    message, which is the exact failure this function exists to fix.
+    """
+    session = tmp_path / "sessions" / "buriedtitle"
+
+    async def build() -> None:
+        transcript = Transcript(session)
+        await transcript.append_message(
+            Message(role="user", content=[TextContent(text="check the flake build please")])
+        )
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": "Nix Flake Build Failure", "user_set": False}
+        )
+        for index in range(120):
+            await transcript.append_message(
+                Message(role="assistant", content=[TextContent(text=f"{index} " + "z" * 8_000)])
+            )
+
+    asyncio.run(build())
+    # Comfortably past a tail-only window, and past both windows combined.
+    assert session.joinpath("transcript.jsonl").stat().st_size > TITLE_SCAN_BYTES * 2
+    assert stored_session_title(session) == "Nix Flake Build Failure"
+
+
+def test_a_late_rename_still_outranks_the_title_journalled_at_the_head(tmp_path: Path):
+    """Reading both ends must not cost the newest-wins rule: the head holds
+    the ORIGINAL name, and a rename made hours later is the one in force."""
+    session = tmp_path / "sessions" / "renamedlate"
+
+    async def build() -> None:
+        transcript = Transcript(session)
+        await transcript.append_message(
+            Message(role="user", content=[TextContent(text="opening line")])
+        )
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": "Generated At The Start", "user_set": False}
+        )
+        for index in range(120):
+            await transcript.append_message(
+                Message(role="assistant", content=[TextContent(text=f"{index} " + "z" * 8_000)])
+            )
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": "Renamed Much Later", "user_set": True}
+        )
+
+    asyncio.run(build())
+    assert stored_session_title(session) == "Renamed Much Later"

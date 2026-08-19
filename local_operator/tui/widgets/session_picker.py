@@ -132,9 +132,10 @@ GUTTER_CELLS = 2
 #: Prefix on a row the filter admitted because the query appears in the
 #: CONVERSATION rather than in the visible name.
 #:
-#: Two cells wide and drawn from the ASCII/Latin-1 range, so it costs the same
-#: width in every terminal and cannot arrive as a replacement box on a font
-#: without an icon set.
+#: Two cells wide (``cell_len`` measured, not assumed), and a plain typographic
+#: quote rather than an icon-set glyph, so it costs the same width in every
+#: terminal and is present in any font that can already draw the curly quotes
+#: this app's own prose uses.
 #:
 #: A QUOTE mark rather than the `·` first shipped: the footer on this same
 #: card uses `·` as its separator forty cells below, and one glyph meaning
