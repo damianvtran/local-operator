@@ -449,7 +449,121 @@ async def test_the_generation_names_the_card_that_is_showing() -> None:
         assert toast.generation == held
 
         # Unchanged by dismissal, so a held value can never come to match a
-        # later card by accident.
+        # later card by accident. Dismissed twice: the first frees the slot and
+        # lets the deferred receipt take its turn (which is a new card, and so
+        # a new generation), the second retires that.
         toast.dismiss_toast()
         await pilot.pause()
-        assert toast.generation == held
+        assert toast.message == "copied 9 characters"
+        after_deferred = toast.generation
+        assert after_deferred == held + 1
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.generation == after_deferred
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_courtesy_card_gets_its_turn_when_the_slot_frees() -> None:
+    """Held, not dropped: the acknowledgement is late rather than lost.
+
+    Deferring fixed the eviction, but it left the copy with no feedback at all
+    — the failure was dismissed and nothing ever said the text had been taken
+    (design round 2, D9). The user had dragged, seen nothing, and the notice
+    they were reading disappeared.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+        assert toast.message == "⊙ MCP failed: github"
+
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        assert toast.message == "copied 9 characters"
+        assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_only_the_latest_deferred_card_is_kept() -> None:
+    """Superseded news is not owed a turn.
+
+    Three drags behind one failure notice must not march three cards down the
+    screen afterwards — that is the stacking the single slot exists to prevent.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        for message in ("copied 3 characters", "copied 5 characters", "copied 9 characters"):
+            toast.show(message, yield_to_actionable=True)
+            await pilot.pause()
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.message == "copied 9 characters"
+
+        # ...and exactly one card is owed. The next dismissal ends it rather
+        # than uncovering another receipt.
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.message == ""
+        assert toast.display is False
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_card_does_not_defer_to_itself() -> None:
+    """The hold is released before the deferred card is shown.
+
+    Dismissal clears `_actionable` first, so the card taking its turn cannot
+    find the slot still held and re-defer — which would either lose it after
+    all or, worse, recurse.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        assert toast.message == "copied 9 characters"
+        assert toast._deferred is None
+        # A courtesy card is not itself actionable, so the slot is takeable.
+        toast.show("copied 4 characters", yield_to_actionable=True)
+        await pilot.pause()
+        assert toast.message == "copied 4 characters"
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_actually_showed_clears_the_deferred_one() -> None:
+    """A receipt that got its own turn is not also owed a later one.
+
+    Without clearing the hold on an accepted `show`, a copy deferred behind a
+    failure would resurface after some unrelated notice minutes later — a
+    receipt for a copy the user made long ago, arriving with no gesture behind
+    it.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+        assert toast._deferred is not None
+
+        # The failure is replaced by an ordinary notice rather than dismissed,
+        # so the slot never passes through `dismiss_toast`.
+        toast.show("⊙ MCP ready: 2 servers", duration_ms=TOAST_DEFAULT_MS)
+        await pilot.pause()
+        assert toast._deferred is None
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.message == ""
+        assert toast.display is False

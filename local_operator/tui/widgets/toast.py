@@ -195,6 +195,10 @@ class Toast(Static):
         #: to a receipt for something they just did. Guards the slot; see
         #: :meth:`show`.
         self._actionable = False
+        #: A courtesy notice that arrived while an actionable one held the slot,
+        #: as ``(text, duration_ms)``. Shown when the slot frees; see
+        #: :meth:`show` and :meth:`dismiss_toast`.
+        self._deferred: tuple[str | Text, int] | None = None
         #: Bumped by every :meth:`show`. Lets a caller name the card IT raised
         #: and act on it only while that card is still the one on screen — a
         #: message string cannot do this, because two notices can word
@@ -264,7 +268,16 @@ class Toast(Static):
         chance to be seen.
         """
         if yield_to_actionable and self._actionable:
+            # Held, not dropped. A deferred receipt is still an acknowledgement
+            # the user is owed: the copy really happened, and without this the
+            # gesture goes entirely unacknowledged — the failure is dismissed
+            # and nothing ever says the text was taken (design round 2, D9).
+            # Only the LATEST is kept: an older receipt is superseded news, and
+            # a queue of them would march the card down the screen, which is
+            # the stacking this widget exists to avoid.
+            self._deferred = (text, duration_ms)
             return
+        self._deferred = None
         self._stop_timer()
         self._generation += 1
         #: Only an actionable notice claims the slot against a courtesy one.
@@ -298,6 +311,15 @@ class Toast(Static):
         self._message = ""
         self._actionable = False
         self.update("")
+        # The slot is free, so a receipt that deferred to this card gets its
+        # turn — the acknowledgement is late rather than lost. Read and cleared
+        # before the call because `show` writes the field itself, and the
+        # actionable hold is already released above, so this one cannot defer
+        # again and recurse.
+        deferred, self._deferred = self._deferred, None
+        if deferred is not None:
+            text, duration_ms = deferred
+            self.show(text, duration_ms=duration_ms)
 
     def on_unmount(self) -> None:
         """Teardown must not leave a live timer behind (see the module note)."""
