@@ -42,6 +42,7 @@ import re
 from pathlib import Path
 from typing import Callable, Literal
 
+from local_operator.session.naming import cut_on_a_word
 from local_operator.tui.settings import settings_get
 
 #: Environment kill switch, mirroring ``shimmer``/``nerd_icons``. Wanted by
@@ -132,27 +133,25 @@ def sanitize_label(value: str | None) -> str:
     Returns ``""`` for anything that sanitises away to nothing, which callers
     read as "no label" rather than as an empty title.
 
-    Over-long labels are cut on a WORD boundary with an ellipsis, matching what
-    the status band does to the same string (``status_line.truncate_name``) and
-    what the excerpt was cut on in the first place
-    (``naming.provisional_title``). A bare slice ended the tab mid-word — `…and
-    reconcile the ledge` — which reads as a string that ran out of buffer rather
-    than as a name that was shortened, and the tab is where truncation bites
-    hardest because most terminals then shorten the label AGAIN to fit the tab
-    strip. The boundary is only taken when it costs less than a third of the
-    cap, so a single enormous token is still cut rather than dropped to nothing
-    (design review D3).
+    Over-long labels are cut on a WORD boundary with an ellipsis, through the
+    same helper the stored title uses (``naming.cut_on_a_word``), so the tab and
+    the band shorten a name identically. A bare slice ended the tab mid-word —
+    `…and reconcile the ledge` — which reads as a string that ran out of buffer
+    rather than as a name that was shortened, and the tab is where truncation
+    bites hardest because most terminals shorten the label AGAIN to fit the tab
+    strip (design review D3).
+
+    For a CONVERSATION NAME this is now a backstop rather than the working cut:
+    ``MAX_TITLE_CHARS`` and ``MAX_LABEL_CHARS`` are both 80, so a title arrives
+    already shortened by the store (D6). It still does real work for the callers
+    with no cap of their own — ``cwd_label`` on a deep path, and a subagent
+    label — which is why the cut lives on both sides rather than being deleted
+    here.
     """
     if not value:
         return ""
     cleaned = " ".join(_CONTROL_CHARS.sub(" ", value).split())
-    if len(cleaned) <= MAX_LABEL_CHARS:
-        return cleaned
-    cut = cleaned[: MAX_LABEL_CHARS - 1]
-    spaced = cut.rsplit(" ", 1)[0]
-    if len(spaced) >= (MAX_LABEL_CHARS - 1) * 2 // 3:
-        cut = spaced
-    return cut.rstrip(" ,.;:") + "…"
+    return cut_on_a_word(cleaned, MAX_LABEL_CHARS)
 
 
 def cwd_label(cwd: str | None) -> str:
