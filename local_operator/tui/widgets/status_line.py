@@ -1650,17 +1650,34 @@ class StatusLine:
             # of the user's opener, so it has no natural bound, and the band is a
             # fixed two-row box.
             #
-            # PADDED to its box, and left-aligned in it. The box is the reserved
-            # width, so the padding is what holds every sibling's column still
-            # while a model rewrites the string in it; left-aligned because the
-            # eye reads a title from its first cell, and a fixed first cell is
-            # exactly what a string that changes on its own needs. The leftover
-            # lands at the band's right edge, which is the one place on this row
-            # where nothing else was ever going to be.
+            # PADDED to its box, and RIGHT-aligned in it. The box is the
+            # reserved width, so the padding is what holds every sibling's
+            # column still while a model rewrites the string in it — that half
+            # is the reserve's whole purpose and is unchanged.
+            #
+            # The alignment inside the box decides where the box's UNUSED cells
+            # sit, and they have to sit somewhere: the fit was decided against
+            # the full box, so those cells are already spoken for and cannot be
+            # given back to the layout without moving every column left of the
+            # name. `rjust` puts them before the title, which makes the title's
+            # last cell the band's right edge at every length.
+            #
+            # `ljust` put them after it instead, and `_compose` then stripped
+            # them — so the painted row simply ended early: flush for a long
+            # title and up to 35 cells short for a brief one, which reads as a
+            # rendering fault rather than as a band with less to say. (They are
+            # ordinary styled cells, so anything READING the row carried them
+            # too: the SVG export wrote all 35.)
+            #
+            # The cost is that the title's FIRST cell moves with its length.
+            # That is the right way round — the reserve exists to stop the
+            # SIBLINGS drifting (the `!` alarm holds its column at every width),
+            # and the alternative, measuring the group by its ink, moves the
+            # alarm itself, which is the defect the box was introduced to fix.
             parts.append(
                 (
                     "",
-                    truncate_name(self._conversation_name, name_cells).ljust(name_cells),
+                    truncate_name(self._conversation_name, name_cells).rjust(name_cells),
                     Style(color=theme_mod.semantic_color("muted")),
                 )
             )
@@ -1687,31 +1704,22 @@ class StatusLine:
         arithmetic is the same at every title length and a short title leaves its
         leftover at the band's edge rather than shunting the group right.
 
-        That leftover is then CUT from the painted row, and the order of those
-        two steps is the whole point — it is NOT the same thing as aligning the
-        group by its ink. The gap above is still computed from the PADDED box, so
-        every column up to and including the name's first cell remains a function
-        of the row's geometry alone and nothing to the LEFT of the name can see
-        this cut. Aligning by ink instead was tried and reintroduces the exact
-        defect the reserve exists for: the alarm glyph goes back to moving with
-        the title, measured at 120/150/160 columns across the four titles in
-        ``_NAMES`` as columns 91/90/85/108, 121/120/115/138 and 122/117/125/148.
-        Here the only cells removed are the run of blanks BETWEEN the name's last
-        inked cell and the band's right edge, and nothing is ever painted there:
-        the name is the row's last segment by construction.
+        The box's unused cells are spent INSIDE the name segment, which
+        right-aligns itself in them (see :meth:`_right_text`), so the row's last
+        inked cell is the band's right edge at every title length and there is
+        nothing here to trim.
 
-        Worth removing because those blanks are not nothing. They are ordinary
-        cells carrying the band's own style, so anything that READS the row
-        rather than looking at it carries them: the SVG export writes 35 trailing
-        spaces after a `short` title at a 160-column terminal (0 after the cut),
-        and a reflow or a copy would take them the same way. A row whose right
-        edge is flush for a long title and 35 cells short for a brief one reads
-        as a rendering fault rather than as a band with less to say.
+        This method used to `rstrip` a LEFT-aligned name's trailing padding,
+        which produced a row that ended early — flush for a long title and up to
+        35 cells short for a brief one. Moving the padding to the other side of
+        the title fixes that at the source: the cells still exist, so the fit
+        arithmetic and every column left of the name are untouched, but they are
+        no longer at the edge where their absence was visible.
 
-        ``rstrip`` mutates, so it is applied to the freshly built row and never
-        to ``right``: trimming the caller's group in place would leave the fit
-        arithmetic in :meth:`_walk` measuring a different string than the box it
-        reserved, which is the bug this method exists to avoid.
+        Aligning the group by its INK rather than its box is the other way to
+        reach the edge, and the one this must not do: measured across four
+        titles it walks the `!` alarm from column 74 to 91/111/151 at 100/120/160
+        cells, which is exactly the drift the reserve was introduced to stop.
         """
         if not right.plain:
             return left
@@ -1720,7 +1728,6 @@ class StatusLine:
         row.append_text(left)
         row.append(" " * gap, style=dim)
         row.append_text(right)
-        row.rstrip()
         return row
 
     def render_text(self, width: int) -> Text:
