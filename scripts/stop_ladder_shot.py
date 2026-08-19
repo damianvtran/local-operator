@@ -17,6 +17,16 @@ Run from the worktree root:
               "still running" row left above "stopped them" reads as current.
 ``nochildren`` first Esc with nothing delegated: the subagent sentence must not
               appear at all.
+``expired``   a first Esc whose 4s window has since closed: the row keeps the
+              FACT that children are running but drops the escalation promise,
+              because an instruction no key will honour must not stand (D4).
+``late``      a second Esc that arrives after the window: it cannot escalate,
+              so the re-armed offer states the constraint rather than
+              repainting an identical row and reading as a dropped key (D1).
+``finished``  a second Esc landing after the children finished on their own:
+              the confirmation must not flatly deny the offer just read (D2).
+``spared``    a stop that leaves a backgrounded `bash` job running, which it
+              names because escalating reads as "stop all of it" (D3).
 ``draft``     a half-typed prompt in the composer (Ctrl+C "before").
 ``cleared``   after Ctrl+C: the draft is cleared into prompt history and the
               exit ladder is NOT armed, so no exit hint is shown.
@@ -35,7 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from local_operator.tui.app import OperatorApp  # noqa: E402
+from local_operator.tui.app import DOUBLE_STOP_WINDOW_S, OperatorApp  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
 from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
@@ -72,6 +82,9 @@ async def main() -> None:
         app._append_block(prose)
         await pilot.pause()
 
+        if state == "spared":
+            session.running_bash_jobs = 1
+
         if state in {"draft", "cleared"}:
             editor = app.query_one(Editor)
             editor.focus()
@@ -84,14 +97,36 @@ async def main() -> None:
             # A turn in flight is the state the user presses Esc in.
             session.streaming = True
             await pilot.pause()
-            if state in {"offer", "stopped", "nochildren"}:
+            if state in {
+                "offer",
+                "stopped",
+                "nochildren",
+                "expired",
+                "late",
+                "finished",
+                "spared",
+            }:
                 await pilot.press("escape")
                 await pilot.pause(0.1)
-            if state == "stopped":
+            if state in {"stopped", "spared"}:
                 # Inside DOUBLE_STOP_WINDOW_S, so this is the escalation press.
                 app._stop_offered_at = time.monotonic()
                 await pilot.press("escape")
                 await pilot.pause(0.1)
+            if state == "finished":
+                # The children settle on their own before the second press.
+                session.running_children = 0
+                app._stop_offered_at = time.monotonic()
+                await pilot.press("escape")
+                await pilot.pause(0.1)
+            if state == "late":
+                # Past the window: this press cannot escalate.
+                app._stop_offered_at = time.monotonic() - (DOUBLE_STOP_WINDOW_S + 1)
+                await pilot.press("escape")
+                await pilot.pause(0.1)
+            if state == "expired":
+                # Let the real timer retire the promise.
+                await pilot.pause(DOUBLE_STOP_WINDOW_S + 0.5)
 
         for _ in range(4):
             await pilot.pause()

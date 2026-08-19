@@ -1145,6 +1145,12 @@ class OperatorApp(App[None]):
         # were still running, this stamps WHEN the wider stop was offered. A
         # second press inside DOUBLE_STOP_WINDOW_S takes the offer up.
         self._stop_offered_at: float | None = None
+        # How many children the standing offer NAMED. Kept beside the stamp so
+        # the escalation can tell "nothing was ever delegated" apart from "the
+        # children the offer counted finished before the second press landed" —
+        # two states that otherwise print the same flat denial of a row the user
+        # is still looking at (D2, design round 1).
+        self._stop_offer_count: int = 0
         # The one live stop-ladder line ("N subagents still running…" /
         # "stopped N subagents"), replaced rather than repeated for the same
         # reason `_exit_hint` is.
@@ -1919,6 +1925,7 @@ class OperatorApp(App[None]):
         # reference goes too; `clear_blocks` unmounts the widget but cannot
         # clear a reference it does not own.
         self._stop_offered_at = None
+        self._stop_offer_count = 0
         self._stop_notice = None
         # And a deferred completion belongs to the dying conversation too. Left
         # set, the replacement session's first settling background job would
@@ -3284,6 +3291,13 @@ class OperatorApp(App[None]):
                 if self._exit_hint is not None:
                     self._transcript_view().remove_block(self._exit_hint)
                     self._exit_hint = None
+                # Say where the text went. Filing the draft into history rather
+                # than the bin is the whole point of this rung, but all the user
+                # SEES is their sentence vanishing — and recoverability nobody
+                # can discover is worth very little, because they retype it
+                # anyway (D6, design round 1). One quiet receipt, in the `note`
+                # weight that answers something the user just did.
+                self._append_block(NoticeBlock("draft cleared — up to recover", "note"))
                 return
 
         now = time.monotonic()
@@ -3475,20 +3489,48 @@ class OperatorApp(App[None]):
             and session is not None
         ):
             self._stop_offered_at = None
+            offered = self._stop_offer_count
+            self._stop_offer_count = 0
             stopped = session.cancel_subagents("interrupted")
             # Re-aborting the parent is deliberate and not redundant: a child
             # settling can hand its result back to a parent that has since
             # started a follow-up turn, and the user's second press means that
             # too. It is idempotent when the parent is already stopped.
             self._interrupt()
-            self._replace_stop_notice(
-                (
-                    f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
-                    if stopped
-                    else "no subagents were running"
-                ),
-                "note",
-            )
+            if stopped:
+                text = f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
+                # Sparing backgrounded `bash` is deliberate (`background=true`
+                # exists so a build outlives the turn) and genuinely surprising
+                # to a user who just escalated a stop, which reads as "stop all
+                # of it". Naming the survivors here, and only when there ARE
+                # any, prevents the "I stopped everything, why is the build
+                # still running" question at the one moment the answer is
+                # wanted (D3, design round 1). Unconditional, it would be noise.
+                spared = self._job_count("bash")
+                if spared:
+                    text += (
+                        f"; {spared} background job{'s' if spared != 1 else ''} "
+                        "still running — jobs cancel to stop"
+                    )
+            elif offered:
+                # The children finished on their own between the two presses.
+                # `cancel_subagents` recounts at press time, so this is
+                # reachable in production and not a fake-session artifact.
+                #
+                # The wording matters more than it looks. Saying "no subagents
+                # were running" here REPLACES a row that just said "2 subagents
+                # still running", so the user reads a flat denial of what they
+                # were told one keypress ago — which re-raises the exact
+                # credibility problem this whole change exists to fix. What
+                # actually happened is better news than the offer implied, and
+                # the line should say so (D2, design round 1).
+                text = (
+                    f"{offered} subagent{'s' if offered != 1 else ''} "
+                    "finished before the stop landed"
+                )
+            else:
+                text = "no subagents were running"
+            self._replace_stop_notice(text, "note")
             return
 
         pending = self._approval is not None and not self._approval.answered
@@ -3514,14 +3556,65 @@ class OperatorApp(App[None]):
             # up: without a line on screen the user has no way to know that a
             # stop left work running, and no way to learn the second press
             # exists.
+            #
+            # A press that lands here while an offer was ALREADY up is a press
+            # that arrived too late to escalate (the branch above took every
+            # press inside the window). Re-arming and reprinting the identical
+            # string made that press a silent no-op — the rendered frame was
+            # byte-identical, so it was indistinguishable from a dropped
+            # keystroke on the one key whose job in this change is to stop
+            # lying about what it did (D1, design round 1). The re-armed offer
+            # therefore says so, which both acknowledges the press and states
+            # the constraint that defeated it.
+            expired = self._stop_offered_at is not None
             self._stop_offered_at = now
+            self._stop_offer_count = children
+            plural = "s" if children != 1 else ""
             self._replace_stop_notice(
-                f"{children} subagent{'s' if children != 1 else ''} still running "
-                "— esc again to stop them",
+                (
+                    f"{children} subagent{plural} still running "
+                    f"— press esc twice within {DOUBLE_STOP_WINDOW_S:g}s to stop them"
+                    if expired
+                    else f"{children} subagent{plural} still running " "— esc again to stop them"
+                ),
                 "warning",
             )
+            # Retire the INSTRUCTION when the window that makes it true closes.
+            # Nothing else cleared the row, so a transcript kept a warning-amber
+            # line reading "esc again to stop them" for the rest of the session,
+            # scrolling up through the history as a standing offer that no key
+            # would honour — and with no visible expiry there was no way to tell
+            # a live offer from a dead one (D4, design round 1). The fact stays
+            # (the children really are still running); only the promise goes.
+            armed_at = now
+            self.set_timer(DOUBLE_STOP_WINDOW_S, lambda: self._expire_stop_offer(armed_at))
         else:
             self._stop_offered_at = None
+            self._stop_offer_count = 0
+
+    def _expire_stop_offer(self, armed_at: float) -> None:
+        """Drop the escalation promise from a standing offer once it lapses.
+
+        Keyed on the stamp it was armed with, so a timer from an earlier press
+        cannot retire a NEWER offer: a second press inside the window re-arms
+        with a fresh ``now``, and this fires for the old one a moment later.
+        Any other outcome (taken, cleared, session swapped) leaves
+        ``_stop_offered_at`` unequal and this does nothing.
+        """
+        if self._stop_offered_at != armed_at:
+            return
+        self._stop_offered_at = None
+        count = self._stop_offer_count
+        self._stop_offer_count = 0
+        notice = self._stop_notice
+        if notice is None or not notice.is_attached or count <= 0:
+            return
+        # `note`, not `warning`: it is no longer a state the user must act on
+        # within a window, just a fact about what is still running.
+        notice.restate(
+            f"{count} subagent{'s' if count != 1 else ''} still running",
+            "note",
+        )
 
     @staticmethod
     def _running_subagents(session: Any | None) -> int:
@@ -3549,9 +3642,23 @@ class OperatorApp(App[None]):
         pressing Esc twice would otherwise leave two contradictory rows ("still
         running" above "stopped them"), and the stale one is the one that reads
         as current.
+
+        Restated IN PLACE rather than removed and re-appended. Re-appending put
+        the row back at the transcript end, so a notice that arrived between the
+        two presses — the aborted turn's own ``interrupted`` row is the ordinary
+        case — ended up ABOVE a row the user had already read, and the
+        transcript stopped being chronological (D5, design round 1).
+        :meth:`NoticeBlock.restate` exists for exactly this "notice that
+        outlived its own truth" case and is what the queued-steer row uses.
+
+        Falls back to appending when the block is gone (``/clear``, a session
+        swap, or a transcript that never mounted it), because restating a block
+        that is no longer in the view would silently write to nothing.
         """
-        if self._stop_notice is not None:
-            self._transcript_view().remove_block(self._stop_notice)
+        notice = self._stop_notice
+        if notice is not None and notice.is_attached:
+            notice.restate(text, kind)
+            return
         self._stop_notice = NoticeBlock(text, kind)
         self._append_block(self._stop_notice)
 
@@ -4361,6 +4468,7 @@ class OperatorApp(App[None]):
         # the user can no longer see the terms of must not stay armed.
         self._stop_notice = None
         self._stop_offered_at = None
+        self._stop_offer_count = 0
         self._streaming_block = None
         self._tool_cards = {}
         self._composing_cards = {}

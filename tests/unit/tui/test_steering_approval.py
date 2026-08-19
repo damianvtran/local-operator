@@ -18,6 +18,7 @@ routes messages internally.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -2469,4 +2470,243 @@ async def test_ctrl_c_never_files_an_aside_question_in_prompt_history() -> None:
         assert not any(
             "salary" in entry for entry in editor.prompt_history()
         ), "the off-the-record question reached the recallable history"
+        assert app.is_running
+
+
+# ---------------------------------------------------------------------------
+# Design review round 1: what the ladder SAYS when its own state has moved on.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_late_second_esc_is_acknowledged_rather_than_silently_ignored() -> None:
+    """A press that misses the window must not repaint an identical row.
+
+    Past DOUBLE_STOP_WINDOW_S the press falls through to the ordinary stop,
+    which re-arms the offer. Reprinting the same string there made the press
+    indistinguishable from a dropped keystroke — the rendered frame was byte
+    for byte the same — on the very key this change exists to stop making
+    silent promises (D1). The re-armed offer now states the constraint that
+    defeated the press, so the user learns why nothing was stopped.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert any("esc again to stop them" in row for row in rows(app))
+
+        # The window lapses without a second press.
+        app._stop_offered_at = time.monotonic() - (DOUBLE_STOP_WINDOW_S + 1)
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        # Nothing was stopped — that part is by design — but the row CHANGED,
+        # so the press is visibly acknowledged.
+        assert session.subagent_cancels == []
+        assert any(
+            "press esc twice within" in row for row in rows(app)
+        ), "the late press repainted an identical row and read as a dropped key"
+
+
+@pytest.mark.asyncio
+async def test_children_finishing_between_presses_is_not_reported_as_a_denial() -> None:
+    """ "no subagents were running" must not contradict the offer (D2).
+
+    `cancel_subagents` recounts at press time, so children that settle inside
+    the window return zero. Printing a flat denial there replaces a row that
+    just said "2 subagents still running" and reads as "the first message was
+    wrong" — re-raising the credibility problem this change exists to fix,
+    when what actually happened is better news than the offer implied.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        # They finish on their own before the user's second press lands.
+        session.running_children = 0
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        painted = rows(app)
+        assert any(
+            "finished before the stop landed" in row for row in painted
+        ), "the confirmation did not explain that the children had finished"
+        assert not any(
+            "no subagents were running" in row for row in painted
+        ), "the confirmation flatly denied the offer the user had just read"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_that_spares_background_jobs_says_so() -> None:
+    """Escalating reads as "stop all of it", and `bash` jobs deliberately
+    survive it (D3). The one moment that is worth a word is the confirmation,
+    and only when such a job actually exists."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 1
+        session.running_bash_jobs = 1
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        app._stop_offered_at = time.monotonic()
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        painted = rows(app)
+        assert any("stopped 1 subagent" in row for row in painted)
+        assert any(
+            "background job" in row and "jobs cancel" in row for row in painted
+        ), "the spared background job was not named"
+
+
+@pytest.mark.asyncio
+async def test_the_confirmation_stays_quiet_when_nothing_was_spared() -> None:
+    """The `bash` clause is conditional: unconditional, it would be noise on
+    every stop (D3)."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 1
+        session.running_bash_jobs = 0
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        app._stop_offered_at = time.monotonic()
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        assert not any("background job" in row for row in rows(app))
+
+
+@pytest.mark.asyncio
+async def test_the_offer_retires_its_promise_when_the_window_closes() -> None:
+    """An instruction that no key will honour must not stand (D4).
+
+    Nothing cleared the row, so a transcript kept a warning-amber
+    "esc again to stop them" for the rest of the session, scrolling up through
+    the history with no visible expiry. The FACT survives — the children really
+    are still running — only the promise goes, and it drops out of the warning
+    weight because it is no longer something to act on within a window.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert any("esc again to stop them" in row for row in rows(app))
+
+        # Wait out the real window rather than reaching into the timer.
+        await pilot.pause(DOUBLE_STOP_WINDOW_S + 0.5)
+
+        painted = rows(app)
+        assert not any(
+            "esc again to stop them" in row for row in painted
+        ), "the expired offer went on advertising an escalation no key honours"
+        assert any(
+            "2 subagents still running" in row for row in painted
+        ), "the surviving fact was dropped along with the promise"
+
+
+@pytest.mark.asyncio
+async def test_taking_the_offer_is_not_undone_by_the_expiry_timer() -> None:
+    """The timer is keyed on the stamp it was armed with, so it can never
+    retire an offer that was already taken, nor a newer one armed since."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        app._stop_offered_at = time.monotonic()
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert session.subagent_cancels == ["interrupted"]
+
+        # The first press's timer fires somewhere in here and must do nothing.
+        await pilot.pause(DOUBLE_STOP_WINDOW_S + 0.5)
+
+        assert any(
+            "stopped 2 subagents" in row for row in rows(app)
+        ), "the expiry timer overwrote the confirmation of a stop that happened"
+
+
+@pytest.mark.asyncio
+async def test_the_ladder_row_keeps_its_place_in_the_transcript() -> None:
+    """Replacing the row must not move it (D5).
+
+    `_replace_stop_notice` used to remove and re-append, so the row jumped to
+    the transcript end and landed BELOW notices that had arrived after it —
+    a row the user had already read reordering itself past later ones. The
+    replacement now restates in place, which keeps both the replace-don't-stack
+    decision and a chronological transcript.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        # A notice arrives after the offer, as the aborted turn's own does.
+        app._append_block(NoticeBlock("interrupted", "info"))
+        await pilot.pause()
+
+        app._stop_offered_at = time.monotonic()
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        painted = [row for row in rows(app) if row.strip()]
+        ladder = next(i for i, row in enumerate(painted) if "stopped 2 subagents" in row)
+        later = next(i for i, row in enumerate(painted) if "interrupted" in row)
+        assert ladder < later, "the restated ladder row jumped below a later notice"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_says_where_the_draft_went() -> None:
+    """Filing the draft into history is the point of this rung, but all the
+    user sees is their sentence vanishing — and recoverability nobody can
+    discover gets retyped instead of recalled (D6)."""
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "a half-typed prompt I do not want to lose"
+        await pilot.pause()
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+
+        painted = rows(app)
+        assert any(
+            "draft cleared" in row and "up to recover" in row for row in painted
+        ), "the draft vanished with nothing to say it was recoverable"
+        # And the exit ladder is still NOT armed by this press.
+        assert not any("ctrl+c again" in row for row in painted)
         assert app.is_running
