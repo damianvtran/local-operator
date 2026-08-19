@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
 
+from rich.cells import cell_len
 from rich.console import Group
 from rich.style import Style
 from rich.terminal_theme import TerminalTheme
@@ -131,6 +132,7 @@ from local_operator.tui.widgets.editor import (
     Attachment,
     Editor,
     EditorCopied,
+    EditorCopyStale,
     EditorQuit,
     EditorSubmitted,
     InterruptRequested,
@@ -2424,6 +2426,26 @@ class OperatorApp(App[None]):
         """
         self._put_on_clipboard(message.text)
 
+    def on_editor_copy_stale(self, message: EditorCopyStale) -> None:
+        """The text a copy receipt describes was edited away — drop the card.
+
+        Select-to-overwrite is the commonest edit in an input: drag a word, type
+        the replacement. The drag copies (that is this PR's whole point), and
+        the receipt then sat there for the rest of its five seconds asserting a
+        copy of characters the user had already replaced (design round 1, D3).
+
+        Only the CLAIM is withdrawn. The clipboard keeps what it took — the
+        copy really happened, and a paste a minute later must still produce it.
+
+        Guarded on the card actually being a copy receipt: an MCP failure that
+        arrived after the copy is not this message's business, and dismissing
+        it because the user carried on typing would be the eviction bug
+        (D2) with extra steps.
+        """
+        toast = self.query_one(Toast)
+        if toast.message.startswith("copied "):
+            toast.dismiss_toast()
+
     def _put_on_clipboard(self, text: str | None) -> None:
         """The one clipboard write, with the receipt that makes it visible.
 
@@ -2436,12 +2458,48 @@ class OperatorApp(App[None]):
         Empty is not an event: ``None`` (nothing selected) and ``""`` (a
         selection nothing would give up) are both "no copy happened", and a
         toast for either would be the same lie the silent copy was.
+
+        **The unit follows the SHAPE of what was taken**, because "line" is a
+        claim the frame can contradict:
+
+        * A selection carrying no newline is reported in CHARACTERS. Saying
+          ``copied 1 line`` there asserted a whole line the user had not taken
+          (they dragged three words out of one), and in the composer it also
+          contradicted the screen: a long draft soft-wraps, so one document
+          line is painted as three highlighted rows and the receipt said
+          ``1 line`` while the user was looking at three (design round 1,
+          D1/D5). A character count is true of both the clipboard and the
+          frame, and it is the number that actually distinguishes "I got the
+          word" from "I got the word and a trailing space".
+        * A selection that spans lines is reported in LINES, which is the
+          useful magnitude there and keeps the transcript's familiar receipt
+          for the multi-paragraph copy it was written for.
+
+        The count is ``splitlines()``, not ``count("\\n") + 1``: the latter
+        reads a trailing newline as a whole further line, so selecting exactly
+        one line and its break — "select this line", a natural composer drag —
+        was reported as ``copied 2 lines`` (review round 1, F3). It is the count
+        the tests already cross-checked against, so the two now agree for every
+        selection rather than only for those ending mid-line.
+
+        The receipt is deliberately a COURTESY (see ``Toast.show``): the user
+        performed this action and can see its result, so it must not evict an
+        actionable failure notice they have not read (design round 1, D2).
         """
         if not text:
             return
         self.copy_to_clipboard(text)
-        lines = text.count("\n") + 1
-        self.query_one(Toast).show(f"copied {lines} line{'' if lines == 1 else 's'}")
+        lines = len(text.splitlines())
+        if lines <= 1:
+            # `cell_len` rather than `len`: the receipt counts what the user
+            # highlighted on screen, and a CJK glyph or an emoji is one
+            # character that occupies two cells. Neither number is wrong in
+            # general; this is the one the frame can be checked against.
+            count = cell_len(text)
+            message = f"copied {count} character{'' if count == 1 else 's'}"
+        else:
+            message = f"copied {lines} lines"
+        self.query_one(Toast).show(message, yield_to_actionable=True)
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]

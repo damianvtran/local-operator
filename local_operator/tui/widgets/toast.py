@@ -191,6 +191,10 @@ class Toast(Static):
         # reserve a row of the transcript it overlays.
         self.display = False
         self._timer = None
+        #: Whether what is showing is a notice the user must ACT on, as opposed
+        #: to a receipt for something they just did. Guards the slot; see
+        #: :meth:`show`.
+        self._actionable = False
         # The plain text currently showing. Kept alongside the renderable
         # because Textual's content accessor is a version-specific internal, and
         # "what is this toast saying" is a question both the tests and a future
@@ -214,14 +218,38 @@ class Toast(Static):
         """Cells available to TEXT inside the card at the current width."""
         return max(1, toast_max_width(self.app.size.width) - TOAST_PADDING_CELLS)
 
-    def show(self, text: str | Text, *, duration_ms: int = TOAST_DEFAULT_MS) -> None:
+    def show(
+        self,
+        text: str | Text,
+        *,
+        duration_ms: int = TOAST_DEFAULT_MS,
+        yield_to_actionable: bool = False,
+    ) -> None:
         """Replace whatever is showing, and re-arm the dismissal timer.
 
         Replacement is the point: the previous timer is stopped before the new
         one is set, so a second toast can never dismiss the first one's
         successor early.
+
+        ``yield_to_actionable`` marks a caller as a COURTESY receipt — news the
+        user already knows, because they are the one who just did the thing.
+        Such a card stands down while an actionable notice is up rather than
+        taking the slot. The single slot was sized for startup-scale events;
+        once a routine gesture can write it (the copy receipt), an MCP failure
+        naming a server and an error the user has not read yet could be evicted
+        by a drag in the composer — and startup is exactly when someone is
+        typing their first prompt (design round 1, D2). The gesture's own
+        feedback is the highlight and the clipboard; the failure has no second
+        chance to be seen.
         """
+        if yield_to_actionable and self._actionable:
+            return
         self._stop_timer()
+        #: Only an actionable notice claims the slot against a courtesy one.
+        #: Set from the DURATION rather than a severity name, for the same
+        #: reason the durations are: `TOAST_FAILURE_MS` is the app's one marker
+        #: for "the user has to act on this".
+        self._actionable = duration_ms >= TOAST_FAILURE_MS
         self._message = text.plain if isinstance(text, Text) else text
         self.update(text)
         # `dismiss_toast` resets the inline pointer before hiding; a reused
@@ -246,6 +274,7 @@ class Toast(Static):
         self.styles.pointer = "default"
         self.display = False
         self._message = ""
+        self._actionable = False
         self.update("")
 
     def on_unmount(self) -> None:

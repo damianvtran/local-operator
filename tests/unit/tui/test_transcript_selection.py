@@ -72,7 +72,7 @@ from local_operator.tui.glyphs import tool_icon
 from local_operator.tui.markdown_theme import install_markdown_theme
 from local_operator.tui.widgets.assistant import AssistantBlock, flatten
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.toast import Toast
+from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
 from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -1184,3 +1184,298 @@ async def test_a_composer_drag_still_leaves_ctrl_c_as_the_interrupt() -> None:
         await pilot.pause()
 
         assert session.aborts == ["interrupted"]
+
+
+# -- what a release does NOT copy (review round 1, F1/F2) ---------------------
+#
+# `Editor._on_mouse_up` fires for every mouse-up routed to the composer, not
+# only for drags the composer began — and `TextArea` leaves its selection live
+# after a drag, so the widget is holding a stale range most of the time. The
+# first version of this fix copied on all of them, which meant a transcript
+# copy was overwritten by the composer's old highlight a moment after being
+# made. `_copy_drag` gates on `_selecting`, which is true only between
+# `TextArea`'s own mouse-down and mouse-up.
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_drag_released_over_the_composer_keeps_the_transcript_copy() -> None:
+    """Overshooting a transcript drag into the composer must not clobber it.
+
+    This is the ordinary way to select to the end of an answer — the composer
+    is docked directly below the transcript, and the existing transcript tests
+    deliberately drag to `(79, 23)` for the same reason. Measured before the
+    `_selecting` gate: the user dragged the agent's answer and got their own
+    draft on the clipboard, with a toast confirming the wrong copy.
+
+    Both handlers run for this one release (`TextSelected` from the screen and,
+    before the gate, `EditorCopied` from the widget), and the composer's
+    message is delivered second — so it always won.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        block = await _seeded(app, pilot)
+        editor = await _composer(app, pilot, "my private draft")
+
+        # A real composer drag first, so the editor is holding a live selection
+        # exactly as it would be in use.
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 16))
+        assert app._clipboard == "my private draft"
+        assert editor.selected_text == "my private draft"
+
+        # Now drag the ANSWER and release over the composer.
+        app.screen._forward_event(_mouse(app, events.MouseDown, block.region.x, block.region.y))
+        await pilot.pause()
+        app.screen._forward_event(_mouse(app, events.MouseMove, 70, block.region.y + 2))
+        await pilot.pause()
+        app.screen._forward_event(_mouse(app, events.MouseMove, *_cell(editor, 0, 5)))
+        await pilot.pause()
+        app.screen._forward_event(_mouse(app, events.MouseUp, *_cell(editor, 0, 5)))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app._clipboard == app.screen.get_selected_text()
+        assert "my private draft" not in app._clipboard
+
+
+@pytest.mark.asyncio
+async def test_a_bare_mouse_up_does_not_copy_a_keyboard_selection() -> None:
+    """A mouse-up with no drag behind it is not a copy gesture.
+
+    Selecting with shift+arrows and then clicking elsewhere would otherwise
+    write the clipboard and announce it, having been asked for neither. Kept
+    separate from the test above because a guard phrased as "did the PRESS land
+    in this widget" would fix that one and leave this one.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "my private draft")
+        app._clipboard = "SOMETHING THE USER PUT THERE"
+        toast = app.query_one(Toast)
+
+        await pilot.press("home", *["shift+right"] * 10)
+        await pilot.pause()
+        assert editor.selected_text == "my private", "the keyboard selection must exist"
+
+        app.screen._forward_event(_mouse(app, events.MouseUp, *_cell(editor, 0, 2)))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app._clipboard == "SOMETHING THE USER PUT THERE"
+        assert toast.message == ""
+
+
+@pytest.mark.asyncio
+async def test_the_read_only_composer_still_copies_what_it_shows() -> None:
+    """Subagent mode is read-only, and a drag over it is still a copy.
+
+    The text there is the app's rather than the user's, which is exactly why
+    someone would want to lift it out. Pinned because `_copy_drag`'s reason for
+    copying the document text is phrased in terms of what the user typed, and
+    the read-only case must not be read as an oversight.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "someone else wrote this")
+        editor.read_only = True
+        await pilot.pause()
+        app._clipboard = ""
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 7))
+
+        assert app._clipboard == "someone"
+        assert editor.text == "someone else wrote this"
+
+
+# -- what the receipt CLAIMS (review round 1 F3, design round 1 D1/D2/D3/D5) --
+
+
+@pytest.mark.asyncio
+async def test_a_sub_line_copy_is_counted_in_characters() -> None:
+    """ "1 line" was a claim the frame contradicted.
+
+    Two ways at once: the user dragged three words out of a line, and in the
+    composer a long draft SOFT-WRAPS, so one document line is painted as three
+    highlighted rows. The receipt said `1 line` while the user looked at three
+    rows of highlight — and the count is the only information the card carries.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 9))
+
+        assert app._clipboard == "summarise"
+        assert toast.message == "copied 9 characters"
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_selection_is_not_reported_as_one_line() -> None:
+    """The composer's common case: a draft too long for one row.
+
+    The regression this pins is specifically the DISAGREEMENT between the
+    receipt and the frame, so it asserts the widget really is painting more
+    rows than the document has lines.
+    """
+    long_draft = (
+        "please summarise the ingest path and then explain how the dedupe stage "
+        "interacts with the watermark, including the retry semantics and what "
+        "happens on a partial failure"
+    )
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, long_draft)
+        toast = app.query_one(Toast)
+        assert editor.region.height > 1, "the draft must actually wrap for this to mean anything"
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 2, 60))
+
+        assert "\n" not in app._clipboard
+        assert "line" not in toast.message
+        assert toast.message == f"copied {len(app._clipboard)} characters"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_line_copy_is_still_counted_in_lines() -> None:
+    """Spanning lines keeps the transcript's familiar receipt.
+
+    The unit follows the shape of the selection: lines are the useful magnitude
+    once there is more than one, and this is the wording the transcript copy
+    has always used for a multi-paragraph take.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "first line here\nsecond line here")
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 1, 11))
+
+        assert app._clipboard == "first line here\nsecond line"
+        assert toast.message == "copied 2 lines"
+
+
+@pytest.mark.asyncio
+async def test_one_line_and_its_break_is_not_reported_as_two_lines() -> None:
+    """`count("\\n") + 1` read a trailing newline as a whole further line.
+
+    "Select this line" — drag from the start of one row to the start of the
+    next — is a natural gesture in a multi-line draft, and it reported
+    `copied 2 lines` for one line of text (review round 1, F3).
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "first line here\nsecond line here")
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 1, 0))
+
+        assert app._clipboard == "first line here\n"
+        assert toast.message != "copied 2 lines"
+        assert toast.message == "copied 15 characters"
+
+
+@pytest.mark.asyncio
+async def test_a_copy_receipt_does_not_evict_an_actionable_notice() -> None:
+    """A courtesy card must not take the slot from a failure the user must read.
+
+    The single toast slot was sized for startup-scale events. Once a routine
+    editing gesture can write it, an MCP failure — the 10 s variant, naming a
+    server and an error — was displaced by a drag in the composer, and startup
+    is exactly when someone is typing their first prompt (design round 1, D2).
+
+    The copy itself still happens: it is the CLAIM that stands down, not the
+    clipboard write.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+        toast.show("mcp: failed: github — command not found: gh", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        app._clipboard = ""
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 9))
+
+        assert toast.message.startswith("mcp: failed")
+        assert app._clipboard == "summarise"
+
+
+@pytest.mark.asyncio
+async def test_a_copy_receipt_still_replaces_an_ordinary_one() -> None:
+    """Only ACTIONABLE notices hold the slot; the deference is not blanket.
+
+    Without this the previous test would also pass if the copy receipt had
+    simply stopped showing at all.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+        toast.show("mcp: 2 connected (14 tools)")
+        await pilot.pause()
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 9))
+
+        assert toast.message == "copied 9 characters"
+
+
+@pytest.mark.asyncio
+async def test_typing_over_a_copied_selection_retires_the_receipt() -> None:
+    """Select-to-overwrite: the commonest edit in any input.
+
+    Drag a word, type the replacement, and the receipt sat there for the rest
+    of its five seconds asserting a copy of characters that no longer existed
+    in the field (design round 1, D3).
+
+    The CLIPBOARD is deliberately untouched — the copy really happened, and a
+    paste a minute later must still produce it. Only the claim is withdrawn.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 14), _cell(editor, 0, 20))
+        assert app._clipboard == "ingest"
+        assert toast.message == "copied 6 characters"
+
+        await pilot.press("d", "e", "d", "u", "p", "e")
+        await pilot.pause()
+
+        assert toast.message == ""
+        assert app._clipboard == "ingest"
+        assert editor.text == "summarise the dedupe path please"
+
+
+@pytest.mark.asyncio
+async def test_typing_does_not_dismiss_a_notice_that_is_not_a_copy_receipt() -> None:
+    """The retirement is scoped to the card the copy raised.
+
+    An MCP failure that arrived after the copy is not the editor's business,
+    and dismissing it because the user carried on typing would be the eviction
+    bug (D2) reintroduced from the other side.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 14), _cell(editor, 0, 20))
+        toast.show("mcp: failed: github — command not found: gh", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        await pilot.press("d", "e", "d", "u", "p", "e")
+        await pilot.pause()
+
+        assert toast.message.startswith("mcp: failed")

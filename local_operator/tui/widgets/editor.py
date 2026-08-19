@@ -349,6 +349,21 @@ class EditorSubmitted(Message):
         self.attachments = dict(attachments or {})
 
 
+class EditorCopyStale(Message):
+    """Posted when the buffer is edited after a copy receipt was raised.
+
+    The receipt is a claim about text the user can see. Editing that text makes
+    the claim false while it is still on screen, so the app drops the card —
+    the clipboard is untouched, only the assertion about it is withdrawn.
+
+    Carries nothing: "what I said a moment ago no longer holds" needs no
+    payload, and the app decides whether a card of its own is still showing.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
 class EditorCopied(Message):
     """Posted when a drag over the composer finishes on a real selection.
 
@@ -569,6 +584,11 @@ class Editor(TextArea):
         #: that begins inside a marker has to stay a drag. See
         #: :meth:`_on_mouse_up`.
         self._pressed_marker: tuple[int, int, int] | None = None
+        #: The text of the copy this widget most recently announced, held only
+        #: until the buffer is edited. It is the SUBJECT of the receipt on
+        #: screen: once the user types over what they highlighted, the card is
+        #: making a claim about characters that are gone. See :meth:`edit`.
+        self._copied_text: str | None = None
         self.set_commands(commands or [])
 
     def render_line(self, y: int) -> Strip:
@@ -1491,11 +1511,37 @@ class Editor(TextArea):
         an input: what a user copies out of a field is what they typed and can
         paste back, so an attachment marker copies as the ``[Image #1, …]`` text
         that cites it — the same characters :meth:`_submit` would send, and the
-        ones that re-cite the image if pasted into another draft.
+        ones that re-cite the image if pasted into another draft. In a read-only
+        composer (subagent view) that text is the app's rather than the user's,
+        and it copies too: what the field shows is what a drag over it takes.
+
+        Only THIS widget's own drag copies, which ``_selecting`` is the record
+        of — ``TextArea._on_mouse_down`` sets it and ``TextArea._on_mouse_up``
+        clears it, and this runs in between (review round 1, F1/F2). Without
+        that gate every mouse-up delivered here copies, and two of them are not
+        copy gestures at all:
+
+        * A drag that STARTS in the transcript and is released over the composer
+          — the ordinary way to select to the end of the answer, since the
+          composer is docked below it. ``TextArea`` leaves a selection live
+          after its own drag, so the composer still holds the last range the
+          user highlighted in it, and re-copying that range overwrites the
+          transcript copy the same release just made. Measured: the user dragged
+          the agent's answer and got their own draft, with a toast confirming
+          it.
+        * A bare mouse-up over a selection made with shift+arrows, which no
+          mouse gesture asked to copy.
+
+        A guard phrased as "did the PRESS land in this widget" would fix the
+        first and miss the second; ``_selecting`` answers the question that
+        actually matters, which is whether this widget is mid-drag.
         """
+        if not self._selecting:
+            return
         text = self.selected_text
         if not text:
             return
+        self._copied_text = text
         self.post_message(EditorCopied(text))
 
     # -- paste ----------------------------------------------------------------
@@ -1685,7 +1731,18 @@ class Editor(TextArea):
         # touched. Both halves are measured BEFORE the edit, because afterwards
         # the range is gone and the citation positions have moved.
         touched = self._attachments_touched_by(edit)
+        # Select-to-overwrite is the commonest edit in any input, and after this
+        # widget started copying on release it also became a clipboard write:
+        # the user drags a word to replace it, types, and a receipt asserting a
+        # copy of characters that no longer exist sits on screen for another
+        # five seconds (design round 1, D3). The clipboard keeps what it took
+        # — that is what a copy IS, and silently un-copying would be worse —
+        # but the CLAIM is retired the moment its subject is edited away.
+        stale_receipt = self._copied_text is not None
         result = super().edit(edit)
+        if stale_receipt:
+            self._copied_text = None
+            self.post_message(EditorCopyStale())
         self._sync_picker()
         if touched:
             self._release_uncited(touched)
