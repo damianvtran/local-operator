@@ -644,3 +644,79 @@ async def test_teardown_settles_a_live_prompt(
 
     assert prompt.answered, "unmount left the login parked on an unresolved future"
     assert prompt.wait().result() is None
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_paste_does_not_claim_a_successful_receipt() -> None:
+    """Design round 1 D1(b): a paste the flow could not use settled as
+    `✓ … code received (107 chars)`.
+
+    The prompt settles the instant the value is handed over, but whether that
+    value parses is decided one layer out in `_parse_pasted_callback`. So a
+    mis-copied URL painted a success glyph, the word "received", and a
+    character count that read as corroboration — directly above the notice
+    saying the authorization had failed. The login is still live at that point
+    (the flow re-prompts, the loopback callback is still racing), so this is
+    not a cancel either.
+    """
+    app = _PromptHost()
+    async with app.run_test() as pilot:
+        block = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        await app.mount(block)
+        await pilot.pause()
+        block.resolve("http://localhost:54548/callback?error=access_denied")
+        await pilot.pause()
+
+        # Before the flow rules on it, the receipt is the ordinary success one.
+        assert "received" in _rendered(block)
+
+        block.mark_unusable()
+        await pilot.pause()
+        receipt = _rendered(block)
+        assert "received" not in receipt, receipt
+        assert "cancelled" not in receipt, receipt
+        assert "not usable" in receipt, receipt
+        assert "still waiting for the browser" in receipt, receipt
+        # The length is gone: it read as evidence the paste was fine.
+        assert "chars" not in receipt, receipt
+
+        # Control: an accepted paste is untouched by the same instrument, so
+        # the assertions above distinguish the two outcomes rather than
+        # describing every receipt.
+        good = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        await app.mount(good)
+        await pilot.pause()
+        good.resolve("code#state")
+        await pilot.pause()
+        assert "received" in _rendered(good)
+
+
+@pytest.mark.asyncio
+async def test_mark_unusable_cannot_rewrite_a_cancel_or_a_live_prompt() -> None:
+    """`mark_unusable` corrects a SUCCESS claim and nothing else.
+
+    A declined paste and a still-open prompt both reach the flow's rejection
+    path in principle (a host may call the hook at any time), and neither has a
+    success claim to correct — turning either into "paste not usable" would
+    invent a paste the user never made.
+    """
+    app = _PromptHost()
+    async with app.run_test() as pilot:
+        declined = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        await app.mount(declined)
+        await pilot.pause()
+        declined.resolve(None)
+        await pilot.pause()
+        before = _rendered(declined)
+        declined.mark_unusable()
+        await pilot.pause()
+        assert _rendered(declined) == before
+
+        live = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        await app.mount(live)
+        await pilot.pause()
+        before_live = _rendered(live)
+        live.mark_unusable()
+        await pilot.pause()
+        assert _rendered(live) == before_live
+        assert not live.answered

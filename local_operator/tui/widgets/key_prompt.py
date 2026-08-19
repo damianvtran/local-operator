@@ -197,6 +197,10 @@ class KeyPromptBlock(TranscriptBlock):
         #: Set when the prompt was retired because the login completed another
         #: way (see :meth:`resolve`), so the receipt does not claim a cancel.
         self._superseded = False
+        #: Set when the value this prompt handed over turned out to be unusable
+        #: (see :meth:`mark_unusable`), so the receipt does not claim a success
+        #: the flow rejected.
+        self._unusable = False
         # `get_running_loop`, not `get_event_loop`: the future must belong to the
         # loop that awaits it, and stating that precondition turns a construction
         # from a sync context into an immediate error rather than a future nobody
@@ -252,6 +256,32 @@ class KeyPromptBlock(TranscriptBlock):
         self.finalize()
         if self._on_settled is not None:
             self._on_settled()
+
+    def mark_unusable(self) -> None:
+        """Repaint a settled receipt to say the pasted value was NOT accepted.
+
+        Called after the fact, because only the login flow can tell: the block
+        hands over whatever was typed, and whether it parses into an
+        authorization code is decided one layer out in
+        ``_parse_pasted_callback``. Same after-the-fact correction as
+        ``superseded``, for the same reason — the block cannot know the outcome
+        from the value alone.
+
+        Without this, a rejected paste settled as ``✓ … code received (107
+        chars)``: a success glyph and the word "received" over a value the flow
+        had just thrown away, directly above the notice explaining why. The
+        count made it worse by looking like corroboration. The login is still
+        live when this fires (the flow re-prompts and the loopback callback is
+        still racing), so this is not a cancel and must not use the cancel
+        wording.
+
+        No-op on a prompt that is not settled or was cancelled: there is no
+        success claim to correct in either case.
+        """
+        if not self._settled or self._submitted is None:
+            return
+        self._unusable = True
+        self._refresh_row()
 
     # -- keys ---------------------------------------------------------------
     def action_submit(self) -> None:
@@ -485,6 +515,17 @@ class KeyPromptBlock(TranscriptBlock):
                         (f"{self.provider_label} — still waiting for the browser", dim),
                     )
                 return row(("✗ ", danger), (f"{self.provider_label} login cancelled", muted))
+            if self._unusable:
+                # A value was handed over and the flow could not use it (see
+                # ``mark_unusable``). Distinguishing word FIRST, as the two
+                # informational receipts above do and for the same truncation
+                # reason. The length is dropped: it read as evidence the paste
+                # was fine, which is the opposite of what happened.
+                return row(
+                    ("✗ ", danger),
+                    ("paste not usable ", muted),
+                    (f"{self.provider_label} — still waiting for the browser", dim),
+                )
             return row(
                 ("✓ ", success),
                 (f"{self.provider_label} {'key' if self.secret else 'code'} received ", muted),

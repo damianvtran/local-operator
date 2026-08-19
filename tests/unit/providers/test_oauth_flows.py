@@ -1520,3 +1520,47 @@ class TestABadPasteDoesNotEndTheLogin:
         got, _ = await self._race(None)
 
         assert got == ("browser-code", "browser-state")
+
+    async def test_re_prompting_does_not_starve_the_event_loop(self) -> None:
+        """Design round 1 D1(a) re-prompts after a rejected paste, and the loop
+        that does it must yield.
+
+        `on_manual_code_input` may be written SYNCHRONOUSLY -- the contract
+        allows it and the CLI host does it -- and `maybe_await` does not
+        suspend on a plain value. A `while True:` with no other await point
+        therefore never returns control to the scheduler, so the loopback
+        callback future cannot be resolved and the flow's own timeout cannot
+        fire: one bad paste hangs the login forever instead of merely failing
+        it. This is the whole class's premise ("the browser can still win")
+        stated as a liveness property, which is why a re-prompt test that only
+        counts prompts would not catch it.
+
+        Driven on its OWN loop in a worker thread, and joined from this one,
+        because the failure it pins is total loop starvation: an
+        ``asyncio.wait_for`` placed on the starved loop can never fire its own
+        timeout either, so an in-loop timeout turns this regression into a hung
+        suite rather than a failing test. The thread gives the assertion an
+        observer the starvation cannot reach.
+        """
+        import threading
+
+        result: list[Any] = []
+
+        def drive() -> None:
+            try:
+                result.append(
+                    asyncio.run(self._race("http://localhost:54548/cb?error=access_denied"))
+                )
+            except BaseException as exc:  # pragma: no cover - diagnostic only
+                result.append(exc)
+
+        worker = threading.Thread(target=drive, daemon=True)
+        worker.start()
+        worker.join(timeout=10.0)
+
+        assert not worker.is_alive(), (
+            "the re-prompt loop starved its event loop: the browser callback "
+            "could not be delivered and the flow's timeout could not fire"
+        )
+        got, _ = result[0]
+        assert got == ("browser-code", "browser-state")
