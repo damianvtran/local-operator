@@ -1525,7 +1525,14 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
                 # A RIDGE, NOT A FLOOR: moving this value in EITHER direction
                 # blinds the test. Swept against a tree with the flush deleted,
                 # it detects at +0.30 and is blind at +0.15, +0.35, +0.40, +0.45
-                # and +0.60 (R10). Too short and the park lands in the range the
+                # and +0.60 (R10/R11).
+                #
+                # Detection is PROBABILISTIC — roughly 3 runs in 4 (measured
+                # 7/8, 9/12, 11/16, 12/16 red). Anyone spot-checking by deleting
+                # the flush must repeat the run: a single green one proves
+                # nothing and would wrongly suggest the test is already dead.
+                #
+                # Too short and the park lands in the range the
                 # backfill already handles; too long and it lands after the
                 # batch has stopped emitting. Both ends pass with the flush
                 # gone, which means the test silently stops testing the thing it
@@ -1585,10 +1592,15 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
             # and is worse (3/40): it lets the generator finish before the park
             # it is supposed to be racing.
             #
-            # The sibling `test_a_slow_unwind_still_reports_the_tool_as_ENDED`
-            # carries a similar-looking overshoot that is INDEPENDENT of this
-            # one: it is a single-call batch testing the backfill, not the
-            # flush, and nothing about it needs to move if this does.
+            # `test_a_duplicate_call_id_does_not_suppress_the_real_calls_end`
+            # `_event` carries the IDENTICAL literal
+            # `ABORT_DRAIN_TIMEOUT_S + 0.3`, which
+            # is what a grep or a search-and-replace would actually collide with
+            # — and it is INDEPENDENT of this one: it exercises the duplicate-id
+            # suppression rule, not the flush window, so nothing about it needs
+            # to move if this does. (`test_a_slow_unwind_still_reports_the_tool
+            # _as_ENDED` overshoots by `+ 2` and is independent for the same
+            # reason; only the identical literal is a real hazard.)
             await asyncio.sleep(0.3)
 
     task = asyncio.ensure_future(run())
