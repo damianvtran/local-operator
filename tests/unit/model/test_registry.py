@@ -129,24 +129,31 @@ def test_get_model_info() -> None:
 def test_token_plan_models_ship_their_real_windows() -> None:
     """Every row pinned to its exact numbers, not merely to "something positive".
 
-    Transcribed from Alibaba's per-SKU specs for this endpoint. OpenRouter
-    corroborates qwen3.8-max and qwen3.6-flash outright and differs on the other
-    four for reasons recorded beside the map (it advertises the largest window
-    across its routes, which is not a claim about this gateway). Pinning only
-    the corroborated row would leave exactly the deliberate deviations free to
-    drift silently, so all six are asserted here: a change to any of them is a
+    Output caps are what the endpoint's own `max_tokens` validator reports;
+    windows are Alibaba's published figure, since the window cannot be probed
+    (a boundary-sized prompt is refused for body size first). Where OpenRouter
+    differs it is because it quotes the largest window across its whole routing
+    pool, which is not a claim about this gateway \u2014 the reasoning is recorded
+    beside the map.
+
+    Pinning only the corroborated row would leave the deliberate deviations free
+    to drift silently, so every row is asserted: a change to any of them is a
     changed compaction threshold and has to be a conscious edit.
     """
     assert {
         model_id: (info.context_window, info.max_tokens)
         for model_id, info in qwencloud_token_plan_models.items()
     } == {
+        # Output caps as the endpoint's own `max_tokens` validator reports them
+        # ("Range of max_tokens should be [1, N]"); see the note beside the map.
         "qwen3.8-max": (1_000_000, 131_072),
-        "qwen3.7-max": (1_000_000, 65_536),
-        "qwen3.7-plus": (1_000_000, 64_000),
+        "qwen3.7-max": (1_000_000, 131_072),
+        "qwen3.7-plus": (1_000_000, 131_072),
         "qwen3.6-flash": (1_000_000, 65_536),
         "glm-5.2": (1_000_000, 131_072),
+        # The two the endpoint does not validate; OpenRouter's figure stands.
         "deepseek-v4-pro": (1_000_000, 384_000),
+        "deepseek-v4-flash-0731": (1_000_000, 393_216),
     }
     assert qwencloud_token_plan_models["qwen3.8-max"].supports_images is True
 
@@ -164,6 +171,44 @@ def test_token_plan_models_ship_their_real_windows() -> None:
     for model_id, info in qwencloud_token_plan_models.items():
         assert info.context_window and info.context_window > 0, model_id
         assert info.max_tokens and info.max_tokens > 0, model_id
+
+
+def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None:
+    """The SET, not just the values — a missing row is silent.
+
+    A model absent from this map does not fail; it resolves to the 128k unknown
+    default and runs with a wrong compaction threshold, which is exactly the
+    defect this map exists to fix. `deepseek-v4-flash-0731` shipped that way in
+    the first cut of this PR precisely because its id sits among the image and
+    audio entries in the listing, so nothing but an explicit set comparison
+    would have caught it.
+
+    The two lists below are the gateway's `/models` response, split by whether a
+    chat completion against the id returns a chat payload (verified live,
+    2026-08-19). Re-run that when the listing changes rather than guessing from
+    the id: `wan2.7-image` reads like an image-only model and answers chat
+    requests with an empty body, while `deepseek-v4-flash-0731` reads like one
+    of a family and is a full reasoning chat model.
+    """
+    gateway_chat_models = {
+        "qwen3.8-max",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-flash",
+        "glm-5.2",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash-0731",
+    }
+    # Listed by the gateway but not chat models: they return no chat payload
+    # (the image/TTS pair) or reject the route outright (the realtime one).
+    gateway_non_chat_models = {
+        "wan2.7-image",
+        "wan2.7-image-pro",
+        "qwen-audio-3.0-tts-plus",
+        "qwen-audio-3.0-realtime-plus",
+    }
+    assert set(qwencloud_token_plan_models) == gateway_chat_models
+    assert gateway_chat_models.isdisjoint(gateway_non_chat_models)
 
 
 def test_token_plan_ships_no_row_the_gateway_serves_under_another_id() -> None:

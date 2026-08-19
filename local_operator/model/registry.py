@@ -1498,25 +1498,27 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
     # is why these entries exist at all: without them the spec fell back to the
     # 128k unknown default and a 1M-window model compacted (or 400'd) at 128k.
     #
-    # Windows and output caps are transcribed from Alibaba's published model
-    # specs for THIS endpoint, then compared against OpenRouter's listing of the
-    # same upstream models. The two agree on qwen3.8-max (1,000,000 / 131,072)
-    # and qwen3.6-flash, and DISAGREE on four rows. Every disagreement is
-    # resolved in favour of the endpoint, and the differences are recorded here
-    # so the next person can tell a deliberate choice from drift:
+    # OUTPUT CAPS come from the endpoint itself, which is the one first-party
+    # source available here. It validates `max_tokens` and names the range in
+    # the rejection, so the number can be asked for rather than transcribed:
     #
-    #   glm-5.2, deepseek-v4-pro   OpenRouter says 1,048,576 ctx; kept at
-    #                              1,000,000 — it advertises the largest window
-    #                              across all its routes, which is a claim about
-    #                              its routing pool, not about this gateway.
-    #   qwen3.7-max, qwen3.7-plus  OpenRouter says 131,072 max output; kept at
-    #                              65,536 / 64,000 per Alibaba's own spec for
-    #                              these SKUs.
+    #   $ POST /chat/completions {"model": "qwen3.8-max", "max_tokens": 9999999}
+    #   {"error": {"message": "Range of max_tokens should be [1, 131072]"}}
     #
-    # Both deviations are conservative: understating a window compacts early,
-    # overstating one overflows the provider's real limit mid-turn. Re-check
-    # both sources if Alibaba ships a new generation, and expect them to keep
-    # differing for the reasons above.
+    # Run that against a SKU to re-derive its cap. Two rows (deepseek-v4-pro,
+    # deepseek-v4-flash-0731) accept any value without validating, so their caps
+    # are OpenRouter's figure for the same upstream model — the endpoint
+    # declines to state one and nothing is gained by inventing a smaller number.
+    #
+    # CONTEXT WINDOWS cannot be probed the same way: a prompt large enough to
+    # test the boundary is refused by a body-size limit (`RequestTooLarge`)
+    # before any window check runs. They are transcribed from Alibaba's
+    # published specs at 1,000,000, which OpenRouter corroborates for the qwen
+    # rows. It reports 1,048,576 for glm-5.2 and deepseek-v4-pro; those keep
+    # 1,000,000 because OpenRouter quotes the largest window across its whole
+    # routing pool (glm-5.2 spans 96,890-1,048,576 over 31 routes) rather than
+    # this gateway's, and understating a window only compacts early where
+    # overstating one overflows mid-turn.
     #
     # Prices are deliberately 0.0: the Token Plan bills subscription CREDITS,
     # not per-token dollars, so any USD rate written here would be an invention.
@@ -1530,12 +1532,15 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
         supports_images=True,
         supports_prompt_cache=False,
         description="Alibaba's flagship Qwen3.8 model via the Token Plan subscription",
+        # The only row marked recommended: it is the plan's flagship, the model
+        # the subscription is bought for, and the one both available sources
+        # describe identically.
         recommended=True,
     ),
     "qwen3.7-max": ModelInfo(
         id="qwen3.7-max",
         name="Qwen3.7 Max",
-        max_tokens=65_536,
+        max_tokens=131_072,
         context_window=1_000_000,
         supports_images=False,
         supports_prompt_cache=False,
@@ -1545,7 +1550,7 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
     "qwen3.7-plus": ModelInfo(
         id="qwen3.7-plus",
         name="Qwen3.7 Plus",
-        max_tokens=64_000,
+        max_tokens=131_072,
         context_window=1_000_000,
         supports_images=True,
         supports_prompt_cache=False,
@@ -1580,6 +1585,22 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
         supports_images=False,
         supports_prompt_cache=False,
         description="Zhipu's GLM-5.2 served through the Token Plan",
+        recommended=False,
+    ),
+    "deepseek-v4-flash-0731": ModelInfo(
+        id="deepseek-v4-flash-0731",
+        # In the gateway's listing and a working reasoning chat model — verified
+        # with a live completion that came back stamped with this id and
+        # `reasoning_tokens` in its usage. It was missed on the first pass
+        # because the id sits among the image/audio entries, and without a row
+        # it resolved to the 128k default: the exact defect this map fixes, one
+        # line away from a sibling that got it right.
+        name="DeepSeek V4 Flash 0731",
+        max_tokens=393_216,
+        context_window=1_000_000,
+        supports_images=False,
+        supports_prompt_cache=False,
+        description="DeepSeek V4 Flash (0731) served through the Token Plan",
         recommended=False,
     ),
     "deepseek-v4-pro": ModelInfo(
