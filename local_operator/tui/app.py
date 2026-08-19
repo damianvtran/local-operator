@@ -3272,7 +3272,18 @@ class OperatorApp(App[None]):
         aside and hands back the main-chat draft it borrowed.
         """
         editor = self._editor()
-        if editor.text.strip():
+        # A LIVE SELECTION in the composer is not a draft the user is scrapping.
+        # They highlighted text a moment ago, which is a copy gesture in
+        # progress, and Ctrl+C there has to keep its older meaning — the
+        # interrupt and the first rung of the exit ladder — rather than being
+        # captured by this rung. Clearing the composer under a live highlight
+        # would also destroy the very text they were reaching for.
+        #
+        # Checked BEFORE the draft branch, because a highlighted composer always
+        # has text in it and would otherwise take that branch every time. The
+        # composer's copy is hung off the mouse release for the same reason this
+        # defers to it: the copy must not buy itself this key.
+        if editor.text.strip() and not getattr(editor, "selected_text", ""):
             # `remember_draft` refuses while the aside owns the composer, and a
             # draft that cannot be filed must not be thrown away either.
             if not editor.remember_draft():

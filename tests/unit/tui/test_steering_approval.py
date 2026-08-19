@@ -26,6 +26,7 @@ from typing import Any, cast
 import pytest
 from rich.cells import cell_len
 from textual.binding import Binding
+from textual.document._document import Selection
 
 from local_operator.harness.types import (
     ImageContent,
@@ -2874,3 +2875,41 @@ async def test_the_expired_row_recounts_rather_than_restating_a_stale_number() -
         assert not any(
             "still running" in row for row in painted
         ), "the expired row asserted running subagents that had already finished"
+
+
+@pytest.mark.asyncio
+async def test_a_highlighted_composer_keeps_ctrl_c_as_the_interrupt() -> None:
+    """The draft rung must not capture a copy gesture.
+
+    A user who has just highlighted text in the composer is mid-copy, not
+    scrapping a draft — and a highlighted composer always has text in it, so
+    without this the draft rung would take every such press. Two costs if it
+    did: Ctrl+C stops being the interrupt in the widget that is focused in
+    essentially every frame, and clearing the composer destroys the very text
+    the user was reaching for.
+
+    The composer's own copy is hung off the mouse release for the same reason.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "summarise the ingest path please"
+        await pilot.pause()
+
+        # Highlight part of the draft, exactly as a drag would leave it.
+        editor.selection = Selection((0, 0), (0, 19))
+        await pilot.pause()
+        assert editor.selected_text, "the highlight must be live for this to mean anything"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+
+        assert session.aborts == [
+            "interrupted"
+        ], "Ctrl+C under a live highlight was captured by the draft rung"
+        # And the text the user was copying is still there.
+        assert editor.text == "summarise the ingest path please"
