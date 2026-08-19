@@ -3628,10 +3628,22 @@ class OperatorApp(App[None]):
         if self._stop_offered_at != armed_at:
             return
         self._stop_offered_at = None
-        count = self._stop_offer_count
         self._stop_offer_count = 0
         notice = self._stop_notice
-        if notice is None or not notice.is_attached or count <= 0:
+        if notice is None or not notice.is_attached:
+            return
+        # RECOUNTED, not the number the offer was armed with. The surviving row
+        # is a present-tense statement of fact in the calm receipt weight, and
+        # children settle on their own schedule — so restating the arm-time
+        # count asserted "2 subagents still running" about children that had
+        # finished during the window, which is a settled-looking lie rather than
+        # a lapsed offer (R3-3, agent review round 3).
+        count = self._running_subagents(self._session)
+        if count <= 0:
+            # Nothing left to report. The row goes rather than settling into a
+            # statement about work that no longer exists.
+            self._transcript_view().remove_block(notice)
+            self._stop_notice = None
             return
         # `note`, not `warning`: it is no longer a state the user must act on
         # within a window, just a fact about what is still running.
@@ -3678,13 +3690,61 @@ class OperatorApp(App[None]):
         Falls back to appending when the block is gone (``/clear``, a session
         swap, or a transcript that never mounted it), because restating a block
         that is no longer in the view would silently write to nothing.
+
+        ...and ALSO when the row has scrolled out of sight, which is the harder
+        case. ``_stop_notice`` outlives the turn that created it, so a later
+        press can find it buried far up the transcript — and restating it there
+        repaints a row the user cannot see, leaving the visible frame unchanged.
+        That is the silent no-op D1 was filed for, reintroduced by D5's in-place
+        restate on a different axis (R3-2, agent review round 3).
+
+        VISIBILITY is the discriminator, not position in the block list. D5's
+        case — a notice arriving between the two presses — leaves the ladder row
+        one row up and plainly on screen, and moving it there is precisely the
+        reordering D5 objected to. R3-2's case has it off screen entirely, where
+        leaving it is indistinguishable from a dropped keystroke. "Can the user
+        see it?" is the question both answers turn on, so it is the one asked.
         """
         notice = self._stop_notice
         if notice is not None and notice.is_attached:
-            notice.restate(text, kind)
-            return
+            if self._is_on_screen(notice):
+                notice.restate(text, kind)
+                return
+            # Out of sight: the row has to move to where the user is looking.
+            # Dropping the old one keeps the replace-don't-stack promise, which
+            # is the whole reason this method exists.
+            self._transcript_view().remove_block(notice)
         self._stop_notice = NoticeBlock(text, kind)
         self._append_block(self._stop_notice)
+
+    def _is_on_screen(self, block: Widget) -> bool:
+        """Whether ``block`` currently occupies rows the user can see.
+
+        Compared against the TRANSCRIPT's own viewport rather than the screen's:
+        the transcript is the scrolling container, so a block scrolled past its
+        fold is out of sight even though it is mounted and inside the app.
+
+        ``block.region`` is already SCREEN-relative — Textual has resolved the
+        scroll offset into it — so the comparison is against the container's
+        on-screen rectangle (``view.region``), not its ``window_region``, which
+        is expressed in the scrolled virtual coordinate space. Mixing the two
+        compares a viewport row number against a virtual one and answers "never
+        visible" for every block once the transcript has scrolled at all.
+
+        Never raises. This runs on a keystroke, and a geometry question that
+        cannot be answered must not be able to swallow a stop — an unanswerable
+        one reports "not visible", which costs a moved row and never a lost
+        press.
+        """
+        try:
+            view = self._transcript_view()
+            region = block.region
+            if not region.height:
+                return False
+            return region.overlaps(view.region)
+        except Exception:  # noqa: BLE001 — visibility is advisory, never fatal
+            logger.debug("could not resolve stop-notice visibility", exc_info=True)
+            return False
 
     # -- tool approvals -------------------------------------------------------
     async def request_tool_approval(

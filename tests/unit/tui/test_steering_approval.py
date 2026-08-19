@@ -67,6 +67,7 @@ from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
     TranscriptView,
+    UserBlock,
     WorkingBlock,
 )
 
@@ -2787,3 +2788,89 @@ async def test_the_late_row_promises_the_number_of_presses_it_actually_costs() -
         assert session.subagent_cancels == [
             "interrupted"
         ], "the row promised one more press and one more press did not escalate"
+
+
+@pytest.mark.asyncio
+async def test_a_buried_ladder_row_moves_to_where_the_user_is_looking() -> None:
+    """Review round 3, R3-2. Restating in place must not repaint off-screen.
+
+    `_stop_notice` outlives the turn that created it, so a later press can find
+    it far up in scrollback. D5's unconditional in-place restate repainted it
+    there and left the visible frame unchanged — the silent no-op D1 was filed
+    for, reintroduced on a different axis. When the row is no longer the
+    transcript's tail it is dropped and re-appended, which keeps both the
+    replace-don't-stack promise and the guarantee that a press is visible.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        first = app._stop_notice
+        assert first is not None
+
+        # The conversation carries on until the row is genuinely off screen —
+        # asserted, not assumed, since a short transcript would not scroll and
+        # the test would then be exercising the visible path by accident.
+        for turn in range(30):
+            app._append_block(UserBlock(f"another question {turn}"))
+            prose = AssistantBlock()
+            prose.update_text(f"another answer {turn} " + "padding " * 20)
+            app._append_block(prose)
+        await pilot.pause()
+        await pilot.pause()
+        assert not app._is_on_screen(first), "the row never scrolled out of sight"
+
+        # A later press must produce a row the user can actually see.
+        session.streaming = True
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        # The append scrolls the transcript; let the layout settle before
+        # asking where the row landed.
+        for _ in range(5):
+            await pilot.pause()
+
+        blocks = app._transcript_view().blocks()
+        assert blocks[-1] is app._stop_notice, "the ladder row did not move to the tail"
+        assert first not in blocks, "the buried row was left behind as a duplicate"
+        # And the new row is where the user is actually looking, which is the
+        # whole point: a press that repaints only off-screen rows is a press
+        # the user cannot tell from a dropped keystroke.
+        moved = app._stop_notice
+        assert moved is not None
+        assert app._is_on_screen(moved), "the moved row is still not visible"
+
+
+@pytest.mark.asyncio
+async def test_the_expired_row_recounts_rather_than_restating_a_stale_number() -> None:
+    """Review round 3, R3-3. The surviving row is present tense, so it must be
+    presently true.
+
+    The expiry used to restate the count captured when the offer was ARMED, in
+    the calm receipt weight — so children that finished during the 4s window
+    left the transcript asserting "2 subagents still running" as settled fact.
+    Better than leaving an amber offer up forever, but one step short.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        session.running_children = 2
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert any("2 subagents still running" in row for row in rows(app))
+
+        # They finish on their own inside the window.
+        session.running_children = 0
+        await pilot.pause(DOUBLE_STOP_WINDOW_S + 0.5)
+
+        painted = rows(app)
+        assert not any(
+            "still running" in row for row in painted
+        ), "the expired row asserted running subagents that had already finished"

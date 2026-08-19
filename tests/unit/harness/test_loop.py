@@ -1480,3 +1480,98 @@ async def test_a_slow_unwind_still_reports_the_tool_as_ENDED():
     )
     assert ends[0].tool_call_id == starts[0].tool_call_id
     assert ends[0].is_error, "an aborted tool must not be reported as a clean success"
+
+
+@pytest.mark.asyncio
+async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill():
+    """Review round 3, R3-1. The backfill must decide before it emits.
+
+    A generator suspends at every ``yield``, handing control to a consumer that
+    may await. A runner whose cleanup lands in one of those windows parks its
+    own result — writing its end event to the queue nobody reads any more — and
+    an interleaved backfill then saw the filled slot and emitted nothing. That
+    call kept its start event and never got an end, which is the exact damage
+    the backfill exists to prevent.
+
+    Needs BOTH a multi-call batch (so there is an earlier slot to suspend on)
+    and a consumer that actually awaits. The single-tool guard above cannot
+    reach it: with one slot there is nothing to suspend on before it.
+    """
+    started = asyncio.Event()
+
+    async def never_parks(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        started.set()
+        await asyncio.sleep(30)
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="stuck", content=[TextContent(text="late")]
+        )
+
+    async def parks_late(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            # Settles just past the drain budget: the batch has given up
+            # waiting, so this lands while the backfill is mid-emit.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 0.3)
+            raise
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="slow", content=[TextContent(text="late")]
+        )
+
+    tools = [
+        AgentTool(
+            name="stuck",
+            parameters={"type": "object", "properties": {}},
+            execute=never_parks,
+        ),
+        AgentTool(
+            name="slow",
+            parameters={"type": "object", "properties": {}},
+            execute=parks_late,
+        ),
+    ]
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="stuck", args="{}"),
+                tool_call_delta(1, id="c2", name="slow", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=tools)
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+            # A consumer that awaits — the TUI paints, the API server writes.
+            # Without this the generator never suspends and the loss is not
+            # reachable. These two durations are not arbitrary: the tool must
+            # park AFTER the drain gives up at ABORT_DRAIN_TIMEOUT_S but while
+            # the consumer still owes the generator a resume, which is the
+            # window in which its end event lands on a queue nobody reads.
+            await asyncio.sleep(0.3)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=ABORT_DRAIN_TIMEOUT_S + 15)
+
+    started_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)]
+    ended_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert sorted(started_ids) == ["c1", "c2"]
+    for call_id in started_ids:
+        assert ended_ids.count(call_id) == 1, (
+            f"{call_id} was announced as started and ended {ended_ids.count(call_id)} "
+            f"times; every started call needs exactly one end (ends={ended_ids})"
+        )
+    # And the wire is still legal: one tool_result per tool_use.
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert sorted(str(m.tool_call_id) for m in tool_messages) == ["c1", "c2"]

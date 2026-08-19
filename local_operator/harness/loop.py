@@ -1264,6 +1264,20 @@ class AgentLoop:
             #
             # Yielded rather than queued: the drain loop above has already
             # broken out and nothing will read the queue again.
+            #
+            # DECIDED IN ONE PASS, EMITTED IN ANOTHER, and the split is load
+            # bearing. A generator suspends at every `yield`, handing control to
+            # a consumer that may await; a runner whose cleanup lands in one of
+            # those windows calls `park()`, which writes its end event to the
+            # queue nobody reads any more and fills the slot. A single
+            # interleaved loop then saw the now-filled slot and emitted nothing,
+            # so that call kept its start event and never got an end — the very
+            # damage this backfill exists to prevent, reachable only when the
+            # consumer is slow enough to suspend us (R3-1, agent review round 3).
+            # Snapshotting first means the decision is made while no await can
+            # intervene, so it cannot be invalidated by what happens mid-emit.
+            pending_ends: list[ToolExecutionEndEvent] = []
+            claimed: set[str] = set()
             for slot, item in enumerate(batch):
                 if results_by_slot[slot] is None:
                     result = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
@@ -1273,13 +1287,42 @@ class AgentLoop:
                         # failure parked its result up front and never emitted a
                         # start event, so an end event for it would be the
                         # mirror image of this bug.
-                        yield ToolExecutionEndEvent(
-                            tool_call_id=item.call.id,
-                            tool_name=item.tool.name,
-                            result=result,
-                            is_error=result.is_error,
+                        claimed.add(item.call.id)
+                        pending_ends.append(
+                            ToolExecutionEndEvent(
+                                tool_call_id=item.call.id,
+                                tool_name=item.tool.name,
+                                result=result,
+                                is_error=result.is_error,
+                            )
                         )
+
+            # THEN drain whatever the runners queued that nobody read. A tool
+            # that parked between the drain loop giving up and this point put a
+            # real end event on the queue and filled its own slot, so the
+            # backfill above correctly skipped it — and without this flush that
+            # event is simply dropped, leaving a start with no end. That is the
+            # half of R3-1 a snapshot alone does not fix: the loss happens
+            # BEFORE the backfill runs, not during its emit.
+            #
+            # `claimed` keeps the two halves from colliding. A slot this
+            # backfill has already spoken for must not also emit the runner's
+            # own end event, or a consumer counting by id sees the call end
+            # twice — a worse defect than the one being fixed.
+            while True:
+                try:
+                    queued = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if isinstance(queued, (_ToolDone, _BatchDone)):
+                    continue
+                if isinstance(queued, ToolExecutionEndEvent) and queued.tool_call_id in claimed:
+                    continue
+                yield queued
+
             results.extend(result for result in results_by_slot if result is not None)
+            for end_event in pending_ends:
+                yield end_event
         finally:
             if watcher is not None and not watcher.done():
                 watcher.cancel()
