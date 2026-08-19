@@ -94,7 +94,10 @@ def identity_from_id_token(id_token: str) -> dict[str, Any]:
         raise LoginError("OpenAI login returned no account id (chatgpt_account_id claim missing)")
     plan_type = auth.get("chatgpt_plan_type")
     email = profile.get("email") or claims.get("email")
-    identity: dict[str, Any] = {"account_id": str(account_id), "org_id": str(account_id)}
+    identity: dict[str, Any] = {
+        "account_id": str(account_id),
+        "org_id": str(account_id),
+    }
     if plan_type:
         identity["org_name"] = str(plan_type)
     if email:
@@ -154,6 +157,7 @@ class OpenAIOAuthFlow(OAuthCallbackFlow):
                 # Pinned: OpenAI allowlists this exact URI.
                 redirect_uri=REDIRECT_URI,
                 allow_port_fallback=False,
+                provider_label="OpenAI",
             ),
             callbacks,
             open_browser=open_browser,

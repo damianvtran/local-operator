@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, urlparse
 from pydantic import AnyUrl
 
 from local_operator.ansi import strip_control_sequences
-from local_operator.mcp.callback_page import callback_response
+from local_operator.callback_page import callback_response
 
 if TYPE_CHECKING:
     # The SDK is an optional extra: these names are needed for annotations
@@ -201,7 +201,10 @@ def _resolve_store(store: StructuralAuthStore | None) -> StructuralAuthStore | N
 
         return AuthStore()
     except Exception:  # pragma: no cover - environment dependent
-        logger.debug("providers.auth_store unavailable; MCP OAuth storage disabled", exc_info=True)
+        logger.debug(
+            "providers.auth_store unavailable; MCP OAuth storage disabled",
+            exc_info=True,
+        )
         return None
 
 
@@ -355,7 +358,11 @@ class McpTokenStorage:
 
             return OAuthClientInformationFull.model_validate(info)
         except Exception:
-            logger.debug("Stored MCP client info invalid for %s", self.credential_id, exc_info=True)
+            logger.debug(
+                "Stored MCP client info invalid for %s",
+                self.credential_id,
+                exc_info=True,
+            )
             return None
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
@@ -573,7 +580,8 @@ class LoopbackAuthFlow:
         prompt = "Paste the full redirect URL (or 'code state' separated by a space): "
         try:
             raw = await asyncio.wait_for(
-                asyncio.to_thread(lambda: input(prompt).strip()), timeout=PASTE_INPUT_TIMEOUT_S
+                asyncio.to_thread(lambda: input(prompt).strip()),
+                timeout=PASTE_INPUT_TIMEOUT_S,
             )
         except asyncio.TimeoutError as exc:
             # TRANSLATE IT. Since 3.11 `asyncio.TimeoutError` IS `TimeoutError`

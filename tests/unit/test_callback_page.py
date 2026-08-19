@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from local_operator.mcp.callback_page import callback_response, render_callback_page
+from local_operator.callback_page import callback_response, render_callback_page
 
 
 class TestZeroNetwork:
@@ -31,7 +31,11 @@ class TestZeroNetwork:
         "kwargs",
         [
             {"tone": "success", "server": "https://srv.example/mcp"},
-            {"tone": "danger", "server": "https://srv.example/mcp", "provider_message": "denied"},
+            {
+                "tone": "danger",
+                "server": "https://srv.example/mcp",
+                "provider_message": "denied",
+            },
             {"tone": "neutral", "closable": False},
             # A caller string that CONTAINS the tokens the assertions look for.
             # It is escaped into a text node and cannot fetch, so the invariant
@@ -109,10 +113,13 @@ class TestVoiceBoundary:
         fold on a page with no navigation. Truncation is visible rather than
         clipped in CSS so the page never hides text without saying so.
         """
-        from local_operator.mcp.callback_page import _MAX_PROVIDER_MESSAGE
+        from local_operator.callback_page import _MAX_PROVIDER_MESSAGE
 
         page = render_callback_page(
-            "Authorization failed", "Detail.", tone="danger", provider_message="x" * 16_000
+            "Authorization failed",
+            "Detail.",
+            tone="danger",
+            provider_message="x" * 16_000,
         )
         rendered = re.search(r'class="trough">(x+…?)<', page)
         assert rendered is not None
@@ -121,7 +128,10 @@ class TestVoiceBoundary:
 
     def test_a_short_provider_message_is_untouched(self) -> None:
         page = render_callback_page(
-            "Authorization failed", "Detail.", tone="danger", provider_message="access_denied"
+            "Authorization failed",
+            "Detail.",
+            tone="danger",
+            provider_message="access_denied",
         )
         assert 'class="trough">access_denied<' in page
         assert "…" not in page
@@ -129,6 +139,17 @@ class TestVoiceBoundary:
     def test_absent_provider_message_renders_no_empty_trough(self) -> None:
         page = render_callback_page("Authorized", "Detail.", tone="success")
         assert "Provider response" not in page
+
+    def test_provider_name_gets_its_own_labelled_trough(self) -> None:
+        """A model-provider login names WHO was signed into, same grammar as
+        the MCP flow's server trough — a labelled trough, not a sentence."""
+        page = render_callback_page("Signed in", "Detail.", tone="success", provider="Anthropic")
+        assert 'class="label">Provider<' in page
+        assert 'class="trough">Anthropic<' in page
+
+    def test_absent_provider_renders_no_trough(self) -> None:
+        page = render_callback_page("Signed in", "Detail.", tone="success")
+        assert 'class="label">Provider<' not in page
 
     @pytest.mark.parametrize("blank", ["", "   ", "\t\n "])
     def test_a_whitespace_only_provider_message_renders_no_trough(self, blank) -> None:
@@ -170,7 +191,8 @@ class TestOutcomeSurvivesWithoutColour:
     """Colour is redundant: the heading and the tab title carry the outcome."""
 
     @pytest.mark.parametrize(
-        "title", ["Authorized", "Authorization failed", "No authorization code", "Nothing here"]
+        "title",
+        ["Authorized", "Authorization failed", "No authorization code", "Nothing here"],
     )
     def test_title_leads_the_document_title(self, title) -> None:
         page = render_callback_page(title, "Detail.")
