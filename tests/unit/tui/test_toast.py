@@ -341,3 +341,115 @@ async def test_a_click_dismisses_the_card_early() -> None:
         assert toast.display is False
         assert toast._timer is None
         assert toast.message == ""
+
+
+# -- the slot's two guards ----------------------------------------------------
+#
+# Both exist because a routine editing gesture (a drag over the composer)
+# became able to write this card. A copy receipt is a COURTESY — the user did
+# the thing and can see the result — while an MCP failure names a server and an
+# error they have not read yet. So a courtesy card declines the slot rather
+# than taking it, and `generation` lets a caller withdraw its own card later
+# without being able to touch anyone else's.
+
+
+@pytest.mark.asyncio
+async def test_a_courtesy_card_declines_a_slot_an_actionable_notice_holds() -> None:
+    """The failure the user must act on outranks the receipt for what they did."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+
+        assert toast.message == "⊙ MCP failed: github"
+
+
+@pytest.mark.asyncio
+async def test_a_courtesy_card_takes_a_slot_an_ordinary_notice_holds() -> None:
+    """The deference is to ACTIONABILITY, not to whatever happens to be showing.
+
+    Without this the test above would also pass if a courtesy card had simply
+    stopped being able to show at all.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP ready: 2 servers", duration_ms=TOAST_DEFAULT_MS)
+        await pilot.pause()
+
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+
+        assert toast.message == "copied 9 characters"
+
+
+@pytest.mark.asyncio
+async def test_an_actionable_notice_is_never_refused_the_slot() -> None:
+    """`yield_to_actionable` is opt-in; a failure always gets through."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        toast.show("⊙ MCP failed: gitlab", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        assert toast.message == "⊙ MCP failed: gitlab"
+
+
+@pytest.mark.asyncio
+async def test_dismissing_clears_the_actionable_hold() -> None:
+    """A failure that has been read must not lock the slot for the session."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+
+        assert toast.message == "copied 9 characters"
+
+
+@pytest.mark.asyncio
+async def test_the_generation_names_the_card_that_is_showing() -> None:
+    """Each clause of `generation`'s contract, separately.
+
+    It is load-bearing for the copy receipt: the app holds the generation of
+    the card its own copy raised and dismisses only while that is still what is
+    on screen. Every clause below is independently falsifiable, and the third
+    is the one a real bug turned on — a copy made while a failure was up
+    adopted the FAILURE's generation and withdrew it on the next keystroke.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        # 0 before anything has ever been shown.
+        assert toast.generation == 0
+
+        # +1 per ACCEPTED show.
+        toast.show("first", duration_ms=TOAST_DEFAULT_MS)
+        await pilot.pause()
+        first = toast.generation
+        assert first == 1
+        toast.show("second", duration_ms=TOAST_DEFAULT_MS)
+        await pilot.pause()
+        assert toast.generation == 2
+
+        # UNCHANGED by a show that declined the slot: no card was raised, so
+        # there is nothing for a caller to name.
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        held = toast.generation
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+        assert toast.generation == held
+
+        # Unchanged by dismissal, so a held value can never come to match a
+        # later card by accident.
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.generation == held

@@ -1409,6 +1409,17 @@ async def test_a_copy_receipt_does_not_evict_an_actionable_notice() -> None:
         assert toast.message.startswith("mcp: failed")
         assert app._clipboard == "summarise"
 
+        # ...and it is still there a keystroke later. The deference is only
+        # half the protection: the copy raised no card, so it must also not
+        # come to OWN the card it deferred to and withdraw it on the next edit
+        # (review round 3, F10/F11). This test builds the state that bug needs,
+        # so it is the one that should catch it.
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert toast.message.startswith("mcp: failed")
+        assert toast.display
+
 
 @pytest.mark.asyncio
 async def test_a_copy_receipt_still_replaces_an_ordinary_one() -> None:
