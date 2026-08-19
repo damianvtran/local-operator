@@ -1575,3 +1575,45 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
     # And the wire is still legal: one tool_result per tool_use.
     tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
     assert sorted(str(m.tool_call_id) for m in tool_messages) == ["c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_never_started_is_never_announced_as_ended():
+    """Review round 4, R4-1. The flush must share the backfill's own guard.
+
+    A planning failure — an unknown tool name, a duplicate call id — is parked
+    up front by ``park()``, which queues an end event for a call that never
+    emitted a START. That was harmless only because nothing drained the queue
+    afterwards; the flush added for R3-1 reads it and announces the end of a
+    call no consumer ever saw begin, which is the mirror image of the bug the
+    flush exists to fix and is what the backfill a few lines below explicitly
+    refuses to do.
+
+    Reachable from a hallucinated tool name alone: no abort, no timing window.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="no_such_tool", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    loop = AgentLoop()
+
+    events: list[Any] = []
+    async for event in loop.run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    started_ids = {e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)}
+    ended_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert started_ids == set(), "a call with no resolvable tool must never start"
+    assert [
+        c for c in ended_ids if c not in started_ids
+    ] == [], f"end event(s) {ended_ids} announced for calls that never started"
+    # The wire is still paired: the failure's result reaches the model.
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert [str(m.tool_call_id) for m in tool_messages] == ["c1"]

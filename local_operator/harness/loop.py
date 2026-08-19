@@ -1277,7 +1277,18 @@ class AgentLoop:
             # Snapshotting first means the decision is made while no await can
             # intervene, so it cannot be invalidated by what happens mid-emit.
             pending_ends: list[ToolExecutionEndEvent] = []
-            claimed: set[str] = set()
+            # Seeded with the calls that NEVER STARTED. A planning failure
+            # (unknown tool, duplicate id) is parked up front by `park()`, which
+            # queues an end event for it — harmless while nothing drained the
+            # queue, but the flush below reads it and would announce the end of
+            # a call no consumer ever saw begin. That is the same mirror-image
+            # defect the backfill refuses to commit a few lines down, and the
+            # flush has to share the guard rather than sit beneath it (R4-1,
+            # agent review round 4). Reachable from a hallucinated tool name
+            # alone: no abort, no timing window.
+            claimed: set[str] = {
+                item.call.id for item in batch if item.failure is not None or item.tool is None
+            }
             for slot, item in enumerate(batch):
                 if results_by_slot[slot] is None:
                     result = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
