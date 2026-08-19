@@ -1419,6 +1419,38 @@ def test_the_titles_seam_stays_tight_against_the_title(monkeypatch) -> None:
                 assert tail and not tail.startswith(" "), f"{where}: the seam was orphaned"
 
 
+def test_a_double_width_title_never_overflows_the_band(monkeypatch) -> None:
+    """The band is ONE row, in cells — including for CJK and Hangul titles.
+
+    The reserve is measured in cells and the row's gap is computed with
+    ``cell_len``, so any padding of the name has to be counted the same way.
+    Padding it with ``str.rjust`` counts CHARACTERS instead, and a title of
+    double-width glyphs then emits a row wider than the band: 592 rows over
+    their width across the ladder variants, worst case 11 cells. Rich drops the
+    over-wide segment rather than clipping it, so the effect was a CJK-named
+    conversation resuming with no name on the band at all — this feature's own
+    failure, reintroduced for non-Latin titles (review round 1, F1).
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    titles = (
+        "修复恢复时的会话标题",
+        "セッションのタイトルを復元する",
+        "세션 제목 복원하기",
+        "修复登录重定向循环的问题并添加测试用例以防止回归",
+    )
+    for label, state in _LADDER_STATES.items():
+        for alarm in (True, False):
+            status = _swept_band(state, alarm=alarm)
+            for name in titles:
+                status.update(conversation_name=name)
+                for width in range(60, 181):
+                    row = status.render_text(width).plain
+                    assert cell_len(row) <= width, (
+                        f"{label} alarm={alarm} width={width} name={name!r}: "
+                        f"the row is {cell_len(row)} cells wide"
+                    )
+
+
 def test_the_bands_cut_lands_on_a_word_like_the_excerpt_it_was_handed() -> None:
     """``provisional_title`` cuts on a word boundary on purpose — "so it reads as
     a quotation rather than as a string that ran out of buffer" — and the band

@@ -386,11 +386,22 @@ def session_name(
 ) -> str:
     """A conversation's display name: its opening user message, on one line.
 
-    Read from the TRANSCRIPT rather than from a stored title because there is
-    no stored title: ``ConversationName`` lives in memory for the life of a
-    session and is never journalled, so the only per-session name on disk is
-    what the user actually typed first. That turns out to be the better name
-    anyway — it is the thing the user remembers about the session.
+    Read from the TRANSCRIPT rather than from the stored title, and that is now
+    a CHOICE rather than the absence of one: sessions journal their title (see
+    ``session.naming.CONVERSATION_NAME_CUSTOM_TYPE``), so a stored name is
+    usually available here.
+
+    The opener is still the better label for this list. The picker names
+    sessions it is not opening, one row each, and the opening message is the
+    thing a user recognises their own work by — it is what they typed, in their
+    words, and it is what they were looking at when they left. A generated title
+    is an interpretation of that message, and a session that never got far
+    enough to be named has one anyway. Keeping one source for every row also
+    keeps the column consistent, where mixing stored titles with openers would
+    make two rows that look alike mean different things.
+
+    Worth revisiting only for an explicit ``/rename``, which is the one case
+    where the user has said in so many words what a session should be called.
 
     Deliberately tolerant. This runs over every session directory to paint a
     picker, so a transcript that is truncated, half-written by a session still
