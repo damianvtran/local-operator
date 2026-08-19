@@ -3327,7 +3327,7 @@ class OperatorApp(App[None]):
         #
         # Checked BEFORE the draft branch, because a composer being dragged over
         # always has text in it and would otherwise take that branch every time.
-        mid_copy = getattr(editor, "_selecting", False) or getattr(editor, "_copied", False)
+        mid_copy = editor.copy_in_flight
         if editor.text.strip() and not mid_copy:
             # `remember_draft` refuses while the aside owns the composer, and a
             # draft that cannot be filed must not be thrown away either.

@@ -1575,15 +1575,34 @@ class Editor(TextArea):
         if not text:
             return
         self._copied = True
-        #: WHICH range the copy took, not merely that one happened. The app's
-        #: Ctrl+C rung defers to a copy while its highlight is still on screen,
-        #: and `_copied` alone cannot tell the copy's own highlight from an
-        #: unrelated selection made later — so a shift+arrow selection after a
-        #: copied range had been collapsed silently re-armed that deferral and
-        #: the next two presses quit the app with the draft unfiled (D22, design
-        #: round 7). Pinning the range makes "the copy's highlight" checkable.
+        # WHICH range the copy took, so `watch_selection` can tell this copy's
+        # own highlight from any later one and retire the claim when it goes.
+        # Without that distinction a shift+arrow selection made after the copied
+        # range had been collapsed silently re-armed the app's Ctrl+C deferral,
+        # and the next two presses quit with the draft unfiled (D22, design
+        # round 7). `#:` is for attribute declarations, and this is an
+        # assignment in a method body (R17 NIT-1).
         self._copied_selection = self.selection
         self.post_message(EditorCopied(text))
+
+    @property
+    def copy_in_flight(self) -> bool:
+        """Is a copy gesture still in progress or still visible on screen?
+
+        THE predicate the app's Ctrl+C rung asks, named once here rather than
+        duck-typed from outside. It was previously two `getattr` probes into
+        this class's privates, which a rename would have degraded silently to
+        "no copy in flight" — i.e. to always clearing the draft — with no test
+        failing (R17 MINOR-2). A property breaks loudly instead, and gives the
+        question a name that says what it means.
+
+        Two moments, because a copy spans both: the drag itself, and the window
+        after release in which the highlight it took is still the highlight on
+        screen. `watch_selection` ends the second the moment that stops being
+        true, so neither flag can outlive the gesture the way three earlier
+        predicates did.
+        """
+        return self._selecting or self._copied
 
     def watch_selection(self, selection: Selection) -> None:
         """Retire the copy receipt's GESTURE claim when the highlight changes.
