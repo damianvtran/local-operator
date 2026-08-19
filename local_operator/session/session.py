@@ -1683,6 +1683,90 @@ class Session:
         if self._signal is not None:
             self._signal.abort(reason)
 
+    def cancel_subagents(self, reason: str = "interrupted") -> int:
+        """Cancel every running SUBAGENT and report how many were stopped.
+
+        Deliberately separate from :meth:`abort`, which stops this session's
+        own turn. A subagent is a child session with its own turn, its own
+        tools and its own spend: aborting the parent's signal does nothing to
+        it, so a stopped parent could sit idle while three children carried on
+        calling the provider. That is the gap this closes.
+
+        Split from ``abort`` rather than folded into it because the two answer
+        different presses. The first Esc stops what the user is watching \u2014 the
+        parent's turn \u2014 and a delegated child doing minutes of useful work
+        should survive a keypress aimed at the foreground. The second Esc says
+        the user meant all of it. Folding them together would make the cheap,
+        recoverable stop also the expensive, unrecoverable one.
+
+        ``bash`` jobs are NOT touched, by the same argument in reverse:
+        ``background=true`` exists precisely so a build or a deploy outlives
+        the turn that started it, and killing one on a keypress meant for the
+        agent destroys work the user asked to be insulated from the agent.
+        ``jobs cancel`` remains the way to stop those, and session teardown
+        still cancels everything.
+
+        Synchronous so a key handler can call it without awaiting: the actual
+        cancellation is a task per child, tracked by the session so
+        :meth:`dispose` still awaits it. Each child's abort is bridged onto
+        its own signal by ``AsyncJobManager.cancel``, so the child settles
+        through its own machinery \u2014 persisting the turn it had produced \u2014
+        rather than dying mid-await.
+        """
+        running = self._cancellable_subagents()
+        for job in running:
+            # Fire-and-forget per child, through the session's own tracker: a
+            # child that is slow to unwind must not hold the keystroke, and a
+            # cancel that raises must not take its siblings down with it.
+            self._spawn_background(self._cancel_job_quietly(job.id, reason))
+        return len(running)
+
+    def running_subagents(self) -> int:
+        """How many subagents :meth:`cancel_subagents` would stop right now.
+
+        THE one predicate, so a host that offers "esc again to stop N agents"
+        and the call that then stops them cannot disagree. They previously did:
+        the TUI counted with a filter that excludes jobs parked at the capacity
+        gate, while the cancel took every ``running`` row including those — so
+        the confirmation contradicted the offer ("1 still running" then
+        "stopped 2"), and a press that found ONLY queued children showed
+        nothing, armed nothing, and left children the second press would
+        happily have cancelled unreachable from the keyboard.
+
+        Queued children are deliberately IN scope: they are delegated work the
+        user asked to stop, and one that is merely waiting for a slot is no
+        less cancelled by being stopped before it starts.
+        """
+        return len(self._cancellable_subagents())
+
+    def _cancellable_subagents(self) -> list[Any]:
+        """The job rows both the count and the cancel act on. Never raises: a
+        keystroke handler and a status line both call into this."""
+        try:
+            return [
+                job
+                for job in self.jobs.list()
+                if getattr(job, "type", "") == "task" and job.status == "running"
+            ]
+        except Exception:  # noqa: BLE001 — a count must not take a keypress down
+            logger.warning("listing subagent jobs failed", exc_info=True)
+            return []
+
+    async def _cancel_job_quietly(self, job_id: str, reason: str) -> None:
+        """Cancel one job, logging rather than raising on failure.
+
+        The caller is a keystroke handler with no way to report an error and
+        nothing useful to do about one; a child that fails to tear down cleanly
+        must not stop its siblings from being cancelled.
+        """
+        del reason  # the manager stamps its own "cancelled" reason
+        try:
+            await self.jobs.cancel(job_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("cancelling subagent job %s failed", job_id, exc_info=True)
+
     # -- live tool refresh (MCP late-connect / reconnect) ---------------------
 
     def refresh_tools(self, tools: Sequence[AgentTool]) -> None:

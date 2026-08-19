@@ -500,6 +500,15 @@ logger = logging.getLogger("local_operator.tui.app")
 #: resume command — where omp's only clears the editor.)
 DOUBLE_INTERRUPT_WINDOW_S = 1.5
 
+#: How long a second Esc counts as the "also stop the subagents" press. Longer
+#: than the Ctrl+C window because the two gestures answer different questions.
+#: Ctrl+C's second press QUITS, so its window is deliberately too short to hit
+#: by accident; Esc's second press only widens the stop, and the user has to
+#: read a line of text ("N subagents still running — esc again to stop them")
+#: before deciding. A window that expires while they are still reading would
+#: silently demote the press back to a no-op.
+DOUBLE_STOP_WINDOW_S = 4.0
+
 #: Sessions the ``/resume`` picker offers. Higher than the recovery listing's
 #: ten because the picker can scroll and filter, and a conversation from a
 #: fortnight ago is exactly the one worth searching for.
@@ -1132,6 +1141,14 @@ class OperatorApp(App[None]):
         # The one live "ctrl+c again to exit" hint, replaced rather than
         # repeated so a run of interrupts leaves one row instead of N.
         self._exit_hint: NoticeBlock | None = None
+        # Esc ladder: when the first press stopped the parent while subagents
+        # were still running, this stamps WHEN the wider stop was offered. A
+        # second press inside DOUBLE_STOP_WINDOW_S takes the offer up.
+        self._stop_offered_at: float | None = None
+        # The one live stop-ladder line ("N subagents still running…" /
+        # "stopped N subagents"), replaced rather than repeated for the same
+        # reason `_exit_hint` is.
+        self._stop_notice: NoticeBlock | None = None
         # The MAIN transcript, held rather than looked up. Once the full-page
         # subagent view is open there are two `TranscriptView`s in the screen,
         # so `query_one(TranscriptView)` is ambiguous exactly while a turn may
@@ -1893,6 +1910,16 @@ class OperatorApp(App[None]):
         # first aborted turn would suppress its notice on the strength of cards
         # that belonged to a conversation the user cannot see any more.
         self._interrupted_cards = 0
+        # And the stop ladder's offer, which is the sharpest instance of this
+        # family: it is an armed ESCALATION. Left standing across a session
+        # swap, an Esc pressed moments after `/new` or `/reload` would take up
+        # an offer made about the OLD conversation's children and cancel the
+        # new session's subagents instead — destroying work on the strength of
+        # a count the user was shown for a different conversation. The notice
+        # reference goes too; `clear_blocks` unmounts the widget but cannot
+        # clear a reference it does not own.
+        self._stop_offered_at = None
+        self._stop_notice = None
         # And a deferred completion belongs to the dying conversation too. Left
         # set, the replacement session's first settling background job would
         # announce "task complete" for a turn the user can no longer see — the
@@ -3216,7 +3243,49 @@ class OperatorApp(App[None]):
         so a further Ctrl+C never reaches this method — a rung that cannot fire
         is worse than no rung, because the docstring promises an escape the user
         does not have.
+
+        A DRAFT in the composer takes the first press, ahead of every rung
+        below. Ctrl+C on a half-typed prompt means "scrap that", and the exit
+        ladder should not start while there is something cheaper and more
+        likely for the key to mean. It also removes the ladder's sharpest edge:
+        the press that quits was previously two taps away while the user was
+        typing, so a reflexive double-tap at the composer could exit the app
+        with a drafted prompt on screen. Clearing consumes the press WITHOUT
+        arming the ladder, so the next Ctrl+C is a first press again.
+
+        The draft is not silently destroyed: it goes to the editor's own
+        history, which is what ``up`` recalls, so the text is one keystroke
+        away rather than gone.
+
+        The ASIDE is handled by closing the card instead. Its draft may not be
+        recorded — the card promises "off the record", and honouring that is
+        why ``remember_draft`` can refuse — so clearing the composer there
+        would destroy the question outright. ``_close_aside`` is the path that
+        already exists for "the user is done with this card": it discards the
+        aside and hands back the main-chat draft it borrowed.
         """
+        editor = self._editor()
+        if editor.text.strip():
+            # `remember_draft` refuses while the aside owns the composer, and a
+            # draft that cannot be filed must not be thrown away either.
+            if not editor.remember_draft():
+                if self._close_aside():
+                    return
+                # Not the aside, but recording is off for some other reason:
+                # leave the text alone rather than destroying it unrecoverably,
+                # and let the press fall through to its interrupt meaning.
+                pass
+            else:
+                editor.clear_content()
+                # The ladder is NOT armed and any live exit hint is stale: this
+                # press meant the composer, and leaving "ctrl+c again to exit"
+                # on screen would promise an exit the next press does not make.
+                self._last_interrupt_at = 0.0
+                if self._exit_hint is not None:
+                    self._transcript_view().remove_block(self._exit_hint)
+                    self._exit_hint = None
+                return
+
         now = time.monotonic()
         if now - self._last_interrupt_at < DOUBLE_INTERRUPT_WINDOW_S:
             self._interrupt()  # stop the work before dropping the terminal
@@ -3335,6 +3404,20 @@ class OperatorApp(App[None]):
         With nothing running Esc does nothing — in particular it must not clear
         the composer, which would throw away typed text on the key people press
         to cancel.
+
+        SUBAGENTS take the second press. The first Esc stops the parent turn,
+        which is what the user is watching; delegated children keep going,
+        because a child can be minutes into useful work and the foreground key
+        should not be able to destroy it by reflex. When any child is still
+        running the stop says so and offers the wider stop, and a second press
+        within :data:`DOUBLE_STOP_WINDOW_S` cancels every child too. Both
+        presses are honest about what they did: a stop that silently left three
+        agents burning tokens is the bug this ladder exists to fix, and one
+        that silently killed them would be the opposite bug.
+
+        Backgrounded ``bash`` jobs are never touched by either press —
+        ``background=true`` exists to outlive the turn. ``jobs cancel`` stops
+        those.
         """
         if self._close_aside():
             return
@@ -3376,9 +3459,101 @@ class OperatorApp(App[None]):
         ):
             self._settle_ask_picker()
             return
-        pending = self._approval is not None and not self._approval.answered
-        if pending or (self._session is not None and self._session.is_streaming):
+
+        session = self._session
+        now = time.monotonic()
+
+        # The escalation press: offered only after a first press that reported
+        # children still running, and only inside the window. It sits BELOW the
+        # picker branch above for the reason that branch states — answering a
+        # question the agent asked is not an abort — and above the ordinary
+        # stop, because by this point the user has already read the offer and
+        # pressed again to take it.
+        if (
+            self._stop_offered_at is not None
+            and now - self._stop_offered_at < DOUBLE_STOP_WINDOW_S
+            and session is not None
+        ):
+            self._stop_offered_at = None
+            stopped = session.cancel_subagents("interrupted")
+            # Re-aborting the parent is deliberate and not redundant: a child
+            # settling can hand its result back to a parent that has since
+            # started a follow-up turn, and the user's second press means that
+            # too. It is idempotent when the parent is already stopped.
             self._interrupt()
+            self._replace_stop_notice(
+                (
+                    f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
+                    if stopped
+                    else "no subagents were running"
+                ),
+                "note",
+            )
+            return
+
+        pending = self._approval is not None and not self._approval.answered
+        streaming = session is not None and session.is_streaming
+        # The SESSION's predicate, not the band's `_job_count("task")`. The two
+        # disagree on children parked at the capacity gate, and the number
+        # offered here must be the number the second press actually stops —
+        # otherwise the confirmation contradicts the offer, and a press that
+        # finds only queued children arms nothing and leaves them unstoppable
+        # from the keyboard. `_job_count` remains right for the status band,
+        # which is reporting work in progress rather than work Esc can reach.
+        children = self._running_subagents(session)
+
+        if not (pending or streaming or children):
+            # Nothing to stop. Explicitly NOT clearing the composer.
+            return
+
+        if pending or streaming:
+            self._interrupt()
+
+        if children:
+            # The offer is the whole point of the first press when children are
+            # up: without a line on screen the user has no way to know that a
+            # stop left work running, and no way to learn the second press
+            # exists.
+            self._stop_offered_at = now
+            self._replace_stop_notice(
+                f"{children} subagent{'s' if children != 1 else ''} still running "
+                "— esc again to stop them",
+                "warning",
+            )
+        else:
+            self._stop_offered_at = None
+
+    @staticmethod
+    def _running_subagents(session: Any | None) -> int:
+        """Children the stop ladder can reach, via the session's own predicate.
+
+        ``getattr`` because reduced hosts and the test fakes need not implement
+        every method on the protocol; a host that cannot answer simply has no
+        children to offer. Never raises — this runs on a keystroke.
+        """
+        if session is None:
+            return 0
+        counter = getattr(session, "running_subagents", None)
+        if counter is None:
+            return 0
+        try:
+            return int(counter())
+        except Exception:  # noqa: BLE001 — a stop must never fail on its count
+            logger.warning("counting subagents failed", exc_info=True)
+            return 0
+
+    def _replace_stop_notice(self, text: str, kind: NoticeKind) -> None:
+        """Show the stop ladder's one line, replacing any previous one.
+
+        Replaced rather than appended for the reason the Ctrl+C hint is: a user
+        pressing Esc twice would otherwise leave two contradictory rows ("still
+        running" above "stopped them"), and the stale one is the one that reads
+        as current.
+        """
+        if self._stop_notice is not None:
+            self._transcript_view().remove_block(self._stop_notice)
+        self._stop_notice = NoticeBlock(text, kind)
+        self._append_block(self._stop_notice)
 
     # -- tool approvals -------------------------------------------------------
     async def request_tool_approval(
@@ -4179,6 +4354,13 @@ class OperatorApp(App[None]):
         # again. Cancelling frees both.
         self._settle_key_prompt()
         self._exit_hint = None  # its widget went with the transcript
+        # The stop ladder's line went with it, for the same reason. Left set,
+        # `_replace_stop_notice` would try to remove a block the transcript no
+        # longer holds. The OFFER is dropped with it: the line that explained
+        # what a second Esc would do is no longer on screen, and an escalation
+        # the user can no longer see the terms of must not stay armed.
+        self._stop_notice = None
+        self._stop_offered_at = None
         self._streaming_block = None
         self._tool_cards = {}
         self._composing_cards = {}

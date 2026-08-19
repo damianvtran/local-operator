@@ -145,7 +145,16 @@ class FakeSession:
     def abort(self, reason: str = "interrupted") -> None:
         pass
 
+    def cancel_subagents(self, reason: str = "interrupted") -> int:
+        """No subagents in this fake; the protocol requires the method."""
+        return 0
+
+    def running_subagents(self) -> int:
+        """No subagents in this fake; the protocol requires the method."""
+        return 0
+
     # events
+
     def subscribe(self, handler: Any) -> Any:
         self.handlers.append(handler)
 

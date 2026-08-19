@@ -718,6 +718,35 @@ class Editor(TextArea):
             self._history.pop()
         self._history_index = None
 
+    def remember_draft(self) -> bool:
+        """Push the CURRENT buffer into prompt history without submitting it.
+
+        For the paths that throw a draft away on the user's behalf — Ctrl+C on
+        a half-typed prompt. Discarding text the user typed should never be
+        final when making it recoverable costs one entry: after this, ``up``
+        brings it straight back.
+
+        History is the right home rather than a bespoke stash because it is
+        already the place a user looks for "what I typed a moment ago", and it
+        already de-duplicates, caps itself at ``HISTORY_LIMIT`` and drops
+        blanks. ``_record_history`` also resets ``_history_index``, so the next
+        ``up`` starts from this entry rather than from wherever an interrupted
+        history walk had got to.
+
+        HONOURS ``_records_history``, and returns whether it recorded. While
+        the aside owns the composer that flag is off, and it is a contract the
+        card states out loud — "off the record — nothing here joins the chat".
+        Recording there would put a question the user explicitly kept out of
+        the conversation one ``up`` and one Enter away from being sent to the
+        agent as a real turn, which is the exact failure
+        :meth:`set_records_history` exists to prevent. The caller uses the
+        return value to decide whether the draft is safe to discard.
+        """
+        if not self._records_history:
+            return False
+        self._record_history(self.text)
+        return True
+
     def set_commands(self, commands: list[SlashCommand]) -> None:
         """Slash commands offered to the picker (sync, no I/O).
 
