@@ -125,7 +125,32 @@ def test_a_label_that_sanitizes_away_reads_as_no_label() -> None:
 
 
 def test_the_label_is_capped() -> None:
+    # One enormous token has no boundary to cut on, so it is cut mid-token
+    # rather than dropped — a tab reading `lo ›` says less than a cut string.
+    # The ellipsis rides in the last cell, so the cap still holds exactly.
     assert len(sanitize_label("x" * 500)) == MAX_LABEL_CHARS
+
+
+def test_an_over_long_label_is_cut_on_a_word_with_an_ellipsis() -> None:
+    """The tab agrees with the band about how a long name is shortened.
+
+    A bare slice ended the tab mid-word (`…and reconcile the ledge`), which
+    reads as a string that ran out of buffer rather than as a name that was
+    shortened — and the tab is where it bites hardest, since most terminals
+    shorten the label again to fit the tab strip. Both the band
+    (``status_line.truncate_name``) and the excerpt this string came from
+    (``naming.provisional_title``) cut on a word, so this is parity rather than
+    a new rule (design review D3).
+    """
+    label = sanitize_label(
+        "Investigate why the nightly importer drops rows silently "
+        "and reconcile the ledger totals"
+    )
+    assert len(label) <= MAX_LABEL_CHARS
+    assert label.endswith("…")
+    assert label == "Investigate why the nightly importer drops rows silently and reconcile the…"
+    # A name that already fits is returned untouched — no stray ellipsis.
+    assert sanitize_label("Reduce agent RAM usage") == "Reduce agent RAM usage"
 
 
 def test_cwd_stands_in_for_a_conversation_that_has_no_name_yet() -> None:

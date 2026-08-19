@@ -131,11 +131,28 @@ def sanitize_label(value: str | None) -> str:
 
     Returns ``""`` for anything that sanitises away to nothing, which callers
     read as "no label" rather than as an empty title.
+
+    Over-long labels are cut on a WORD boundary with an ellipsis, matching what
+    the status band does to the same string (``status_line.truncate_name``) and
+    what the excerpt was cut on in the first place
+    (``naming.provisional_title``). A bare slice ended the tab mid-word — `…and
+    reconcile the ledge` — which reads as a string that ran out of buffer rather
+    than as a name that was shortened, and the tab is where truncation bites
+    hardest because most terminals then shorten the label AGAIN to fit the tab
+    strip. The boundary is only taken when it costs less than a third of the
+    cap, so a single enormous token is still cut rather than dropped to nothing
+    (design review D3).
     """
     if not value:
         return ""
     cleaned = " ".join(_CONTROL_CHARS.sub(" ", value).split())
-    return cleaned[:MAX_LABEL_CHARS]
+    if len(cleaned) <= MAX_LABEL_CHARS:
+        return cleaned
+    cut = cleaned[: MAX_LABEL_CHARS - 1]
+    spaced = cut.rsplit(" ", 1)[0]
+    if len(spaced) >= (MAX_LABEL_CHARS - 1) * 2 // 3:
+        cut = spaced
+    return cut.rstrip(" ,.;:") + "…"
 
 
 def cwd_label(cwd: str | None) -> str:
