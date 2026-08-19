@@ -638,3 +638,25 @@ def test_the_marker_is_not_charged_against_the_byte_ceiling(tmp_path):
     after = sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
 
     assert before.bytes_remaining == after.bytes_remaining == 100
+
+
+def test_claiming_creates_the_directory_so_there_is_no_unclaimed_window(tmp_path):
+    """A session directory must never exist unclaimed, even for an instant.
+
+    Empty directories are reaped on sight, so any gap between creating a
+    session directory and claiming it is a window in which a concurrent
+    session's startup sweep can delete it — which is the original bug. Callers
+    close that gap by claiming FIRST, which only works because the claim
+    creates the directory rather than requiring one.
+    """
+    sessions = tmp_path / "sessions"
+    fresh = sessions / "fresh"
+
+    claim_session(fresh)
+
+    assert fresh.is_dir(), "claim_session must create the directory it claims"
+    assert (fresh / LIVE_MARKER_NAME).is_file()
+
+    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
+
+    assert fresh.exists(), "a claimed, empty, brand-new session directory was reaped"

@@ -723,6 +723,20 @@ async def _build_child_session(
     session_dir = (
         resume_dir if resume_dir is not None else config_dir() / "sessions" / uuid.uuid4().hex[:12]
     )
+    # CLAIM FIRST, before the directory holds anything at all. A child writes
+    # its own session directory under the same ``sessions/`` store the
+    # retention sweep reclaims, so it needs the same claim its parent has:
+    # subagents routinely outlive the sweep that another session's startup
+    # runs, and an unclaimed child directory is an eviction candidate while the
+    # child is still writing to it. The pid is the parent process's, which is
+    # exactly right — that is the process whose death makes the directory dead.
+    #
+    # Ordered ahead of the stamp and the transcript rather than after them
+    # because an empty directory is reaped on sight: everything between
+    # creating this directory and claiming it is a window in which a concurrent
+    # session's startup sweep can take it. ``claim_session`` creates the
+    # directory itself, so claiming first leaves no window at all.
+    claim_session(session_dir)
     # Stamp the directory as the machine's BEFORE the transcript exists, so a
     # picker painted while this child is mid-run already knows what it is. A
     # child's directory is shape-identical to a user conversation, which is how
@@ -732,13 +746,6 @@ async def _build_child_session(
     # lost to an earlier failed write is worth retrying while we are here.
     mark_session_origin(session_dir, ORIGIN_SUBAGENT, label=label, agent=agent)
     transcript = Transcript(session_dir)
-    # A child writes its own session directory under the same ``sessions/``
-    # store the retention sweep reclaims, so it needs the same claim its parent
-    # has: subagents routinely outlive the sweep that another session's startup
-    # runs, and an unclaimed child directory is an eviction candidate while the
-    # child is still writing to it. The pid is the parent process's, which is
-    # exactly right — that is the process whose death makes the directory dead.
-    claim_session(session_dir)
     # The operator's standing instructions are machine-wide, so a delegated
     # slice inherits them for the same reason it inherits the goal: the parent
     # authoring a task prompt is not a reliable channel for a preference the

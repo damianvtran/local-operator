@@ -925,6 +925,9 @@ async def _prepare(
     yolo = bool(getattr(args, "yolo", False))
 
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
+    # ``claim_session`` below creates this directory for a session under
+    # ``sessions/``; the explicit mkdir is what covers an agent directory,
+    # which is deliberately never claimed.
     transcript_dir.mkdir(parents=True, exist_ok=True)
 
     # Bound the ephemeral session store before this run adds to it. Startup
