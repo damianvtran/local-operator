@@ -388,7 +388,7 @@ async def test_the_effort_is_fitted_to_the_spec_actually_being_sent(monkeypatch)
 
     async def _preflight(model) -> None:
         stream._message_boundary_pending = False
-        stream._quota_recheck_pending = False
+        stream._quota_recheck_for = None
 
     monkeypatch.setattr(stream, "preflight_usage", _preflight)
     wide = ModelSpec(
@@ -448,7 +448,7 @@ async def test_a_switch_never_applies_an_effort_the_user_was_not_shown(monkeypat
 
     async def _preflight(model) -> None:
         stream._message_boundary_pending = False
-        stream._quota_recheck_pending = False
+        stream._quota_recheck_for = None
 
     monkeypatch.setattr(stream, "preflight_usage", _preflight)
     ladderless = ModelSpec(provider="test", model_id="plain", reasoning_efforts=())
@@ -474,6 +474,54 @@ async def test_a_switch_never_applies_an_effort_the_user_was_not_shown(monkeypat
     ]
     assert captured[-1].model.reasoning_effort is None, captured[-1].model.reasoning_effort
     assert not any("auto effort" in text for text in notices), notices
+    await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_call_cannot_spend_the_new_models_quota_check() -> None:
+    """The recheck token names its selector, so only that model can spend it (review F10).
+
+    A request built just BEFORE the switch can still reach the preflight after
+    it: the loop resolves the spec two yields before it calls the stream, and
+    its resolver can fall back to the run's snapshot. With a bare boolean token
+    that stale call consumed the check the new provider was owed, reproducing
+    F7's symptom on a narrower path.
+    """
+    from local_operator.model.configure import SessionStreamFn
+
+    class FakeAuth:
+        async def get_oauth_access(self, *args, **kwargs):
+            return None
+
+        def list_credentials(self, *args, **kwargs):
+            return []
+
+        def is_blocked(self, *args, **kwargs):
+            return False
+
+    stream = SessionStreamFn(cast(Any, FakeAuth()), {}, "session-x")
+    opened: list[str] = []
+    real_preflight = stream.preflight_usage
+
+    async def spy(model: ModelSpec) -> None:
+        was_open = stream._message_boundary_pending or stream._quota_recheck_for is not None
+        await real_preflight(model)
+        if was_open:
+            opened.append(model.provider)
+
+    stream.preflight_usage = spy  # type: ignore[method-assign]
+    first = ModelSpec(provider="pa", model_id="m")
+    second = ModelSpec(provider="pb", model_id="m")
+
+    stream.begin_message()
+    await stream.preflight_usage(first)
+    stream.on_model_changed(second)
+    # A call still carrying the PRE-SWITCH spec lands first...
+    await stream.preflight_usage(first)
+    # ...and must not have eaten the check the switched-to model is owed.
+    await stream.preflight_usage(second)
+
+    assert "pb" in opened, opened
     await stream.close()
 
 

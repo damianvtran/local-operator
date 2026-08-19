@@ -1502,7 +1502,10 @@ class SessionStreamFn:
         # is deliberately not ``_message_boundary_pending``: that flag also gates
         # effort classification, and re-arming it to buy a quota check re-grades
         # the turn from an aside (see ``on_model_changed``).
-        self._quota_recheck_pending = False
+        #
+        # It holds the SELECTOR rather than a bare bool so only the model the
+        # switch was made to can spend it — see ``preflight_usage`` (review F10).
+        self._quota_recheck_for: str | None = None
         self._primary_selector: str | None = None
         self._usage_checked_selector: str | None = None
         self._usage_checked_at = 0.0
@@ -1525,7 +1528,9 @@ class SessionStreamFn:
     def begin_message(self) -> None:
         """Mark the next model call as a user-message boundary."""
         self._message_boundary_pending = True
-        self._quota_recheck_pending = False
+        # A switch nobody spent a check on does not carry into the next message:
+        # this boundary re-checks whatever model it opens on anyway.
+        self._quota_recheck_for = None
         self._message_effort = None
         self._message_tier = None
 
@@ -1547,18 +1552,25 @@ class SessionStreamFn:
         fitting to one while applying to the other is how the two drift
         (review F9).
         """
-        del model  # see above: effort is fitted to the request's own spec
-        # ONLY the quota gate, and it is its OWN flag on purpose.
+        # ONLY the quota gate, and it is its OWN token on purpose.
         # ``_message_boundary_pending`` also gates effort CLASSIFICATION, so
         # re-arming that to get a quota check would re-grade the turn from
         # whatever aside happens to be the newest user-role message — the exact
         # defect review F2 found.
         #
-        # Without a flag of its own the new provider went unchecked for the rest
-        # of the turn (review F7): ``preflight_usage``'s body sits behind the
-        # boundary token, which the turn's FIRST call already spent, so clearing
-        # the memo behind that gate achieved nothing.
-        self._quota_recheck_pending = True
+        # Without a token of its own the new provider went unchecked for the
+        # rest of the turn (review F7): ``preflight_usage``'s body sits behind
+        # the boundary token, which the turn's FIRST call already spent, so
+        # clearing the memo behind that gate achieved nothing.
+        #
+        # The token names the SELECTOR it was armed for, because a bare bool is
+        # spent by whichever request reaches the preflight first — and that is
+        # not necessarily a request on the new model. A call built just before
+        # the switch can still be in flight (the loop resolves the spec two
+        # yields before it calls the stream, and its resolver may fall back to
+        # the run's snapshot), so a bool let a stale call consume the check the
+        # new provider was owed, reproducing F7 on a narrower path (review F10).
+        self._quota_recheck_for = f"{model.provider}/{model.model_id}"
 
     def _effort_for(self, model: ModelSpec) -> str | None:
         """The frozen auto-effort as a rung ``model`` actually accepts.
@@ -1581,6 +1593,14 @@ class SessionStreamFn:
 
         Called per request rather than on the switch itself so the fit is always
         against the spec being sent (review F9).
+
+        A level the new model ALREADY accepts is kept as-is rather than re-fitted
+        (review F11). So a ``med`` prompt frozen as ``low`` on a two-rung ladder
+        stays ``low`` on a three-rung one, where re-fitting would say ``medium``.
+        That is deliberate: this function exists to keep requests legal, and
+        silently deepening a level the user has been shown — and is being billed
+        for — because the ladder got finer is a bigger surprise than a level that
+        holds steady across a switch.
         """
         if self._message_effort is None:
             return None
@@ -1690,10 +1710,17 @@ class SessionStreamFn:
         # because the boundary one was already spent by the turn's first call —
         # without it the new provider went unchecked for the rest of the turn
         # (review F7).
-        if not self._message_boundary_pending and not self._quota_recheck_pending:
+        #
+        # The switch token is honoured only for the selector it was armed for,
+        # and is consumed only by that same selector, so a request still
+        # carrying the pre-switch spec can neither open the gate nor spend the
+        # check the new model is owed (review F10).
+        recheck_due = self._quota_recheck_for == selector
+        if not self._message_boundary_pending and not recheck_due:
             return
         self._message_boundary_pending = False
-        self._quota_recheck_pending = False
+        if recheck_due:
+            self._quota_recheck_for = None
 
         now = time.monotonic()
         if (
