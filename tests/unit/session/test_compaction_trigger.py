@@ -171,13 +171,14 @@ async def test_a_200k_session_still_compacts_at_80_percent(tmp_path, monkeypatch
 async def test_the_gate_measures_the_provider_figure_not_just_the_estimate(tmp_path, monkeypatch):
     """``compaction_context_tokens`` is ``max(provider-reported, local)``, and
     the gate acts on that maximum. The plan carries BOTH figures: the maximum
-    (``context_tokens``, what the gate compared and what the receipt now
-    quotes as "before") and the bare local estimate (``tokens_before``, the
-    transcript-entry bookkeeping). They used to be printed crosswise — the
-    receipt quoted the local estimate while the band showed the provider
-    figure, so a pass that fired at a provider-reported 600k printed
-    "319.4k → …" and read as the two disagreeing about what just happened.
-    Pinning the fields apart keeps the split documented.
+    (``context_tokens``, what the gate compared, what the transcript entry
+    records, and what the receipt quotes as "before") and the bare local
+    estimate (``tokens_before``, the pre-pass half of the same-ruler saving
+    the commit subtracts from the maximum to get "after"). They used to be
+    printed crosswise — the receipt quoted the local estimate while the band
+    showed the provider figure, so a pass that fired at a provider-reported
+    600k printed "319.4k → …" and read as the two disagreeing about what just
+    happened. Pinning the fields apart keeps the split documented.
     """
     session = make_session(tmp_path)
     await talk(session)

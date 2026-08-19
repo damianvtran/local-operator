@@ -185,8 +185,9 @@ def frame_token_estimate_for(provider: str, model_id: str) -> int:
     context that the provider then billed at 6.7k. Formulas mirror omp's
     ``familyBilling``, which verified them against live bills:
 
-    - Anthropic: ceil(edge/28)² 28px patches, capped at 4,784 visual tokens,
-      +5% margin (1568px → 3,293; 1932px → 5,024).
+    - Anthropic: ceil(edge/28)² 28px patches, capped at 4,784 patches, +5%
+      margin (1568px → 3,293; 1932px → 5,000 — 69² = 4,761 patches, under
+      the cap; the cap binds only for frames past ~1,937px).
     - Google: flat 1,120 tokens per image (``media_resolution`` HIGH),
       regardless of pixel size.
     - OpenAI: ceil(edge/32)² 32px patches × 1.2 flagship multiplier, capped
@@ -645,13 +646,19 @@ def compact_to_archive(
         edge_tokens = estimate_archive_tokens(
             Archive(frames=[], text_head=text_head, text_tail=text_tail)
         )
+        budget_dropped = 0
         while pages and edge_tokens + len(pages) * per_frame > budget:
-            truncated_chars += len(pages[0])
+            budget_dropped += len(pages[0])
             pages = pages[1:]
+        if budget_dropped:
+            # ONE cumulative marker for the whole budget pass, not one per
+            # dropped page: N markers say the same thing N times and each
+            # re-renders into every later archive via Archive.text.
+            truncated_chars += budget_dropped
             text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
-        # The marker lines appended above are a handful of tokens; they are
-        # deliberately not folded back into edge_tokens — the budget is an
-        # estimate with a 2x reserve, not an invoice.
+        # The marker line is a handful of tokens; it is deliberately not
+        # folded back into edge_tokens — the budget is an estimate with a
+        # 2x reserve, not an invoice.
 
     frames = [render_frame(page, shape) for page in pages]
     # Pages carry no trailing newline; joining without one glues the last
@@ -730,6 +737,24 @@ def strategy_for_model(model_spec: ModelSpec) -> Literal["snapcompact", "context
     return "snapcompact" if model_spec.supports_images else "context-full"
 
 
+#: ``Shape.id`` grammar: ``<advance>on<line_pitch>-bw@<width>``. Parsed back
+#: when a caption must describe an archive rendered by a DIFFERENT model than
+#: the one reading it (mid-session switches): the frames' own shape_id is the
+#: durable truth about their geometry; the current model's shape is not.
+_SHAPE_ID_RE = re.compile(r"^(\d+)on(\d+)-bw@(\d+)$")
+
+
+def _shape_from_id(shape_id: str) -> Shape | None:
+    """Revive the geometry a persisted archive was rendered with, or None."""
+    match = _SHAPE_ID_RE.match(shape_id or "")
+    if not match:
+        return None
+    advance, line_pitch, width = (int(g) for g in match.groups())
+    if not (advance and line_pitch and width):
+        return None
+    return _shape(8, 13, advance, line_pitch, width)
+
+
 def archive_summary(archive: Archive, provider: str, model_id: str) -> str:
     """Deterministic summary text for a snapcompact pass — NO LLM call.
 
@@ -748,7 +773,11 @@ def archive_summary(archive: Archive, provider: str, model_id: str) -> str:
     contradict it, and hosts that render the text slot get an honest caption
     rather than an unlabelled apology.
     """
-    shape = resolve_shape(provider, model_id)
+    # The frames were rendered with the archive's OWN shape; after a model
+    # switch the current reader's shape can differ, and a caption describing
+    # the wrong grid is worse than none. Fall back to the reader's shape only
+    # for archives predating shape_id.
+    shape = _shape_from_id(archive.shape_id) or resolve_shape(provider, model_id)
     middle = (
         ", with the middle rendered as pixel-font image frames"
         if archive.frames

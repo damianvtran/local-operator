@@ -432,7 +432,8 @@ def test_frame_token_estimate_follows_provider_billing():
     tokens +5%, OpenAI 32px patches x1.2, Gemini a flat 1,120 per image. The
     cross-provider ceiling (5024) stays exported for callers with no reader
     at hand, but pricing a Gemini frame at it overstated the archive 4.5x."""
-    assert frame_token_estimate_for("anthropic", "claude-fable-5") == 5000  # 1932px, capped
+    # 1932px: 69^2 = 4,761 patches, UNDER the 4,784 cap; x1.05 -> 5,000.
+    assert frame_token_estimate_for("anthropic", "claude-fable-5") == 5000
     assert frame_token_estimate_for("anthropic", "claude-sonnet-4-5") == 3293  # 1568px
     assert frame_token_estimate_for("openai", "gpt-5.5") == 2882  # 49^2 * 1.2
     assert frame_token_estimate_for("google", "gemini-3") == 1120  # flat HIGH budget

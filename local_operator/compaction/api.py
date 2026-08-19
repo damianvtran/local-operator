@@ -212,6 +212,26 @@ def _serialize_message(message: AgentMessage, drop_call_ids: set[str]) -> str | 
     """One transcript block, or None to drop the message entirely."""
     if isinstance(message, CustomMessage):
         if message.custom_type == "compaction_summary":
+            # A snapcompact marker's summary is reading instructions for its
+            # image frames, not a digest — chaining IT into a later text
+            # summarization would replace the archived history with constant
+            # boilerplate. The archive's text edges are the real transcript
+            # (newest and oldest slices), so serialize those instead. The
+            # session's own summarize path never reaches this branch (it
+            # converts markers to rendered content first); this guards direct
+            # consumers of serialize_conversation handed raw transcript
+            # vocabulary.
+            preserve = message.details.get("preserve_data") or {}
+            snap = preserve.get("snapcompact") if isinstance(preserve, dict) else None
+            if isinstance(snap, dict):
+                edges = [
+                    edge
+                    for edge in (snap.get("text_head"), snap.get("text_tail"))
+                    if isinstance(edge, str) and edge.strip()
+                ]
+                if edges:
+                    joined = "\n[...]\n".join(edges)
+                    return f"[Previously archived history (edges)]\n{joined}"
             summary = message.details.get("summary", "")
             return f"[Previous compaction summary]\n{summary}"
         return f"[{message.custom_type}]"

@@ -48,6 +48,40 @@ def test_tool_result_truncation_boundary():
     assert "1 more characters truncated" in in_over
 
 
+def test_snapcompact_marker_serializes_its_text_edges_not_the_caption():
+    """A snapcompact marker's summary is reading instructions for its frames,
+    not a digest — chaining it into a later text summarization (a vision→text
+    model switch is the live path) would replace the archived history with
+    constant boilerplate. The archive's text edges are the real transcript,
+    so the serializer prefers them; a marker with no archive (a context-full
+    pass) keeps the summary, which for that strategy IS the content."""
+    from local_operator.harness.types import CustomMessage
+
+    snap_marker = CustomMessage(
+        custom_type="compaction_summary",
+        details={
+            "summary": "Resume prior conversation. Reading the archive: ...",
+            "preserve_data": {
+                "snapcompact": {
+                    "text_head": "OLDEST: parser question",
+                    "text_tail": "NEWEST: fix landed",
+                }
+            },
+        },
+    )
+    rendered = serialize_conversation([snap_marker])
+    assert "OLDEST: parser question" in rendered
+    assert "NEWEST: fix landed" in rendered
+    assert "Reading the archive" not in rendered
+
+    text_marker = CustomMessage(
+        custom_type="compaction_summary",
+        details={"summary": "the agent read two modules"},
+    )
+    rendered = serialize_conversation([text_marker])
+    assert "the agent read two modules" in rendered
+
+
 def test_useless_drops_pair_but_sibling_survives():
     """A useless result AND its paired call vanish; a sibling call on the same
     assistant survives with its (non-useless) result."""

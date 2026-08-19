@@ -695,10 +695,28 @@ def _render_compaction_marker(marker: CustomMessage, entry_id: str | None = None
                 return _replayed_user_message(content, entry_id)
         except Exception:
             logger.warning("snapcompact replay failed; falling back to text summary", exc_info=True)
+    # A snapcompact summary is reading instructions for the frames, not a
+    # digest of the history — falling back to it ALONE would replay a caption
+    # describing images that are not there while the real content vanished.
+    # The archive's text edges are plain strings in the same payload and
+    # survive whatever made the frame list unrevivable, so salvage them: they
+    # are the newest/oldest slices of the actual transcript, which is strictly
+    # more useful than any caption.
+    salvage = ""
+    if isinstance(archive_payload, dict):
+        head = archive_payload.get("text_head")
+        tail = archive_payload.get("text_tail")
+        edges = [edge for edge in (head, tail) if isinstance(edge, str) and edge.strip()]
+        if edges:
+            joined = "\n[...]\n".join(edges)
+            salvage = f"\n<archived-transcript-edges>\n{joined}\n</archived-transcript-edges>"
     return _replayed_user_message(
         [
             TextContent(
-                text="<previous-context-summary>\n" f"{summary}\n" "</previous-context-summary>"
+                text="<previous-context-summary>\n"
+                f"{summary}\n"
+                "</previous-context-summary>"
+                f"{salvage}"
             )
         ],
         entry_id,
@@ -2951,7 +2969,7 @@ class Session:
             # baked in here as a plain user message is past both of the guards
             # that expire it.
             self._context.messages = [marker, *kept]
-            tokens_after = await self._offloaded(
+            history_after = await self._offloaded(
                 compaction_api, "estimate_messages_tokens", self._render_for_compaction()
             )
             # The local ruler prices every image at a flat IMAGE_TOKEN_ESTIMATE
@@ -2970,7 +2988,7 @@ class Session:
 
                     frame_count = len(snap_payload.get("frames") or [])
                     per_frame = frame_token_estimate_for(self._model.provider, self._model.model_id)
-                    tokens_after += frame_count * (per_frame - IMAGE_TOKEN_ESTIMATE)
+                    history_after += frame_count * (per_frame - IMAGE_TOKEN_ESTIMATE)
                 except Exception:  # noqa: BLE001 - a receipt must not fail the pass
                     logger.debug("frame pricing correction failed", exc_info=True)
             # ``tokens_before`` is the figure the GATE acted on —
@@ -2981,6 +2999,19 @@ class Session:
             # estimate) read as the band and the receipt disagreeing about
             # what just happened. omp quotes the provider figure for the same
             # reason (``calculateContextTokens(lastUsage)``).
+            #
+            # But the SAVING is measured with one ruler. The provider figure is
+            # the full request (system blocks + tool schemas + history) while
+            # the local estimates cover history alone, so ``context_tokens -
+            # history_after`` would count the fixed overhead as if the pass had
+            # removed it — inflating the receipt's "% smaller" and collapsing
+            # the band (which subtracts before-after) to a figure that
+            # understates the next request by the whole overhead. The honest
+            # after-figure keeps the overhead on both sides:
+            # ``context_tokens - (history saving)``, floored at the history
+            # itself for the degenerate case where the plan's figures cross.
+            saved = max(0, plan.tokens_before - history_after)
+            tokens_after = max(history_after, plan.context_tokens - saved)
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,

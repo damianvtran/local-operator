@@ -50,11 +50,14 @@ class CompactionOutcome:
 
     ``tokens_before`` is the figure the compaction gate acted on —
     ``max(provider-reported context, local estimate)`` — so the receipt agrees
-    with the status band the user was just looking at. ``tokens_after`` is the
-    local estimate of the rebuilt history, with archive frames re-priced at
-    the provider's own image billing rather than the estimator's flat rate.
-    Both exclude the system blocks and tool schemas, which a compaction does
-    not touch.
+    with the status band the user was just looking at. ``tokens_after`` is
+    ``tokens_before`` minus the pass's saving, where the saving is the
+    HISTORY-only difference measured by one local ruler on both sides (archive
+    frames re-priced at the provider's own image billing). Subtracting a
+    history-only after-figure from a full-request before-figure would count
+    the system blocks and tool schemas — which a compaction does not touch —
+    as if the pass had removed them; keeping the overhead on both sides is
+    what lets a host subtract the pair from its own reading safely.
     """
 
     ran: bool
