@@ -61,16 +61,6 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import wrap_cells
 
-#: Width the card takes when the terminal allows it, and the floor it prefers.
-#: Both are CELL counts of the card's content, inside its padding, and are
-#: resolved against the screen every paint (see :meth:`AskPickerScreen._card_width`).
-ASK_MAX_WIDTH = 74
-ASK_MIN_WIDTH = 30
-
-#: Cells left between the card and the terminal edges, on top of the card's own
-#: padding, so it reads as floating rather than bolted to the side.
-ASK_WIDTH_MARGIN = 6
-
 #: Cells of the card's own padding on EACH side, mirroring the horizontal half
 #: of ``padding: 1 1`` in the stylesheet. One cell rather than the modal's two:
 #: docked, this is the same rail every other panel in the dock uses (the
@@ -757,12 +747,14 @@ class AskPickerScreen(Container):
         Three guards, all load-bearing, because a false positive here answers
         the agent's question on the user's behalf:
 
-        - the point must be inside the BODY's region. The card is full-width in
-          the dock while its TEXT is not, so a click in the empty columns beside
-          a row still lands on this widget with a ``y`` that looks valid; and
-          the padding rows above and below the body do the same with an ``x``
-          that does. Region containment is what separates the card's ink from
-          the container it is painted in;
+        - the point must be inside the BODY's region. The body now spans the
+          card's full column, so the columns either side of a row are the card's
+          one-cell padding rather than the wide empty band they were while the
+          text was capped — but the guard is unchanged and still load-bearing:
+          the padding ROWS above and below the body carry no row at all, and a
+          click on one arrives with an ``x`` that looks perfectly valid. Region
+          containment is what separates the card's ink from the container it is
+          painted in, in both axes;
         - the line must map to a row in ``_line_rows``, which is recorded while
           painting, so the header, the blank spacers and the footer resolve to
           nothing rather than to whichever row the arithmetic lands on;
@@ -910,24 +902,40 @@ class AskPickerScreen(Container):
         return reserved if seen else _DOCK_ROWS_FALLBACK
 
     def _card_width(self) -> int:
-        """Content cells the card may use, measured against the terminal.
+        """Content cells the card may use: the COLUMN the dock laid it out in.
 
-        The preferred floor applies only while it FITS: a minimum width is a
-        preference and the terminal is not, so on a very narrow screen the card
-        gives up its breathing margin and then the floor rather than overflowing.
+        This is ``self.size.width`` and not a budget re-derived from the screen,
+        which is the opposite of what :meth:`_screen_size` does for ROWS — and
+        the asymmetry is the point. Height here is content-driven (``height:
+        auto``), so measuring it against the card's own box is measuring its own
+        shadow. Width is not: the stylesheet pins the card at ``width: 1fr``, so
+        its content box is IMPOSED by the dock and reading it back asks the
+        layout engine what column this panel occupies rather than guessing.
 
-        ``ASK_PADDING_CELLS`` must stay equal to the horizontal half of this
-        card's ``padding`` in the stylesheet. They are two statements of one
-        measurement, and when they disagree the card either wastes cells it was
-        given or lays out lines wider than the panel can draw — which the panel
-        resolves by clipping, silently.
+        What it replaces was a modal-era cap — 74 cells, less a floating margin,
+        measured against the terminal — and it survived the move into the dock
+        as a number nothing re-derived. The slab had been full-width since that
+        move, so the two disagreed and the gap grew with the terminal: measured
+        with a question and four options up, the card's text stopped at 74 cells
+        inside a 116-cell panel at 120 columns and inside a 156-cell panel at
+        160, leaving a third of the card as blank fill and every row — the rule
+        under the title, the selected row's tint, the footer — ending short of a
+        composer that ran the full width directly beneath it. A floating modal's
+        margin holds it off the terminal EDGE; docked, there is no edge there to
+        hold off, only the panel the card is part of.
+
+        Padding is not subtracted: Textual is border-box, so ``size`` is already
+        the box inside this widget's ``padding``. ``ASK_PADDING_CELLS`` is still
+        the stylesheet's mirror, and it is what the pre-layout fallback below
+        spends — the one path that has no laid-out width to read, because
+        ``compose`` paints once before the card has been placed. That frame is
+        replaced by ``on_resize`` the moment it has.
         """
+        mine = self.size.width if self.is_mounted else 0
+        if mine:
+            return max(1, mine)
         width, _ = self._screen_size()
-        padding = ASK_PADDING_CELLS * 2
-        room = width - ASK_WIDTH_MARGIN - padding
-        if room < ASK_MIN_WIDTH:
-            return max(1, width - padding)
-        return min(ASK_MAX_WIDTH, room)
+        return max(1, width - ASK_PADDING_CELLS * 2)
 
     def _question_lines(self, width: int) -> list[str]:
         """The question, wrapped. Never truncated: it is what is being asked.
