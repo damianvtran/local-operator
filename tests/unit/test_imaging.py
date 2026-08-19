@@ -543,6 +543,66 @@ def test_a_dithered_halftone_is_not_treated_as_line_art() -> None:
     assert error < 30, f"the halftone lost its tone (mean error {error:.1f})"
 
 
+@pytest.mark.parametrize(
+    ("height", "solid_period"),
+    [
+        # Defeats a ROUND `height // 64` stride: at 2048 that stride is 32, and
+        # every row it reads is one of the solid ones.
+        (2048, 32),
+        (1280, 20),
+        # Defeats a PRIME stride of 31, which collapses whenever the height is a
+        # multiple of 31 — 930 reads 30 distinct rows, 155 reads 5, 62 reads 2,
+        # and every one of them is solid.
+        (930, 31),
+        (155, 31),
+        (62, 31),
+    ],
+)
+def test_a_periodic_dither_is_never_misread_as_line_art(height: int, solid_period: int) -> None:
+    """The density must be measured over every pixel, not over sampled rows.
+
+    Any stride can be aliased by content whose vertical period shares a factor
+    with it, and the misclassification is not a near miss: a halftone called
+    line art is downscaled with NEAREST, which destroys the tone the alternating
+    pixels encode (~85 mean error against ~11 for LANCZOS).
+
+    Two strides have been tried in this function and each is defeated by a
+    different case below, which is why the fixture is parametrised over the
+    content period rather than pinned to one shape. A sampled implementation of
+    any stride fails at least one of these, so a future return to sampling fails
+    here rather than in a user's transcript.
+    """
+    width = 600
+    image = Image.new("L", (width, height), 0)
+    for y in range(height):
+        # Dithered everywhere EXCEPT rows on the period, which are left solid
+        # black — those are the rows an aliased sample reads.
+        if y % solid_period:
+            for x in range(0, width, 2):
+                image.putpixel((x, y), 255)
+
+    assert image.getcolors(maxcolors=2) is not None, "the fixture is not two-valued"
+    assert not _is_line_art(
+        image
+    ), f"a period-{solid_period} dither at height {height} was misread as line art"
+
+
+def test_line_art_is_still_recognised_at_a_stride_aligned_height() -> None:
+    """The exact measurement must not have cost us the true positive.
+
+    The companion to the test above: genuine line art at one of the same
+    collapsing heights still has to reach the NEAREST path, or the fix for the
+    aliasing would have been bought by disabling the feature.
+    """
+    width, height = 600, 930
+    image = Image.new("L", (width, height), 255)
+    for y in range(0, height, 16):  # flat horizontal rules — solid runs
+        for x in range(width):
+            image.putpixel((x, y), 0)
+
+    assert _is_line_art(image), "flat rules were not recognised as line art"
+
+
 def test_a_photograph_is_still_resized_smoothly_to_the_cheap_bound() -> None:
     """The NEAREST path is for line art only. Photographic content has no
     strokes to lose, is what the 1568 cost argument was measured on, and would

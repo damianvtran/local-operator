@@ -265,10 +265,14 @@ def _exif_transposed(image: Any) -> Any:
 #: delicate. 0.15 sits in the empty middle.
 _LINE_ART_MAX_TRANSITION_DENSITY = 0.15
 
-#: Rows sampled when measuring that density. The statistic is a proportion, so
-#: it converges long before a full read; sampling bounds the check at a few
-#: hundred row reads no matter how large the image is.
-_LINE_ART_SAMPLE_ROWS = 64
+#: Rows per strip when measuring that density. The measurement reads EVERY
+#: pixel — see :func:`_is_line_art` for why sampling was abandoned — so this
+#: exists only to bound peak memory, not to bound the work. Each strip
+#: allocates two difference buffers of ``width * band`` bytes, so at the 50M
+#: pixel decode ceiling the walk peaks at a few MB rather than at ~100 MB for a
+#: whole-image diff. 512 rows is ~3.6 MB on a 7000px-wide image; smaller bands
+#: only add per-crop overhead without changing the result.
+_LINE_ART_BAND_ROWS = 512
 
 
 def _is_line_art(image: Any) -> bool:
@@ -284,9 +288,28 @@ def _is_line_art(image: Any) -> bool:
     against 11.4 for LANCZOS (review round 3, F11).
 
     So two tests, in cost order. The histogram is bounded by ``maxcolors`` and
-    bails immediately on anything photographic. Only then is the transition
-    density measured, and only over sampled rows, because by then the image is
-    known to be two-valued and the question is just how its pixels alternate.
+    bails immediately on anything photographic — which is the gate that keeps
+    this cheap, because only an image already known to be two-valued reaches the
+    second test.
+
+    The density is then measured over EVERY pixel, not over sampled rows. An
+    earlier version read 64 rows at a stride, and every stride is alignable:
+    content whose own vertical period shares a factor with the stride is read at
+    the same phase every time. A round ``height // rows`` stride misreads an
+    image that is solid on exactly the rows it lands on, and switching to a
+    prime stride only moves the collision — at a stride of 31 any height that is
+    a multiple of 31 collapses the walk onto ``height / 31`` distinct rows (a
+    930px image samples 30 rows, a 155px image just 5). Since the two
+    populations are separated by ~50x, the failure is not a near miss: a
+    misread halftone is downscaled with NEAREST, which destroys the tone it
+    encodes.
+
+    Reading everything removes the premise instead of retuning it, and costs
+    nothing to do so. The comparison is vectorised in Pillow — the image against
+    itself shifted one column, differenced, then histogrammed — so it is the
+    same ~4 ms on a 2048x1200 frame that the 64-row Python loop cost, and it
+    cannot be defeated by any content period. It runs banded so that peak memory
+    stays bounded on a large image.
 
     Asked of the PIXELS rather than the mode: snapcompact renders ``L``, a
     scanner produces ``1``, and an ordinary grayscale photograph is also ``L``.
@@ -297,20 +320,34 @@ def _is_line_art(image: Any) -> bool:
     if image.mode not in ("1", "L"):
         return False
     try:
+        # Imported inside the function, like every other Pillow use here:
+        # `imaging` is reachable from the core import path and a module-level
+        # `from PIL import ...` costs ~23 ms and ~7.6 MB RSS on runs that never
+        # touch an image. `tests/unit/test_import_graph.py` pins that.
+        from PIL import ImageChops
+
         if image.getcolors(maxcolors=2) is None:
             return False
         gray = image if image.mode == "L" else image.convert("L")
         width, height = gray.size
         if width < 2 or height < 1:
             return False
-        pixels = gray.get_flattened_data()
-        step = max(1, height // _LINE_ART_SAMPLE_ROWS)
+        # Count horizontally adjacent pairs that differ, one horizontal band at
+        # a time. Within a band the count is the number of non-zero pixels in
+        # |strip - strip shifted left one column|, which Pillow computes in C.
         transitions = 0
-        compared = 0
-        for y in range(0, height, step):
-            row = pixels[y * width : (y + 1) * width]
-            compared += width - 1
-            transitions += sum(1 for x in range(width - 1) if row[x] != row[x + 1])
+        compared = (width - 1) * height
+        for top in range(0, height, _LINE_ART_BAND_ROWS):
+            bottom = min(top + _LINE_ART_BAND_ROWS, height)
+            strip = gray.crop((0, top, width, bottom))
+            rows = bottom - top
+            delta = ImageChops.difference(
+                strip.crop((0, 0, width - 1, rows)),
+                strip.crop((1, 0, width, rows)),
+            )
+            # histogram()[0] is the count of identical pairs; everything above
+            # it is a transition, whatever the magnitude of the change.
+            transitions += sum(delta.histogram()[1:])
         if not compared:
             return False
         return transitions / compared <= _LINE_ART_MAX_TRANSITION_DENSITY
