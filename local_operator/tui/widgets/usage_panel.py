@@ -514,6 +514,11 @@ class UsagePanel(Static):
         self._reports: list[Any] = []
         self._offset = 0
         self._loading = False
+        #: A background refresh is running while cached reports are already on
+        #: screen. The body renders the reports (their age stated in the title)
+        #: rather than "fetching…": the numbers the user came for are present,
+        #: and the fetch only confirms or replaces them.
+        self._refreshing = False
         self._error = ""
         self._target = ""
         self._fetched_ms: float | None = None
@@ -539,16 +544,40 @@ class UsagePanel(Static):
         """
         self._request_generation += 1
         self._loading = True
+        self._refreshing = False
         self._error = ""
         self._target = target
+        # Clear any previous reports so a cold open reads "fetching…" rather
+        # than the last session's numbers; the cached-first path repopulates
+        # this immediately via `show_cached` when a row is on hand.
+        self._reports = []
+        self._fetched_ms = None
         self.display = True
         self._repaint()
         return self._request_generation
+
+    def show_cached(self, reports, *, now_ms: float) -> None:  # noqa: ANN001
+        """Paint cached reports immediately while the fetch runs behind them.
+
+        The panel opened with a row already in the shared cache: showing
+        "fetching…" would hide an answer that is on hand, so the reports render
+        at once with their true age in the title and a ``refreshing…`` mark, and
+        the fetch's result replaces them when it lands.
+        """
+        self._reports = list(reports)
+        self._loading = False
+        self._refreshing = True
+        self._error = ""
+        self._fetched_ms = now_ms
+        self._offset = 0
+        self.display = True
+        self._repaint()
 
     def show_reports(self, reports, *, now_ms: float | None = None) -> None:  # noqa: ANN001
         """Install a finished fetch and paint it."""
         self._reports = list(reports)
         self._loading = False
+        self._refreshing = False
         self._error = ""
         self._fetched_ms = self._now() if now_ms is None else now_ms
         self._offset = 0
@@ -558,8 +587,20 @@ class UsagePanel(Static):
     def show_error(self, message: str) -> None:
         """A failed fetch stays IN the panel, next to the key that retries it."""
         self._loading = False
+        self._refreshing = False
         self._error = message
         self.display = True
+        self._repaint()
+
+    def settle_refresh(self) -> None:
+        """A background refresh ended with the cached reports still on screen.
+
+        The fetch path serves stale data on failure rather than blanking the
+        panel, so the only visible change is the ``refreshing…`` mark going
+        away: the numbers stay, and their age in the title already says how
+        stale they are.
+        """
+        self._refreshing = False
         self._repaint()
 
     def accepts_request(self, generation: int) -> bool:
@@ -570,6 +611,7 @@ class UsagePanel(Static):
         """Hide the panel and forget the scroll position."""
         self._request_generation += 1
         self._loading = False
+        self._refreshing = False
         self._offset = 0
         self.display = False
 
@@ -590,6 +632,11 @@ class UsagePanel(Static):
     @property
     def reports(self) -> list[Any]:
         return list(self._reports)
+
+    @property
+    def has_reports(self) -> bool:
+        """Whether any reports (live or cached) are on screen."""
+        return bool(self._reports)
 
     @property
     def view_offset(self) -> int:
@@ -734,7 +781,7 @@ class UsagePanel(Static):
                 [Text(truncate_cells(self._error, width), style=danger)],
                 frozenset({1}),
             )
-        if self._loading:
+        if self._loading and not self._reports:
             return UsageBody([Text("fetching…", style=dim)], frozenset({1}))
         if not self._reports:
             # Two failures look identical in an empty panel and only one is
@@ -756,6 +803,8 @@ class UsagePanel(Static):
             row.append(f"  {self._target}", style=muted)
         if self._fetched_ms is not None and not self._loading and not self._error:
             row.append(f"  {format_age(self._now() - self._fetched_ms)}", style=dim)
+        if self._refreshing and not self._error:
+            row.append("  refreshing…", style=dim)
         return row
 
     def _hint_row(self, scrolled: bool) -> Text:

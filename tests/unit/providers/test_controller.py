@@ -8,6 +8,7 @@ httpx transport.
 from __future__ import annotations
 
 import types
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -16,6 +17,7 @@ import pytest
 from local_operator.harness.types import ModelSpec
 from local_operator.providers.controller import ProviderController
 from local_operator.providers.usage import UsageReport
+from local_operator.providers.usage_cache import UsageCacheStore
 
 
 class FakeAuthStore:
@@ -71,8 +73,17 @@ def store() -> FakeAuthStore:
 
 
 @pytest.fixture
-def controller(store):
-    return ProviderController(store, login_callbacks=None)
+def usage_cache(tmp_path) -> Iterator[UsageCacheStore]:
+    # Aim the shared cache at a temp file so controller tests never touch (or
+    # are polluted by) the real ~/.local-operator/usage_cache.db.
+    cache = UsageCacheStore(tmp_path / "usage_cache.db")
+    yield cache
+    cache.close()
+
+
+@pytest.fixture
+def controller(store, usage_cache):
+    return ProviderController(store, login_callbacks=None, usage_cache=usage_cache)
 
 
 def test_login_provider_listing(controller) -> None:
@@ -541,3 +552,146 @@ def test_a_catalogue_survives_a_store_that_cannot_be_read(controller, store) -> 
     entries = controller.static_catalogue()
     assert entries
     assert all(entry.connected for entry in entries)
+
+
+class TestUsageCache:
+    """`/usage` answers from the shared cache, not the network, whenever a row
+    is warm. The cache is what makes the command instant across every lop
+    session on the machine, so these pin the fetch path to it."""
+
+    @staticmethod
+    def _account(email: str, account_id: str):
+        return types.SimpleNamespace(
+            access_token=f"tok-{account_id}",
+            credential_id=0,
+            account_id=account_id,
+            email=email,
+            org_id=None,
+            api_endpoint=None,
+            kind="oauth",
+            raw=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_warm_row_is_served_without_crossing_the_network(
+        self, controller, store, monkeypatch
+    ) -> None:
+        store.oauth_accounts["anthropic"] = [self._account("me@example.com", "acct-1")]
+        calls = 0
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            nonlocal calls
+            calls += 1
+            return UsageReport(provider=provider, limits=[])
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        first = await controller.fetch_usage(["anthropic"])
+        second = await controller.fetch_usage(["anthropic"])
+
+        assert len(first) == 1 and len(second) == 1
+        # The second read hit the cache: exactly one network round total.
+        assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_force_refresh_bypasses_the_warm_row(
+        self, controller, store, monkeypatch
+    ) -> None:
+        store.oauth_accounts["anthropic"] = [self._account("me@example.com", "acct-1")]
+        calls = 0
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            nonlocal calls
+            calls += 1
+            return UsageReport(provider=provider, limits=[])
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        await controller.fetch_usage(["anthropic"])
+        await controller.fetch_usage(["anthropic"], force_refresh=True)
+
+        # `r` in the panel must actually re-fetch, not hand back the cache.
+        assert calls == 2
+
+    @pytest.mark.asyncio
+    async def test_login_invalidates_the_cached_row(self, controller, store, monkeypatch) -> None:
+        """The account set is folded into the cache key, so adding an account
+        stops the old row from matching and forces a fresh fetch.
+
+        The fingerprint is a synchronous projection of the STORED credential
+        rows (the same source `list_oauth_accesses` reads in the real store),
+        so the test populates `rows` as well as the fake's `oauth_accounts`.
+        """
+        store.upsert_credential(
+            "anthropic", {"refresh": "r1", "access": "a1", "email": "me@example.com"}
+        )
+        store.oauth_accounts["anthropic"] = [self._account("me@example.com", "acct-1")]
+        calls = 0
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            nonlocal calls
+            calls += 1
+            return UsageReport(provider=provider, limits=[])
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        await controller.fetch_usage(["anthropic"])
+        # A second account logs in: the fingerprint changes, the cached row no
+        # longer matches, and the fetch runs again.
+        store.upsert_credential(
+            "anthropic", {"refresh": "r2", "access": "a2", "email": "other@example.com"}
+        )
+        store.oauth_accounts["anthropic"].append(self._account("other@example.com", "acct-2"))
+        await controller.fetch_usage(["anthropic"])
+        # The second fetch re-ran for BOTH accounts (the row no longer matched),
+        # so the total is 1 + 2, not a cache hit.
+        assert calls == 3
+
+    @pytest.mark.asyncio
+    async def test_a_failed_refresh_serves_the_last_good_value(
+        self, controller, store, monkeypatch
+    ) -> None:
+        store.oauth_accounts["anthropic"] = [self._account("me@example.com", "acct-1")]
+        fail = False
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            if fail:
+                raise RuntimeError("quota endpoint exploded")
+            return UsageReport(provider=provider, limits=[])
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        warm = await controller.fetch_usage(["anthropic"])
+        assert len(warm) == 1
+
+        # Expire the row (a RECENT past expiry — an ancient one is pruned by the
+        # retention cleanup on the next write), then fail the refresh: the stale
+        # value must survive.
+        key = controller._usage_cache_key("anthropic")
+        cache = controller._usage_cache_store()
+        assert cache is not None
+        stale = cache.get(key, include_expired=True)
+        assert stale is not None
+        import time as _time
+
+        cache.set(key, "anthropic", stale, expires_at_ms=int(_time.time() * 1000) - 1000)
+
+        fail = True
+        recovered = await controller.fetch_usage(["anthropic"])
+        assert len(recovered) == 1, "a blip must not blank the report"
+
+    @pytest.mark.asyncio
+    async def test_alias_providers_share_one_cache_row(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """`openai-device` logs in under `openai`; both spellings must read the
+        same cache row rather than hold one permanently-stale copy each."""
+        assert controller._usage_cache_key("openai") == controller._usage_cache_key("openai-device")

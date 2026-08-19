@@ -476,6 +476,20 @@ LOOP_PROMPT = (
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
 
+#: How often the background usage warmer checks whether the active provider's
+#: quota row is going stale. The warmer only REFRESHES when the shared cache row
+#: is older than the TTL minus one interval, so in steady state it costs one
+#: network round per provider per TTL — and because the cache is shared across
+#: every lop session on this machine, one session's warm keeps every session's
+#: `/usage` instant. The panel's own fetch reads the same cache, so a warm row
+#: means `/usage` answers with no network at all.
+USAGE_WARM_INTERVAL_S = 60.0
+
+#: Refresh threshold for the warmer: a row younger than this is left alone.
+#: One TTL interval below the cache TTL, so the warmer fires roughly once per
+#: TTL window rather than racing the expiry.
+USAGE_WARM_STALE_AFTER_S = 240.0
+
 #: Minimum seconds between two re-title CHECKS on one conversation. The check
 #: is a provider call (the model, not a keyword rule, judges whether the
 #: subject moved — see :meth:`OperatorApp._maybe_retitle_conversation`), so
@@ -1353,6 +1367,9 @@ class OperatorApp(App[None]):
         editor.focus()
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
+        # Keep the active provider's quota warm in the shared cache so `/usage`
+        # answers from disk (see USAGE_WARM_INTERVAL_S).
+        self.set_interval(USAGE_WARM_INTERVAL_S, self._warm_usage_background)
 
         # Await the session in a worker so the app paints first.
         self.run_worker(self._boot_session(), thread=False, group="session")
@@ -1498,6 +1515,11 @@ class OperatorApp(App[None]):
             return
         self._adopt_session(session)
         await self._preflight_usage(session)
+        # Warm the active provider's quota row in the shared cache so the first
+        # `/usage` after launch answers from disk. No-op when another session
+        # already holds a fresh row (the age gate), so a fleet of terminals does
+        # not each pay a startup fetch.
+        self._warm_usage_background()
 
     def _restore_resumed_name(self, session: Any) -> None:
         """Give a resumed conversation a label even when none was stored.
@@ -6298,6 +6320,10 @@ class OperatorApp(App[None]):
         # A different model may well have a dial, so the per-model refusal latch
         # goes with the old one.
         self._effort_refusal_shown = None
+        # The active provider just changed; warm its quota row so a `/usage`
+        # right after the switch answers from disk too. The age gate makes this
+        # a no-op when the row is already warm.
+        self._warm_usage_background()
         persist_result: str | None = None
         saved_to = ""
         if persist_default:
@@ -7303,11 +7329,17 @@ class OperatorApp(App[None]):
         self._open_usage_panel(target)
 
     def _open_usage_panel(self, target: str) -> None:
-        """Show the panel in its loading state and start the fetch.
+        """Show the panel and start the fetch.
 
         The panel opens BEFORE the request. The fetch crosses the network once
         per logged-in provider, and a command whose only immediate effect was a
         transcript notice read as a command that had not run.
+
+        When the shared cache already holds a row for the target, the reports
+        paint IMMEDIATELY (their age stated in the title, a ``refreshing…``
+        mark while the fetch confirms them) — that is the fast path `/usage`
+        exists for. With nothing cached the panel shows its loading state and
+        the fetch is the whole answer.
         """
         panel = self._usage_panel()
         if panel is None:
@@ -7316,6 +7348,16 @@ class OperatorApp(App[None]):
         self._usage_focus_restore = self.focused
         generation = panel.start_fetch(target)
         panel.focus()
+        # Instant paint from the shared cache, when a row exists. Synchronous
+        # and network-free, so it is safe on the keystroke; the fetch below
+        # then confirms or replaces what is on screen.
+        if self._providers is not None:
+            try:
+                cached = self._providers.cached_usage_reports(target or None)
+            except Exception:  # noqa: BLE001 — a cache read failure is a cold open
+                cached = []
+            if cached:
+                panel.show_cached(cached, now_ms=self._usage_data_age_ms(cached))
         # A second command replaces the first request. Without exclusivity a slow
         # response can overwrite the newer provider's report.
         self.run_worker(
@@ -7332,32 +7374,137 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — the panel is optional chrome
             return None
 
-    async def _fetch_usage_worker(self, provider: str | None, generation: int) -> None:
+    async def _fetch_usage_worker(
+        self, provider: str | None, generation: int, force_refresh: bool = False
+    ) -> None:
         """Fetch usage and paint only if this request still owns the panel.
 
         A failure is reported INSIDE the panel rather than as a transcript
         notice: the panel is what has focus and what carries the key that
         retries, so sending the error anywhere else asks the user to look away
         from the surface holding the fix.
+
+        ``force_refresh`` is the panel's ``r``: bypass the fresh-cache check so
+        an explicit refresh always crosses the network. The bare command and the
+        warmer read the shared cache first, which is how `/usage` answers
+        instantly when a row is warm.
         """
         panel = self._usage_panel()
         try:
             assert self._providers is not None
-            reports = await self._providers.fetch_usage([provider] if provider else None)
+            reports = await self._providers.fetch_usage(
+                [provider] if provider else None, force_refresh=force_refresh
+            )
         except Exception as error:
             if panel is None:
                 self._append_block(NoticeBlock(f"usage fetch failed: {error}", "error"))
             elif panel.accepts_request(generation):
-                panel.show_error(f"usage fetch failed: {error}")
+                # Cached reports already on screen survive a failed refresh:
+                # the numbers stay, the `refreshing…` mark goes, and the age in
+                # the title already states how stale they are. Blanking them for
+                # a network blip would lose the very answer the cache holds.
+                if panel.has_reports:
+                    panel.settle_refresh()
+                else:
+                    panel.show_error(f"usage fetch failed: {error}")
             return
         if panel is None:
             self._append_block(NoticeBlock("usage panel unavailable", "warning"))
             return
         if panel.accepts_request(generation):
-            panel.show_reports(reports)
+            if not reports and panel.has_reports:
+                # An empty result with cached rows on screen means the refresh
+                # found nothing new (or failed and served stale): keep what is
+                # painted rather than wipe it for an empty fetch.
+                panel.settle_refresh()
+                return
+            # The age shown is the DATA's age, not the fetch's: a row served
+            # from the shared cache may be minutes old, and "just now" would
+            # overstate a number the user is deciding on. `r` forces a live
+            # fetch when fresher numbers are wanted.
+            panel.show_reports(reports, now_ms=self._usage_data_age_ms(reports))
+
+    @staticmethod
+    def _usage_data_age_ms(reports: list[Any]) -> float:
+        """The oldest report's ``fetched_at`` as an epoch-ms clock reading.
+
+        The panel's title renders ``now - fetched_ms`` as the age, so handing
+        it the OLDEST report's fetch time states how stale the stalest number
+        on screen is. Falls back to the wall clock (age ≈ 0) when no report
+        carries a usable timestamp.
+        """
+        stamps = [int(getattr(report, "fetched_at", 0) or 0) for report in reports]
+        stamps = [stamp for stamp in stamps if stamp > 0]
+        if not stamps:
+            import time
+
+            return time.time() * 1000
+        return float(min(stamps))
+
+    def _warm_usage_background(self) -> None:
+        """Keep the active provider's quota row warm so `/usage` answers from disk.
+
+        Interval callback (see :data:`USAGE_WARM_INTERVAL_S`). Reads the shared
+        cache's age for the provider this session is actually running on, and
+        only when that row is missing or going stale does it kick a background
+        refresh — so in steady state it costs one network round per provider per
+        TTL, never a fetch per interval.
+
+        The refresh goes through the SAME cached fetch path the panel uses, which
+        is what makes this cheap across many concurrent sessions: the cross-process
+        lease in :mod:`usage_cache` ensures only one session on the machine
+        actually crosses the network for a stale row, and every other session's
+        warmer reads the freshly-written shared cache and does nothing. Warming
+        the active provider (rather than every reportable one) is deliberate —
+        it is the account a turn could run out of, and the one a user is most
+        likely to ask about; bare `/usage` still fetches any cold provider in
+        parallel on demand.
+
+        Never raises into the event loop: a quota warm-up is an optimisation,
+        and a failure must read as "the next `/usage` fetches live", not as a
+        crash.
+        """
+        if self._providers is None:
+            return
+        provider = getattr(_model_spec(self._session), "provider", None)
+        if not provider:
+            return
+        try:
+            if not self._providers.can_report_usage(provider):
+                return
+            age_ms = self._providers.usage_cache_age_ms(provider)
+        except Exception:  # noqa: BLE001 — a warm-up must never take the app down
+            return
+        if age_ms is not None and age_ms <= USAGE_WARM_STALE_AFTER_S * 1000:
+            return  # still fresh: nothing to do this tick
+        self.run_worker(
+            self._warm_usage_worker(provider),
+            thread=False,
+            group="usage-warm",
+            exclusive=True,
+        )
+
+    async def _warm_usage_worker(self, provider: str) -> None:
+        """Background refresh for one provider; never paints the panel.
+
+        Deliberately NOT the panel's ``group="usage"`` worker: a warm-up must
+        neither cancel an in-flight panel fetch nor be cancelled by one, and it
+        has no surface to update — its only output is the shared cache row the
+        next `/usage` reads.
+        """
+        try:
+            assert self._providers is not None
+            await self._providers.fetch_usage([provider])
+        except Exception:  # noqa: BLE001 — warm-up failure is a future live fetch
+            pass
 
     def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
-        """``r`` in the panel — re-run the same fetch behind the same view."""
+        """``r`` in the panel — re-run the same fetch behind the same view.
+
+        Forced: ``r`` is the user saying the numbers on screen are not fresh
+        enough, so it bypasses the cache rather than risk handing back the
+        same row.
+        """
         message.stop()
         if self._providers is None:
             return
@@ -7367,7 +7514,7 @@ class OperatorApp(App[None]):
         target = panel.target
         generation = panel.start_fetch(target)
         self.run_worker(
-            self._fetch_usage_worker(target or None, generation),
+            self._fetch_usage_worker(target or None, generation, force_refresh=True),
             thread=False,
             group="usage",
             exclusive=True,

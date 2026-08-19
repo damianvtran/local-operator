@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import random
 import time
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
@@ -43,6 +44,13 @@ from local_operator.providers.usage import (
     usage_kinds,
     usage_supported,
 )
+from local_operator.providers.usage_cache import (
+    USAGE_REPORT_TTL_MS,
+    UsageCacheStore,
+    fingerprint_accounts,
+    fingerprint_secret,
+    provider_cache_key,
+)
 
 if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
     from local_operator.credentials import CredentialManager
@@ -50,6 +58,18 @@ if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
 LoginCallbackFactory = Callable[[ProviderDefinition], "LoginCallbacks"]
+
+
+class _UsageFetchError(Exception):
+    """Every fetch attempt for a provider failed.
+
+    Distinct from a legitimately EMPTY result: a provider whose endpoint
+    answered "no quota" (an empty plan, a key with no balance endpoint) must be
+    negative-cached so the warmer does not re-hit it every tick, while a
+    provider whose endpoint is DOWN must keep serving its last good value and
+    retry on the next cool-down. Raising is how the two are told apart at the
+    cache-settling layer.
+    """
 
 
 @dataclasses.dataclass(frozen=True)
@@ -117,6 +137,7 @@ class ProviderController:
         credential_manager: "CredentialManager | None" = None,
         *,
         login_callbacks: LoginCallbackFactory | None = None,
+        usage_cache: UsageCacheStore | None = None,
     ) -> None:
         self.auth_store = auth_store
         self.credential_manager = credential_manager
@@ -124,6 +145,12 @@ class ProviderController:
         # used by default; an embedding host (e.g. a Textual app) injects
         # callbacks that yield the terminal before the flow runs.
         self._login_callbacks = login_callbacks
+        # Shared on-disk usage cache (see providers.usage_cache). Built lazily
+        # so a host that never asks for usage pays nothing, and injectable so
+        # tests can aim it at a temp file. Deliberately SHARED across every
+        # lop session on this machine: several terminals run at once, and one
+        # process's refresh is every process's answer.
+        self._usage_cache = usage_cache
 
     def set_login_callbacks(self, factory: "LoginCallbackFactory | None") -> None:
         """Install host-specific login callbacks after construction.
@@ -299,11 +326,32 @@ class ProviderController:
         return f"Removed {removed} credential(s) for '{provider_id}'."
 
     # -- usage -------------------------------------------------------------
-    async def fetch_usage(self, provider_ids: list[str] | None = None) -> list[UsageReport]:
+    async def fetch_usage(
+        self,
+        provider_ids: list[str] | None = None,
+        *,
+        force_refresh: bool = False,
+    ) -> list[UsageReport]:
         """Fetch normalized usage reports for the requested (or all
         report-able) providers. Never raises: a provider with no reachable
         credential or endpoint is simply absent from the result, and one
-        malformed provider never aborts the others."""
+        malformed provider never aborts the others.
+
+        Two accelerators sit in front of the network (see
+        :mod:`local_operator.providers.usage_cache`):
+
+        - A **shared on-disk cache** keyed per provider + account set, so a
+          fresh entry answers with no network at all — and because it is shared
+          across every lop session on this machine, one session's refresh is
+          every session's answer.
+        - **Parallel fan-out** across providers. The old loop awaited each
+          provider in turn, so the panel waited for the SUM of the round trips;
+          now it waits for the slowest one.
+
+        ``force_refresh`` bypasses the fresh-cache check (the panel's ``r``)
+        but still writes its result back, so the next read — in this session or
+        any other — is instant.
+        """
         targets = provider_ids or []
         if not targets:
             # The SAME predicate `/provider` and `/usage <provider>` use. An env key
@@ -314,14 +362,236 @@ class ProviderController:
         # De-duplicate aliases that share a storage id (openai vs
         # openai-device; xai vs xai-oauth) so one request/one report per row.
         targets = self._dedupe_targets(targets)
+        if not targets:
+            return []
         reports: list[UsageReport] = []
         async with httpx.AsyncClient() as client:
-            for provider in targets:
-                try:
-                    reports.extend(await self._fetch_provider(client, provider))
-                except Exception:  # noqa: BLE001 — isolate one broken provider
-                    continue
+            results = await asyncio.gather(
+                *(
+                    self._fetch_provider_cached(client, provider, force_refresh)
+                    for provider in targets
+                ),
+                return_exceptions=True,
+            )
+        for result in results:
+            # Isolate one broken provider: an exception here drops that row
+            # rather than aborting the whole report (the old per-provider try).
+            if isinstance(result, BaseException):
+                continue
+            reports.extend(result)
         return reports
+
+    # -- usage cache plumbing ------------------------------------------------
+
+    def close(self) -> None:
+        """Release the shared usage cache handle (idempotent, never raises)."""
+        if self._usage_cache is not None:
+            try:
+                self._usage_cache.close()
+            except Exception:  # noqa: BLE001 — teardown, never fatal
+                pass
+            self._usage_cache = None
+
+    def usage_cache_age_ms(self, provider: str) -> int | None:
+        """Milliseconds since the cached usage row for ``provider`` was fetched.
+
+        ``None`` when there is no cached row for the provider's CURRENT account
+        set (never fetched, or the account set changed since). This is the
+        question the TUI's background warmer asks before deciding whether to
+        spend a refresh: a warm row means `/usage` will answer from disk, so
+        the warmer only fires when the row is missing or going stale.
+
+        Synchronous and cheap (one indexed SQLite read), safe to call from an
+        interval callback.
+        """
+        cache = self._usage_cache_store()
+        if cache is None:
+            return None
+        key = self._usage_cache_key(provider)
+        fetched_at = cache.fetched_at_ms(key)
+        if fetched_at is None or fetched_at <= 0:
+            return None
+        now_ms = int(time.time() * 1000)
+        return max(0, now_ms - fetched_at)
+
+    def cached_usage_reports(self, provider: str | None = None) -> list[UsageReport]:
+        """The cached usage reports for ``provider`` (or all providers), any age.
+
+        The panel's instant-open half: when a row exists, `/usage` can paint it
+        immediately (its age stated in the title) while the fetch worker runs in
+        the background to confirm or replace it. Reads the shared cache only —
+        never crosses the network — so it is safe to call synchronously on the
+        keystroke that opens the panel.
+        """
+        cache = self._usage_cache_store()
+        if cache is None:
+            return []
+        targets = (
+            [provider] if provider else self._dedupe_targets(self.usage_reportable_providers())
+        )
+        reports: list[UsageReport] = []
+        for target in targets:
+            key = self._usage_cache_key(target)
+            try:
+                cached = cache.get(key, include_expired=True)
+            except Exception:  # noqa: BLE001 — a bad read is an empty open
+                cached = None
+            if cached:
+                reports.extend(cached)
+        return reports
+
+    def _usage_cache_store(self) -> UsageCacheStore | None:
+        """The shared usage cache, built lazily on first use.
+
+        Lazy so a host that never asks for usage pays nothing. Injectable via
+        the constructor so tests can aim it at a temp file instead of the real
+        ``~/.local-operator/usage_cache.db``.
+        """
+        if self._usage_cache is None:
+            try:
+                self._usage_cache = UsageCacheStore()
+            except Exception:  # noqa: BLE001 — no cache = live fetch, never fatal
+                return None
+        return self._usage_cache
+
+    def _storage_id(self, provider: str) -> str:
+        """The credential storage id for ``provider`` (aliases collapse).
+
+        ``openai-device`` logs in under ``openai``, ``xai-oauth`` under ``xai``;
+        the registry's ``store_credentials_as`` says so. Cache keys must follow
+        the SAME aliasing or the two spellings of one account would hold two
+        rows — one of them permanently stale.
+        """
+        definition = get_provider_definition(provider)
+        return (definition.store_credentials_as or provider) if definition else provider
+
+    def _usage_cache_key(self, provider: str) -> str:
+        """The shared-cache key for ``provider``'s current account set."""
+        return provider_cache_key(self._storage_id(provider), self._account_fingerprint(provider))
+
+    def _account_fingerprint(self, provider: str) -> str:
+        """A synchronous fingerprint of WHICH accounts ``provider`` would fetch.
+
+        Built from the stored credential rows (identity keys for OAuth, a hash
+        for API keys) plus any env key — no OAuth refresh, no network. Folding
+        the account set into the cache key is what makes login/logout
+        self-invalidating: the moment the set changes, the key changes and the
+        stale row stops matching. See :mod:`usage_cache` for why the key names
+        the account rather than the (rotating) access token.
+        """
+        storage = self._storage_id(provider)
+        parts: list[str] = []
+        try:
+            rows = self.auth_store.list_credentials(storage)
+        except Exception:  # noqa: BLE001 — an unreadable store fingerprints empty
+            rows = []
+        for row in rows:
+            if getattr(row, "credential_type", None) == "oauth":
+                identity = getattr(row, "identity_key", None)
+                parts.append(identity or f"cred:{getattr(row, 'id', 0)}")
+            else:
+                data = getattr(row, "data", None) or {}
+                key = data.get("key") if isinstance(data, dict) else None
+                if key:
+                    parts.append(fingerprint_secret(str(key)))
+        try:
+            env_key = resolve_env_key(storage)
+        except Exception:  # noqa: BLE001
+            env_key = None
+        if env_key:
+            parts.append(fingerprint_secret(env_key))
+        return fingerprint_accounts(parts)
+
+    @staticmethod
+    def _jittered_ttl_ms() -> int:
+        """Base TTL spread ±25%, so several accounts/providers do not all expire
+        into the same refresh window (the per-IP burst that earns a 429)."""
+        jitter = USAGE_REPORT_TTL_MS * (random.random() * 0.5 - 0.25)
+        return int(USAGE_REPORT_TTL_MS + jitter)
+
+    async def _fetch_provider_cached(
+        self,
+        client: httpx.AsyncClient,
+        provider: str,
+        force_refresh: bool,
+    ) -> list[UsageReport]:
+        """One provider's reports, cache-first.
+
+        Fast path: a fresh cache entry returns with no network at all. The
+        slow path delegates to :meth:`_refresh_provider_usage`, where the
+        cross-process lease ensures only one session on the machine actually
+        crosses the network for a stale row — every other session serves the
+        stale value while that one refreshes. That lease is the coordination;
+        no in-process future map is needed on top of it.
+        """
+        cache = self._usage_cache_store()
+        key = ""
+        if cache is not None:
+            key = self._usage_cache_key(provider)
+            if not force_refresh:
+                fresh = cache.get(key)
+                if fresh is not None:
+                    return fresh
+        return await self._refresh_provider_usage(client, provider, key, cache, force_refresh)
+
+    async def _refresh_provider_usage(
+        self,
+        client: httpx.AsyncClient,
+        provider: str,
+        key: str,
+        cache: UsageCacheStore | None,
+        force_refresh: bool,
+    ) -> list[UsageReport]:
+        """Actually cross the network for ``provider``, then settle the cache.
+
+        Cross-process coordination lives here: when the cached row is stale,
+        ONE session wins a lease and refreshes while the others serve the stale
+        row rather than joining a synchronized fan-out (Anthropic/OpenAI
+        rate-limit the usage endpoint per source IP). On failure the last good
+        value is served with a short cool-down, so a blip never blanks the
+        report.
+        """
+        stale: list[UsageReport] | None = None
+        lease_held = False
+        if cache is not None and key:
+            stale = cache.get(key, include_expired=True)
+            # The lease only has something to protect when a stale value exists:
+            # the loser serves it while the winner refreshes. With nothing on
+            # hand every session must fetch anyway (the pre-cache behaviour).
+            if not force_refresh and stale is not None and not cache.try_lease(key):
+                # A peer session owns this refresh; its result lands in the same
+                # shared row. Serve what we have instead of doubling the fan-out.
+                return stale
+            lease_held = stale is not None
+        try:
+            try:
+                reports = await self._fetch_provider(client, provider)
+            except _UsageFetchError:
+                # Every attempt failed: keep the last good value servable through
+                # a short cool-down rather than blanking the report.
+                reports = []
+                if cache is not None and key and stale is not None:
+                    cache.write_failure(key, provider)
+            else:
+                if cache is not None and key:
+                    now_ms = int(time.time() * 1000)
+                    # Cache the answer whether or not it has rows: a provider that
+                    # legitimately reports no quota (an empty plan) is negative-
+                    # cached so the warmer does not re-hit its endpoint every
+                    # tick. The empty list round-trips through the same row.
+                    cache.set(
+                        key, provider, reports, expires_at_ms=now_ms + self._jittered_ttl_ms()
+                    )
+        finally:
+            if lease_held and cache is not None and key:
+                cache.release_lease(key)
+        if reports:
+            return reports
+        if stale is not None:
+            # A forced refresh that failed still shows the last good numbers
+            # (their age is stated in the panel) rather than an empty card.
+            return stale
+        return []
 
     async def _fetch_provider(self, client: httpx.AsyncClient, provider: str) -> list[UsageReport]:
         """Every account's usage for one provider — not just the cascade's pick.
@@ -340,20 +610,45 @@ class ProviderController:
         if not usage_supported(provider):
             return []
         reports: list[UsageReport] = []
+        # Whether ANY fetch attempt ran against a real credential and completed
+        # without raising. That is the line between a legitimately EMPTY answer
+        # (negative-cache it) and a DOWN endpoint (keep the last good value and
+        # retry): a provider whose endpoint answered "no quota" must not be
+        # re-hit every warmer tick, while one whose every attempt raised must.
+        any_completed = False
         for access in await self.auth_store.list_oauth_accesses(provider):
             try:
                 report = await self._fetch_one(client, provider, access=access)
             except Exception:  # noqa: BLE001 — one bad account, not the provider
                 continue
+            any_completed = True
             if report is not None:
                 reports.append(report)
         if reports:
             return reports
+        # The API-key route only counts as "completed" when there WAS a key to
+        # try: `_fetch_one` returns None for "no credential at all", which is
+        # nothing fetched, not an empty answer. Without this guard a provider
+        # whose OAuth accounts all failed to fetch would be negative-cached as
+        # "no quota" instead of served its last good value.
         try:
-            report = await self._fetch_one(client, provider, access=None)
+            api_key = await self.auth_store.get_api_key(provider)
         except Exception:  # noqa: BLE001
-            return []
-        return [report] if report is not None else []
+            api_key = None
+        if api_key:
+            try:
+                report = await self._fetch_one(client, provider, access=None)
+            except Exception:  # noqa: BLE001
+                report = None
+            else:
+                any_completed = True
+            if report is not None:
+                return [report]
+        if not any_completed:
+            # Every attempt raised (or there was nothing to attempt): a failure,
+            # not an empty answer.
+            raise _UsageFetchError(provider)
+        return []
 
     def _dedupe_targets(self, targets: list[str]) -> list[str]:
         """Keep one id per storage row so alias providers don't double-fetch."""
