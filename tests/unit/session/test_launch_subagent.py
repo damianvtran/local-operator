@@ -881,3 +881,126 @@ async def test_a_launched_subagent_stays_out_of_the_resume_picker(tmp_path, monk
     assert session_origin(child_dir) == ORIGIN_SUBAGENT
 
     await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_hub_ask_reaches_a_child_under_the_eager_task_factory(tmp_path, monkeypatch):
+    """The observed wedge, end to end. Textual installs
+    ``asyncio.eager_task_factory`` on its loop (``textual/app.py``), which makes
+    ``ensure_future`` execute a new coroutine synchronously up to its first
+    suspension. The subagent runner registered inside ``jobs_manager.register``
+    can therefore build its child and call ``comms.attach`` BEFORE ``register``
+    returns to ``run_subagent`` — which then calls ``record_launch`` on an
+    already-attached record. The pre-fix ``record_launch`` REPLACED that
+    record, discarding the live child, the reply watcher and the session
+    directory: every later ``hub`` send/steer/ask buffered into ``pending`` on
+    a record whose flush (attach) had already happened and would never happen
+    again. Live, a healthy reviewer worked 41 minutes while two ``hub ask``
+    status checks never reached it, it was cancelled as wedged, and the roster
+    reported the settled child as "never started, so it has no transcript".
+
+    This drives the real launch path on an eager loop with a child that stays
+    in a slow tool call (the wedged reviewer's shape), asks it mid-run, and
+    asserts the question reaches the child's next provider request, the
+    child's prose reply resolves the ask, and the roster keeps the transcript.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    loop = asyncio.get_running_loop()
+    old_factory = loop.get_task_factory()
+    loop.set_task_factory(asyncio.eager_task_factory)
+
+    try:
+        from local_operator.harness import subagent as subagent_mod
+        from local_operator.harness.types import AgentTool, TextContent, ToolResult
+
+        slow_runs = [0]
+
+        async def slow_execute(tool_call_id, args, signal=None, on_update=None, context=None):
+            slow_runs[0] += 1
+            await asyncio.sleep(0.4)
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name="slow",
+                content=[TextContent(text="ok")],
+            )
+
+        slow_tool = AgentTool(
+            name="slow",
+            label="slow",
+            description="slow test tool",
+            parameters={"type": "object", "properties": {}},
+            execute=slow_execute,
+        )
+
+        class SlowToolChildStream:
+            """One slow-tool turn, then a final text turn; records whether a
+            parent message ever reached the child's context."""
+
+            def __init__(self) -> None:
+                self.calls = 0
+                self.parent_message_seen = False
+
+            def __call__(self, request: ChatRequest, signal):
+                self.calls += 1
+                for m in request.messages:
+                    if "parent-message" in m.text:
+                        self.parent_message_seen = True
+                n = self.calls
+
+                async def gen():
+                    if n == 1:
+                        yield StreamToolCallDelta(
+                            index=0, id="tc1", name="slow", argument_delta="{}"
+                        )
+                        yield StreamEndEvent(stop_reason="toolUse")
+                    else:
+                        yield StreamTextDelta(delta="child done, all fine")
+                        yield StreamEndEvent(stop_reason="stop")
+
+                return gen()
+
+        child_stream = SlowToolChildStream()
+        orig_build = subagent_mod._build_child_session
+
+        async def build_with_slow_tool(**kwargs):
+            child = await orig_build(**kwargs)
+            child._tools = [slow_tool]
+            child._context.tools = [slow_tool]
+            child._stream_fn = child_stream
+            return child
+
+        monkeypatch.setattr(subagent_mod, "_build_child_session", build_with_slow_tool)
+
+        parent = make_session(tmp_path, child_stream)
+        job_id = parent._launch_subagent(label="reviewer", prompt="review the diff")
+        comms = parent.subagent_comms
+
+        # The eager runner attached before record_launch ran; the fix must have
+        # merged, so the live child is still addressable right now.
+        record = comms._records[job_id]
+        assert record.child is not None, "attach was clobbered by record_launch"
+        assert record.session_dir is not None
+
+        # The child is parked in its slow tool call; ask it mid-run, exactly
+        # the parent's status-check pattern that used to time out.
+        reply = await comms.ask(job_id, "Status check: where are you?", 10_000)
+        assert reply.timed_out is False
+        assert reply.error is None
+        assert "child done" in (reply.text or "")
+        assert child_stream.parent_message_seen, "the question never reached the child"
+        assert slow_runs[0] == 1
+
+        # The settled child keeps its transcript on the roster, so resume and
+        # the roster's "never started" lie are both gone.
+        def _settled() -> bool:
+            job = parent.jobs.get(job_id)
+            return job is None or job.status != "running"
+
+        await wait_for(_settled)
+        [row] = [info for info in comms.roster() if info.job_id == job_id]
+        assert row.session_id == record.session_dir.name
+        assert "never started" not in (row.detail or "")
+
+        await parent.dispose()
+    finally:
+        loop.set_task_factory(old_factory)

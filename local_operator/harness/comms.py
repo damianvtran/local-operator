@@ -252,7 +252,32 @@ class SubagentComms:
         Called by :func:`~local_operator.harness.subagent.run_subagent` the
         moment the job id exists, so a parent can address a child that is
         still parked behind the capacity gate.
+
+        MERGES into an existing record instead of replacing it, and the
+        difference is load-bearing under an eager task factory. Textual
+        installs ``asyncio.eager_task_factory`` on the TUI's loop
+        (``textual/app.py``), which makes ``ensure_future`` execute a new
+        coroutine synchronously up to its first true suspension — so the
+        subagent runner registered inside ``jobs_manager.register`` can build
+        its child session and call :meth:`attach` BEFORE ``register`` returns
+        to ``run_subagent``, which only then calls this method. Replacing the
+        record here discarded that attach: the fresh record had no ``child``,
+        no ``session_dir`` and no reply watcher, so every later ``send``/
+        ``steer``/``ask`` buffered into ``pending`` on a record whose flush
+        (attach) had already happened and would never happen again. Live
+        effect, observed 2026-08-19: a healthy reviewer subagent worked for
+        41 minutes while two ``hub ask`` status checks silently never reached
+        it, it was cancelled as wedged, and the roster reported every settled
+        child as "never started, so it has no transcript" — which also made
+        ``resume`` refuse them.
         """
+        existing = self._records.get(job_id)
+        if existing is not None:
+            # attach() ran first (eager task factory) and its record carries
+            # the live child, the flushed asides and the reply watcher; the
+            # only fact this call adds is the label run_subagent chose.
+            existing.label = label
+            return
         self._records[job_id] = _ChildRecord(job_id=job_id, label=label)
         self._evict_overflow()
 
