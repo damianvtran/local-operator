@@ -267,11 +267,11 @@ _LINE_ART_MAX_TRANSITION_DENSITY = 0.15
 
 #: Rows per strip when measuring that density. The measurement reads EVERY
 #: pixel — see :func:`_is_line_art` for why sampling was abandoned — so this
-#: exists only to bound peak memory, not to bound the work. Each strip
-#: allocates two difference buffers of ``width * band`` bytes, so at the 50M
-#: pixel decode ceiling the walk peaks at a few MB rather than at ~100 MB for a
-#: whole-image diff. 512 rows is ~3.6 MB on a 7000px-wide image; smaller bands
-#: only add per-crop overhead without changing the result.
+#: exists only to bound peak memory, not to bound the work. A band allocates
+#: four buffers of roughly ``width * band`` bytes (the strip crop, its two
+#: shifted copies and their difference), which at 512 rows is 14.3 MB on a
+#: 7000px-wide image against 196 MB for the same walk done whole. Smaller bands
+#: cut that further but add per-crop overhead without changing the result.
 _LINE_ART_BAND_ROWS = 512
 
 
@@ -304,12 +304,16 @@ def _is_line_art(image: Any) -> bool:
     misread halftone is downscaled with NEAREST, which destroys the tone it
     encodes.
 
-    Reading everything removes the premise instead of retuning it, and costs
-    nothing to do so. The comparison is vectorised in Pillow — the image against
-    itself shifted one column, differenced, then histogrammed — so it is the
-    same ~4 ms on a 2048x1200 frame that the 64-row Python loop cost, and it
-    cannot be defeated by any content period. It runs banded so that peak memory
-    stays bounded on a large image.
+    Reading everything removes the premise instead of retuning it. It is not
+    free — the comparison is vectorised in Pillow (the image against itself
+    shifted one column, differenced, then histogrammed), but it touches every
+    pixel where the sample touched 64 rows, so on a 1200x2048 frame it costs
+    ~5 ms against ~2 ms and at the 50M-pixel decode ceiling ~107 ms against
+    ~17 ms. That is the right trade here: the result is exact and cannot be
+    defeated by any content period, the repair it gates is memoized so a given
+    image pays once, and the histogram gate above means photographic content
+    never reaches this walk at all. It runs banded so peak memory stays bounded
+    on a large image.
 
     Asked of the PIXELS rather than the mode: snapcompact renders ``L``, a
     scanner produces ``1``, and an ordinary grayscale photograph is also ``L``.
@@ -348,8 +352,8 @@ def _is_line_art(image: Any) -> bool:
             # histogram()[0] is the count of identical pairs; everything above
             # it is a transition, whatever the magnitude of the change.
             transitions += sum(delta.histogram()[1:])
-        if not compared:
-            return False
+        # ``compared`` cannot be zero: the guard above establishes width >= 2
+        # and height >= 1, so there is always at least one adjacent pair.
         return transitions / compared <= _LINE_ART_MAX_TRANSITION_DENSITY
     except Exception:  # noqa: BLE001 — a heuristic must never fail an image
         return False
