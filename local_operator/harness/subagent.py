@@ -114,6 +114,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.paths import config_dir
+from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 
 if TYPE_CHECKING:
     from local_operator.agent_profiles import AgentProfile
@@ -319,6 +320,13 @@ def _make_runner(
                 # text.
                 raise RuntimeError(str(final["error"]))
             result_text = final["text"]
+            # Recorded on the comms record, not just the job row: the manager
+            # sweeps settled rows after its retention window while comms
+            # records outlive them so a child stays resumable, and without
+            # this the roster (``hub op='list'``) could not say whether a
+            # swept child finished or crashed.
+            if comms is not None:
+                comms.record_outcome(job_id, "completed")
             await emit(
                 SubagentEndEvent(
                     job_id=job_id,
@@ -335,12 +343,25 @@ def _make_runner(
             # the end of the subagent it was shown start.
             if child is not None:
                 await _persist_inflight(child)
+            # After _persist_inflight, so the outcome is only recorded once the
+            # transcript a resume would replay is actually on disk. A pause
+            # arrives here too (it cancels underneath); record_outcome leaves
+            # the record's ``paused`` flag alone precisely so the roster can
+            # still tell the two apart.
+            if comms is not None:
+                comms.record_outcome(job_id, "cancelled")
             with contextlib.suppress(BaseException):
                 await asyncio.shield(
                     emit(SubagentEndEvent(job_id=job_id, label=label, status="cancelled"))
                 )
             raise
         except Exception as exc:
+            # The error text is kept on the record as well as the job row: it
+            # is what the roster shows for a failed child once the row is
+            # swept, which is the state an operator is most likely to be
+            # looking at when they ask what went wrong.
+            if comms is not None:
+                comms.record_outcome(job_id, "failed", str(exc))
             await emit(
                 SubagentEndEvent(job_id=job_id, label=label, status="failed", error_text=str(exc))
             )
@@ -397,8 +418,22 @@ async def _persist_inflight(child: "Session") -> None:
     """
 
     async def _write() -> None:
+        # Imported here rather than at module scope: ``session.session`` imports
+        # this module, so a top-level import is a cycle (the TYPE_CHECKING block
+        # above imports ``Session`` the same way).
+        from local_operator.session.session import _is_persistable_message
+
         known = {entry.id for entry in child._transcript.entries()}
         for message in _answered_prefix(list(child._context.messages)):
+            # The SAME allow-list the session's own flush uses. This writes the
+            # child's LIVE context, which after a compaction pass begins with
+            # the summary marker and may carry a todo reminder — neither of
+            # which may be persisted as a message: the marker is already stored
+            # as its own compaction entry, so writing it again replays a
+            # superseded summary beside the live one, and a stored reminder
+            # comes back as a user message the user never sent.
+            if not _is_persistable_message(message):
+                continue
             if message.id not in known:
                 await child._transcript.append_message(message)
 
@@ -688,6 +723,14 @@ async def _build_child_session(
     session_dir = (
         resume_dir if resume_dir is not None else config_dir() / "sessions" / uuid.uuid4().hex[:12]
     )
+    # Stamp the directory as the machine's BEFORE the transcript exists, so a
+    # picker painted while this child is mid-run already knows what it is. A
+    # child's directory is shape-identical to a user conversation, which is how
+    # every delegated reviewer, designer and scout run ended up offered under
+    # ``/resume`` as if the user had opened it. Re-stamped on resume as well:
+    # ``hub op='resume'`` rebuilds a child on its old directory, and a marker
+    # lost to an earlier failed write is worth retrying while we are here.
+    mark_session_origin(session_dir, ORIGIN_SUBAGENT, label=label, agent=agent)
     transcript = Transcript(session_dir)
     # A child writes its own session directory under the same ``sessions/``
     # store the retention sweep reclaims, so it needs the same claim its parent

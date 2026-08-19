@@ -42,7 +42,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.session.session import Session
-from local_operator.session.transcript import Transcript
+from local_operator.session.transcript import TRANSCRIPT_FILENAME, Transcript
 from local_operator.tools.builtin import execute_hub
 from local_operator.tools.registry import create_tools
 
@@ -1177,3 +1177,528 @@ def test_the_persisted_prefix_keeps_finished_batches_and_drops_the_interrupted_o
     assert kept == messages[:3]
     # A history with no dangling call is returned untouched.
     assert _answered_prefix(messages[:3]) == messages[:3]
+
+
+# --- roster (op='list') and pause ---------------------------------------------
+#
+# The gap these close: before them the only ways to enumerate children were
+# ``resolve("all")``, which returns RUNNING ones only, and the ``jobs`` tool,
+# whose rows the manager sweeps a few minutes after they settle. A child that
+# failed or was stopped therefore became unaddressable long before it stopped
+# being resumable, so the case an operator most wants to act on — a stuck or
+# crashed subagent — was the one they could not see.
+
+
+def test_the_roster_lists_a_running_child_as_not_resumable():
+    """Resumability is the opposite of the intuitive reading of the status, so
+    the roster states it rather than leaving it to be inferred: a RUNNING child
+    is the one that cannot be resumed."""
+    comms, _jobs, _child, _parent = wire()
+
+    [row] = comms.roster()
+
+    assert row.job_id == "job-1" and row.label == "parser"
+    assert row.status == "running"
+    assert row.resumable is False
+    assert "still running" in (row.detail or "")
+
+
+def test_the_roster_still_lists_a_child_whose_job_row_was_swept(tmp_path):
+    """The whole point of the feature. Job rows are swept minutes after they
+    settle while comms records outlive them so a child stays resumable; a
+    roster that read the row would go blank exactly when resume still works."""
+    comms, jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), tmp_path)
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.record_outcome("job-1", "failed", "provider 500")
+    comms.detach("job-1")
+    del jobs.jobs["job-1"]  # what AsyncJobManager._sweep_due does
+
+    [row] = comms.roster()
+
+    assert row.status == "failed"
+    assert row.resumable is True
+    assert "provider 500" in (row.detail or "")
+
+
+def test_the_roster_reports_a_never_started_child_as_unresumable():
+    """No transcript means no context to continue, and a resume that quietly
+    starts a stranger is worse than none — so the roster says so up front
+    rather than letting the caller discover it from a failed resume."""
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].status = "cancelled"
+
+    [row] = comms.roster()
+
+    assert row.resumable is False
+    assert "never started" in (row.detail or "")
+
+
+def test_the_roster_marks_a_child_whose_transcript_is_gone(tmp_path):
+    """``resumable`` must agree with what ``resume`` will actually do; a row
+    promising a resume that then refuses is worse than an honest refusal."""
+    comms, jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), tmp_path / "missing")
+    comms.record_outcome("job-1", "completed")
+    comms.detach("job-1")
+    # The manager stamps the row once the runner returns. Without this the
+    # record is settled while the row still says running, which is a real
+    # (brief) state but a different one -- and it is reported as "still
+    # settling", not as the missing transcript this test is about.
+    jobs.jobs["job-1"].status = "completed"
+
+    [row] = comms.roster()
+
+    assert row.resumable is False
+    assert "gone from disk" in (row.detail or "")
+    # ...and the two surfaces agree, which is the invariant that matters.
+    assert comms.resume("job-1", "carry on")[0] is None
+
+
+def test_the_roster_refuses_to_offer_a_second_resume_of_one_transcript(tmp_path):
+    """Two children on one transcript directory destroy each other's history,
+    so the roster must not advertise a resume that ``resume`` would refuse."""
+    comms, jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    comms.record_outcome("job-1", "cancelled")
+    comms.detach("job-1")
+    jobs.jobs["job-1"].status = "cancelled"
+    # The continuation, live on the same directory.
+    jobs.add("job-2")
+    comms.record_launch("job-2", "parser")
+    comms.attach("job-2", FakeChild(), tmp_path)
+
+    rows = {row.job_id: row for row in comms.roster()}
+
+    assert rows["job-1"].resumable is False
+    assert "already resumed as job job-2" in (rows["job-1"].detail or "")
+
+
+@pytest.mark.asyncio
+async def test_pause_stops_the_child_and_keeps_it_resumable(tmp_path):
+    """A pause is a cancel plus intent: same physical state, but the roster
+    has to keep saying which one the parent meant."""
+    comms, jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+
+    delivery = await comms.pause("job-1")
+
+    assert delivery.outcome == "paused"
+    assert jobs.jobs["job-1"].status == "cancelled"  # mechanically a cancel
+    comms.record_outcome("job-1", "cancelled")  # what the runner's teardown does
+    comms.detach("job-1")
+    [row] = comms.roster()
+    assert row.status == "paused"  # ...but reported as the intent, not the mechanism
+    assert row.resumable is True
+
+
+@pytest.mark.asyncio
+async def test_resume_ends_the_pause(tmp_path, monkeypatch):
+    """Left set, the stopped record would advertise ``paused`` forever beside
+    the running child that replaced it, inviting a resume of a live run."""
+    comms, jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    await comms.pause("job-1")
+    comms.record_outcome("job-1", "cancelled")
+    comms.detach("job-1")
+    monkeypatch.setattr(
+        "local_operator.harness.subagent.run_subagent",
+        lambda **kwargs: jobs.add("job-2").id,
+    )
+
+    new_id, error = comms.resume("job-1", "carry on")
+
+    assert error is None and new_id == "job-2"
+    rows = {row.job_id: row for row in comms.roster()}
+    assert rows["job-1"].status != "paused"
+
+
+@pytest.mark.asyncio
+async def test_pause_refuses_a_child_with_no_transcript():
+    """A pause that cannot be resumed is a cancel wearing the wrong name; the
+    caller should have to say what it means."""
+    comms, _jobs, _child, _parent = wire(attach=False)
+
+    delivery = await comms.pause("job-1")
+
+    assert delivery.outcome == "failed"
+    assert "no transcript to pause" in (delivery.error or "")
+
+
+@pytest.mark.asyncio
+async def test_pause_reports_an_already_settled_child_rather_than_acting():
+    comms, jobs, _child, _parent = wire()
+    jobs.jobs["job-1"].status = "completed"
+
+    delivery = await comms.pause("job-1")
+
+    assert delivery.outcome == "failed"
+    assert "already completed" in (delivery.error or "")
+    assert "resume" in (delivery.error or "")
+
+
+@pytest.mark.asyncio
+async def test_the_list_op_needs_no_target_and_names_every_child(tmp_path):
+    """``to`` is optional only for ``list``; the schema had it required, which
+    is why this op could not simply reuse the existing dispatch."""
+    comms, jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    jobs.add("job-2")
+    comms.record_launch("job-2", "docs")
+    comms.attach("job-2", FakeChild(), tmp_path)
+    comms.record_outcome("job-2", "failed", "boom")
+    comms.detach("job-2")
+    jobs.jobs["job-2"].status = "failed"  # the manager stamps the row last
+
+    result = await execute_hub(
+        "call-1", {"op": "list"}, None, None, ToolContext(cwd=".", subagent_comms=comms)
+    )
+
+    text = body(result)
+    assert not result.is_error
+    assert "parser" in text and "docs" in text
+    assert "failed" in text and "boom" in text
+    assert payload(result)["count"] == 2
+    assert {entry["job_id"] for entry in payload(result)["children"]} == {"job-1", "job-2"}
+
+
+@pytest.mark.asyncio
+async def test_the_list_op_says_so_when_nothing_was_launched():
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+
+    result = await execute_hub(
+        "call-1", {"op": "list"}, None, None, ToolContext(cwd=".", subagent_comms=comms)
+    )
+
+    assert "no subagents" in body(result)
+    # Nothing to act on: compaction should not keep this in context.
+    assert result.useless is True
+    assert payload(result)["useless"] is True
+
+
+@pytest.mark.asyncio
+async def test_every_op_but_list_still_requires_a_target():
+    """Making ``to`` optional for ``list`` must not make it optional for the
+    ops that act on a child — a send with no target would otherwise be a
+    silent no-op."""
+    comms, _jobs, _child, _parent = wire()
+
+    result = await execute_hub(
+        "call-1",
+        {"op": "send", "message": "hello"},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms),
+    )
+
+    assert result.is_error
+    assert "needs a 'to' target" in body(result)
+
+
+@pytest.mark.asyncio
+async def test_the_pause_op_needs_no_body(tmp_path):
+    comms, _jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+
+    result = await execute_hub(
+        "call-1",
+        {"op": "pause", "to": ["job-1"]},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms),
+    )
+
+    assert not result.is_error
+    assert "paused" in body(result)
+
+
+@pytest.mark.asyncio
+async def test_a_paused_child_survives_its_swept_job_row_and_resumes(tmp_path, monkeypatch):
+    """The end-to-end claim the roster and pause exist for, on real sessions.
+
+    A child is paused mid-run; its job row is then swept the way retention
+    sweeps it minutes later. The roster must still show the child, still call
+    it resumable, and a resume driven from that roster must replay the paused
+    run's transcript rather than starting a stranger.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_parent(tmp_path, ScriptedProvider())
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="docs", prompt="Update the docs.")
+    comms = parent.subagent_comms
+    await wait_for(lambda: comms.session_dir_of(job_id) is not None)
+
+    # Wait on the CONDITION, not the clock: the point is that the child has
+    # actually done a round of work worth resuming, and a fixed sleep is the
+    # line that goes first on a loaded CI box. The transcript cannot be the
+    # probe here — ``Session.prompt`` persists a turn when the turn ENDS, so it
+    # stays at one entry until the pause below pre-empts it (measured: still 1
+    # after 1.5 s) — so this watches the job's live trajectory instead, which
+    # the runner appends to as the child completes tool calls.
+    # A COMPLETED turn, not merely a non-empty trajectory: the trajectory is
+    # populated at ``agent_start``, long before any tool has run, so a length
+    # probe would pass instantly and the pause would pre-empt the child before
+    # it had produced anything worth replaying.
+    def finished_a_turn() -> bool:
+        job = parent.jobs.get(job_id)
+        return any(
+            entry.get("type") == "turn_end" for entry in (getattr(job, "trajectory", None) or [])
+        )
+
+    await wait_for(finished_a_turn)
+
+    paused = await comms.pause(job_id)
+    assert paused.outcome == "paused"
+    await wait_for(lambda: status_of(parent, job_id) == "cancelled")
+    await wait_for(lambda: len(Transcript(comms.session_dir_of(job_id)).build_llm_history()) >= 2)
+    before = Transcript(comms.session_dir_of(job_id)).build_llm_history()
+
+    # Exactly what AsyncJobManager._sweep_due does once retention elapses.
+    # Reaching for the private dict rather than driving the real sweep because
+    # ``Session`` builds its own manager with no retention knob to shorten;
+    # the equivalence was verified against the real ``_sweep_due`` (row gone,
+    # signals cleared, roster unchanged).
+    parent.jobs._jobs.pop(job_id)
+    assert parent.jobs.get(job_id) is None
+
+    [row] = [row for row in comms.roster() if row.job_id == job_id]
+    assert row.status == "paused"  # not "gone", and not "cancelled"
+    assert row.resumable is True
+
+    new_id, error = comms.resume(job_id, "You were interrupted. Wrap up.")
+    assert error is None and new_id is not None
+    await wait_for(lambda: status_of(parent, new_id) != "running")
+
+    after = Transcript(comms.session_dir_of(new_id)).build_llm_history()
+    assert len(after) > len(before)
+    assert first_text(after) == first_text(before) == "Update the docs."
+    assert status_of(parent, new_id) == "completed"
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_roster_records_a_real_childs_failure(tmp_path, monkeypatch):
+    """A crashed child is the case an operator most wants to find later, so
+    the roster must carry its failure across the job row's sweep."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    async def exploding(request, signal=None):
+        raise RuntimeError("provider exploded")
+        yield  # pragma: no cover - makes this an async generator
+
+    parent = make_parent(tmp_path, exploding)
+    await parent.async_init()
+    job_id = parent._launch_subagent(label="doomed", prompt="Do the thing.")
+    comms = parent.subagent_comms
+    await wait_for(lambda: status_of(parent, job_id) != "running")
+
+    parent.jobs._jobs.pop(job_id)  # retention sweep
+    [row] = [row for row in comms.roster() if row.job_id == job_id]
+
+    assert row.status == "failed"
+    assert "provider exploded" in (row.detail or "")
+    await parent.dispose()
+
+
+def test_the_roster_does_not_promise_a_resume_during_the_pause_window(tmp_path):
+    """Roster and ``resume`` must agree even in a paused-but-still-running state.
+
+    This state is NOT currently reachable in production, and the test says so
+    rather than implying otherwise: ``pause`` sets the flag and then awaits
+    ``jobs.cancel``, which stamps the row before its first suspension point, so
+    no concurrent ``list`` can observe the gap. The state is constructed here
+    directly.
+
+    It is worth a test anyway, because the guard's job is to make the
+    roster/``resume`` invariant hold structurally rather than by luck about
+    where an ``await`` sits in ``AsyncJobManager``. If someone later adds one
+    inside ``cancel``, this is what stops the divergence reopening silently.
+    """
+    comms, _jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    # Constructed, not raced into: see the docstring.
+    comms._records["job-1"].paused = True
+
+    [row] = comms.roster()
+
+    assert row.status == "pausing"
+    assert row.resumable is False
+    # The invariant that matters: the two surfaces give the same answer.
+    assert comms.resume("job-1", "carry on")[0] is None
+
+
+def test_the_roster_does_not_promise_a_resume_during_the_settle_window(tmp_path):
+    """F1: ``resumable`` and ``resume()`` must consult the same fact.
+
+    ``record_outcome`` runs inside the runner's settle path, which then still
+    awaits ``emit(SubagentEndEvent)`` — the parent's whole handler fan-out —
+    before returning, and only then does the manager stamp the job row. For
+    that stretch the record says ``failed`` while the row says ``running``.
+    Deriving ``resumable`` from the status alone advertised "failed —
+    resumable" while ``resume()``, which reads the row via ``_is_running``,
+    refused with "still running". Measured at ~256 ms with one 250 ms handler:
+    wide enough for a concurrent ``list`` in the same tool batch to land in.
+    """
+    comms, _jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    # Exactly the window: the outcome is recorded, the row is not yet stamped.
+    comms.record_outcome("job-1", "failed", "provider 500")
+
+    [row] = comms.roster()
+
+    assert row.status == "failed"  # the status string is correct...
+    assert row.resumable is False  # ...and must not invite a resume yet
+    # The invariant: whatever the roster promises, resume() must deliver.
+    assert comms.resume("job-1", "carry on")[0] is None
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_paused_child_abandons_the_pause(tmp_path):
+    """F2: a pause must not be a one-way door.
+
+    Only ``resume`` used to clear the flag, so a parent that paused a child and
+    then decided it was wrong had no way to say so: ``cancel`` refused a job
+    that was already stopped, and the roster went on advertising a pause the
+    parent had abandoned.
+    """
+    comms, jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    await comms.pause("job-1")
+    comms.record_outcome("job-1", "cancelled")
+    comms.detach("job-1")
+    assert comms.roster()[0].status == "paused"
+
+    delivery = await comms.cancel("job-1")
+
+    assert delivery.outcome == "cancelled"
+    [row] = comms.roster()
+    assert row.status == "cancelled"  # no longer advertised as paused
+    # The transcript is untouched, so anyone holding the id can still resume.
+    assert row.resumable is True
+
+
+def test_an_unknown_status_is_not_born_resumable(tmp_path):
+    """F4: resumability is enumerated, not defaulted.
+
+    A status nobody has reasoned about is one the parent should not be invited
+    to resume; the old default meant any status added to ``_describe`` was
+    silently born resumable.
+    """
+    comms, jobs, _child, _parent = wire()
+    # A real transcript on disk and a settled record, so every EARLIER branch
+    # (still running, no session_dir, transcript missing, live twin) is passed
+    # and the enumeration is genuinely what decides. Without this the test
+    # passed on the old fail-open code too, proving nothing: ``session_dir is
+    # None`` short-circuited long before the status was consulted.
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    comms.detach("job-1")
+    jobs.jobs["job-1"].status = "some_future_state"
+
+    [row] = comms.roster()
+
+    assert row.status == "some_future_state"  # reached the enumeration...
+    assert row.resumable is False  # ...and was not born resumable
+
+
+def test_a_swept_row_with_a_transcript_is_still_resumable(tmp_path):
+    """R3: ``gone`` says the job row was swept, not that the work is lost.
+
+    ``resume`` asks only whether the record has a readable transcript and no
+    live twin — it never consults the row's status. Leaving ``gone`` out of the
+    resumable enumeration therefore refused a resume that would have succeeded:
+    the same roster/``resume`` disagreement as F1, pointing the safe way. It is
+    still a lie about the child, and this is the state a parent reaches by
+    coming back to a long-settled subagent, which is the feature's whole point.
+    """
+    comms, jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    # Row swept with no recorded outcome: the ``gone`` fallback.
+    del jobs.jobs["job-1"]
+
+    [row] = comms.roster()
+
+    assert row.status == "gone"
+    assert row.resumable is True
+    # And the invariant: nothing in resume() disagrees.
+    assert comms._live_twin(comms._records["job-1"]) is None
+
+
+def test_the_roster_carries_the_session_id_a_resume_would_take(tmp_path):
+    """The roster is now the ONLY surface that can show a child's session id.
+
+    Children are deliberately kept out of the `/resume` picker — they are the
+    machine's own runs, not the user's conversations — and the job row that
+    carries `job_id` is swept minutes after a child settles. Without the
+    session id here, an operator investigating a subagent that crashed an hour
+    ago has no in-product path to its transcript, which is precisely the case
+    this roster exists to cover.
+
+    Note it is NOT the job id: `--resume` takes the transcript directory name.
+    """
+    session_dir = tmp_path / "9f2c1a0b7e44"
+    session_dir.mkdir()
+    comms, jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), session_dir)
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.record_outcome("job-1", "failed", "provider 500")
+    comms.detach("job-1")
+    del jobs.jobs["job-1"]  # the sweep that used to take the id with it
+
+    [row] = comms.roster()
+
+    assert row.resumable is True
+    assert row.session_id == "9f2c1a0b7e44"
+    assert row.session_id != row.job_id
+
+
+def test_a_child_that_never_started_has_no_session_id_to_offer():
+    """No transcript directory, so there is nothing to print. A blank is
+    honest; the job id in its place would be an id that resumes nothing."""
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].status = "cancelled"
+
+    [row] = comms.roster()
+
+    assert row.session_id is None
+
+
+def test_the_roster_text_tells_the_two_ids_apart(tmp_path):
+    """Both ids are `uuid4().hex[:12]`, so they are visually identical.
+
+    The roster prints a job id and a transcript id two lines apart, and the
+    line under them said "Resume one with hub op='resume'" — which takes the
+    JOB id and rejects the transcript id with `unknown subagent`. Two
+    indistinguishable ids beside an instruction that fits only one is a
+    coin-flip, so each id now names what it is for.
+    """
+    from local_operator.tools.builtin import _hub_list
+
+    session_dir = tmp_path / "9f2c1a0b7e44"
+    session_dir.mkdir()
+    comms, jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), session_dir)
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.record_outcome("job-1", "failed", "provider 500")
+    comms.detach("job-1")
+    del jobs.jobs["job-1"]
+
+    block = _hub_list("call-1", comms).content[0]
+    assert isinstance(block, TextContent)
+    text = block.text
+
+    # The transcript id is shown with the command that actually takes it.
+    assert "local-operator --resume 9f2c1a0b7e44" in text
+    # And the resume instruction says which id it wants, so the transcript id
+    # sitting above it is not read as the argument.
+    assert "JOB id" in text
+    assert "not a job id" in text

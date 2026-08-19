@@ -32,7 +32,12 @@ import pytest
 
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import TurnEnded
-from local_operator.tui.widgets.approval import ApprovalBlock
+
+# `ApprovalPrompt`, not `ApprovalBlock`: the live question is the docked card
+# that `_approval` holds, and the block is now only the transcript receipt
+# written after an answer. These tests stand a PENDING approval into that slot
+# to drive the notifier, so they need the type that can be pending.
+from local_operator.tui.widgets.approval import ApprovalPrompt
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -223,7 +228,7 @@ async def test_an_unanswered_approval_notifies_exactly_once() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app._approval = ApprovalBlock("bash", "rm -rf /tmp/x", on_answer=lambda _: None)
+        app._approval = ApprovalPrompt("bash", "rm -rf /tmp/x", on_answer=lambda _: None)
         for _ in range(5):
             app._refresh_working_activity()
         await pilot.pause()
@@ -239,11 +244,11 @@ async def test_answering_rearms_the_notification_for_the_next_question() -> None
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app._approval = ApprovalBlock("bash", "first", on_answer=lambda _: None)
+        app._approval = ApprovalPrompt("bash", "first", on_answer=lambda _: None)
         app._refresh_working_activity()
         app._approval = None  # answered
         app._refresh_working_activity()
-        app._approval = ApprovalBlock("write", "second", on_answer=lambda _: None)
+        app._approval = ApprovalPrompt("write", "second", on_answer=lambda _: None)
         app._refresh_working_activity()
         await pilot.pause()
     assert notifier.kinds == ["approval", "approval"]
@@ -340,7 +345,7 @@ async def test_a_question_raised_while_focused_is_told_when_the_user_looks_away(
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
         notifier.focused = True
-        app._approval = ApprovalBlock("bash", "rm -rf /tmp/x", on_answer=lambda _: None)
+        app._approval = ApprovalPrompt("bash", "rm -rf /tmp/x", on_answer=lambda _: None)
         app._refresh_working_activity()
         assert notifier.kinds == []  # suppressed: the user is watching
         app.on_app_blur(AppBlur())
@@ -449,7 +454,7 @@ async def test_an_ask_raised_over_a_live_approval_is_still_announced() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app._approval = ApprovalBlock("bash", "x", on_answer=lambda _: None)
+        app._approval = ApprovalPrompt("bash", "x", on_answer=lambda _: None)
         app._refresh_working_activity()
         app._ask_pending = asyncio.get_running_loop().create_future()
         app._refresh_working_activity()
@@ -501,7 +506,7 @@ async def test_blurring_twice_does_not_announce_one_question_twice() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app._approval = ApprovalBlock("bash", "x", on_answer=lambda _: None)
+        app._approval = ApprovalPrompt("bash", "x", on_answer=lambda _: None)
         app._refresh_working_activity()
         for _ in range(3):
             app.on_app_blur(AppBlur())
@@ -544,13 +549,13 @@ async def test_a_question_after_an_aborted_turn_is_still_announced() -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
-        app._approval = ApprovalBlock("bash", "first", on_answer=lambda _: None)
+        app._approval = ApprovalPrompt("bash", "first", on_answer=lambda _: None)
         app._refresh_working_activity()
         # An abort ends the turn without the answered-transition that clears it.
         app.on_turn_ended(TurnEnded(aborted=True, error=None))
         await pilot.pause()
         app.on_turn_started(TurnStarted())
-        app._approval = ApprovalBlock("write", "second", on_answer=lambda _: None)
+        app._approval = ApprovalPrompt("write", "second", on_answer=lambda _: None)
         app._refresh_working_activity()
         await pilot.pause()
     assert notifier.kinds == ["approval", "approval"]

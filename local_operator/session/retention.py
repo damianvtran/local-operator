@@ -54,6 +54,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from local_operator.resume import ORIGIN_NAME
+
 logger = logging.getLogger(__name__)
 
 #: Directory under the config dir holding ephemeral per-run transcripts.
@@ -65,15 +67,15 @@ SESSIONS_DIRNAME = "sessions"
 #: empty" test below for the same reason.
 LIVE_MARKER_NAME = ".session.pid"
 
-#: How long a session directory is protected from the empty-directory reap
-#: purely because it is new. A run creates its directory before it writes the
-#: first transcript line, and on a busy machine another session's startup
-#: sweep lands in that window: without a grace period it reaped a directory
-#: whose owner was seconds away from writing to it. The claim marker covers
-#: this too, so the grace period is only the belt to that pair of braces —
-#: it also covers a session whose claim could not be written (read-only dir,
-#: exotic platform) and one killed before it claimed.
-NEW_SESSION_GRACE_S = 300.0
+#: Sidecars: files a session directory may hold that are bookkeeping ABOUT the
+#: session rather than session content. Collected in one place because three
+#: separate decisions must agree on the list — the size a directory is charged
+#: (:func:`_dir_size`), how recently it was active (:func:`_activity_mtime`),
+#: and therefore whether it counts as empty. A sidecar missed by any one of
+#: them makes a directory that carries nothing to lose look like history worth
+#: a retention slot.
+_SIDECAR_NAMES = frozenset({LIVE_MARKER_NAME, ORIGIN_NAME})
+
 
 #: How long a claim is trusted after the session's last WRITE, where liveness
 #: cannot be probed (Windows, see :func:`_process_alive`). On POSIX the pid
@@ -174,15 +176,26 @@ def _dir_size(directory: Path) -> int:
     """Bytes under ``directory``. Files that vanish mid-walk are skipped: a
     concurrent process disposing its own session is normal, not an error.
 
-    The claim marker is excluded. It is bookkeeping this module wrote itself,
-    and counting it would make a directory holding nothing but a claim look
-    like it has content — the opposite of what the empty-directory reap needs
-    to see once the claim is released.
+    BOTH sidecars are EXCLUDED from the total, for the same reason: they are
+    bookkeeping ABOUT a session, never session content, so they are not what
+    the ceilings are budgeting. Counting either one turns a directory that
+    carries nothing to lose into an ordinary keep candidate occupying a
+    retention slot, which is what keeps the "empty directories are reaped"
+    rule meaning what it says.
+
+    - the origin marker, because a session is stamped before its transcript
+      exists, so a run that aborts in between leaves a directory holding
+      nothing but a 43-byte marker. Measured: with a count ceiling of 3, two
+      aborted children evicted two of the user's real transcripts to keep two
+      empty markers.
+    - the claim marker, because a directory holding nothing but a claim would
+      otherwise look like it has content — the opposite of what the
+      empty-directory reap needs to see once the claim is released.
     """
     total = 0
     for entry in directory.rglob("*"):
         try:
-            if entry.is_file() and entry.name != LIVE_MARKER_NAME:
+            if entry.is_file() and entry.name not in _SIDECAR_NAMES:
                 total += entry.stat().st_size
         except OSError:
             continue
@@ -249,7 +262,8 @@ def claim_session(session_dir: Path, pid: int | None = None) -> None:
 
     Best-effort by design: a claim that cannot be written must not stop a
     session from starting, and the worst consequence of a missing claim is the
-    pre-existing behaviour, now additionally guarded by ``NEW_SESSION_GRACE_S``.
+    pre-existing behaviour: the sweep falls back to treating the directory as
+    ordinary history, which is what it did before claims existed.
 
     Confined to ``sessions/`` (see :func:`_is_session_store_dir`): a marker in
     an agent directory protects nothing and escapes into published agent
@@ -357,27 +371,29 @@ def _activity_mtime(directory: Path, fallback: float) -> float:
     Taking the newest mtime among the directory's files ranks by real activity.
 
     The content's mtime REPLACES the directory's rather than being maxed with
-    it, and the claim marker is ignored entirely. Both exclusions are the same
-    point: the marker is written once at startup and would otherwise peg a
+    it, and the sidecars are ignored entirely. Both exclusions are the same
+    point: a sidecar is written once at startup and would otherwise peg a
     long-running session's "activity" to its birth time, and folding the
     directory's own mtime in would let claim/release churn refresh the age of
     real history and exempt it from the age ceiling.
+
+    Sidecars, plural and read from :data:`_SIDECAR_NAMES`, so this stays in
+    step with what :func:`_dir_size` refuses to charge. A file that counts as
+    no bytes but does count as activity would keep a directory that holds only
+    bookkeeping looking permanently fresh.
 
     A directory with NO content falls back to its own mtime, and there that
     genuinely is the best signal available. Note the consequence, because it
     is deliberate rather than overlooked: claiming and releasing both touch the
     directory, so a session that started, wrote nothing and exited looks
-    freshly created and keeps its ``NEW_SESSION_GRACE_S`` for one more sweep
-    cycle than its age warrants. Making that exact would mean preserving the
-    claim time across the release, which is a second timestamp to keep honest
-    in return for reaping an empty directory a few minutes sooner — the
-    tradeoff is not worth it, and the reap still collects it on the next pass.
+    freshly created. That costs nothing: such a directory has no content, and
+    a directory with no content is reaped whatever its apparent age.
     """
     newest: float | None = None
     try:
         for entry in directory.rglob("*"):
             try:
-                if entry.name == LIVE_MARKER_NAME or not entry.is_file():
+                if entry.name in _SIDECAR_NAMES or not entry.is_file():
                     continue
                 stamp = entry.stat().st_mtime
             except OSError:
@@ -445,14 +461,12 @@ def sweep_sessions(
     and a startup path that raises there would be a regression traded for
     disk. ``live_dir`` is excluded from every pass.
 
-    Empty directories are reaped regardless of the ceilings once they are past
-    ``NEW_SESSION_GRACE_S``. They are left behind by runs that built a session
-    and exited before writing a turn, they carry nothing to lose, and on a real
-    install 23 of 147 session directories were exactly this. The grace period
-    is what keeps that reap off a session that has just created its directory
-    and has not yet written its first line: reaping it there deleted the
-    directory a starting run was about to write into, and that run then failed
-    on every turn with a missing transcript.
+    Empty directories are always reaped, regardless of the ceilings. They are
+    left behind by runs that built a session and exited before writing a turn,
+    they carry nothing to lose, and on a real install 23 of 147 session
+    directories were exactly this. A session that is still STARTING UP is not
+    one of them: it has claimed its directory (``_prepare`` claims before it
+    sweeps), and claimed directories never reach this loop.
     """
     if not sessions_dir.is_dir():
         return SweepResult()
@@ -468,12 +482,24 @@ def sweep_sessions(
     keep: list[_Candidate] = []
     doomed: list[_Candidate] = []
     for candidate in candidates:
-        fresh = candidate.mtime > moment - NEW_SESSION_GRACE_S
         if candidate.size == 0:
-            # A directory with no content is worth nothing EXCEPT in the window
-            # where its owner is still starting up; there, it is the next
-            # turn's transcript.
-            (keep if fresh else doomed).append(candidate)
+            # A directory with no content carries nothing to lose, and is
+            # reaped whatever the ceilings say.
+            #
+            # No freshness exemption, deliberately, and this is a reversal:
+            # an earlier revision of this fix kept a newly created empty
+            # directory for a grace period on the theory that its
+            # owner might be seconds from writing the first turn. The CLAIM
+            # covers that case properly — ``_prepare`` claims before it sweeps,
+            # and a claimed directory never reaches this loop — so the grace
+            # period only ever applied to a directory with no live owner, while
+            # costing the rule that empty directories are always reaped. That
+            # rule earns its keep: a run stamped with its origin before it
+            # aborts leaves a marker-only directory, and letting those linger
+            # spends retention slots on the machine's own abandoned work
+            # (measured at a count ceiling of 3: two aborted children evicted
+            # two of the user's real transcripts).
+            doomed.append(candidate)
         elif max_age_days > 0 and candidate.mtime < horizon:
             doomed.append(candidate)
         else:
@@ -563,14 +589,21 @@ def sweep_sessions(
     # back under budget at all. A big number here means the budget is being
     # consumed by data the ceilings are not allowed to reclaim.
     if max_bytes > 0 and live_bytes > max_bytes * LIVE_BYTES_WARN_SHARE:
+        # States only what is measured. An earlier version reported
+        # ``max_bytes - live_bytes`` as the headroom "left for history", which
+        # reads as a budget the sweep enforces and it is not: the byte loop
+        # trims GOVERNED bytes against ``max_bytes`` and does not subtract the
+        # live total, so history was retained well above the figure quoted
+        # (1.0 MB kept against a stated 0.2 MB). The honest statement is the
+        # share itself plus the total on disk, both of which are facts.
         logger.warning(
             "session retention: live sessions hold %.1f MB of the %.1f MB ceiling and are "
-            "exempt from eviction (%.1f MB on disk in total), so only %.1f MB is left for "
-            "history the sweep can actually reclaim",
+            "exempt from eviction; %.1f MB is on disk in total, and the ceiling only "
+            "governs the %.1f MB of history that is not in use",
             live_bytes / 1024 / 1024,
             max_bytes / 1024 / 1024,
             result.bytes_on_disk / 1024 / 1024,
-            max(max_bytes - live_bytes, 0) / 1024 / 1024,
+            result.bytes_remaining / 1024 / 1024,
         )
     # The other way the ceiling can fail to hold, and the one with a cause the
     # operator can act on: the sweep SELECTED directories and could not delete

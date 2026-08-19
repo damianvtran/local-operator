@@ -305,6 +305,23 @@ _IMAGE_REJECTION_MARKERS = (
     "does not match the provided media type",
     "image exceeds",
     "unsupported image",
+    # The DIMENSION refusals, which the list above missed entirely and which
+    # are the ones a long screenshot-taking session actually hits. Anthropic's
+    # wording is "At least one of the image dimensions exceed max allowed
+    # size: 8000 pixels" for a single oversized image, and "... max allowed
+    # size for many-image requests: 2000 pixels" once a request carries more
+    # than twenty images.
+    #
+    # The second is the nasty one: no image changed, the CONVERSATION grew, so
+    # a block that was accepted for a hundred turns starts being refused and
+    # keeps being refused forever. Without a marker here the degrade never
+    # fired, and the session answered every prompt — and every /compact — with
+    # the same 400 until it was abandoned. Observed live on 2026-08-18.
+    #
+    # Matched on the shared prefix so both variants and any future pixel
+    # ceiling are covered by one marker, since the number is the part that
+    # moves.
+    "image dimensions exceed max allowed size",
 )
 
 

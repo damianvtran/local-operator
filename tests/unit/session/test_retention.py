@@ -20,7 +20,6 @@ from local_operator.session.retention import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_SESSIONS,
     LIVE_MARKER_NAME,
-    NEW_SESSION_GRACE_S,
     _is_claimed,
     claim_session,
     release_session,
@@ -123,18 +122,16 @@ def test_live_session_is_never_evicted(tmp_path):
     assert result.evicted == 5
 
 
-def test_empty_directories_are_reaped_once_past_the_grace_period(tmp_path):
+def test_empty_directories_are_always_reaped(tmp_path):
     """Left behind by runs that built a session and exited before writing a
     turn; 23 of 147 directories on a real install were exactly this.
 
-    Aged past ``NEW_SESSION_GRACE_S``, because an empty directory younger than
-    that belongs to a session that is still starting up (see the test below).
+    Reaped whatever their apparent age: a session that is still starting up is
+    protected by its CLAIM, not by looking new (see the test below).
     """
     sessions = tmp_path / "sessions"
     hollow = sessions / "hollow"
     hollow.mkdir(parents=True)
-    old = time.time() - NEW_SESSION_GRACE_S - 60
-    os.utime(hollow, (old, old))
     _session(sessions, "real")
 
     sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
@@ -151,10 +148,15 @@ def test_a_session_that_has_not_written_its_first_turn_yet_survives(tmp_path):
     directory as "empty", and the starting run then died on
     ``FileNotFoundError: .../transcript.jsonl`` — on that turn and on every
     turn after it, because nothing recreated the directory.
+
+    The CLAIM is what protects it, which is why ``_prepare`` claims before it
+    sweeps. Nothing here depends on the directory looking recently created:
+    an empty directory with no live owner is still reaped on sight.
     """
     sessions = tmp_path / "sessions"
     starting = sessions / "starting"
     starting.mkdir(parents=True)
+    claim_session(starting)
 
     sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
 
@@ -227,9 +229,6 @@ def test_a_claim_alone_does_not_count_as_session_content(tmp_path):
     hollow = sessions / "hollow"
     hollow.mkdir(parents=True)
     claim_session(hollow, pid=_dead_pid())
-    old = time.time() - NEW_SESSION_GRACE_S - 60
-    for path in (hollow / LIVE_MARKER_NAME, hollow):
-        os.utime(path, (old, old))
 
     sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
 
@@ -426,8 +425,6 @@ def test_a_hollow_run_leaves_nothing_behind_once_it_is_past_the_grace_period(tmp
     claim_session(hollow)
     release_session(hollow)
     assert not (hollow / LIVE_MARKER_NAME).exists(), "release must remove the marker"
-    old = time.time() - NEW_SESSION_GRACE_S - 600
-    os.utime(hollow, (old, old))
 
     sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
 
@@ -436,7 +433,15 @@ def test_a_hollow_run_leaves_nothing_behind_once_it_is_past_the_grace_period(tmp
 
 def test_a_released_claim_reads_as_unclaimed_on_every_platform(tmp_path, monkeypatch):
     """Release must stop protecting the directory even where the pid probe is
-    unavailable, since there nothing else can disprove a stale claim."""
+    unavailable, since there nothing else can disprove a stale claim.
+
+    Today this holds on every platform BY CONSTRUCTION rather than by this
+    test: release removes the marker, so ``_is_claimed`` returns at its
+    missing-file guard before any platform branch is reached. The patch below
+    is kept anyway — it is what would catch a future release that blanks the
+    marker instead of deleting it, which is exactly the shape a previous
+    revision of this fix had.
+    """
     # BOTH names, always: ``_LIVENESS_IS_VERIFIABLE`` is derived from
     # ``_PLATFORM`` at import, so patching one alone builds a combination the
     # real code never reaches and quietly stops testing the platform it names.
@@ -588,3 +593,48 @@ def test_directories_that_could_not_be_deleted_are_still_counted_and_reported(
     assert result.bytes_remaining == 300_000, "stranded bytes vanished from the accounting"
     assert result.bytes_on_disk == 300_000
     assert any("could not delete" in record.message for record in caplog.records)
+
+
+def test_an_aborted_child_leaves_nothing_worth_a_retention_slot(tmp_path):
+    """A session is stamped with its origin BEFORE its transcript exists, so a
+    run that aborts in between leaves a directory holding only the marker.
+
+    Such a directory used to be empty, and empty directories are always reaped
+    regardless of the ceilings — they carry nothing to lose. Counting the
+    marker's 43 bytes turned each one into an ordinary keep candidate holding a
+    slot: measured with a count ceiling of 3, two aborted children evicted two
+    of the user's real transcripts to keep two empty markers.
+    """
+    import os
+
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+
+    sessions = tmp_path / "sessions"
+    # The user's real work, older than the children that abort after it.
+    for i in range(3):
+        _session(sessions, f"user{i}", age_days=3 - i)
+    for i in range(2):
+        hollow = sessions / f"hollow{i}"
+        hollow.mkdir(parents=True)
+        mark_session_origin(hollow, ORIGIN_SUBAGENT, label="review")
+        now = time.time()
+        os.utime(hollow, (now, now))
+
+    sweep_sessions(sessions, max_sessions=3, max_bytes=0, max_age_days=0)
+
+    survivors = sorted(path.name for path in sessions.iterdir())
+    assert survivors == ["user0", "user1", "user2"], survivors
+
+
+def test_the_marker_is_not_charged_against_the_byte_ceiling(tmp_path):
+    """The marker is bookkeeping ABOUT a session, never session content, so it
+    is not what the ceilings are budgeting."""
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+
+    sessions = tmp_path / "sessions"
+    directory = _session(sessions, "one", size=100)
+    before = sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
+    mark_session_origin(directory, ORIGIN_SUBAGENT, label="review")
+    after = sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
+
+    assert before.bytes_remaining == after.bytes_remaining == 100

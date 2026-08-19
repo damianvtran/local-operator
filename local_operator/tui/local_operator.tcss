@@ -924,6 +924,41 @@ KeyPromptBlock:focus {
     background: $lo-surface;
 }
 
+/* One surface row ABOVE the band's first slot, so a docked panel is inset the
+ * same on both sides of its slab.
+ *
+ * The asymmetry this fixes, measured at 100x24 with three todos: the panel's
+ * caption sat directly on the transcript's ground row while TWO surface rows
+ * (the last slot's own padding, then `#input-shell`'s) separated its last row
+ * from the composer. One row above against two below, on a slab whose whole job
+ * is to read as part of the dock — reported from the field as "it looks a bit
+ * tight" above the todo and subagent lists.
+ *
+ * On the BAND, not on `.band-slot`: the slot's padding repeats per slot, and
+ * with both panels docked a per-slot top row would open a second gap between
+ * the subagent list and the todo list — where the existing single row is
+ * already the right rhythm. This is the join between the CONVERSATION and the
+ * dock, which happens once no matter how many slots the band holds.
+ *
+ * Why this does not re-create the trench the padding flip removed: that row was
+ * transparent, so it painted the Screen's `$lo-bg` between two lighter slabs.
+ * This one is inside `#band` and therefore `$lo-surface` — the same fill as the
+ * rows below the slab, so the panel reads as inset within the dock rather than
+ * as having come loose from it. The transcript's own ground row still sits
+ * above it and still separates the conversation from the dock, which is the
+ * rule that row belongs to.
+ *
+ * Carried by a CLASS the band toggles rather than declared unconditionally,
+ * because padding on a container applies even when every child is hidden: an
+ * idle session and the boot splash have both panels `display: none`, and an
+ * unconditional row would put a bare surface strip into a composition that is
+ * measured to the row (`test_an_empty_band_paints_nothing_on_the_splash`). The
+ * class is applied only while a slot is actually visible — see
+ * `OperatorApp._refresh_band`. */
+#band.has-slot {
+    padding: 1 0 0 0;
+}
+
 /* One blank row UNDER each slot, not over it, and the direction is the whole
  * point: the transcript ends in a row of its own ground (`TranscriptView`'s
  * bottom padding), so a top padding row here stacked with it — measured at
@@ -1204,38 +1239,95 @@ SessionPickerScreen .session-picker {
 }
 
 
-/* ── ask-tool picker ──────────────────────────────────────────────────── *
+/* ── prompts: the ask picker and the approval gate ────────────────────── *
  *
- * The same floating card as `/resume` above, and deliberately not a variation
- * on it: both are "read a list, pick a row" surfaces, and giving the agent's
- * question its own visual language would make the one modal the user did not
- * open look like a different application.
+ * The same "read a list, pick a row" card as `/resume` above, and deliberately
+ * not a variation on it: giving the agent's own question a different visual
+ * language would make the one surface the user did not open look like a
+ * different application.
  *
- * It differs only in being MODAL in intent as well as in class — the turn is
- * parked on this answer — which the shared `$lo-sunken` backdrop already says. */
-AskPickerScreen {
-    align: center middle;
-    background: $lo-sunken;
+ * Where it DOES differ is placement, and that is the whole point of these
+ * rules. `/resume` is a modal the user opened and can close; these two are
+ * questions the turn is parked on, raised by the agent while the user was
+ * reading something else. As modals they covered the conversation they were
+ * asking about — the tool output, the error, the plan — so answering meant
+ * dismissing the question to go and look, and scrollback was unreachable.
+ * Anchored in the dock they are a band above the composer instead: the
+ * transcript keeps the rest of the screen and all of its scrollback, and the
+ * question stays put while the user scrolls back for what they need.
+ *
+ * ── the prompt host ──────────────────────────────────────────────────── *
+ *
+ * A positioner, like `#band` and for the same reasons: it reserves rows only
+ * while it holds a question, so an ordinary session pays nothing for it, and
+ * it carries the dock's fill so the rows it does reserve read as part of the
+ * input rather than as a slab of transcript.
+ *
+ * It sits at the TOP of `#input-dock`, above `#band`. That ordering is the
+ * feature: the band is status (subagent jobs, todos) and a prompt is a
+ * blocker, so the thing being waited on stays closest to the composer, and a
+ * status list that grows and shrinks as jobs come and go cannot shift the
+ * question under the user's cursor while they are answering it.
+ *
+ * `display` is toggled in Python (`OperatorApp._mount_prompt`) rather than
+ * driven by `:empty`, which Textual does not implement: an empty container
+ * with padding still paints its padding rows, and this one must be exactly
+ * zero rows when nothing is being asked.
+ *
+ * The one blank row BELOW the prompt lives HERE, on the host, and not on the
+ * card. That is a correctness constraint rather than a preference: the card is
+ * itself the slot (the app mounts it directly into this host), so a
+ * `.prompt-slot` padding rule and the card's own `padding` rule would target
+ * ONE widget and conflict — and Textual resolves that by specificity, where
+ * the class selector beats the type selector. Written that way the card
+ * silently lost its vertical padding to the slot's rule, `CARD_PADDING_ROWS`
+ * no longer described the real geometry, and the dock came out taller than the
+ * screen (measured at 80x12: `virtual_size` 12 against `size` 10, the
+ * scrollable screen AGENTS.md calls always a bug here). One owner per
+ * property: the host owns the separation row, the card owns its padding. */
+#prompt-host {
+    width: 1fr;
+    height: auto;
+    background: $lo-surface;
+    display: none;
+    padding: 0 0 1 0;
 }
 
-AskPickerScreen .ask-picker {
-    width: auto;
+/* The card itself. No longer a modal backdrop: this is a raised panel in the
+ * dock, so it gets the elevation step (`$lo-overlay` over the dock's
+ * `$lo-surface`) that this kit uses everywhere instead of a border.
+ *
+ * `width: 1fr` rather than `auto`, which is a change from the modal version
+ * and is load-bearing: an auto-width card sizes to its widest LINE, so the
+ * question's own wrapping decided how wide the panel was and the card visibly
+ * changed width as the user moved between questions of a multi-question ask.
+ * Full-width in the dock, the panel is stable and the card's own width budget
+ * (`AskPickerScreen._card_width`) governs the TEXT, which is what should be
+ * measured against the terminal. */
+AskPickerScreen {
+    width: 1fr;
     height: auto;
-    max-width: 80;
-    /* 100%, not the 80% `/resume` uses, because this card budgets its own
-     * height in Python — `AskPickerScreen._body_rows`, which leaves the same
-     * one-in-`CARD_FLOAT_MARGIN_SHARE` margin behind it whenever it can afford
-     * to. Two caps that each thought they knew the answer is how the card lost
-     * its footer: the widget laid out the rows the share allowed, the
-     * stylesheet clipped to the same share from the outside, and the difference
-     * came off the bottom — the keys, and the only statement of how to leave
-     * (D1). This one is the backstop and nothing else: it says the card may not
-     * leave the screen. The card claims more than the share only when its
-     * content needs the rows, and `height: auto` keeps it short whenever that
-     * content is. */
-    max-height: 100%;
     background: $lo-overlay;
-    padding: 1 2;
+    padding: 1 1;
+}
+
+/* Focus is not decorated. The card takes focus the moment it mounts and holds
+ * it until it is answered, so a focus ring would be permanent furniture — and
+ * the one state worth showing is the opposite one (focus LOST to the
+ * composer), which the app fixes by handing focus back rather than by
+ * painting it. */
+/* The card's inner body holder. Height stays `auto` and is NOT capped here:
+ * the card budgets its own rows in Python (`AskPickerScreen._body_rows`,
+ * which reserves the transcript's share and the rest of the dock), and a
+ * second cap in the stylesheet is how this card lost its footer once already
+ * — the widget laid out the rows its own budget allowed, the sheet clipped to
+ * a different number from the outside, and the difference came off the tail,
+ * taking the keys and the only statement of how to leave with it (D1).
+ * One budget, in one place, and the sheet does not second-guess it. */
+AskPickerScreen .ask-picker {
+    width: 1fr;
+    height: auto;
+    padding: 0;
 }
 
 #ask-picker-body {

@@ -47,7 +47,7 @@ from collections.abc import (
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
-from local_operator.compaction.tokens import approx_text_tokens
+from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
 from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJobManager
@@ -76,6 +76,7 @@ from local_operator.harness.types import (
     ModelSpec,
     NoticeEvent,
     StaleAside,
+    SteeringDeliveredEvent,
     StreamEvent,
     StreamTextDelta,
     StreamUsageEvent,
@@ -353,6 +354,38 @@ def _is_todo_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
     return isinstance(message, CustomMessage) and message.custom_type == TODO_REMINDER_MESSAGE_TYPE
 
 
+#: ``CustomMessage`` types that belong in the transcript as message entries.
+#:
+#: An ALLOW-LIST, because the cost of the two mistakes is asymmetric. Omitting a
+#: type that should persist loses one replayed message; persisting one that
+#: should not corrupts the session's history for good, and the compaction
+#: summary marker is the proof: it is minted by ``_run_compaction`` and stored
+#: through ``append_compaction`` as its OWN entry type, so writing it a second
+#: time as a message replays a superseded summary back into context beside the
+#: live one. A deny-list enumerating the ephemeral types cannot see a type that
+#: does not exist yet; this one excludes it by default.
+_PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset({SESSION_INCIDENT_MESSAGE_TYPE})
+
+
+def _is_persistable_message(message: AgentMessage) -> bool:
+    """Whether ``message`` may be written to the transcript as a message entry.
+
+    Plain ``Message``s always may. A ``CustomMessage`` may only when its type is
+    in :data:`_PERSISTABLE_CUSTOM_TYPES` — todo reminders are ephemeral by
+    design (a stored reminder replays as a user message the user never sent and
+    goes on asserting that finished items are open), and a compaction summary
+    marker is already persisted as a compaction entry.
+
+    This matters because the mid-turn gate flushes from the LIVE loop context,
+    which is exactly where both of those live: after a pass the context is
+    ``[marker, *kept]``, so the very next boundary would otherwise persist the
+    marker.
+    """
+    if isinstance(message, CustomMessage):
+        return message.custom_type in _PERSISTABLE_CUSTOM_TYPES
+    return True
+
+
 def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
     """The todo fingerprint a reminder was built from, normalized for compare.
 
@@ -434,6 +467,70 @@ def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
         for message in messages
         if isinstance(message, Message) and (message.provider_payload or {}).get("pruned")
     }
+
+
+def _parsed_usage(payload: dict[str, Any]) -> Usage | None:
+    """One persisted ``usage`` payload as a :class:`Usage`, or ``None``.
+
+    A transcript row is data from a previous process and may predate a field, so
+    a payload that no longer validates is dropped rather than raised: a status
+    readout must not be able to stop a session from opening. ``None`` simply
+    falls through to the next-newest reading, and then to the local estimate.
+    """
+    try:
+        return Usage.model_validate(payload)
+    except Exception:
+        logger.debug("dropping unparseable persisted usage payload", exc_info=True)
+        return None
+
+
+def _last_reported_usage(usages: Sequence[Usage | None]) -> Usage | None:
+    """The newest provider-reported :class:`Usage` in ``usages``, or ``None``.
+
+    Scans BACKWARDS and stops at the first hit: the newest reading is the only
+    one that describes the context as it now stands, and a resumed conversation
+    can hold hundreds of entries to walk past.
+
+    **Refuses any reading recorded before the newest compaction**, and that
+    exception is the whole reason this is a function rather than a one-line
+    scan. A compacted transcript replays as a summary marker followed by the
+    KEPT WINDOW, and those kept messages still carry the ``usage`` they were
+    given BEFORE the pass — figures describing a context that no longer exists,
+    which nothing supersedes when the session compacted and then exited.
+
+    Seeding from one is not a small error. Measured on a transcript that
+    compacted at 900k of a 1M window, the reading came back 900_000 against a
+    real 1_707 — 527x over, installed as EXACT so the correct local estimate
+    could never replace it, and handed to ``should_compact``, which would then
+    rewrite the user's history on the first turn after the resume.
+    Under-reporting was the bug this seeding fixed; this is the same lie
+    pointing the other way, and the compaction consequence makes it the more
+    expensive of the two.
+
+    The rule cannot be expressed on the replayed list alone. The marker sits at
+    the HEAD of it and the kept window FOLLOWS it, so "stop scanning backwards
+    at the marker" reads exactly backwards — the stale messages come first — and
+    "any marker disqualifies everything" throws away the legitimate case: a
+    session that compacted and then ran ten more turns has a perfectly good
+    newest reading, and refusing it would send every such resume back to the
+    local estimate for no reason.
+
+    So the boundary is taken from the TRANSCRIPT, whose entries are in append
+    order and therefore say which readings were recorded after the pass.
+    ``entries_after_compaction`` returns exactly those; a history with no
+    compaction returns all of them, which is the ordinary path.
+
+    ``None`` means "no usable reading here", a real state and distinct from
+    zero: a brand-new session, a conversation of nothing but user messages, a
+    provider that reports no usage, or a compacted history with no completed
+    turn since the pass. Callers must not collapse the two — a confident 0 on a
+    resumed session is the empty-context lie this exists to prevent — and
+    falling through to the local estimate is the right answer for all of them.
+    """
+    for usage in reversed(usages):
+        if usage is not None:
+            return usage
+    return None
 
 
 def _render_compaction_marker(marker: CustomMessage, entry_id: str | None = None) -> Message:
@@ -596,7 +693,22 @@ class Session:
         self.mcp_startup: McpStartupOutcome | None = None
         self._aside_thunks: list[Aside] = []
         self._continuation_queue: list[AgentMessage] = []
-        self._last_usage: Usage | None = None  # latest provider-reported usage
+        # Latest provider-reported usage. SEEDED from the replayed transcript
+        # rather than starting at None, because on a resumed session the last
+        # turn's usage is a fact that already happened and the transcript is
+        # where it was persisted. Two things read it and both were wrong without
+        # this: the compaction trigger fell back to a local estimate for the
+        # first turn after every resume (the estimate runs 7-17% off, and the
+        # gate it feeds decides whether to rewrite the user's history), and
+        # ``restored_usage`` below reports the conversation's real size to a
+        # front end that would otherwise open on an empty-looking context.
+        # From the TRANSCRIPT, not from the replayed context: only append order
+        # distinguishes a reading taken after the newest compaction from one the
+        # pass invalidated, and the replayed list deliberately loses that (see
+        # ``Transcript.usages_since_compaction`` and ``_last_reported_usage``).
+        self._last_usage: Usage | None = _last_reported_usage(
+            [_parsed_usage(payload) for payload in transcript.usages_since_compaction()]
+        )
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
         # Boundary-event suppression across a post-compaction continuation:
@@ -1238,6 +1350,29 @@ class Session:
 
     # -- context accounting ---------------------------------------------------
 
+    def restored_usage(self) -> Usage | None:
+        """The provider's own last reading for THIS conversation, or ``None``.
+
+        What a resumed front end needs and could not previously get. The status
+        band's context segment and its cost segment are both fed by turns that
+        end while the app is running, so a resumed session had no source for
+        either until the user spent a whole turn — the band opened reporting an
+        empty context and no spend for a conversation that might be 40% of the
+        way through its window with dollars already on it.
+
+        This is the EXACT figure the provider reported, not an estimate, so a
+        host may mark it as such: it is the same number the band would be
+        showing had the process never stopped. ``None`` means the transcript
+        holds no usage at all (a new session, or a provider that reports none),
+        which is why this returns the object rather than a bare int — a caller
+        must be able to tell "nothing reported" from "reported zero" and only
+        the first justifies falling back to a local estimate.
+
+        Read-only and synchronous: it serves an already-parsed field off the
+        replayed history, so a front end may call it on the paint path.
+        """
+        return self._last_usage
+
     async def measure_preloaded_context(self) -> int:
         """Tokens the NEXT request carries before the user has typed anything.
 
@@ -1251,8 +1386,27 @@ class Session:
         from 0% to 15% because of a short question.
 
         What is counted is exactly what :class:`~local_operator.harness.loop`
-        puts in a ``ChatRequest`` with an empty transcript: the system blocks
-        and the serialized tool schemas.
+        puts in a ``ChatRequest``: the system blocks, the serialized tool
+        schemas, AND the conversation already in context.
+
+        That last term is not an embellishment, it is the difference between a
+        correct reading and a wrong one on every RESUMED session. The name says
+        "preloaded", and on a NEW session the history is empty so the two
+        readings coincide — which is exactly why the omission survived. A
+        ``--resume`` (or ``/resume``, or any reload that keeps the conversation)
+        rebuilds ``_context.messages`` from the transcript before this runs, so
+        a sum over blocks and schemas alone reports the size of an EMPTY
+        conversation for one that may hold hundreds of messages: measured on a
+        resumed session whose last provider reading was 402k, the band opened at
+        1.7k (0.2%/1M) and stayed there until the next turn happened to end.
+        Under-reporting is the dangerous direction — it is the reading a user
+        checks to decide whether there is room to keep going, and it claimed a
+        whole free window while 40% of it was already spent.
+
+        The history is measured through the SAME renderer a request is built
+        from (:meth:`_render_history`), so what is counted is what would
+        actually be sent — expired todo reminders dropped, images stripped when
+        a provider has refused them — rather than the raw transcript.
 
         Two costs are deliberately refused, because a status readout must not
         be the most expensive thing a session does before the user speaks:
@@ -1281,6 +1435,13 @@ class Session:
         # ``self._tools`` rather than mutating it, so this reference stays a
         # coherent snapshot even if an MCP refresh swaps the list mid-count.
         tools = self._tools
+        # Rendered on the LOOP for the same reason the schemas are serialized in
+        # the thread is right: rendering touches session state (the todo-reminder
+        # expiry reads the store, the image degrade reads a flag), and handing
+        # mutable session state to a worker thread is how a snapshot tears. The
+        # render is a list walk over messages already in memory; the tokenizing
+        # of its text is the part that scales, and that still crosses.
+        rendered = self._render_history(list(self._context.messages))
 
         def count() -> int:
             total = sum(approx_text_tokens(text) for text in resolved)
@@ -1293,6 +1454,34 @@ class Session:
                 total += approx_text_tokens(tool.description)
                 if tool.parameters:
                     total += approx_text_tokens(json.dumps(tool.parameters, separators=(",", ":")))
+            # Counted with THIS method's own ruler, deliberately, rather than
+            # with ``estimate_messages_tokens``. That function is the sharper
+            # one — it is what compaction plans against — but it reaches for
+            # cl100k_base, and the two costs this method's docstring refuses are
+            # exactly what that would spend: ~43.6 MB RSS and, on a cold cache, a
+            # network fetch of the ranks, on the boot path, before the user has
+            # typed anything. Measured on an ordinary session: 58 ms and +41 MB
+            # against 0.7 ms and +0 MB for the arithmetic below. The memoization
+            # does not rescue it either, because a session that never approaches
+            # the compaction threshold never tokenizes at all — so this would not
+            # be sharing a cost already paid, it would be creating one.
+            #
+            # The terms mirror ``_compute_tokens`` so the shape of what is
+            # counted matches the sharper ruler even though the ruler differs:
+            # text, a flat charge per image, and each tool call's name plus its
+            # serialized arguments. Dropping the last two would understate a
+            # resumed vision or tool-heavy session by its largest terms.
+            for message in rendered:
+                for block in message.content:
+                    if isinstance(block, TextContent):
+                        total += approx_text_tokens(block.text)
+                    else:
+                        total += IMAGE_TOKEN_ESTIMATE
+                for call in message.tool_calls:
+                    total += approx_text_tokens(call.name)
+                    total += approx_text_tokens(
+                        call.raw_arguments or json.dumps(call.arguments, sort_keys=True)
+                    )
             return total
 
         return await asyncio.to_thread(count)
@@ -1480,11 +1669,12 @@ class Session:
             self._last_provider_request_ms = int(time.time() * 1000)
 
             # Persist everything the turn produced (initial messages were
-            # written before the run).
-            for message in new_messages:
-                if message in initial:
-                    continue
-                await self._transcript.append_message(message)
+            # written before the run). Deduplicated by id rather than by
+            # identity against ``initial``, because the mid-turn compaction
+            # gate may already have flushed part of this run to get a
+            # replayable cut target; re-appending those would resurrect
+            # messages after the compaction entry that superseded them.
+            await self._persist_new_messages(new_messages)
 
             pending_incident = self._pending_incident
             self._pending_incident = None
@@ -1733,12 +1923,27 @@ class Session:
     async def _drain_steering(self) -> list[AgentMessage]:
         """Consume the steering queue. Steering messages are real injected
         turns, so they are persisted here — the loop never returns them in its
-        ``new_messages``."""
+        ``new_messages``.
+
+        Emits :class:`SteeringDeliveredEvent` when it actually takes something.
+        This is the one place that knows a queued message stopped being queued:
+        the loop calls it at the boundary where the messages join the context,
+        so a front end showing "queued — sends when this step finishes" can
+        settle that row to a delivered one instead of leaving the promise up for
+        the rest of the session. Silent when the queue is empty, which is the
+        overwhelmingly common case — this is called at EVERY tool and message
+        boundary, and an event per boundary would be noise with no receiver.
+        """
         messages: list[AgentMessage] = []
         while not self._steering_queue.empty():
             message = self._steering_queue.get_nowait()
             await self._transcript.append_message(message)
             messages.append(message)
+        if messages:
+            # After persistence, not before: the receipt says the message is in
+            # the conversation, and it is only in the conversation once it is on
+            # disk and in the list being handed back to the loop.
+            await self._emit(SteeringDeliveredEvent(count=len(messages)))
         return messages
 
     async def _drain_asides(self) -> list[Aside]:
@@ -1844,6 +2049,23 @@ class Session:
         except OSError as exc:
             logger.warning("could not journal pruned tool outputs: %s", exc)
 
+    async def _persist_new_messages(self, messages: Sequence[AgentMessage]) -> None:
+        """Append every message not already in the transcript, in order.
+
+        Idempotent by message id, which is what lets the mid-turn compaction
+        gate flush a run's messages early (it needs a persisted cut target)
+        without the post-run persistence pass writing them a second time. The
+        transcript stores a message under its OWN id, so "already stored" is
+        an exact check rather than a heuristic.
+        """
+        stored = {entry.id for entry in self._transcript.entries()}
+        for message in messages:
+            if not _is_persistable_message(message):
+                continue
+            if getattr(message, "id", None) in stored:
+                continue
+            await self._transcript.append_message(message)
+
     async def _on_turn_end(self, messages: list[AgentMessage]) -> list[AgentMessage] | None:
         """Mid-turn compaction gate — runs INSIDE the tool loop, at the safe
         boundary after each tool batch lands and before the next model call.
@@ -1903,6 +2125,23 @@ class Session:
                 provider_reported, self._model.context_window, settings
             ):
                 return None
+        # Persist what the run has produced SO FAR before planning a cut.
+        #
+        # The post-run path writes the whole run at once (see the persistence
+        # block in ``prompt``), which is too late for a mid-run pass: the cut
+        # has to land on an already-persisted entry or ``_plan_compaction``
+        # refuses it as ``cut_not_replayable``, and mid-run the tail of the
+        # history is exactly the part the run just made. That refusal fired at
+        # every boundary of a long tool run, so the gate correctly decided to
+        # compact and was then blocked from doing it, and the context kept
+        # growing until the run ended.
+        #
+        # Appending early is safe because the transcript is append-only and
+        # keyed by message id: the post-run loop re-appends nothing that is
+        # already stored (``_persist_new_messages`` skips known ids), and a
+        # crash mid-run leaves a transcript that replays to what actually
+        # happened rather than losing the run outright.
+        await self._persist_new_messages(messages)
         planned = await self._plan_compaction(respect_threshold=True)
         if isinstance(planned, CompactionOutcome):
             return None
