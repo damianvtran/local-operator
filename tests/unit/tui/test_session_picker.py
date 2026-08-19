@@ -1051,3 +1051,30 @@ async def test_typing_finds_a_session_by_its_conversation_not_its_name() -> None
         await pilot.press("enter")
         await pilot.pause()
     assert app.chosen == ["aaa111"]
+
+
+def test_the_marker_column_does_not_depend_on_what_is_scrolled_into_view() -> None:
+    """A page is not the result set.
+
+    Deciding the reservation from the rows currently ON SCREEN made it vanish
+    when the one marked row scrolled off, so every name jumped two cells
+    sideways on a single arrow press and truncation changed for rows that had
+    not changed. Needs more rows than a page holds -- the earlier fixtures
+    could not scroll, which is why this was missed.
+    """
+    rows = [_row(f"id{index:09d}", f"session number {index}") for index in range(6)]
+    marked = {"id000000000"}  # only the first row matched inside its body
+    with_marked = render_rows(rows[0:3], 0, 74, NOW, None, marked)
+    without_marked = render_rows(rows[3:6], 0, 74, NOW, None, marked)
+    assert with_marked[0].plain.index("session number 0") == (
+        without_marked[0].plain.index("session number 3")
+    )
+
+
+def test_an_unfiltered_list_reserves_no_marker_column() -> None:
+    """The reservation costs nothing when nothing matched, so an ordinary
+    open of the picker renders exactly as it did before the marker existed."""
+    rows = [_row("abc123def456", "one"), _row("bbb222ccc333", "two")]
+    assert render_rows(rows, 0, 74, NOW)[0].plain == (
+        render_rows(rows, 0, 74, NOW, None, set())[0].plain
+    )

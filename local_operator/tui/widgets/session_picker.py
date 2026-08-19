@@ -290,9 +290,14 @@ def render_rows(
     dim = theme_mod.semantic_color("dim")
 
     ages = [format_age(max(0.0, now - row.mtime)) for row in rows]
-    # Whether ANY row on screen is marked decides the column for ALL of them,
-    # so the name's left edge is straight down the list.
-    marked = any(row.id in body_matched for row in rows)
+    # Whether the RESULT SET has any marked row decides the column, not whether
+    # this PAGE does. `rows` here is one page of a scrolling list, so asking it
+    # made the reservation appear and disappear as the marked row scrolled in
+    # and out of view: every name jumped two cells sideways on a single arrow
+    # press, and truncation changed for rows that had not changed. A column
+    # that depends on scroll position is D2's ragged edge moved onto the time
+    # axis, where it is worse — motion draws the eye, a static offset does not.
+    marked = bool(body_matched)
     name_col, age_col, id_col = plan_columns(rows, width, ages, marked)
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
 
