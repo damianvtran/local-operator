@@ -687,26 +687,26 @@ class AuthStore:
         # the same failing bearer came back every time. A healthy credential one
         # tier down never received a single request.
         #
-        # Dropping is safe precisely because it is conditional: if every
-        # reachable credential is demoted, the marks describe an outage rather
-        # than any one account and :meth:`_selection_order` clears them.
+        # Dropping is safe WITHOUT a "is anything else reachable?" guard, and
+        # deliberately has none. Such a guard could only count database ROWS,
+        # while the cascade also resolves from the env var (tier 5) and the
+        # fallback resolver (tier 7), which are not rows: a demoted lone stored
+        # row would then never yield, and an exported ANTHROPIC_API_KEY beside a
+        # signed-in account became unreachable where it used to be the fallback.
+        #
+        # The real safety net is :meth:`_selection_order`, which clears the
+        # marks as stale once every row it is shown is demoted -- so a pool that
+        # has been walked comes back rather than emptying.
         demoted = self._active_demotions(provider)
-        if demoted and any(r.id not in demoted for r in self._all_selectable_rows(provider)):
+        if demoted:
             remaining = [r for r in rows if r.id not in demoted]
             if remaining:
                 return remaining
-            # Every row in THIS tier is demoted but another tier still has one:
-            # yield the tier so the cascade moves on to it.
+            # Every row in THIS tier is demoted: yield the tier so the cascade
+            # moves on to whatever comes next -- another tier, the env var, or
+            # the resolver.
             return []
         return rows
-
-    def _all_selectable_rows(self, provider: str) -> list[StoredCredential]:
-        """Every enabled, unblocked row for ``provider``, across all tiers."""
-        return [
-            r
-            for r in self.list_credentials(provider)
-            if r.disabled_cause is None and not self.is_blocked(r.id, provider)
-        ]
 
     # -- the cascade ---------------------------------------------------------
 
@@ -942,6 +942,17 @@ class AuthStore:
         if resolver is not None:
             return resolver(provider), None
 
+        # Nothing in the whole cascade -- but demotions are a ROUTING
+        # preference, never a statement that a credential is unusable. If they
+        # are the only reason this came back empty, they have outlived their
+        # purpose (there is nowhere else to route to), so clear them and resolve
+        # once more. Without this a sole demoted credential resolved to None and
+        # the caller was told no credential was configured, which is exactly the
+        # misdiagnosis this change set out to remove.
+        if not read_only and self._active_demotions(provider):
+            self.clear_deprioritized(provider)
+            return await self._resolve(provider, session_id, force_refresh=force_refresh)
+
         return None, None
 
     def _env_api_key(self, provider: str) -> str | None:
@@ -1041,12 +1052,20 @@ class AuthStore:
         ]
         if siblings:
             return True
-        # No untried sibling remains. For a provider-side fault the failing row
-        # was only deprioritised, never blocked, so it is still a legitimate
-        # thing to retry once the pool has been walked -- report that rather
-        # than declaring rotation exhausted and killing the turn.
-        if server_side and failing is not None:
-            self.clear_deprioritized(provider, failing.id)
+        # No untried sibling of the SAME TYPE remains -- which is not the same
+        # as "nothing else is reachable". The cascade has other tiers: another
+        # credential type, the env var, the fallback resolver. Clearing the
+        # demotion here erased the mark in the very call that set it whenever
+        # the failing row had no same-type sibling (an OAuth account beside a
+        # pasted key -- precisely the shape a Z.AI sign-in creates), so tier 3
+        # re-served the identical failing row and the healthy credential one
+        # tier down was never asked.
+        #
+        # So the mark STANDS. It is not permanent: it expires on its TTL, it is
+        # cleared when the credential next serves a request, and
+        # `_selection_order` drops the whole set as stale once every row it sees
+        # is demoted. Any of those returns this credential to service; none of
+        # them requires pretending here that the fault never happened.
         return False
 
     @staticmethod

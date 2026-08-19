@@ -865,3 +865,61 @@ class TestADemotedRowDoesNotHoldItsTier:
         store.deprioritize_credential("anthropic", row.id)
 
         assert await store.get_api_key("anthropic") == "only-key"
+
+
+class TestADemotionSurvivesAMixedPool:
+    """R36/R37: the two ways a demotion stopped moving a turn on.
+
+    Both were edges of the same idea -- "is anything else reachable?" answered
+    by looking at the credential TABLE, which is the question this PR has
+    already been wrong about five times on the failover side.
+    """
+
+    async def test_a_row_with_no_same_type_sibling_stays_demoted(self, tmp_path: Any) -> None:
+        """R36: `rotate_sibling`'s sibling list is filtered by credential_type,
+        so an OAuth row beside a pasted key has no same-type sibling. Clearing
+        the mark there erased it in the very call that set it, and tier 3
+        re-served the identical failing row forever -- the exact shape a Z.AI
+        sign-in creates beside an API key."""
+        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.failover import ProviderError
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        oauth_row = store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "oauth-down", "refresh": "r", "expires": None},
+        )
+        store.upsert_credential(
+            "anthropic", {"type": "api_key", "key": "apikey-healthy", "source": "login"}
+        )
+
+        store.rotate_sibling(
+            "anthropic",
+            "s1",
+            ProviderError(500, "permanent", retryable=True),
+            api_key="oauth-down",
+        )
+
+        assert oauth_row.id in store._active_demotions("anthropic")
+        # And the cascade now reaches the healthy credential in the next tier.
+        assert await store.get_api_key("anthropic") == "apikey-healthy"
+
+    async def test_a_demoted_lone_row_still_yields_to_the_env_var(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R37: the cascade also resolves from the env var (tier 5) and the
+        fallback resolver (tier 7), which are not rows -- so a guard that
+        counted rows to decide whether to yield made an exported key
+        unreachable where it used to be the fallback."""
+        from local_operator.providers.auth_store import AuthStore
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-fallback-key")
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        row = store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "oauth-down", "refresh": "r", "expires": None},
+        )
+
+        assert await store.get_api_key("anthropic") == "oauth-down"
+        store.deprioritize_credential("anthropic", row.id)
+        assert await store.get_api_key("anthropic") == "env-fallback-key"
