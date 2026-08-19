@@ -16,15 +16,24 @@ supposed to be the escape hatch.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
+import statistics
 
 import pytest
 from PIL import Image
 
+from local_operator import imaging
 from local_operator.imaging import (
+    _REBOUND_CACHE,
+    _REBOUND_CACHE_MAX_BYTES,
     IMAGE_MAX_EDGE,
     IMAGE_MAX_PIXELS,
+    IMAGE_REFUSAL_MAX_B64_BYTES,
+    _is_line_art,
     bound_image_for_model,
+    rebound_oversize_image,
 )
 from local_operator.media import ImageInfo, sniff_image
 
@@ -39,6 +48,30 @@ MANY_IMAGE_PIXEL_LIMIT = 2000
 def _png(size: tuple[int, int]) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", size, (10, 60, 120)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _noise_png(size: tuple[int, int]) -> bytes:
+    """An INCOMPRESSIBLE PNG. A flat fill compresses to a few KB whatever its
+    dimensions, so it cannot exercise anything that is measured in bytes."""
+    import os
+
+    buffer = io.BytesIO()
+    Image.frombytes("RGB", size, os.urandom(size[0] * size[1] * 3)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _bilevel_png(size: tuple[int, int]) -> bytes:
+    """Black-and-white line art: horizontal one-pixel rules, two values only.
+
+    Stands in for the pixel-font renderings this path actually protects, without
+    depending on snapcompact's geometry.
+    """
+    image = Image.new("L", size, 0)
+    for y in range(0, size[1], 3):
+        image.paste(255, (0, y, size[0], y + 1))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
     return buffer.getvalue()
 
 
@@ -299,3 +332,379 @@ def test_undecodable_bytes_raise_rather_than_becoming_an_image_block() -> None:
     # The header still parses; only the body is gone.
     with pytest.raises(ValueError):
         bound_image_for_model(truncated, _sniffed(truncated))
+
+
+# ---------------------------------------------------------------------------
+# Repairing history that an older build already poisoned
+# ---------------------------------------------------------------------------
+
+
+def test_an_oversized_block_from_an_older_build_is_rebound() -> None:
+    """The reported bug, at the unit level.
+
+    Bounding on the way in cannot reach a block that was written before it
+    shipped, and a transcript is replayed verbatim on every resume — so the
+    2206x266 paste that wedged a real session kept earning the many-image
+    refusal on a build whose composer could no longer produce it.
+    """
+    source = _png((2206, 266))
+    rebound = rebound_oversize_image(base64.b64encode(source).decode("ascii"))
+    assert rebound is not None, "the oversized block was left as it was"
+    data, mime = rebound
+    width, height = Image.open(io.BytesIO(base64.b64decode(data))).size
+    assert max(width, height) <= IMAGE_MAX_EDGE
+    assert max(width, height) < MANY_IMAGE_PIXEL_LIMIT
+    assert width / height == pytest.approx(2206 / 266, rel=0.01), "aspect ratio was not preserved"
+    assert mime == "image/png"
+
+
+def test_an_in_bounds_block_is_left_completely_alone() -> None:
+    """``None`` means "do not touch it", and it is the answer for almost every
+    block in every conversation. Re-encoding an image the provider already
+    accepts would spend CPU on every turn to make the picture worse."""
+    source = _png((800, 600))
+    assert rebound_oversize_image(base64.b64encode(source).decode("ascii")) is None
+
+
+def test_a_block_that_cannot_be_decoded_is_kept_rather_than_dropped() -> None:
+    """A repair pass must never be able to destroy context on its own.
+
+    Bytes this cannot read may still be perfectly acceptable to the provider,
+    and the ``is_image_rejection`` degrade is the net for the ones that are not.
+    """
+    assert rebound_oversize_image("not base64 at all!!") is None
+
+    truncated = _png((3000, 400))[:60]  # header parses, body is gone
+    assert rebound_oversize_image(base64.b64encode(truncated).decode("ascii")) is None
+
+
+def test_the_repair_is_memoized_so_a_resize_is_not_paid_every_turn() -> None:
+    """The rendered history is rebuilt on every turn and again for every token
+    count, so an uncached repair would re-decode and re-resize the same frame
+    several times a turn for the life of the session."""
+    source = _png((2206, 266))
+    encoded = base64.b64encode(source).decode("ascii")
+    _REBOUND_CACHE.clear()
+
+    first = rebound_oversize_image(encoded)
+    assert len(_REBOUND_CACHE) == 1, "an oversized block was not memoized"
+    second = rebound_oversize_image(encoded)
+    assert first == second, "the memo returned a different image than the resize did"
+
+    # In-bounds blocks are settled by a header read, so they must not consume
+    # cache entries: a long session of ordinary screenshots would otherwise
+    # evict the one entry that actually costs something to recompute.
+    small = base64.b64encode(_png((800, 600))).decode("ascii")
+    rebound_oversize_image(small)
+    assert len(_REBOUND_CACHE) == 1
+
+
+def test_the_memo_cannot_grow_without_bound() -> None:
+    """Bounded in BYTES, because the values are whole images whose sizes differ
+    by orders of magnitude — an entry count would bound the wrong quantity and
+    let the map retain tens of MB for the life of the process."""
+    _REBOUND_CACHE.clear()
+    for index in range(40):
+        # Distinct sizes, so every one is a distinct cache key. Photographic
+        # noise, so each result is genuinely large rather than a flat PNG that
+        # compresses to nothing and would never reach the cap.
+        source = _noise_png((2100 + index, 2000))
+        rebound_oversize_image(base64.b64encode(source).decode("ascii"))
+    retained = sum(len(data) for data, _ in _REBOUND_CACHE.values())
+    assert retained <= _REBOUND_CACHE_MAX_BYTES
+    assert _REBOUND_CACHE, "the cap evicted so aggressively that nothing is ever cached"
+
+
+# ---------------------------------------------------------------------------
+# Snapcompact archive frames
+#
+# These are the one image source that does NOT come through
+# ``bound_image_for_model`` on the way in: compaction renders them to a
+# per-provider geometry that is a deliberate billing decision. The repair walks
+# over them like any other block, so it must be measured against a REAL frame —
+# a synthetic ``Image.new("RGB", ...)`` shares neither their mode nor their
+# content, and it was exactly that gap that let a 55x size regression and a
+# silent rewrite of the high-res shape pass a green suite (review round 1, F4).
+# ---------------------------------------------------------------------------
+
+
+def _archive_frame(provider: str, model: str) -> bytes:
+    from local_operator.compaction.snapcompact import render_frame, resolve_shape
+
+    page = ("the quick brown fox jumps over the lazy dog 0123456789 " * 40 + "\n") * 40
+    return render_frame(page, resolve_shape(provider, model))
+
+
+def test_an_in_spec_high_res_archive_frame_is_left_alone() -> None:
+    """The Anthropic high-res shape is 1932px: over ``IMAGE_MAX_EDGE`` but UNDER
+    the 2000px ceiling, so no provider would refuse it.
+
+    1932 is a costed choice ("sweet spot under the 4,784 visual-token cap").
+    Repairing it would silently re-decide a billing trade that belongs to the
+    compaction layer, which is the trade this module's docstring promises to
+    leave alone.
+    """
+    frame = _archive_frame("anthropic", "claude-opus-4.7")
+    assert max(Image.open(io.BytesIO(frame)).size) == 1932, "the fixture is not the high-res shape"
+    assert rebound_oversize_image(base64.b64encode(frame).decode("ascii")) is None
+
+
+def test_a_repaired_archive_frame_stays_a_readable_pixel_font() -> None:
+    """A bilevel frame must be resampled with NEAREST and shrunk only as far as
+    the refusal ceiling demands.
+
+    The glyphs are one-pixel strokes, so a smooth filter turns each into a grey
+    ramp — which destroys the legibility the font exists for and, by replacing 2
+    distinct values with 256, makes the "shrunk" frame ~21x LARGER than the
+    source it was shrinking. Both failure modes are asserted here because either
+    one alone would look like a reasonable result.
+    """
+    frame = _archive_frame("google", "gemini-2.5-pro")
+    source = Image.open(io.BytesIO(frame))
+    source.load()
+    rebound = rebound_oversize_image(base64.b64encode(frame).decode("ascii"))
+    assert rebound is not None
+    repaired = Image.open(io.BytesIO(base64.b64decode(rebound[0])))
+    repaired.load()
+
+    colors = repaired.getcolors(maxcolors=256)
+    assert colors is not None and len(colors) <= 2, "the pixel font was antialiased into a ramp"
+
+    # Stated against the alternative rather than against a bare ratio. Some
+    # growth is unavoidable — a downscale destroys the horizontal run lengths
+    # PNG was compressing — so the meaningful claim is not "it got smaller" but
+    # "it did not get catastrophically bigger the way a smooth filter makes it".
+    smooth = source.resize(repaired.size, Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    smooth.save(buffer, format="PNG")
+    assert len(base64.b64decode(rebound[0])) * 4 < len(
+        buffer.getvalue()
+    ), "the repair is no better than the antialiasing path it exists to avoid"
+    # Shrunk to the refusal ceiling, not all the way to IMAGE_MAX_EDGE: every
+    # pixel taken off a 1px stroke is a stroke that may vanish.
+    assert max(repaired.size) <= MANY_IMAGE_PIXEL_LIMIT
+    assert max(repaired.size) > IMAGE_MAX_EDGE, "line art was shrunk further than it had to be"
+
+
+def test_a_repair_lands_under_the_refusal_line_not_exactly_on_it() -> None:
+    """The boundary is inferred from an error message, so it must not be sat on.
+
+    The provider says dimensions that "exceed max allowed size ... 2000 pixels",
+    which reads as making 2000 itself legal — but this is the one number whose
+    failure mode is a permanently wedged session, and the module already refuses
+    to sit on it for the ingest cap. A repair that landed exactly on 2000 would
+    be betting the fix on a strict inequality nobody has tested.
+    """
+    source = _bilevel_png((2400, 900))
+    rebound = rebound_oversize_image(base64.b64encode(source).decode("ascii"))
+    assert rebound is not None
+    repaired = Image.open(io.BytesIO(base64.b64decode(rebound[0])))
+    assert max(repaired.size) < MANY_IMAGE_PIXEL_LIMIT, "a repair landed on the refusal line"
+
+    # And the gate itself is exclusive: a block already at the limit is legal
+    # and must not be rewritten.
+    at_limit = _bilevel_png((MANY_IMAGE_PIXEL_LIMIT, 900))
+    assert rebound_oversize_image(base64.b64encode(at_limit).decode("ascii")) is None
+
+
+def test_a_dithered_halftone_is_not_treated_as_line_art() -> None:
+    """Two distinct values is NOT the same predicate as line art, and the right
+    resampler is opposite for the two.
+
+    A halftone encodes tone as the RATIO of alternating black and white pixels,
+    so dropping every other pixel destroys the tone it was encoding — the exact
+    thing NEAREST does. This runs on the INGEST path too (every paste, every
+    ``read``), so getting it wrong silently degrades scans and dithered images
+    that have nothing to do with the archive frames the branch exists for.
+    """
+    dithered = Image.linear_gradient("L").resize((3000, 1200)).convert("1").convert("L")
+    buffer = io.BytesIO()
+    dithered.save(buffer, format="PNG")
+    source = buffer.getvalue()
+
+    assert dithered.getcolors(maxcolors=2) is not None, "the fixture is not two-valued"
+    assert not _is_line_art(Image.open(io.BytesIO(source))), "a halftone was called line art"
+
+    payload, _mime, _summary = bound_image_for_model(source, _sniffed(source))
+    got = Image.open(io.BytesIO(payload)).convert("L")
+    reference = (
+        Image.linear_gradient("L")
+        .resize((3000, 1200))
+        .resize(got.size, Image.Resampling.LANCZOS)
+        .convert("L")
+    )
+    # Both images are single-band ``L``, so the samples are ints; the stub types
+    # these accessors wide enough to include the multi-band tuple form, hence
+    # the explicit narrowing rather than arithmetic on an ``int | tuple``.
+    reference_band = [int(value) for value in reference.tobytes()]
+    got_band = [int(value) for value in got.tobytes()]
+    error = statistics.fmean(abs(a - b) for a, b in zip(reference_band, got_band))
+    # A smooth downscale reconstructs the gradient (~11); NEAREST shreds it (~85).
+    assert error < 30, f"the halftone lost its tone (mean error {error:.1f})"
+
+
+@pytest.mark.parametrize(
+    ("height", "solid_period"),
+    [
+        # Defeats a ROUND `height // 64` stride: at 2048 that stride is 32, and
+        # every row it reads is one of the solid ones.
+        (2048, 32),
+        (1280, 20),
+        # Defeats a PRIME stride of 31, which collapses whenever the height is a
+        # multiple of 31 — 930 reads 30 distinct rows, 155 reads 5, 62 reads 2,
+        # and every one of them is solid.
+        (930, 31),
+        (155, 31),
+        (62, 31),
+    ],
+)
+def test_a_periodic_dither_is_never_misread_as_line_art(height: int, solid_period: int) -> None:
+    """The density must be measured over every pixel, not over sampled rows.
+
+    Any stride can be aliased by content whose vertical period shares a factor
+    with it, and the misclassification is not a near miss: a halftone called
+    line art is downscaled with NEAREST, which destroys the tone the alternating
+    pixels encode (~85 mean error against ~11 for LANCZOS).
+
+    Two strides have been tried in this function and each is defeated by a
+    different case below, which is why the fixture is parametrised over the
+    content period rather than pinned to one shape. A sampled implementation of
+    any stride fails at least one of these, so a future return to sampling fails
+    here rather than in a user's transcript.
+    """
+    width = 600
+    image = Image.new("L", (width, height), 0)
+    for y in range(height):
+        # Dithered everywhere EXCEPT rows on the period, which are left solid
+        # black — those are the rows an aliased sample reads.
+        if y % solid_period:
+            for x in range(0, width, 2):
+                image.putpixel((x, y), 255)
+
+    assert image.getcolors(maxcolors=2) is not None, "the fixture is not two-valued"
+    assert not _is_line_art(
+        image
+    ), f"a period-{solid_period} dither at height {height} was misread as line art"
+
+
+def test_line_art_is_still_recognised_at_a_stride_aligned_height() -> None:
+    """The exact measurement must not have cost us the true positive.
+
+    The companion to the test above: genuine line art at one of the same
+    collapsing heights still has to reach the NEAREST path, or the fix for the
+    aliasing would have been bought by disabling the feature.
+    """
+    width, height = 600, 930
+    image = Image.new("L", (width, height), 255)
+    for y in range(0, height, 16):  # flat horizontal rules — solid runs
+        for x in range(width):
+            image.putpixel((x, y), 0)
+
+    assert _is_line_art(image), "flat rules were not recognised as line art"
+
+
+def test_a_photograph_is_still_resized_smoothly_to_the_cheap_bound() -> None:
+    """The NEAREST path is for line art only. Photographic content has no
+    strokes to lose, is what the 1568 cost argument was measured on, and would
+    look aliased under a nearest-neighbour downscale."""
+    source = _noise_png((2600, 1200))
+    rebound = rebound_oversize_image(base64.b64encode(source).decode("ascii"))
+    assert rebound is not None
+    repaired = Image.open(io.BytesIO(base64.b64decode(rebound[0])))
+    assert max(repaired.size) == IMAGE_MAX_EDGE, "a photo was not taken to the cheap bound"
+
+
+def test_a_block_under_every_pixel_ceiling_can_still_be_too_heavy() -> None:
+    """Dimensions cannot predict the byte wall.
+
+    Providers refuse an image block over 5 MB of base64, and an incompressible
+    1900x1900 PNG clears every pixel ceiling while encoding to ~14.5 MB — so a
+    dimension-only gate leaves a block that is certain to be refused.
+    """
+    source = _noise_png((1900, 1900))
+    encoded = base64.b64encode(source).decode("ascii")
+    assert max(Image.open(io.BytesIO(source)).size) <= MANY_IMAGE_PIXEL_LIMIT
+    assert len(encoded) > IMAGE_REFUSAL_MAX_B64_BYTES, "the fixture is not actually too heavy"
+
+    rebound = rebound_oversize_image(encoded)
+    assert rebound is not None, "a block that would be refused on size was left in the history"
+    assert len(rebound[0]) < len(encoded), "the repair did not make it lighter"
+
+
+def test_the_memo_survives_a_working_set_larger_than_the_cap(monkeypatch) -> None:
+    """Eviction must be oldest-first, not clear-on-overflow.
+
+    The access pattern here is a full WALK of the same history on every render,
+    not random lookups, and that is what makes the difference matter: clearing
+    on overflow empties the cache part-way through each walk, so every later
+    frame in that same walk misses and the memo never warms at all — measured at
+    3,858 ms per warm walk against ~5 ms when the set fits.
+
+    The cap is monkeypatched down rather than fed enough real images to reach
+    32 MB. Feeding it the real thing would make this a slow test that only
+    exercises eviction by accident, and the earlier version of this test did
+    exactly that and proved nothing: it used four renders of the SAME text,
+    which are byte-identical and collapse to one cache entry occupying 0.36% of
+    the cap, so eviction never ran and the test passed against the very
+    clear-on-overflow code it was written to forbid (review round 3, F10).
+    """
+    sources = [_noise_png((2100 + index * 40, 2000)) for index in range(6)]
+    encoded = [base64.b64encode(source).decode("ascii") for source in sources]
+    assert len({len(item) for item in encoded}) == len(encoded), "fixtures are not distinct"
+
+    _REBOUND_CACHE.clear()
+    for item in encoded:
+        rebound_oversize_image(item)
+    assert len(_REBOUND_CACHE) == len(encoded), "distinct images shared a cache entry"
+
+    # Force a cap that fits THREE entries, then walk the whole set. Three is
+    # the smallest size at which the two policies diverge: at a two-entry cap
+    # both leave the final pair, so a smaller cap would make this test unable to
+    # tell them apart no matter what it asserted.
+    entries = sorted(len(data) for data, _ in _REBOUND_CACHE.values())
+    monkeypatch.setattr(imaging, "_REBOUND_CACHE_MAX_BYTES", sum(entries[:3]))
+    _REBOUND_CACHE.clear()
+    for item in encoded:
+        rebound_oversize_image(item)
+
+    retained = sum(len(data) for data, _ in _REBOUND_CACHE.values())
+    assert retained <= imaging._REBOUND_CACHE_MAX_BYTES, "the cap was exceeded"
+
+    # The discriminating assertion, and it has to be about SIZE as well as
+    # identity: clear-on-overflow refills from empty and so ends the walk
+    # holding only the two entries added since it last cleared, while
+    # oldest-first keeps the cache full at three. Both end with a newest-suffix,
+    # so asserting identity alone would pass against either.
+    assert len(_REBOUND_CACHE) == 3, (
+        "eviction did not keep the cache full; a clearing cache refills from "
+        f"empty and ends the walk holding fewer ({len(_REBOUND_CACHE)})"
+    )
+    expected = [hashlib.sha256(source).hexdigest() for source in sources]
+    survivors = list(_REBOUND_CACHE)
+    assert survivors == expected[-len(survivors) :], (
+        "eviction did not keep the newest entries; a clearing cache leaves a "
+        f"different set ({survivors} against {expected[-len(survivors):]})"
+    )
+
+
+def test_an_oversized_archive_frame_is_repaired_without_going_lossy() -> None:
+    """The Google shape is 2048px and IS refusable, so it must be repaired —
+    but archive frames are grayscale renderings of a 5x7 bitmap font, and the
+    whole point of that font is that it stays crisp and deterministic.
+
+    Widening the mode to RGB tripled the PNG, blew ``IMAGE_MAX_BYTES`` and
+    dropped the frame onto the lossy JPEG rung, putting ringing artifacts on
+    pixel-font text and inflating one measured frame 55x.
+    """
+    frame = _archive_frame("google", "gemini-2.5-pro")
+    source = Image.open(io.BytesIO(frame))
+    assert max(source.size) > MANY_IMAGE_PIXEL_LIMIT, "the fixture is not refusable"
+    assert source.mode == "L", "the fixture is not the grayscale render"
+
+    rebound = rebound_oversize_image(base64.b64encode(frame).decode("ascii"))
+    assert rebound is not None, "a refusable frame was left in the history"
+    data, mime = rebound
+    assert mime == "image/png", "a pixel-font frame was re-encoded lossily"
+    repaired = Image.open(io.BytesIO(base64.b64decode(data)))
+    assert repaired.mode == "L", "grayscale was widened, which is what forces the JPEG rung"
+    assert max(repaired.size) <= MANY_IMAGE_PIXEL_LIMIT
