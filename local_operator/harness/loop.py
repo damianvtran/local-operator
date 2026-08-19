@@ -1182,10 +1182,26 @@ class AgentLoop:
                     # Duplicate-id and resolution failures never execute: the
                     # synthetic result parks in the slot without a task, so
                     # two slots can never collide on one results entry.
-                    park(
-                        slot,
-                        item,
-                        item.failure or self._synthetic_result(item.call, "Tool not found."),
+                    parked = item.failure or self._synthetic_result(item.call, "Tool not found.")
+                    park(slot, item, parked)
+                    # SAY SO, since the end event no longer does. `park` withholds
+                    # the end event for a call that never started, which is right
+                    # — but the headless renderer printed `✗ <name> failed` off
+                    # that event, so suppressing it alone would turn a visible
+                    # diagnostic into silence and leave an operator watching a
+                    # hallucinated tool name produce nothing at all (R6-3, agent
+                    # review round 6). A notice is the honest carrier: it reports
+                    # the failure without claiming a lifecycle that never began.
+                    # The model is unaffected either way — it still gets the
+                    # `tool_result` parked above.
+                    reason = " ".join(
+                        block.text
+                        for block in parked.content
+                        if isinstance(block, TextContent) and block.text
+                    ).strip()
+                    yield NoticeEvent(
+                        text=f"{item.call.name}: {reason or 'tool not found'}",
+                        kind="error",
                     )
                     continue
                 interruptible = item.tool.interruptible
@@ -1339,10 +1355,18 @@ class AgentLoop:
             # half of R3-1 a snapshot alone does not fix: the loss happens
             # BEFORE the backfill runs, not during its emit.
             #
-            # `claimed` keeps the two halves from colliding. A slot this
-            # backfill has already spoken for must not also emit the runner's
-            # own end event, or a consumer counting by id sees the call end
-            # twice — a worse defect than the one being fixed.
+            # `claimed` is DEFENCE IN DEPTH, not a live guard. It was
+            # load-bearing when the two halves could collide; the source-side
+            # withholding in `park` removes that collision, and `park` is
+            # synchronous, so a slot is filled and its end queued atomically
+            # with respect to the event loop and no `await` separates this
+            # backfill from the flush below. There is therefore no interleaving
+            # in which the flush meets an end for a slot the backfill claimed —
+            # measured: 0 suppressions across the whole harness suite (R6-1,
+            # agent review round 6). It stays as a belt, and it counts rather
+            # than matching because ids collide within a batch, so a future
+            # change that reintroduces an interleaving cannot resurrect R5-1 by
+            # suppressing a started call's end along with its twin's.
             while True:
                 try:
                     queued = queue.get_nowait()

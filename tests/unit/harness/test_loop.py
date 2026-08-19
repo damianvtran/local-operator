@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections import Counter
 from typing import Any, Literal
 
 import pytest
@@ -28,6 +29,7 @@ from local_operator.harness.types import (
     LoopConfig,
     Message,
     ModelSpec,
+    NoticeEvent,
     StreamEndEvent,
     StreamEvent,
     StreamTextDelta,
@@ -1693,3 +1695,79 @@ async def test_a_duplicate_call_id_does_not_suppress_the_real_calls_end_event():
     assert ended_ids.count("dup") == len(
         started_ids
     ), f"expected one end per started call, got ends={ended_ids} starts={started_ids}"
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_never_ran_still_reports_itself_to_the_operator():
+    """Review round 6, R6-3. Suppressing the end event must not mean silence.
+
+    `park` withholds the end event for a call that never started, which is
+    right — but the headless renderer printed `✗ <name> failed` off exactly
+    that event, so withholding it alone turned a visible diagnostic into
+    nothing at all: an operator watching a hallucinated tool name saw the run
+    simply produce no output about it.
+
+    A notice is the honest carrier. It reports the failure without claiming a
+    lifecycle that never began, and the model is unaffected either way because
+    it still receives the parked `tool_result`.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="echo", args='{"text":"hi"}'),
+                tool_call_delta(1, id="c2", name="no_such_tool", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[echo_tool(executed)])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    loop = AgentLoop()
+
+    events: list[Any] = []
+    async for event in loop.run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    notices = [e.text for e in events if isinstance(e, NoticeEvent)]
+    assert any(
+        "no_such_tool" in text for text in notices
+    ), f"the unresolvable call produced no operator-visible diagnostic: {notices}"
+    # Still no orphan end event, which is what R4-1/R5-1 fixed.
+    started_ids = {e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)}
+    ended_ids = [e.tool_call_id for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert [c for c in ended_ids if c not in started_ids] == []
+    # And the model still gets both results, so the wire stays legal.
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert sorted(str(m.tool_call_id) for m in tool_messages) == ["c1", "c2"]
+
+
+def test_the_flush_suppression_counts_rather_than_matching():
+    """Review round 6, R6-2. Pin the mechanism R5-1 was about.
+
+    The behavioural tests above cannot reach this: the source-side guard in
+    `park` means the flush's `claimed` bookkeeping is currently unreachable
+    (R6-1), so reverting it to a `set` leaves them all green. That is exactly
+    why it needs pinning directly — the next change that reintroduces an
+    interleaving would silently restore R5-1, where one id names both a call
+    that started and a duplicate that did not, and a set suppresses BOTH.
+
+    A unit test on the rule itself, not the loop: with N queued ends carrying
+    one id and K of them owed suppression, exactly N-K must survive.
+    """
+    # Two slots, one id: one started, one a duplicate that never did.
+    owed = Counter(["dup"])  # one suppression owed
+    queued = ["dup", "dup"]  # the twin's parked end, and the real one
+
+    survived = []
+    for call_id in queued:
+        if owed.get(call_id, 0):
+            owed[call_id] -= 1
+            continue
+        survived.append(call_id)
+
+    assert survived == ["dup"], (
+        "counting must swallow only what is owed; matching by id swallows the "
+        "started call's genuine end event too, which is R5-1"
+    )
