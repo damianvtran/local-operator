@@ -256,6 +256,58 @@ def test_send_to_an_unstarted_child_buffers_until_it_attaches():
     assert "skip the migration" in hub_aside(aside).details["text"]
 
 
+def test_record_launch_after_attach_keeps_the_attached_child():
+    """attach() can run BEFORE record_launch(): under Textual's eager task
+    factory the runner registered by ``jobs_manager.register`` executes
+    synchronously up to its first suspension, so it may build its child and
+    call attach() before ``register`` returns and ``run_subagent`` records
+    the launch. record_launch() must merge into that record, not replace it —
+    replacing it discards the live child, the reply watcher and the session
+    directory, and every later send/steer/ask then buffers into ``pending``
+    on a record whose flush (attach) already happened. Observed live: a
+    healthy reviewer ran 41 minutes while two ``hub ask`` status checks never
+    reached it, and the roster reported the settled child as "never started".
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1")
+    child = FakeChild()
+    session_dir = tmp_dir() / "child-session"
+    comms.attach("job-1", child, session_dir)  # eager runner attaches first
+    comms.record_launch("job-1", "reviewer")  # then registration records
+
+    # The live child survived the late record_launch.
+    delivery = comms.send("job-1", "scope is only the diff")
+    assert delivery.outcome == "injected"
+    [aside] = child.materialize()
+    assert "scope is only the diff" in hub_aside(aside).details["text"]
+
+    # The roster keeps the transcript directory, so a settled child stays
+    # resumable instead of reading "never started, so it has no transcript".
+    [row] = [info for info in comms.roster() if info.job_id == "job-1"]
+    assert row.label == "reviewer"
+    assert row.session_id == session_dir.name
+
+
+def test_record_launch_replacement_is_still_the_normal_path():
+    """The merge must not change the ordinary ordering: a child that has not
+    attached yet gets its launch record, and a buffered note still flushes at
+    the later attach."""
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1")
+    comms.record_launch("job-1", "parser")
+    comms.record_launch("job-1", "parser")  # a duplicate launch is a no-op
+
+    delivery = comms.send("job-1", "note")
+    assert delivery.outcome == "queued"
+
+    child = FakeChild()
+    comms.attach("job-1", child, tmp_dir())
+    [aside] = child.materialize()
+    assert "note" in hub_aside(aside).details["text"]
+
+
 @pytest.mark.asyncio
 async def test_a_starting_child_is_not_reported_as_parked_behind_the_gate():
     """Two states reach the no-live-child branch and an operator acts on them
