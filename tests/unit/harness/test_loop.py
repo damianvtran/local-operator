@@ -1520,12 +1520,17 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
                 # Parks past the drain budget by enough that the event lands on
                 # a queue the drain loop has already abandoned — which is the
                 # window the FLUSH exists to cover, and the only window in which
-                # this test can detect the flush going missing. Shortening this
-                # overshoot moves the park into the range the backfill already
-                # handles, and the test then passes with the flush deleted:
-                # measured 32/32 green at +0.15 against a flush-less tree,
-                # versus 7/8 red at +0.3 (R9 MAJOR-1). The flakiness this once
-                # had is fixed by the `parked` gate below, not by moving this.
+                # this test can detect the flush going missing.
+                #
+                # A RIDGE, NOT A FLOOR: moving this value in EITHER direction
+                # blinds the test. Swept against a tree with the flush deleted,
+                # it detects at +0.30 and is blind at +0.15, +0.35, +0.40, +0.45
+                # and +0.60 (R10). Too short and the park lands in the range the
+                # backfill already handles; too long and it lands after the
+                # batch has stopped emitting. Both ends pass with the flush
+                # gone, which means the test silently stops testing the thing it
+                # is named for. The flakiness this once had is fixed by the
+                # `parked` gate below, not by moving this.
                 await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 0.3)
             parked.set()
             raise
@@ -1573,12 +1578,17 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
             # flake: the tool has to park AFTER the drain gives up at
             # ABORT_DRAIN_TIMEOUT_S but while the consumer still owes the
             # generator a resume, and that window is what the flush covers.
-            # Moving either number moves the park into the range the BACKFILL
-            # already handles, and the test then passes with the flush deleted
-            # (measured 32/32 green against a flush-less tree) — i.e. it stops
-            # testing the thing it is named for. Waiting on the park event
-            # instead was tried and is worse (3/40): it lets the generator
-            # finish before the park it is supposed to be racing.
+            # Moving either number moves the park out of that window — see the
+            # ridge measurements on the tool's own sleep above — and the test
+            # then passes with the flush deleted, i.e. it stops testing the
+            # thing it is named for. Waiting on the park event instead was tried
+            # and is worse (3/40): it lets the generator finish before the park
+            # it is supposed to be racing.
+            #
+            # The sibling `test_a_slow_unwind_still_reports_the_tool_as_ENDED`
+            # carries a similar-looking overshoot that is INDEPENDENT of this
+            # one: it is a single-call batch testing the backfill, not the
+            # flush, and nothing about it needs to move if this does.
             await asyncio.sleep(0.3)
 
     task = asyncio.ensure_future(run())
