@@ -889,6 +889,12 @@ class StatusLine:
         #: attaches one, which keeps the band usable by the lightweight test
         #: hosts that have no terminal to write to.
         self._title: TerminalTitle | None = None
+        #: Cells of the trailing name's reserved box that the current title does
+        #: not fill. Paid out immediately before the seam that introduces the
+        #: title (see :meth:`_right_text`), which is what keeps the row flush to
+        #: the band's right edge without orphaning the chevron or letting the
+        #: title's length move any column to its left.
+        self._name_slack: int = 0
 
     def set_terminal_title(self, title: TerminalTitle | None) -> None:
         """Attach (or detach) the window-title writer and paint it once.
@@ -1500,9 +1506,14 @@ class StatusLine:
         """agents ‹ jobs ‹ context ‹ cost ‹ duration ‹ [!] ‹ name.
 
         ``name_cells`` is the box :meth:`_walk` reserved for the trailing name —
-        zero when the ladder dropped it. The name is PADDED to that box rather
-        than measured, which is what pins every other segment's column; see
-        :data:`NAME_CELLS`.
+        zero when the ladder dropped it. The row always SPENDS that whole box,
+        whatever the title's own width, which is what pins every other segment's
+        column; see :data:`NAME_CELLS`. The title itself is emitted UNPADDED and
+        the remainder (:attr:`_name_slack`) is paid out as blanks just before
+        the seam that introduces it, so the box is filled without the title
+        having to be the thing that fills it — which is what lets the row reach
+        the band's right edge at every title length while the columns to the
+        left of the name stay put.
 
         Colour groups by KIND rather than giving every field its own hue, which
         would be a rainbow: counters share `label`, the two numbers an operator
@@ -1510,6 +1521,9 @@ class StatusLine:
         caution), and the least volatile fields stay neutral. Green is not used
         at all — it belongs to the running indicator.
         """
+        # Reset per render: the reserve's unused cells are a property of THIS
+        # row, and a stale value would pay slack the current title does not have.
+        self._name_slack = 0
         parts: list[tuple[str, str, Style]] = []
         if self._subagent is not None and self._subagent.label:
             # Never dropped: it is what says whose numbers follow it, and a
@@ -1650,23 +1664,65 @@ class StatusLine:
             # of the user's opener, so it has no natural bound, and the band is a
             # fixed two-row box.
             #
-            # PADDED to its box, and left-aligned in it. The box is the reserved
-            # width, so the padding is what holds every sibling's column still
-            # while a model rewrites the string in it; left-aligned because the
-            # eye reads a title from its first cell, and a fixed first cell is
-            # exactly what a string that changes on its own needs. The leftover
-            # lands at the band's right edge, which is the one place on this row
-            # where nothing else was ever going to be.
+            # The box's UNUSED cells are emitted as their own segment, BEFORE
+            # the seam, rather than as padding on either side of the title.
+            #
+            # The reserve itself is unchanged and is still the point: the fit
+            # was decided against the full box, so those cells are spoken for
+            # and cannot be handed back to the layout without moving every
+            # column left of the name. What varies is only where they are
+            # painted, and both obvious answers put them somewhere a reader
+            # notices:
+            #
+            # * `ljust` trailed them after the title. `_compose` stripped them,
+            #   so the painted row ended early — flush at the band's edge for a
+            #   long title and up to 35 cells short for a brief one, which reads
+            #   as a rendering fault. (They are ordinary styled cells, so
+            #   anything READING the row carried them too: the SVG export wrote
+            #   all 35.)
+            # * `rjust` moved them between the seam and the title, which fixed
+            #   the edge and orphaned the `‹`: every other seam on the row is
+            #   tight against what it introduces, so a lone chevron with 36
+            #   blanks after it reads as a missing segment (design review D1).
+            #
+            # Emitting them ahead of the seam keeps the seam glued to the title
+            # it introduces AND puts the title's last cell on the band's right
+            # edge, while the columns left of the name still cannot see the
+            # title's length. A blank segment renders as blanks either way; the
+            # only thing being chosen here is which side of the chevron the
+            # slack falls on.
+            # Carried on the SEAM's left so no extra separator is emitted: the
+            # blanks ride in front of the ` ‹ ` that introduces the title, which
+            # is one segment, not two.
+            self._name_slack = name_cells - cell_len(
+                truncate_name(self._conversation_name, name_cells)
+            )
             parts.append(
                 (
                     "",
-                    truncate_name(self._conversation_name, name_cells).ljust(name_cells),
+                    truncate_name(self._conversation_name, name_cells),
                     Style(color=theme_mod.semantic_color("muted")),
                 )
             )
 
         right = Text()
+        last = len(parts) - 1
         for index, (icon, text, style) in enumerate(parts):
+            # The name's unused reserve is paid out HERE, immediately before the
+            # seam that introduces the title, so the chevron stays tight against
+            # the text it points at (design review D1) while the cells still sit
+            # inside the right group and cannot move any column to their left.
+            #
+            # OUTSIDE the `if index:` seam guard, because the name is not always
+            # preceded by a sibling: a freshly-opened session has no counters, no
+            # context reading, no cost and no duration, so the title is the whole
+            # right group and lands at index 0. Emitting the slack only alongside
+            # a seam silently skipped it there, and the group then aligned by its
+            # INK — the alternative this design explicitly rejects. Measured at
+            # 100 cells, the title's first column walked 95 -> 78 -> 73 -> 63 as
+            # the title grew, on the very first band a user sees (review F1).
+            if index == last and self._name_slack:
+                right.append(" " * self._name_slack, style=dim)
             if index:
                 right.append(f" {_SEP_RIGHT} ", style=seam)
             if icon:
@@ -1682,36 +1738,29 @@ class StatusLine:
         that exactly fitted its frame `_MIN_GROUP_GAP` cells past it, on trailing
         blanks that aligned nothing.
 
-        The right group is aligned by its BOX, not by its ink: the name arrives
-        padded to the cells :meth:`_walk` reserved (:data:`NAME_CELLS`), so this
-        arithmetic is the same at every title length and a short title leaves its
-        leftover at the band's edge rather than shunting the group right.
+        The right group is aligned by its BOX, not by its ink: the group always
+        spends the cells :meth:`_walk` reserved for the name
+        (:data:`NAME_CELLS`), so this arithmetic is the same at every title
+        length and a short title cannot shunt the group right.
 
-        That leftover is then CUT from the painted row, and the order of those
-        two steps is the whole point — it is NOT the same thing as aligning the
-        group by its ink. The gap above is still computed from the PADDED box, so
-        every column up to and including the name's first cell remains a function
-        of the row's geometry alone and nothing to the LEFT of the name can see
-        this cut. Aligning by ink instead was tried and reintroduces the exact
-        defect the reserve exists for: the alarm glyph goes back to moving with
-        the title, measured at 120/150/160 columns across the four titles in
-        ``_NAMES`` as columns 91/90/85/108, 121/120/115/138 and 122/117/125/148.
-        Here the only cells removed are the run of blanks BETWEEN the name's last
-        inked cell and the band's right edge, and nothing is ever painted there:
-        the name is the row's last segment by construction.
+        The box's unused cells are spent inside the right group by
+        :meth:`_right_text`, as a run of blanks immediately BEFORE the seam that
+        introduces the title — so the row's last inked cell is the band's right
+        edge at every title length and there is nothing here to trim.
 
-        Worth removing because those blanks are not nothing. They are ordinary
-        cells carrying the band's own style, so anything that READS the row
-        rather than looking at it carries them: the SVG export writes 35 trailing
-        spaces after a `short` title at a 160-column terminal (0 after the cut),
-        and a reflow or a copy would take them the same way. A row whose right
-        edge is flush for a long title and 35 cells short for a brief one reads
-        as a rendering fault rather than as a band with less to say.
+        This method used to `rstrip` a left-aligned name's trailing padding,
+        which produced a row that ended early — flush for a long title and up to
+        35 cells short for a brief one. Moving those cells ahead of the title
+        fixes that at the source: they still exist, so the fit arithmetic and
+        every column left of the name are untouched, but they are no longer at
+        the edge where their absence was visible. Putting them between the seam
+        and the title instead reaches the edge too and orphans the chevron by up
+        to 39 cells, which reads as a segment that failed to render.
 
-        ``rstrip`` mutates, so it is applied to the freshly built row and never
-        to ``right``: trimming the caller's group in place would leave the fit
-        arithmetic in :meth:`_walk` measuring a different string than the box it
-        reserved, which is the bug this method exists to avoid.
+        Aligning the group by its INK rather than its box is the other way to
+        reach the edge, and the one this must not do: measured across four
+        titles it walks the `!` alarm from column 74 to 91/111/151 at 100/120/160
+        cells, which is exactly the drift the reserve was introduced to stop.
         """
         if not right.plain:
             return left
@@ -1720,7 +1769,6 @@ class StatusLine:
         row.append_text(left)
         row.append(" " * gap, style=dim)
         row.append_text(right)
-        row.rstrip()
         return row
 
     def render_text(self, width: int) -> Text:

@@ -125,6 +125,19 @@ logger = logging.getLogger(__name__)
 #: cost of exhausting it is one stale row that the next write corrects.
 _NAME_PERSIST_MAX_PASSES = 3
 
+#: Total budget for landing the title at teardown, shared by the wait for an
+#: in-flight write and the retry behind it (see
+#: :meth:`Session._flush_conversation_name`) so the two cannot add up.
+#:
+#: Bounded at all because teardown must not hang on a wedged filesystem or
+#: behind a transcript lock a long turn still holds. Not TIGHT, because the
+#: bound decides whether a slow-but-real write is LOST: an append is
+#: sub-millisecond on a local disk, so seconds already mean a stalled mount, and
+#: a 4.9 s append lost its title under two 2 s budgets that a single 5 s budget
+#: keeps. Five seconds is comfortably above any real append and still a pause a
+#: person will sit through once on ctrl+d.
+_NAME_FLUSH_TIMEOUT_S = 5.0
+
 #: Self-prompt scheduled after a compaction pass that cleared the recovery
 #: band, so the model resumes where the summary left off.
 _CONTINUATION_PROMPT = (
@@ -1506,11 +1519,25 @@ class Session:
         Any write already in flight is awaited first, so the ordinary path
         costs nothing here and the retry below only runs when that write never
         happened (never scheduled, or cancelled).
+
+        Both halves share ONE deadline, and it is the whole cost of this method
+        rather than the cost of each half. Charged separately they ran in
+        sequence, so teardown could take twice the advertised bound; and because
+        the bound decides whether a slow-but-real write is LOST rather than
+        merely un-waited-for, two tight budgets were also the wrong shape — a
+        4.9 s append lost its title where a single 5 s budget keeps it. An
+        append is sub-millisecond on a local disk, so seconds already mean a
+        stalled mount, and in that state a user is better served by a few
+        seconds of teardown than by a resume that opens unnamed.
         """
+        deadline = time.monotonic() + _NAME_FLUSH_TIMEOUT_S
+
         task = self._conversation_name_task
         if task is not None and not task.done():
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=max(0.0, deadline - time.monotonic())
+                )
             except BaseException:  # noqa: BLE001 — fall through to the retry
                 pass
         if not self._conversation_name_dirty:
@@ -1523,8 +1550,12 @@ class Session:
             # behind it indefinitely (measured blocking >3 s and still going),
             # which trades a missing title for a session that will not close.
             # Every other await on this path is bounded; this one has no claim
-            # to be the exception.
-            await asyncio.wait_for(self._persist_conversation_name(), timeout=2.0)
+            # to be the exception. What remains of the shared deadline is the
+            # budget, so the two waits cannot add up.
+            await asyncio.wait_for(
+                self._persist_conversation_name(),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
         except Exception:
             # Decoration must never be the reason a dispose fails: losing the
             # name is survivable, losing the conversation is not. A timeout is

@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.harness.types import StreamEndEvent
+from local_operator.session import session as session_mod
 from local_operator.session.naming import CONVERSATION_NAME_CUSTOM_TYPE
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -229,6 +231,88 @@ async def test_a_rename_landing_mid_write_is_not_lost(tmp_path) -> None:
     assert _session(tmp_path).conversation_name == "Second title"
     await session.dispose()
     assert _session(tmp_path).conversation_name == "Second title"
+
+
+@pytest.mark.asyncio
+async def test_teardown_costs_one_budget_not_two(tmp_path, monkeypatch, caplog) -> None:
+    """The flush's whole cost is ``_NAME_FLUSH_TIMEOUT_S``, once.
+
+    The wait and the retry used to charge a full budget each and ran in
+    sequence, so a wedged volume plus a title that moved under the write made
+    teardown twice what the constant advertises (measured at 10 s). They now
+    share one deadline (review round 3, F14).
+
+    The warning is asserted too, so that bounding the wait stays visible in a
+    log rather than becoming a silent drop.
+    """
+    monkeypatch.setattr(session_mod, "_NAME_FLUSH_TIMEOUT_S", 0.4)
+
+    class WedgedTranscript(Transcript):
+        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable: the sleep outlives the test")
+
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=WedgedTranscript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+    await session.async_init()
+    session.set_conversation_name("Title A", user_set=False)
+    await asyncio.sleep(0.05)
+    # Moves the title under the in-flight write, which is what sends the flush
+    # through BOTH halves — the case that used to cost two budgets.
+    session.set_conversation_name("Title B", user_set=True)
+
+    with caplog.at_level("WARNING"):
+        started = time.monotonic()
+        await session.dispose()
+        elapsed = time.monotonic() - started
+
+    # One budget plus scheduling slack, nowhere near two.
+    assert elapsed < 0.4 * 1.8, f"teardown took {elapsed:.2f}s, more than one budget"
+    assert any("conversation name" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_but_real_write_keeps_its_title(tmp_path, monkeypatch) -> None:
+    """The budget must not drop a write that was going to finish.
+
+    The wait and the retry used to charge a full budget EACH and run in
+    sequence, so teardown could take twice the advertised bound — and because
+    the bound is what decides whether a slow-but-real write is lost rather than
+    merely un-awaited, two tight budgets also threw away titles: an append just
+    under the sum was cut off by the first half. One shared deadline keeps any
+    append inside the budget and still bounds teardown.
+    """
+    # NOT monkeypatched. The defect was a hard-coded per-half budget, so a test
+    # that patches the shared constant proves nothing about it: the patched name
+    # simply is not read by the broken code, and the test passes either way
+    # (review round 1, F4). The delay is therefore expressed against the REAL
+    # `_NAME_FLUSH_TIMEOUT_S` and placed where the two shapes disagree — past
+    # what a single half used to allow, comfortably inside the shared budget.
+    delay = session_mod._NAME_FLUSH_TIMEOUT_S * 0.6
+    assert delay > 2.0, "the delay must exceed the old per-half budget to discriminate"
+
+    class SlowTranscript(Transcript):
+        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+            await asyncio.sleep(delay)
+            return await super().append_custom(custom_type, details)
+
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=SlowTranscript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+    await session.async_init()
+    session.set_conversation_name("Slow but real", user_set=True)
+    await session.dispose()
+
+    assert _session(tmp_path).conversation_name == "Slow but real"
 
 
 @pytest.mark.asyncio
