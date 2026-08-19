@@ -353,8 +353,19 @@ def usage_health(
     else:
         state = "healthy"
     binding = [limit for limit, value in measured if value <= threshold]
-    binding_resets = [limit.resets_in_ms(now_ms) for limit in binding]
-    reset_after = max((value for value in binding_resets if value is not None), default=None)
+    # ``reset_after_ms`` answers "when does the condition the STATE names
+    # clear", and the horizon must come from the windows that produced that
+    # state. A depleted verdict feeds a block that lasts this long, so it may
+    # only count fully-spent windows: mixing in a window that is merely in
+    # reserve stretched a three-hour 5h-window block out to that window's
+    # seven-day reset — a days-long outage written against an account that
+    # was usable again the same afternoon.
+    if state == "depleted":
+        horizon = [limit for limit, value in measured if value <= 0]
+    else:
+        horizon = binding
+    horizon_resets = [limit.resets_in_ms(now_ms) for limit in horizon]
+    reset_after = max((value for value in horizon_resets if value is not None), default=None)
     if not binding:
         scope: Literal["account", "model", "unknown"] = "unknown"
     elif all(limit.tier and not limit.shared for limit in binding):
