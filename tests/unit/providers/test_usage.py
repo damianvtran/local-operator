@@ -1112,6 +1112,97 @@ async def test_xai_asks_once_when_the_weekly_shape_answers() -> None:
     assert len(urls) == 1, urls
 
 
+#: Verbatim production bodies captured 2026-08-18 from a live SuperGrok account
+#: on unified billing whose plan is NOT metered against a numeric cap: the
+#: credits URL answers with no ``creditUsagePercent`` at all, and the bare URL
+#: reports ``monthlyLimit: 0`` while ``used`` keeps counting. Every window
+#: parser rejected both shapes, the report collapsed to None, and xai was the
+#: one logged-in provider missing from the usage view — the regression these
+#: fixtures pin.
+XAI_UNIFIED_CREDITS_BODY = {
+    "config": {
+        "currentPeriod": {
+            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+            "start": "2026-08-16T10:03:37.905824+00:00",
+            "end": "2026-08-23T10:03:37.905824+00:00",
+        },
+        "onDemandCap": {"val": 0},
+        "onDemandUsed": {"val": 0},
+        "isUnifiedBillingUser": True,
+        "prepaidBalance": {"val": 0},
+        "billingPeriodStart": "2026-08-16T10:03:37.905824+00:00",
+        "billingPeriodEnd": "2026-08-23T10:03:37.905824+00:00",
+    }
+}
+XAI_UNIFIED_MONTHLY_BODY = {
+    "config": {
+        "monthlyLimit": {"val": 0},
+        "used": {"val": 443},
+        "onDemandCap": {"val": 0},
+        "billingPeriodStart": "2026-08-01T00:00:00+00:00",
+        "billingPeriodEnd": "2026-09-01T00:00:00+00:00",
+    }
+}
+
+
+@pytest.mark.asyncio
+async def test_xai_uncapped_unified_account_still_reports_its_spend() -> None:
+    """The regression: an answering account vanished from the panel.
+
+    A unified-billing plan with no metered cap answers ``monthlyLimit: 0`` with
+    a live ``used`` counter. Requiring a positive cap dropped the row, nothing
+    else survived, and ``fetch_xai_oauth`` returned None — which the panel
+    cannot tell apart from a missing credential."""
+    bodies = {"credits": XAI_UNIFIED_CREDITS_BODY, "bare": XAI_UNIFIED_MONTHLY_BODY}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = "credits" if "format=credits" in str(request.url) else "bare"
+        return httpx.Response(200, json=bodies[key])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(client, "xai", access_token="tok")
+    assert report is not None
+    row = next(limit for limit in report.limits if limit.id == "xai:usage:1mo")
+    assert row.amount.used == pytest.approx(443.0)
+    # No cap means no denominator: the row must stay unmeasurable rather than
+    # invent a fraction, so quota health keeps answering "unknown".
+    assert row.amount.fraction() is None
+    assert row.shared is True
+    assert report.notes is not None and "unified billing" in report.notes
+
+
+@pytest.mark.asyncio
+async def test_xai_answered_but_empty_shape_reports_a_note_not_none() -> None:
+    """An endpoint that ANSWERS with nothing renderable is still an account.
+
+    Only a transport failure or dead token may collapse to None; a well-formed
+    config with no numbers keeps the provider block on screen with a note, so
+    the user reads "nothing to meter" instead of suspecting their login."""
+    empty = {"config": {"isUnifiedBillingUser": True}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=empty)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(client, "xai", access_token="tok")
+    assert report is not None
+    assert report.limits == []
+    assert report.notes == "unified billing — no metered windows reported"
+
+
+@pytest.mark.asyncio
+async def test_xai_transport_failure_still_returns_none() -> None:
+    """The None path must survive the empty-report change: a 401 on both URLs
+    is a credential problem, and reporting it as an empty account block would
+    hide exactly the failure the user needs to act on."""
+    client = _client_for({}, status=401)
+    async with client:
+        report = await fetch_usage(client, "xai", access_token="dead")
+    assert report is None
+
+
 @pytest.mark.asyncio
 async def test_oauth_provider_without_token_returns_none() -> None:
     # OAuth-only provider with no access token -> None (no report).

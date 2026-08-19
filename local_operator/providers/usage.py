@@ -1479,12 +1479,38 @@ def _xai_weekly_limits(config: dict[str, Any]) -> list[UsageLimit]:
 
 
 def _xai_monthly_limits(config: dict[str, Any]) -> list[UsageLimit]:
-    """The unified-billing monthly included quota."""
+    """The unified-billing monthly quota — capped, or bare spend when uncapped.
+
+    Some unified-billing accounts are billed by their subscription plan rather
+    than metered against a numeric allowance: the bare billing URL answers
+    ``monthlyLimit: {"val": 0}`` while still counting ``used`` up (verified
+    against production 2026-08-18 — ``used: {"val": 443}`` on a live SuperGrok
+    account). Requiring a positive cap dropped the only number such an account
+    reports, every other row was already empty for it, and the whole report
+    collapsed to None — so the provider vanished from the usage view,
+    indistinguishable from a missing credential.
+
+    A used-only row keeps the account visible and honest: no cap means no
+    fraction, so it renders as an unmeasurable row (dotted bar, bare number)
+    rather than inventing a denominator, and :func:`usage_health` keeps
+    treating the account as "unknown" instead of guessing at depletion.
+    """
     limit = _xai_amount(config.get("monthlyLimit"))
     used = _xai_amount(config.get("used"))
-    if limit is None or limit <= 0 or used is None:
+    if used is None:
         return []
     resets_ms = _parse_iso_ms(config.get("billingPeriodEnd"))
+    if limit is None or limit <= 0:
+        return [
+            UsageLimit(
+                id="xai:usage:1mo",
+                label="Monthly usage",
+                amount=UsageAmount(used=used, unit="unknown"),
+                window="1 month",
+                resets_at_ms=resets_ms,
+                shared=True,
+            )
+        ]
     return [
         UsageLimit(
             id="xai:included:1mo",
@@ -1556,7 +1582,31 @@ async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> Usage
     # on-demand cap when an account reports weekly and monthly at once.
     seen: set[str] = set()
     deduped = [limit for limit in limits if not (limit.id in seen or seen.add(limit.id))]
-    return UsageReport(provider="xai", limits=deduped) if deduped else None
+    if not deduped:
+        if config is None:
+            # Nothing ANSWERED — transport failure or a dead token. None here
+            # lets the caller fall through to other routes and, failing those,
+            # report "no usage data", which is the truthful message.
+            return None
+        # The endpoint answered, but the shape carried nothing renderable
+        # (e.g. a unified-billing config with neither ``used`` nor a cap).
+        # Returning None here is what made an ANSWERING account disappear from
+        # the panel entirely; an empty report keeps the provider block on
+        # screen ("no windows reported") with a note saying why, which is the
+        # difference between "your login is broken" and "xAI has nothing to
+        # meter for this plan".
+        note = (
+            "unified billing — no metered windows reported"
+            if config.get("isUnifiedBillingUser") is True
+            else "no measurable windows reported"
+        )
+        return UsageReport(provider="xai", limits=[], notes=note)
+    notes = None
+    if unified and all(limit.amount.fraction() is None for limit in deduped):
+        # Every surviving row is unmeasurable (the uncapped-spend shape): say
+        # why the bars are dotted, or the row reads like a rendering defect.
+        notes = "unified billing — spend is reported without a metered cap"
+    return UsageReport(provider="xai", limits=deduped, notes=notes)
 
 
 def _num(value: Any, default: float | None = None) -> float | None:
