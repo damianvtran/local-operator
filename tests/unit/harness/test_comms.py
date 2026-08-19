@@ -1767,12 +1767,24 @@ async def test_ask_buffers_rather_than_refusing_a_started_but_unattached_child()
     comms, jobs, _child, _parent = wire(attach=False)
     jobs.jobs["job-1"].started_at = time.time() - 1800
 
+    seen: list[str] = []
+    original = comms._withdraw_pending
+
+    def spy(record, message):
+        # The buffer is WITHDRAWN when the ask gives up (round 2, R5), so the
+        # queue is empty by the time ``ask`` returns. Capture it mid-flight
+        # instead of asserting on the wreckage afterwards.
+        seen.append(message.details["body"])
+        return original(record, message)
+
+    comms._withdraw_pending = spy  # type: ignore[method-assign]
+
     reply = await comms.ask("job-1", "status?", 400)
 
     assert reply.error is None, f"refused a working child: {reply.error!r}"
     assert reply.timed_out is True  # nobody attached inside the budget
-    [buffered] = comms._records["job-1"].pending
-    assert buffered.details["expects_reply"] is True
+    assert seen == ["status?"], "the question was never buffered for the child"
+    assert not comms._records["job-1"].pending, "an abandoned question was left queued"
 
 
 @pytest.mark.asyncio
@@ -1783,8 +1795,11 @@ async def test_a_question_buffered_past_the_grace_is_answered_once_it_attaches()
     comms, jobs, child, _parent = wire(attach=False)
     jobs.jobs["job-1"].started_at = time.time() - 1800
 
-    asking = asyncio.create_task(comms.ask("job-1", "stuck?", 20_000))
-    await wait_for(lambda: bool(comms._records["job-1"].pending))
+    # 4 s budget -> a 2 s attach grace, so the question buffers well inside
+    # ``wait_for``'s default. (A 20 s budget would spend 10 s in the grace and
+    # time the WAIT out, not the ask.)
+    asking = asyncio.create_task(comms.ask("job-1", "stuck?", 4_000))
+    await wait_for(lambda: bool(comms._records["job-1"].pending), timeout=5.0)
 
     comms.attach("job-1", child, tmp_dir())  # the window finally closes
     await wait_for(lambda: bool(child.asides))
@@ -1802,3 +1817,72 @@ async def test_a_question_buffered_past_the_grace_is_answered_once_it_attaches()
     reply = await asking
     assert reply.error is None and reply.timed_out is False, f"{reply.error!r}"
     assert reply.text == "no, just slow"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_buffered_question_cannot_answer_the_next_asker():
+    """A timed-out buffered question must be WITHDRAWN, not left in the queue.
+
+    ``_thunk``'s identity check exists so a question whose asker gave up cannot
+    arm the next question's future. The buffered path defeated it by binding at
+    flush time — ``attach`` asked "is this a question?" and reached for
+    whatever ``record.ask`` then held, so the parent asked "are you blocked?"
+    and was handed the answer to "what is your ETA?", with ``error=None`` and
+    ``timed_out=False``. Wrong and indistinguishable from right (round 2, R5).
+    """
+    comms, jobs, child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    stale = await comms.ask("job-1", "OLD: what is your ETA?", 200)
+    assert stale.timed_out is True
+    assert not comms._records["job-1"].pending, "the abandoned question was not withdrawn"
+
+    # 4 s budget -> 2 s attach grace, comfortably inside ``wait_for``.
+    asking = asyncio.create_task(comms.ask("job-1", "NEW: are you blocked?", 4_000))
+    await wait_for(lambda: bool(comms._records["job-1"].pending), timeout=5.0)
+
+    comms.attach("job-1", child, tmp_dir())
+    await wait_for(lambda: bool(child.asides))
+    materialized = child.materialize()
+    assert all(isinstance(message, CustomMessage) for message in materialized)
+    bodies = [
+        message.details["body"] for message in materialized if isinstance(message, CustomMessage)
+    ]
+    assert bodies == ["NEW: are you blocked?"], f"a stale question reached the child: {bodies}"
+
+    await execute_hub(
+        "call-1",
+        {"message": "no, not blocked"},
+        None,
+        None,
+        ToolContext(cwd=".", subagent_comms=comms, job_id="job-1"),
+    )
+
+    reply = await asking
+    assert reply.text == "no, not blocked", "the asker got someone else's answer"
+
+
+@pytest.mark.asyncio
+async def test_a_second_question_is_refused_on_the_buffered_path_too():
+    """The concurrent-ask guard has to cover BOTH paths.
+
+    The buffered path used to overwrite a live ``record.ask``, orphaning the
+    first caller: nothing held its future afterwards, so it could receive
+    neither an answer nor a failure and burned its whole budget — up to the
+    600 s schema maximum (round 2, R6).
+    """
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    first = asyncio.create_task(comms.ask("job-1", "Q-A", 4_000))
+    # Past the attach grace (half the budget, so 2 s here), where Q-A buffers.
+    await wait_for(lambda: bool(comms._records["job-1"].pending), timeout=5.0)
+    held = comms._records["job-1"].ask
+
+    second = await comms.ask("job-1", "Q-B", 4_000)
+
+    assert second.error == "a question is already pending for this subagent"
+    assert comms._records["job-1"].ask is held, "the first caller's future was replaced"
+    assert [m.details["body"] for m in comms._records["job-1"].pending] == ["Q-A"]
+    first_reply = await first
+    assert first_reply.timed_out is True  # it ended on its OWN terms, not orphaned
