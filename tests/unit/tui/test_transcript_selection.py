@@ -1378,7 +1378,9 @@ async def test_one_line_and_its_break_is_not_reported_as_two_lines() -> None:
 
         assert app._clipboard == "first line here\n"
         assert toast.message != "copied 2 lines"
-        assert toast.message == "copied 15 characters"
+        # 16, not 15: the break is a character the clipboard carries. Cell-width
+        # counting scored it 0 and reported 15 (design round 2, D10).
+        assert toast.message == "copied 16 characters"
 
 
 @pytest.mark.asyncio
@@ -1479,3 +1481,154 @@ async def test_typing_does_not_dismiss_a_notice_that_is_not_a_copy_receipt() -> 
         await pilot.pause()
 
         assert toast.message.startswith("mcp: failed")
+
+
+# -- whose receipt is it? (review round 2 F5/F9, design round 2 D8) -----------
+#
+# The D3 retirement first asked whether the card's message started with
+# `copied `, which cannot tell one receipt from another — a transcript copy
+# raises a `copied …` card too. So turning to the composer and typing the next
+# prompt withdrew a claim that was still perfectly true. The app now remembers
+# the `Toast.generation` of the card the COMPOSER's copy raised, and retires
+# that card and no other.
+
+
+@pytest.mark.asyncio
+async def test_typing_does_not_retire_the_transcript_s_copy_receipt() -> None:
+    """A transcript copy is not falsified by typing in the composer.
+
+    Copy an answer, turn to the composer to write the follow-up, and the
+    receipt for the answer must survive the first keystroke: nothing about that
+    copy went stale, and the composer never touched the text it describes.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        block = await _seeded(app, pilot)
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+
+        # A composer copy FIRST, so the editor is armed exactly as it would be
+        # in use — this is the state that made the old prefix check misfire.
+        await _composer_drag(app, pilot, _cell(editor, 0, 14), _cell(editor, 0, 20))
+        assert toast.message == "copied 6 characters"
+
+        await _drag(app, pilot, (block.region.x, block.region.y), (79, 23))
+        transcript_receipt = toast.message
+        assert transcript_receipt == "copied 3 lines"
+
+        editor.focus()
+        await pilot.press("h")
+        await pilot.pause()
+
+        assert toast.message == transcript_receipt
+        assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_replacing_the_buffer_disarms_the_receipt() -> None:
+    """`load_text` is the other mutation funnel, and it must stand the flag down.
+
+    Textual's ``text`` setter calls ``load_text`` directly, so ``edit()`` never
+    runs for a submit, a `/clear`, a history step or `begin_model_query`. The
+    flag survived all of them, and the next keystroke — whenever it came, and
+    whatever was on screen by then — withdrew that card (review round 2, F5).
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 14), _cell(editor, 0, 20))
+        assert editor._copied, "the copy must arm the flag for this to mean anything"
+
+        editor.clear_content()
+        await pilot.pause()
+        assert not editor._copied
+
+        # A card raised after the buffer was replaced is not this copy's, so
+        # typing must leave it alone.
+        toast.show("mcp: 2 connected (14 tools)")
+        await pilot.pause()
+        await pilot.press("h")
+        await pilot.pause()
+
+        assert toast.message == "mcp: 2 connected (14 tools)"
+
+
+# -- what the number counts (review round 2 F6/F7, design round 2 D10) --------
+
+
+@pytest.mark.asyncio
+async def test_a_line_and_its_break_is_not_reported_as_zero_characters() -> None:
+    """`cell_len` scores a newline 0, so a real copy announced nothing.
+
+    "Select this line" puts a trailing break on the clipboard, which
+    `splitlines()` still counts as one line — so it takes the character branch,
+    and under cell-width counting the receipt read `copied 0 characters` for a
+    genuine clipboard write (design round 2, D10). A receipt that says 0 reads
+    as a failure.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "first line here\nsecond line here")
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 1, 0))
+
+        assert app._clipboard == "first line here\n"
+        assert toast.message == "copied 16 characters"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("draft", "columns", "expected"),
+    [
+        ("👍 ok", 2, "copied 1 character"),
+        ("日本語 text", 3, "copied 1 character"),
+    ],
+)
+async def test_a_wide_glyph_counts_as_the_one_character_it_is(
+    draft: str, columns: int, expected: str
+) -> None:
+    """The word `characters` has to mean characters.
+
+    Cells were tried first, on the theory that the receipt should count what is
+    painted. But an emoji is ONE glyph the user highlighted and `cell_len` calls
+    it two, and a tab is scored 0 while the editor paints it expanded — so cell
+    width matched the frame only where it already matched `len` (review round 2,
+    F6). The reason given for the count now has a test that decides it.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, draft)
+        toast = app.query_one(Toast)
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, columns))
+
+        assert toast.message == expected
+
+
+@pytest.mark.asyncio
+async def test_a_sub_line_transcript_copy_is_counted_in_characters_too() -> None:
+    """The receipt is shared, so the transcript's wording changed as well.
+
+    Deliberate and consistent with the composer — the unit follows the shape of
+    the selection wherever it was made — but it was changed behaviour with no
+    test asserting it (review round 2, F7).
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        block = await _seeded(app, pilot)
+        toast = app.query_one(Toast)
+
+        await _drag(
+            app, pilot, (block.region.x, block.region.y), (block.region.x + 13, block.region.y)
+        )
+
+        assert "\n" not in app._clipboard
+        assert toast.message == f"copied {len(app._clipboard)} characters"

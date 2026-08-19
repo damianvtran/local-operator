@@ -584,11 +584,13 @@ class Editor(TextArea):
         #: that begins inside a marker has to stay a drag. See
         #: :meth:`_on_mouse_up`.
         self._pressed_marker: tuple[int, int, int] | None = None
-        #: The text of the copy this widget most recently announced, held only
-        #: until the buffer is edited. It is the SUBJECT of the receipt on
-        #: screen: once the user types over what they highlighted, the card is
-        #: making a claim about characters that are gone. See :meth:`edit`.
-        self._copied_text: str | None = None
+        #: Whether this widget has announced a copy that the buffer has not yet
+        #: been edited past. The receipt on screen is a claim about text the
+        #: user can see, so the first edit after a copy withdraws it. A flag and
+        #: not the text itself: nothing reads the content, and holding the
+        #: user's copied draft on the widget buys nothing (review round 2, F9).
+        #: See :meth:`edit` and :meth:`load_text`.
+        self._copied = False
         self.set_commands(commands or [])
 
     def render_line(self, y: int) -> Strip:
@@ -1541,7 +1543,7 @@ class Editor(TextArea):
         text = self.selected_text
         if not text:
             return
-        self._copied_text = text
+        self._copied = True
         self.post_message(EditorCopied(text))
 
     # -- paste ----------------------------------------------------------------
@@ -1738,10 +1740,10 @@ class Editor(TextArea):
         # five seconds (design round 1, D3). The clipboard keeps what it took
         # — that is what a copy IS, and silently un-copying would be worse —
         # but the CLAIM is retired the moment its subject is edited away.
-        stale_receipt = self._copied_text is not None
+        stale_receipt = self._copied
         result = super().edit(edit)
         if stale_receipt:
-            self._copied_text = None
+            self._copied = False
             self.post_message(EditorCopyStale())
         self._sync_picker()
         if touched:
@@ -1797,6 +1799,20 @@ class Editor(TextArea):
         return touched
 
     def load_text(self, text: str) -> None:
+        """Whole-buffer replacement — the OTHER mutation funnel.
+
+        ``edit()`` does not run for this path (Textual's ``text`` setter calls
+        ``load_text`` directly), so the copy receipt has to be stood down here
+        too. Without it the flag survived every submit, ``/clear``, history
+        step and ``begin_model_query``, and the next keystroke — whenever it
+        came — withdrew whatever receipt happened to be on screen by then
+        (review round 2, F5).
+
+        No ``EditorCopyStale`` is posted: replacing the buffer is not the user
+        editing the text their receipt describes, and the card, if it is still
+        up, is about a copy that remains perfectly true.
+        """
+        self._copied = False
         super().load_text(text)
         self._sync_picker()
 

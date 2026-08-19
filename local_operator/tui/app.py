@@ -30,7 +30,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple, Protocol, cast
 
-from rich.cells import cell_len
 from rich.console import Group
 from rich.style import Style
 from rich.terminal_theme import TerminalTheme
@@ -976,6 +975,10 @@ class OperatorApp(App[None]):
         #: The two together are the FIFO the engine drains: these rows were
         #: queued first, so they settle first (see `on_steering_delivered`).
         self._deferred_steer_notices: list[NoticeBlock] = []
+        #: The `Toast.generation` of the card the composer's last copy raised,
+        #: or None once it has been withdrawn or superseded. Editing the copied
+        #: text retires THAT card and no other — see `on_editor_copy_stale`.
+        self._copy_receipt: int | None = None
         #: What the CURRENT turn has already been billed for, per model call, by
         #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
         #: whole and is the authoritative figure, so it adds only the difference
@@ -2423,8 +2426,15 @@ class OperatorApp(App[None]):
         share one clipboard write and one toast: a copy out of the input must be
         indistinguishable from a copy out of the transcript, or the receipt
         becomes evidence about which widget you dragged over.
+
+        Only THIS path records the receipt for later withdrawal: the composer's
+        copy is the one an edit to the composer can falsify. A transcript copy
+        goes through the same clipboard write and must NOT be retired when the
+        user turns to the composer and starts typing their next prompt (review
+        round 2, F5; design round 2, D8).
         """
         self._put_on_clipboard(message.text)
+        self._copy_receipt = self.query_one(Toast).generation
 
     def on_editor_copy_stale(self, message: EditorCopyStale) -> None:
         """The text a copy receipt describes was edited away — drop the card.
@@ -2437,13 +2447,25 @@ class OperatorApp(App[None]):
         Only the CLAIM is withdrawn. The clipboard keeps what it took — the
         copy really happened, and a paste a minute later must still produce it.
 
-        Guarded on the card actually being a copy receipt: an MCP failure that
-        arrived after the copy is not this message's business, and dismissing
-        it because the user carried on typing would be the eviction bug
-        (D2) with extra steps.
+        Retires THE CARD THIS EDITOR'S COPY RAISED, by identity, and nothing
+        else. The first version asked whether the message started with
+        ``copied ``, which cannot tell one receipt from another: a transcript
+        copy raises a ``copied …`` card too, so typing the next prompt dismissed
+        a receipt for text the composer never touched — D3 inverted, withdrawing
+        a claim that was still true (review round 2, F5; design round 2, D8).
+        Comparing the object also drops the string coupling between this method
+        and the two f-strings that build the message (F8).
         """
+        receipt = self._copy_receipt
+        self._copy_receipt = None
+        if receipt is None:
+            return
         toast = self.query_one(Toast)
-        if toast.message.startswith("copied "):
+        # The GENERATION, not the wording: two copies can produce the same
+        # string, and what must be true is that the card on screen is still the
+        # one this editor's copy put there. Any later `show` — another copy, an
+        # MCP failure — moves the counter and this stands down.
+        if toast.generation == receipt:
             toast.dismiss_toast()
 
     def _put_on_clipboard(self, text: str | None) -> None:
@@ -2491,15 +2513,26 @@ class OperatorApp(App[None]):
         self.copy_to_clipboard(text)
         lines = len(text.splitlines())
         if lines <= 1:
-            # `cell_len` rather than `len`: the receipt counts what the user
-            # highlighted on screen, and a CJK glyph or an emoji is one
-            # character that occupies two cells. Neither number is wrong in
-            # general; this is the one the frame can be checked against.
-            count = cell_len(text)
+            # `len` rather than `cell_len`, i.e. the word means what it says.
+            # Cells were tried first, on the theory that the receipt should
+            # count what is painted \u2014 but cell width matches the frame only for
+            # the cases where it already matches `len`. An emoji is ONE glyph
+            # the user highlighted and `cell_len` calls it two; a tab is scored
+            # 0 while the editor paints it expanded to `indent_width`, so cells
+            # matched neither the document nor the screen (review round 2, F6).
+            # A newline scores 0 too, which made "select this line and its
+            # break" announce `copied 0 characters` for a real clipboard write
+            # \u2014 a receipt that reads as a failure (design round 2, D10).
+            count = len(text)
             message = f"copied {count} character{'' if count == 1 else 's'}"
         else:
             message = f"copied {lines} lines"
         self.query_one(Toast).show(message, yield_to_actionable=True)
+        # Any card raised here supersedes a composer receipt this app was
+        # holding: whatever is on screen now is not the one that copy put there,
+        # so there is nothing left for a later edit to withdraw. (The composer's
+        # own path re-arms it immediately afterwards.)
+        self._copy_receipt = None
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]

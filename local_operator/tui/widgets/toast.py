@@ -195,6 +195,11 @@ class Toast(Static):
         #: to a receipt for something they just did. Guards the slot; see
         #: :meth:`show`.
         self._actionable = False
+        #: Bumped by every :meth:`show`. Lets a caller name the card IT raised
+        #: and act on it only while that card is still the one on screen — a
+        #: message string cannot do this, because two notices can word
+        #: themselves identically. See :attr:`generation`.
+        self._generation = 0
         # The plain text currently showing. Kept alongside the renderable
         # because Textual's content accessor is a version-specific internal, and
         # "what is this toast saying" is a question both the tests and a future
@@ -212,6 +217,22 @@ class Toast(Static):
     def message(self) -> str:
         """What the card is saying right now; empty once dismissed."""
         return self._message
+
+    @property
+    def generation(self) -> int:
+        """Which card is showing, as a value a caller can hold on to.
+
+        A caller that raises a notice and may later want to withdraw it keeps
+        this and compares before dismissing, so it can only ever retire its own
+        card: any intervening ``show`` moves the counter. The alternative —
+        matching on the message text — cannot tell two identically worded
+        notices apart, which is how a composer edit came to dismiss the
+        transcript's copy receipt (review round 2, F5).
+
+        ``0`` while nothing has ever been shown, and unchanged by a ``show``
+        that declined the slot.
+        """
+        return self._generation
 
     @property
     def content_cells(self) -> int:
@@ -245,6 +266,7 @@ class Toast(Static):
         if yield_to_actionable and self._actionable:
             return
         self._stop_timer()
+        self._generation += 1
         #: Only an actionable notice claims the slot against a courtesy one.
         #: Set from the DURATION rather than a severity name, for the same
         #: reason the durations are: `TOAST_FAILURE_MS` is the app's one marker
