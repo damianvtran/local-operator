@@ -1384,6 +1384,10 @@ async def stream_with_failover(
         # chain. Each provider is a different service having a different day,
         # and the ceiling is about what ONE provider receives.
         server_fault_requests = 0
+        # Attempts this target's FIRST bearer spent before rotation started, so
+        # the restore below can hand back the remainder of the user's budget
+        # instead of a fresh one.
+        spent_before_rotation = 0
         # The last credential that actually produced a bearer, and whether its
         # configured budget has already been handed back once rotation ran out.
         last_access: "OAuthAccess | None" = None
@@ -1405,6 +1409,12 @@ async def stream_with_failover(
                 )
                 token = access.access_token if access is not None else None
                 if token != current_token:
+                    if not exhausted_budget_restored:
+                        # Attempts already charged to this bearer, INCLUDING the
+                        # one the rotation cycle itself spends re-presenting it
+                        # after a refresh. Missing that one is a whole extra
+                        # request against a provider that is already failing.
+                        spent_before_rotation = max(spent_before_rotation, transport_retries + 1)
                     current_token = token
                     transport_retries = 0  # fresh credential ⇒ fresh budget
                 if access is None and error is not None:
@@ -1419,30 +1429,41 @@ async def stream_with_failover(
                     if (
                         not exhausted_budget_restored
                         and last_access is not None
+                        and spent_before_rotation < retry.max_retries
                         and is_server_side_failure(error)
                         and server_fault_requests < MAX_SERVER_FAULT_REQUESTS_PER_TURN
                     ):
                         exhausted_budget_restored = True
                         access = last_access
-                        # NOTE: `transport_retries` was already zeroed a few
-                        # lines above, because rotation returning nothing makes
-                        # `token` None and so trips the `token != current_token`
-                        # reset. The restored pass therefore starts a FRESH
-                        # `max_retries`, and a lone credential's total for one
-                        # target is roughly twice the configured budget rather
-                        # than exactly it.
+                        # Carry the attempts already spent, and re-pin
+                        # `current_token`, so the restored pass finishes the
+                        # user's budget rather than starting a second one.
                         #
-                        # That is deliberate here, and it is also what the
-                        # unpatched code does: the same reset makes a single
-                        # credential spend `max_retries` per rotation cycle on
-                        # `main` too (verified A/B: identical counts at
-                        # maxRetries 0/1/3/5). The turn ceiling above is what
-                        # actually bounds it. Making the total exact is a real
-                        # improvement but it is a pre-existing accounting
-                        # question, not part of this change, and tightening it
-                        # here would silently reduce retries for every
-                        # single-credential user in a PR about the opposite
-                        # problem.
+                        # Both halves are load-bearing. Rotation returning
+                        # nothing makes `token` None, which trips the
+                        # `token != current_token` reset a few lines above and
+                        # zeroes the counter; re-pinning here stops the NEXT
+                        # pass doing the same thing again. Without this a lone
+                        # credential spent 2 x (max_retries + 1) requests
+                        # against one provider -- twice the configured budget,
+                        # in a change whose whole purpose is to stop hammering a
+                        # provider that is already failing.
+                        #
+                        # `spent_before_rotation < max_retries` above is part of
+                        # the same contract: when the pre-rotation allowance has
+                        # already met the configured budget there is nothing
+                        # left to restore, and firing anyway would grant an
+                        # extra request. It also covers `maxRetries: 0`, where a
+                        # user who asked for no retries must get exactly one
+                        # request.
+                        # Never LESS than what has already been spent: the
+                        # restored pass finishes the configured budget, it does
+                        # not reopen it. With a small `max_retries` the
+                        # pre-rotation allowance can already have met or passed
+                        # the budget, in which case there is nothing to restore
+                        # and the loop simply ends.
+                        transport_retries = max(spent_before_rotation, transport_retries)
+                        current_token = last_access.access_token
                         error = None
                     else:
                         break  # rotation exhausted for this provider
@@ -1705,21 +1726,20 @@ def _server_fault_budget_spent(error: ProviderError, server_fault_requests: int)
 
 
 def _request_has_rotated(state: AuthRetryKeyState) -> bool:
-    """Is there a credential this request has not tried and could still reach?
+    """Has this request already been handed more than one distinct bearer?
 
-    This decides ONE thing: whether to keep the per-credential allowance small
-    so the turn moves on to another account, or to spend the configured budget
-    here because there is nowhere else to go.
+    This decides ONE thing: whether the small per-credential allowance applies,
+    because the budget is about to be spent AGAIN on another account -- the
+    multiplication the cap exists to prevent.
 
-    It reads the store's OWN report (``AuthStore.rotate_sibling`` returns
-    whether another usable credential remained) rather than modelling the
-    credential table. Five review rounds each found a predictive version
-    drifting from what the cascade actually does -- raw row counts, then blocked
-    rows, then credential types, then override bearers with no row at all, then
-    ``api_key`` rows split across cascade tiers where one always wins -- and
-    every drift cost a real user retries they needed. The store is the only
-    thing that knows its own tiers, blocks, aliases and overrides; asking it is
-    the fix that does not have a sixth version.
+    It reports what ALREADY HAPPENED -- more than one distinct bearer has been
+    handed to this request -- rather than modelling the credential table. Five
+    review rounds each found a predictive version drifting from what the cascade
+    actually does: raw row counts, then blocked rows, then credential types,
+    then override bearers with no row at all, then ``api_key`` rows split across
+    cascade tiers where one always wins. Every drift cost a real user retries
+    they needed. A fact about the past cannot drift, which is why this version
+    has no sixth.
     """
     return len(state.attempted_keys) > 1
 

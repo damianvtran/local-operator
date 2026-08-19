@@ -648,18 +648,11 @@ async def test_transport_retries_honor_budget_same_key_first() -> None:
         async for _ in stream_with_failover(_request(), auth, settings, client_for):
             pass
     assert excinfo.value.status == 503
-    # `k1` spends its budget, the turn rotates to `k2`, and when rotation then
-    # reports no further sibling the bearer in hand is restored for one more
-    # pass -- the pre-rotation allowance exists only to get a turn moving to
-    # another account, and there is no longer one to move to.
-    #
-    # `k2` therefore appears twice over: `transport_retries` is reset whenever
-    # the resolved token changes, and rotation exhausting resolves to None
-    # first, so the restored pass starts a fresh budget rather than the
-    # remainder of the spent one. That accounting is PRE-EXISTING -- `main`
-    # produces the same per-credential counts for the same settings -- and the
-    # turn ceiling is what bounds it; see the note at the restore site.
-    assert attempts == ["k1", "k1", "k1", "k2", "k2", "k2", "k2", "k2", "k2"]
+    # Two same-key retries before rotation, then the sibling gets the same --
+    # the sequence this test has always asserted, and the one `main` produces.
+    # The restore-once path hands back the REMAINDER of the configured budget
+    # rather than a fresh one, so it adds nothing here.
+    assert attempts == ["k1", "k1", "k1", "k2", "k2", "k2"]
     # Every credential in the pool is asked before the turn is declared dead: a
     # 5xx is a PROVIDER fault, so the next ACCOUNT is the thing most likely to
     # succeed. Capping rotation at one switch is what stranded two healthy
@@ -2517,21 +2510,29 @@ class TestARestoredBudgetIsTheConfiguredOne:
             failover_module._abortable_sleep = original  # type: ignore[assignment]
         return attempts[0]
 
-    async def test_a_lone_credential_scales_with_the_configured_budget(self, tmp_path: Any) -> None:
-        """The point is that it MOVES with the setting; the earlier form
-        returned the same number for every value."""
+    @pytest.mark.parametrize("max_retries", [0, 1, 3, 5, 10])
+    async def test_a_lone_credential_spends_exactly_its_configured_budget(
+        self, tmp_path: Any, max_retries: int
+    ) -> None:
+        """`max_retries + 1` requests -- the same total as before this change.
+
+        The restore-once path hands back the REMAINDER of the user's budget; it
+        neither zeroes the counter nor reopens the budget. An earlier form let
+        the token-change reset zero it first, so a lone credential spent
+        `2 x (max_retries + 1)` requests -- twice what was asked for, inside a
+        change whose whole purpose is to stop hammering a provider that is
+        already failing.
+
+        Swept across the range because the doubling was nearly invisible at the
+        default (the turn ceiling masked it) and worst for the users who
+        deliberately configured a SMALL budget.
+        """
         from local_operator.providers.auth_store import AuthStore
 
-        counts = []
-        for max_retries in (2, 4, 10):
-            store = AuthStore(db_path=tmp_path / f"auth-{max_retries}.db")
-            store.upsert_credential(
-                "openai",
-                {"type": "oauth", "access": "only", "refresh": "r", "expires": None},
-            )
-            counts.append(await self._requests_for(store, max_retries))
+        store = AuthStore(db_path=tmp_path / f"auth-{max_retries}.db")
+        store.upsert_credential(
+            "openai",
+            {"type": "oauth", "access": "only", "refresh": "r", "expires": None},
+        )
 
-        assert counts[0] < counts[1] < counts[2], counts
-        # And a lone credential rides out a blip that clears late, as it did
-        # before any of this work (main recovered through attempt 11).
-        assert counts[2] >= 11, counts
+        assert await self._requests_for(store, max_retries) == max_retries + 1
