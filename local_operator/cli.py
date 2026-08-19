@@ -1097,6 +1097,8 @@ def _preflight_hosting_model(
     agent_registry: "AgentRegistry",
     current_agent: Optional[Any],
     args: argparse.Namespace,
+    *,
+    require_api_key: bool = True,
 ) -> int | None:
     """Startup preflight (CL-06): resolve hosting/model and verify that a
     credential source exists BEFORE any turn runs.
@@ -1109,6 +1111,18 @@ def _preflight_hosting_model(
     custom) pass through, and anything the provider registry cannot answer
     passes through too — a preflight must never block a configuration the
     engine itself would accept.
+
+    ``require_api_key=False`` demotes a missing API key from a fatal error to
+    a stderr warning, and exists for the interactive front ends (TUI and
+    headless REPL): the in-app ``/login`` command is the product's own remedy
+    for a missing key, and a fatal preflight sat exactly between the user and
+    that remedy — a fresh config whose default hosting was a keyed provider
+    could not start at all. Session construction never needs the key (stream
+    time resolves it through the AuthStore cascade), the TUI splash already
+    shows "not logged in — /login <provider>", and a keyless turn fails with
+    its own accurate message, so letting the app start loses nothing. Hosting/
+    model resolution errors stay fatal on every path: without a hosting there
+    is no session to build and nothing for ``/login`` to fix.
 
     Returns -1 (already printed) on failure, None to continue. All engine
     imports stay lazy so this never weights down parser-only paths.
@@ -1128,10 +1142,12 @@ def _preflight_hosting_model(
     except Exception:  # noqa: BLE001 — unknown providers pass through
         return None
 
-    return _preflight_api_key(hosting, credential_manager)
+    return _preflight_api_key(hosting, credential_manager, require_key=require_api_key)
 
 
-def _preflight_api_key(hosting: str, credential_manager: CredentialManager) -> int | None:
+def _preflight_api_key(
+    hosting: str, credential_manager: CredentialManager, *, require_key: bool = True
+) -> int | None:
     """Verify that the provider has a credential source.
 
     Stored OAuth and API-key rows satisfy preflight by presence, including a
@@ -1145,7 +1161,10 @@ def _preflight_api_key(hosting: str, credential_manager: CredentialManager) -> i
     registry cannot answer pass through — a preflight must never block a
     configuration the engine itself would accept.
 
-    Returns -1 (already printed) on failure, None to continue.
+    Returns -1 (already printed) on failure, None to continue. With
+    ``require_key=False`` a missing key is a warning instead of a failure —
+    see :func:`_preflight_hosting_model` for why the interactive front ends
+    must not be blocked from starting (the fix lives behind the gate).
     """
     canonical = "test" if hosting == "noop" else hosting
     try:
@@ -1179,6 +1198,18 @@ def _preflight_api_key(hosting: str, credential_manager: CredentialManager) -> i
         return None
 
     key_name = definition.env_keys if isinstance(definition.env_keys, str) else "API key"
+    if not require_key:
+        # Interactive start: name the fact and the in-app remedy, then let the
+        # app come up. The TUI repaints over this line, but its splash carries
+        # the same warning; the headless REPL keeps it visible on stderr.
+        print(
+            f"\n\033[1;33mWarning: no credentials are configured for hosting "
+            f"platform '{hosting}'. Starting anyway — run `/login {canonical}` "
+            f"in the app, `local-operator login {canonical}`, or set "
+            f"{key_name} in the environment.\033[0m",
+            file=sys.stderr,
+        )
+        return None
     # stderr: this fires on every fresh install and every typo'd --hosting,
     # i.e. it is the single most common `exec --json` failure, and a coloured
     # non-JSON line on stdout breaks the consumer it is trying to inform.
@@ -1613,12 +1644,20 @@ def main() -> int:
         if auto_save_enabled:
             args.train = True
 
-        # Startup preflight (CL-06): hosting/model + API-key resolution fails
-        # fast with the legacy message shape BEFORE any turn (the factory
-        # raises the same errors mid-construction; surfacing them here keeps
-        # the user from seeing a half-initialized session).
+        # Startup preflight (CL-06): hosting/model resolution fails fast with
+        # the legacy message shape BEFORE any turn (the factory raises the
+        # same errors mid-construction; surfacing them here keeps the user
+        # from seeing a half-initialized session). A missing API key is only a
+        # WARNING here: this is the interactive path, `/login` inside the app
+        # is the remedy, and a fatal gate locked the user out of it (the exec
+        # path keeps its fatal check — a scripted run has no login prompt).
         preflight_result = _preflight_hosting_model(
-            config_manager, credential_manager, agent_registry, current_agent, args
+            config_manager,
+            credential_manager,
+            agent_registry,
+            current_agent,
+            args,
+            require_api_key=False,
         )
         if preflight_result is not None:
             return preflight_result
