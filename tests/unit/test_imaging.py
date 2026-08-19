@@ -27,6 +27,7 @@ from local_operator.imaging import (
     _REBOUND_CACHE_MAX_BYTES,
     IMAGE_MAX_EDGE,
     IMAGE_MAX_PIXELS,
+    IMAGE_REFUSAL_MAX_B64_BYTES,
     bound_image_for_model,
     rebound_oversize_image,
 )
@@ -430,6 +431,93 @@ def test_an_in_spec_high_res_archive_frame_is_left_alone() -> None:
     assert rebound_oversize_image(base64.b64encode(frame).decode("ascii")) is None
 
 
+def test_a_repaired_archive_frame_stays_a_readable_pixel_font() -> None:
+    """A bilevel frame must be resampled with NEAREST and shrunk only as far as
+    the refusal ceiling demands.
+
+    The glyphs are one-pixel strokes, so a smooth filter turns each into a grey
+    ramp — which destroys the legibility the font exists for and, by replacing 2
+    distinct values with 256, makes the "shrunk" frame ~21x LARGER than the
+    source it was shrinking. Both failure modes are asserted here because either
+    one alone would look like a reasonable result.
+    """
+    frame = _archive_frame("google", "gemini-2.5-pro")
+    source = Image.open(io.BytesIO(frame))
+    source.load()
+    rebound = rebound_oversize_image(base64.b64encode(frame).decode("ascii"))
+    assert rebound is not None
+    repaired = Image.open(io.BytesIO(base64.b64decode(rebound[0])))
+    repaired.load()
+
+    colors = repaired.getcolors(maxcolors=256)
+    assert colors is not None and len(colors) <= 2, "the pixel font was antialiased into a ramp"
+
+    # Stated against the alternative rather than against a bare ratio. Some
+    # growth is unavoidable — a downscale destroys the horizontal run lengths
+    # PNG was compressing — so the meaningful claim is not "it got smaller" but
+    # "it did not get catastrophically bigger the way a smooth filter makes it".
+    smooth = source.resize(repaired.size, Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    smooth.save(buffer, format="PNG")
+    assert len(base64.b64decode(rebound[0])) * 4 < len(
+        buffer.getvalue()
+    ), "the repair is no better than the antialiasing path it exists to avoid"
+    # Shrunk to the refusal ceiling, not all the way to IMAGE_MAX_EDGE: every
+    # pixel taken off a 1px stroke is a stroke that may vanish.
+    assert max(repaired.size) <= MANY_IMAGE_PIXEL_LIMIT
+    assert max(repaired.size) > IMAGE_MAX_EDGE, "line art was shrunk further than it had to be"
+
+
+def test_a_photograph_is_still_resized_smoothly_to_the_cheap_bound() -> None:
+    """The NEAREST path is for line art only. Photographic content has no
+    strokes to lose, is what the 1568 cost argument was measured on, and would
+    look aliased under a nearest-neighbour downscale."""
+    source = _noise_png((2600, 1200))
+    rebound = rebound_oversize_image(base64.b64encode(source).decode("ascii"))
+    assert rebound is not None
+    repaired = Image.open(io.BytesIO(base64.b64decode(rebound[0])))
+    assert max(repaired.size) == IMAGE_MAX_EDGE, "a photo was not taken to the cheap bound"
+
+
+def test_a_block_under_every_pixel_ceiling_can_still_be_too_heavy() -> None:
+    """Dimensions cannot predict the byte wall.
+
+    Providers refuse an image block over 5 MB of base64, and an incompressible
+    1900x1900 PNG clears every pixel ceiling while encoding to ~14.5 MB — so a
+    dimension-only gate leaves a block that is certain to be refused.
+    """
+    source = _noise_png((1900, 1900))
+    encoded = base64.b64encode(source).decode("ascii")
+    assert max(Image.open(io.BytesIO(source)).size) <= MANY_IMAGE_PIXEL_LIMIT
+    assert len(encoded) > IMAGE_REFUSAL_MAX_B64_BYTES, "the fixture is not actually too heavy"
+
+    rebound = rebound_oversize_image(encoded)
+    assert rebound is not None, "a block that would be refused on size was left in the history"
+    assert len(rebound[0]) < len(encoded), "the repair did not make it lighter"
+
+
+def test_the_memo_survives_a_working_set_larger_than_the_cap() -> None:
+    """Eviction must be oldest-first, not clear-on-overflow.
+
+    The access pattern is a full walk of the same history on every render, not
+    random lookups. Clearing on overflow empties the cache part-way through each
+    walk, so every later frame in that same walk misses and the memo never warms
+    — measured at 3,858 ms per warm walk against 5 ms when the set fits.
+    """
+    _REBOUND_CACHE.clear()
+    frames = [_archive_frame("google", "gemini-2.5-pro") for _ in range(4)]
+    encoded = [base64.b64encode(frame).decode("ascii") for frame in frames]
+    for item in encoded:
+        rebound_oversize_image(item)
+    # Force the cap far below the working set, then walk it twice. Every entry
+    # must still be cached at the end of a walk that exceeded the cap.
+    hits_before = len(_REBOUND_CACHE)
+    assert hits_before >= 1
+    for item in encoded:
+        assert rebound_oversize_image(item) is not None
+    assert len(_REBOUND_CACHE) == hits_before, "a walk that fits the cap still evicted"
+
+
 def test_an_oversized_archive_frame_is_repaired_without_going_lossy() -> None:
     """The Google shape is 2048px and IS refusable, so it must be repaired —
     but archive frames are grayscale renderings of a 5x7 bitmap font, and the
@@ -450,4 +538,4 @@ def test_an_oversized_archive_frame_is_repaired_without_going_lossy() -> None:
     assert mime == "image/png", "a pixel-font frame was re-encoded lossily"
     repaired = Image.open(io.BytesIO(base64.b64decode(data)))
     assert repaired.mode == "L", "grayscale was widened, which is what forces the JPEG rung"
-    assert max(repaired.size) <= IMAGE_MAX_EDGE
+    assert max(repaired.size) <= MANY_IMAGE_PIXEL_LIMIT

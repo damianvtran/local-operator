@@ -59,6 +59,14 @@ the invariant is total:
   provider would actually refuse — is shrunk. Gating on 1568 instead rewrote
   every high-res frame on every render, which is the trade this exception
   exists to leave alone.
+
+  These frames are also the reason the ladder cares what an image is MADE of.
+  They are bilevel renderings of a 5x7 pixel font, so a smooth resampler turns
+  every one-pixel stroke into a grey ramp: it destroys the legibility the font
+  was chosen for AND replaces a 2-value image with a 256-value one that PNG can
+  no longer compress, making the "shrunk" frame 21x larger than the source. A
+  bilevel source is therefore resampled with NEAREST and shrunk only as far as
+  the refusal ceiling demands.
 - ``_forward_undecoded`` cannot resize at all, because on that host there is no
   decoder. See its own docstring for what it does enforce.
 """
@@ -68,6 +76,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+from collections import OrderedDict
 from typing import Any
 
 from local_operator.helpers import heif_image_module, pillow_image_module
@@ -131,6 +140,13 @@ IMAGE_MAX_BYTES = 1024 * 1024
 #: JPEG quality used for that fallback. 85 is the standard visually-lossless
 #: point; on the sampled files it turned 1.9 MB of re-encoded PNG into 271 KB.
 IMAGE_JPEG_QUALITY = 85
+#: The base64 wall a REPAIR is measured against, the byte counterpart to
+#: :data:`IMAGE_REFUSAL_MAX_EDGE`. Providers reject an image block over 5 MB of
+#: base64, and dimensions alone cannot see that coming: a 1900x1900 noise PNG is
+#: comfortably under every pixel ceiling and still encodes to 14.5 MB of base64
+#: (review round 2, F9). Set below the wall so a block that would be refused is
+#: repaired before it is sent, not after.
+IMAGE_REFUSAL_MAX_B64_BYTES = 4 * 1024 * 1024
 
 
 def _forward_undecoded(data: bytes, info: ImageInfo) -> tuple[bytes, str, str]:
@@ -225,6 +241,52 @@ def _exif_transposed(image: Any) -> Any:
         return image
 
 
+def _is_bilevel(image: Any) -> bool:
+    """Does this image use only two distinct values (black-and-white line art)?
+
+    Asked of the PIXELS rather than of the mode, because mode is not evidence:
+    snapcompact renders its archive frames as ``L`` and a scanner produces
+    ``1``, while an ordinary grayscale photograph is also ``L`` and must not be
+    treated as line art. What matters is whether the content is made of hard
+    one-pixel strokes, and a two-value histogram is exactly that.
+
+    ``getcolors`` is given a small ceiling and returns ``None`` the moment the
+    image exceeds it, so this costs one bounded histogram pass and cannot be
+    made expensive by a photographic input — it gives up almost immediately on
+    anything that is not already nearly bilevel.
+
+    Multi-channel images are excluded outright: two distinct RGB tuples is a
+    two-colour graphic rather than the black-and-white glyph rendering this is
+    protecting, and downsampling that with NEAREST would be a guess.
+    """
+    if image.mode not in ("1", "L"):
+        return False
+    try:
+        colors = image.getcolors(maxcolors=2)
+    except Exception:  # noqa: BLE001 — a histogram must never fail an image
+        return False
+    return colors is not None and len(colors) <= 2
+
+
+def _is_bilevel_bytes(data: bytes, info: ImageInfo) -> bool:
+    """:func:`_is_bilevel` for bytes that have not been decoded yet.
+
+    Separate from the decoded check because the repair path has to make the
+    decision BEFORE it calls into the ladder, and must not fail an image just
+    because it could not answer the question — an unreadable histogram simply
+    means "treat it as photographic", which is the conservative default.
+    """
+    module = pillow_image_module() if info.sendable else heif_image_module()
+    if module is None:
+        return False
+    try:
+        with module.open(io.BytesIO(data)) as image:
+            image.load()
+            return _is_bilevel(image)
+    except Exception:  # noqa: BLE001 — the ladder reports decode failures, not this
+        return False
+
+
 def _guard_pixel_budget(width: int, height: int) -> None:
     """Refuse an image whose pixel count would dominate the process.
 
@@ -238,7 +300,9 @@ def _guard_pixel_budget(width: int, height: int) -> None:
         )
 
 
-def bound_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str]:
+def bound_image_for_model(
+    data: bytes, info: ImageInfo, *, max_edge: int | None = None
+) -> tuple[bytes, str, str]:
     """Decode, bound and re-encode image bytes for a provider.
 
     Returns ``(payload, wire_mime, summary)``; raises ``ValueError`` with a
@@ -268,6 +332,14 @@ def bound_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str
        the usual case here — the sampled 1672x941 photographic PNG re-encoded
        to 1.9 MB of PNG against 271 KB of quality-85 JPEG — but it is not the
        only one, so the choice is measured rather than assumed.
+
+    ``max_edge`` overrides :data:`IMAGE_MAX_EDGE` for callers that are REPAIRING
+    rather than ingesting. The default exists to make an image cheap, and it is
+    the right default for anything arriving from a paste or a file read; but a
+    caller shrinking an image that already exists is trading fidelity it did not
+    choose, and for line art the smallest possible reduction is worth real
+    money. See :func:`rebound_oversize_image`, which passes the refusal ceiling
+    for bilevel sources so a pixel font is shrunk by 2% instead of 23%.
 
     With no decoder available the whole ladder collapses to
     :func:`_forward_undecoded`.
@@ -331,19 +403,37 @@ def bound_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str
         width, height = image.size
 
         long_edge = max(width, height)
+        edge_cap = IMAGE_MAX_EDGE if max_edge is None else max_edge
         if (
             info.sendable
             and frames == 1
             and not rotated
-            and long_edge <= IMAGE_MAX_EDGE
+            and long_edge <= edge_cap
             and len(data) <= IMAGE_MAX_BYTES
         ):
             return data, info.mime_type, f"{info.mime_type}, {width}x{height}, {len(data)} bytes"
 
-        if long_edge > IMAGE_MAX_EDGE:
-            scale = IMAGE_MAX_EDGE / long_edge
+        if long_edge > edge_cap:
+            scale = edge_cap / long_edge
             size = (max(1, round(width * scale)), max(1, round(height * scale)))
-            image = image.resize(size, image_module.LANCZOS)
+            # LANCZOS everywhere EXCEPT a bilevel source, where it is actively
+            # destructive. A two-value image is a rendering of glyphs or line
+            # art whose strokes are one pixel wide; a smooth filter turns each
+            # stroke into a grey ramp, which both destroys the thing that made
+            # it legible and replaces a 2-value image with a 256-value one that
+            # PNG can no longer compress. Measured on a snapcompact archive
+            # frame: 31 KB of bilevel text became 665 KB after a LANCZOS
+            # downscale — 21x LARGER than the source it was shrinking — while
+            # the glyphs themselves smeared (review round 2, F8).
+            #
+            # NEAREST keeps the two values and the compression, and for pixel
+            # fonts it is also the more faithful resampler: dropping whole rows
+            # and columns leaves the surviving strokes crisp instead of making
+            # every stroke uniformly soft. It is the wrong choice for
+            # photographic content, which is why it is gated on the source
+            # actually being bilevel rather than on the mode being ``L``.
+            resample = image_module.NEAREST if _is_bilevel(image) else image_module.LANCZOS
+            image = image.resize(size, resample)
 
         # Palette and high-bit-depth modes are legal PNG but not legal JPEG,
         # and rung 3 must not be the first place a mode problem shows up.
@@ -429,7 +519,7 @@ def bound_image_for_model(data: bytes, info: ImageInfo) -> tuple[bytes, str, str
 #: this walk into a worker must revisit that, though the failure mode under the
 #: GIL would be duplicated work rather than a corrupt entry (dict get/set are
 #: atomic).
-_REBOUND_CACHE: dict[str, tuple[str, str]] = {}
+_REBOUND_CACHE: OrderedDict[str, tuple[str, str]] = OrderedDict()
 
 #: Cap on :data:`_REBOUND_CACHE` measured in PAYLOAD BYTES, not entries. The
 #: values are full base64 images and their sizes differ by orders of magnitude,
@@ -441,9 +531,21 @@ _REBOUND_CACHE: dict[str, tuple[str, str]] = {}
 #: staying an order of magnitude under what the images themselves cost in
 #: context.
 #:
-#: Cleared wholesale rather than evicted by age: the entries are equally
-#: valuable, a cold cache costs exactly one resize, and a subtle LRU here would
-#: cost a reader's afternoon for no measurable gain.
+#: Evicted OLDEST-FIRST, not cleared wholesale. Clearing looks simpler and is
+#: catastrophic here, because the access pattern is a full walk of the same
+#: history on every render rather than random lookups: once the working set
+#: exceeds the cap, a clear-on-overflow cache is emptied part-way through each
+#: walk and every later frame in that same walk misses, so the memo never warms
+#: at all. Measured on Gemini-shape archive frames, whose working set is exactly
+#: the "fifty-odd frames" a snapcompact archive replays — 38 frames warm-walked
+#: in 3,858 ms under clear-on-overflow against 5 ms when they fit (review round
+#: 2, F7). Dropping the oldest entries instead keeps the cache hot for the
+#: majority of the walk and degrades smoothly.
+#:
+#: Python dicts preserve insertion order, so "oldest" is the head of the map and
+#: no separate bookkeeping is needed. Insertion order rather than true LRU is
+#: deliberate: a walk touches every entry once per render, so recency carries no
+#: information a full pass does not already erase.
 _REBOUND_CACHE_MAX_BYTES = 32 * 1024 * 1024
 
 
@@ -477,9 +579,18 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
     so it earns its keep only on a block that would otherwise be refused; a
     block between the two numbers is one this module would not have created but
     which the provider accepts, and rewriting it would silently overrule the
-    caller that chose that size (review round 1, F1). Blocks that ARE repaired
-    come back bounded to ``IMAGE_MAX_EDGE``, because once a re-encode is
-    unavoidable the cost argument for 1568 applies in full.
+    caller that chose that size (review round 1, F1).
+
+    Size is not the only way to be refused, so :data:`IMAGE_REFUSAL_MAX_B64_BYTES`
+    is checked too: a 1900x1900 noise PNG clears every pixel ceiling and still
+    encodes to 14.5 MB of base64 against a 5 MB wall (review round 2, F9).
+
+    How FAR a repaired block is shrunk then depends on what it is. Photographic
+    content goes to ``IMAGE_MAX_EDGE``, where the cost argument for 1568 was
+    measured. Line art goes only to the refusal ceiling, because its strokes are
+    one pixel wide and every pixel removed is a stroke that may disappear — on a
+    snapcompact frame that is the difference between a 2% and a 23% reduction,
+    and between legible glyphs and glyphs missing strokes (review round 2, F8).
 
     A block this cannot decode is returned unchanged rather than dropped. It may
     be perfectly acceptable to the provider (a HEIF whose dimensions this cannot
@@ -495,7 +606,14 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
     if info is None or info.width is None or info.height is None:
         # Unreadable header: cannot prove it is oversized, so do not touch it.
         return None
-    if max(info.width, info.height) <= IMAGE_REFUSAL_MAX_EDGE:
+    oversized = max(info.width, info.height) > IMAGE_REFUSAL_MAX_EDGE
+    # The byte wall is a SEPARATE refusal that dimensions cannot predict. A
+    # 1900x1900 noise PNG clears every pixel ceiling and still encodes to 14.5 MB
+    # of base64, which the provider refuses exactly as flatly as an oversized
+    # edge (review round 2, F9). Measured on the ENCODED text, because that is
+    # what is actually sent and what the wall is expressed in.
+    too_heavy = len(data_b64) > IMAGE_REFUSAL_MAX_B64_BYTES
+    if not oversized and not too_heavy:
         return None
     # Only oversized blocks reach the cache, so the common path never pays for
     # it. The digest covers the bytes alone, which is the whole key: the result
@@ -508,17 +626,28 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
     cached = _REBOUND_CACHE.get(key)
     if cached is not None:
         return cached
+    # Line art is shrunk to the REFUSAL ceiling rather than to IMAGE_MAX_EDGE:
+    # every pixel removed from a one-pixel stroke is a stroke that may vanish,
+    # so a repair takes the smallest reduction that clears the wall instead of
+    # the cheapest one. On a snapcompact frame that is a 2% downscale rather
+    # than 23%, which is the difference between legible glyphs and glyphs
+    # missing strokes (review round 2, F8). It is also the cheaper choice here,
+    # because a bilevel image compresses to almost nothing either way.
+    #
+    # Photographic content keeps the 1568 default: it has no strokes to lose,
+    # and it is the case the cost argument for 1568 was measured on.
+    edge = IMAGE_REFUSAL_MAX_EDGE if _is_bilevel_bytes(raw, info) else IMAGE_MAX_EDGE
     try:
-        payload, wire_mime, _ = bound_image_for_model(raw, info)
+        payload, wire_mime, _ = bound_image_for_model(raw, info, max_edge=edge)
     except ValueError:
         # Corrupt or bomb-sized. Leaving it is strictly better than dropping it:
         # the block may still be one the provider accepts, and if it is not, the
         # session's image-rejection degrade removes it on the refusal.
         return None
     result = (base64.b64encode(payload).decode("ascii"), wire_mime)
-    if sum(len(data) for data, _ in _REBOUND_CACHE.values()) + len(result[0]) > (
-        _REBOUND_CACHE_MAX_BYTES
-    ):
-        _REBOUND_CACHE.clear()
+    retained = sum(len(data) for data, _ in _REBOUND_CACHE.values()) + len(result[0])
+    while retained > _REBOUND_CACHE_MAX_BYTES and _REBOUND_CACHE:
+        _, (evicted, _mime) = _REBOUND_CACHE.popitem(last=False)
+        retained -= len(evicted)
     _REBOUND_CACHE[key] = result
     return result
