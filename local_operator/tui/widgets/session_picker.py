@@ -21,6 +21,14 @@ are not: with a hundred sessions, "asteroids" finds the one you mean faster
 than paging can. Filtering narrows; it never reorders, so a row does not move
 under the cursor as the query grows.
 
+**The filter also searches what was SAID in each conversation**, not only its
+name — see ``session/search_index.py``. Matching on the name alone meant a
+session could only be found by the words in its title, so a user who could not
+recall how a conversation was named could not reach it at all, however
+distinctive the work inside it was. A row matched on its body rather than its
+name is marked, because otherwise it looks like a result the filter had no
+reason to return.
+
 **The card measures the terminal.** Every column here is a cell count derived
 from the screen, not a constant: the first cut shipped a fixed 78-cell card
 that a 70-column terminal simply clipped, which amputated the id column
@@ -35,6 +43,7 @@ footer (which is the only place the card says how to get out).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -46,6 +55,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from local_operator.resume import SessionRow, format_age
+from local_operator.session.search_index import search_digests
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -119,19 +129,65 @@ CURSOR = "❯"
 #: Cells the cursor gutter always occupies, so names start at one column.
 GUTTER_CELLS = 2
 
+#: Prefix on a row the filter admitted because the query appears in the
+#: CONVERSATION rather than in the visible name.
+#:
+#: Two cells wide (``cell_len`` measured, not assumed), and a plain typographic
+#: quote rather than an icon-set glyph, so it costs the same width in every
+#: terminal and is present in any font that can already draw the curly quotes
+#: this app's own prose uses.
+#:
+#: A QUOTE mark rather than the `·` first shipped: the footer on this same
+#: card uses `·` as its separator forty cells below, and one glyph meaning
+#: "and also" in the chrome and "found inside this conversation" in the list
+#: is a collision the reader has to resolve every time (D4). A quote reads as
+#: "something was said here", which is what the mark actually means.
+BODY_MATCH_MARKER = "” "
 
-def filter_rows(rows: Sequence[SessionRow], query: str) -> list[SessionRow]:
-    """Rows whose name or id contains ``query``, case-insensitively.
 
-    Substring rather than fuzzy on purpose: the two fields are a sentence the
-    user wrote and a hex id, and fuzzy matching over free text produces
-    confident nonsense ("asteroids" matching a row about "assets ordering").
+def filter_rows(
+    rows: Sequence[SessionRow],
+    query: str,
+    body_matches: AbstractSet[str] | None = None,
+) -> list[SessionRow]:
+    """Rows whose name, id, or conversation BODY contains ``query``.
+
+    Substring rather than fuzzy on purpose: the fields are sentences the user
+    wrote and a hex id, and fuzzy matching over free text produces confident
+    nonsense ("asteroids" matching a row about "assets ordering").
     Order is preserved — filtering must never move a row under the cursor.
+
+    ``body_matches`` is the set of ids whose conversation text matched, decided
+    by :func:`local_operator.session.search_index.search_digests`. Passed in
+    rather than computed here so this function stays pure and cheap enough to
+    run per keystroke, and so a caller with no index (a test, an embedder)
+    keeps exactly the old name-and-id behaviour.
     """
     needle = query.strip().lower()
     if not needle:
         return list(rows)
-    return [row for row in rows if needle in row.name.lower() or needle in row.id.lower()]
+    matched = body_matches or frozenset()
+    return [
+        row
+        for row in rows
+        if needle in row.name.lower() or needle in row.id.lower() or row.id in matched
+    ]
+
+
+def matched_in_body(row: SessionRow, query: str, body_matches: AbstractSet[str]) -> bool:
+    """True when ``row`` is on screen only because its CONVERSATION matched.
+
+    Drives the body-match marker. A row whose visible name already contains the
+    query needs no explanation; one that does not would otherwise read as the
+    filter returning something arbitrary, which is worse than no marker at all
+    because it makes the whole result set look untrustworthy.
+    """
+    needle = query.strip().lower()
+    if not needle:
+        return False
+    if needle in row.name.lower() or needle in row.id.lower():
+        return False
+    return row.id in body_matches
 
 
 def _pad_cells(text: str, width: int) -> str:
@@ -175,7 +231,7 @@ def _wrap_cells(text: str, width: int) -> list[str]:
 
 
 def plan_columns(
-    rows: Sequence[SessionRow], width: int, ages: Sequence[str]
+    rows: Sequence[SessionRow], width: int, ages: Sequence[str], marked: bool = False
 ) -> tuple[int, int, int]:
     """``(name, age, id)`` cell budgets for ``width``, dropping before cutting.
 
@@ -184,18 +240,33 @@ def plan_columns(
     copies into ``/resume <id>``. The age goes second — "4h" with the "ago"
     sliced off is noise. The name is last and truncates with an ellipsis,
     because a prefix of a sentence is still recognisable.
+
+    ``marked`` reserves the body-match marker's cells as part of the FIXED
+    chrome, for every row in the list rather than only the matched ones. Two
+    reasons, and both were found by looking at rendered frames rather than at
+    the arithmetic:
+
+    * Subtracting the marker from the name AFTER this function had already
+      spent the budget down to :data:`NAME_MIN_CELLS` rendered marked names at
+      14 cells — under the floor this module documents as "not identifiable",
+      and it let the marker jump a queue in which the id and the age are
+      supposed to surrender their cells before the name gives up any.
+    * Reserving it only on matched rows started names at a different column
+      depending on how each row matched, so a filtered list rendered a ragged
+      left edge for the one field the user is reading down.
     """
+    marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     age_col = max((cell_len(age) for age in ages), default=0)
     # Measured rather than assumed at 12: an id written by an older build with
     # a different length must still line up instead of ragging the column.
     id_col = max((cell_len(row.id) for row in rows), default=0)
-    fixed = GUTTER_CELLS + 2 + age_col + 2 + id_col
+    fixed = GUTTER_CELLS + marker_col + 2 + age_col + 2 + id_col
     if width - fixed >= NAME_MIN_CELLS:
         return width - fixed, age_col, id_col
-    fixed = GUTTER_CELLS + 2 + age_col
+    fixed = GUTTER_CELLS + marker_col + 2 + age_col
     if width - fixed >= NAME_MIN_CELLS:
         return width - fixed, age_col, 0
-    return max(NAME_MIN_CELLS, width - GUTTER_CELLS), 0, 0
+    return max(NAME_MIN_CELLS, width - GUTTER_CELLS - marker_col), 0, 0
 
 
 def render_rows(
@@ -204,6 +275,7 @@ def render_rows(
     width: int,
     now: float,
     hovered: int | None = None,
+    body_matched: AbstractSet[str] = frozenset(),
 ) -> list[Text]:
     """One line per session: cursor, name, age, id.
 
@@ -218,7 +290,16 @@ def render_rows(
     dim = theme_mod.semantic_color("dim")
 
     ages = [format_age(max(0.0, now - row.mtime)) for row in rows]
-    name_col, age_col, id_col = plan_columns(rows, width, ages)
+    # Whether the RESULT SET has any marked row decides the column, not whether
+    # this PAGE does. `rows` here is one page of a scrolling list, so asking it
+    # made the reservation appear and disappear as the marked row scrolled in
+    # and out of view: every name jumped two cells sideways on a single arrow
+    # press, and truncation changed for rows that had not changed. A column
+    # that depends on scroll position is D2's ragged edge moved onto the time
+    # axis, where it is worse — motion draws the eye, a static offset does not.
+    marked = bool(body_matched)
+    name_col, age_col, id_col = plan_columns(rows, width, ages, marked)
+    marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
 
     lines: list[Text] = []
     for index, (row, age) in enumerate(zip(rows, ages)):
@@ -258,6 +339,26 @@ def render_rows(
             name_colour = fg if current else muted
         else:
             name_colour = muted if current else dim
+        # A row that matched inside the conversation carries a mark, because
+        # its NAME does not contain what was typed and an unexplained row makes
+        # the whole result set read as broken.
+        #
+        # The COLUMN is reserved for every row whenever any row is marked (see
+        # ``plan_columns``), and unmarked rows pad it with blanks. Painting it
+        # only where it applies moved the start of the name between rows, which
+        # ragged the left edge of the one field being read down the list.
+        #
+        # `muted`, not `dim`. The two are interchangeable for the id and the
+        # age, which are redundant lookup keys, but this mark is the ONLY thing
+        # explaining why a row with no visible match is in the results — and
+        # `dim` measures 3.43:1 dark / 2.72:1 light on this card's raised
+        # ground, under AA. `muted` is 6.51:1 / 5.18:1, and is already the
+        # caret's ink for exactly this argument (D3).
+        if marker_col:
+            line.append(
+                _pad_cells(BODY_MATCH_MARKER if row.id in body_matched else "", marker_col),
+                style=row_bg + Style(color=muted),
+            )
         line.append(
             _pad_cells(truncate_cells(name, name_col), name_col),
             style=row_bg + Style(color=name_colour),
@@ -297,7 +398,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         Binding("backspace", "backspace", "Edit filter", show=False),
     ]
 
-    def __init__(self, rows: Sequence[SessionRow], now: float) -> None:
+    def __init__(
+        self,
+        rows: Sequence[SessionRow],
+        now: float,
+        digests: dict[str, str] | None = None,
+    ) -> None:
         super().__init__()
         self._all = list(rows)
         self._now = now
@@ -305,11 +411,20 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._selected = 0
         self._offset = 0
         self._hovered: int | None = None
+        # ``{session id: conversation digest}``, built by the caller before the
+        # screen is pushed (``search_index.build_index``). Optional so a host
+        # without an index — tests, embedders — gets the name-and-id filter
+        # unchanged instead of an error.
+        self._digests = dict(digests or {})
         # Filtering runs on every keystroke and again on every paint; the
         # result is cached against the query that produced it so a card with
-        # several hundred sessions does not re-scan the list per repaint.
+        # several hundred sessions does not re-scan the list per repaint. The
+        # body matches are cached on the SAME key, because they are recomputed
+        # by the same keystroke and scanning 200 digests per repaint is the
+        # cost this cache exists to avoid.
         self._filtered: list[SessionRow] = list(rows)
         self._filtered_for = ""
+        self._body_matches: set[str] = set()
         self._body: Static
 
     # -- state ---------------------------------------------------------------
@@ -322,9 +437,20 @@ class SessionPickerScreen(ModalScreen[str | None]):
     def visible_rows(self) -> list[SessionRow]:
         """The rows the current filter admits, in their original order."""
         if self._filtered_for != self._query:
-            self._filtered = filter_rows(self._all, self._query)
+            self._body_matches = search_digests(self._digests, self._query)
+            self._filtered = filter_rows(self._all, self._query, self._body_matches)
             self._filtered_for = self._query
         return self._filtered
+
+    @property
+    def body_matched_ids(self) -> set[str]:
+        """Ids on screen because their CONVERSATION matched, not their name.
+
+        Reads through :attr:`visible_rows` rather than the cached set directly,
+        so the two can never answer for different queries.
+        """
+        rows = self.visible_rows
+        return {row.id for row in rows if matched_in_body(row, self._query, self._body_matches)}
 
     @property
     def filter_query(self) -> str:
@@ -679,6 +805,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
                     width,
                     self._now,
                     None if self._hovered is None else self._hovered - self._offset,
+                    self.body_matched_ids,
                 )
             ):
                 if index:

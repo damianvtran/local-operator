@@ -27,12 +27,16 @@ from local_operator.resume import (
 )
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
+    BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
     CARD_PADDING_ROWS,
+    GUTTER_CELLS,
     NAME_MIN_CELLS,
     PAGE_ROWS_MAX,
+    PICKER_MIN_WIDTH,
     SessionPickerScreen,
     filter_rows,
+    matched_in_body,
     plan_columns,
     render_rows,
 )
@@ -297,16 +301,17 @@ def test_an_unnamed_session_says_so_rather_than_rendering_a_blank() -> None:
 class _PickerHost(App[None]):
     """A host whose only job is to own the modal under test."""
 
-    def __init__(self, rows: list[SessionRow]) -> None:
+    def __init__(self, rows: list[SessionRow], digests: dict[str, str] | None = None) -> None:
         super().__init__()
         self._rows = rows
+        self._digests = digests
         self.chosen: list[str | None] = []
 
     def compose(self) -> ComposeResult:
         return iter(())
 
     async def open_picker(self) -> SessionPickerScreen:
-        screen = SessionPickerScreen(self._rows, NOW)
+        screen = SessionPickerScreen(self._rows, NOW, self._digests)
         self.push_screen(screen, self.chosen.append)
         return screen
 
@@ -953,3 +958,132 @@ async def test_the_empty_card_never_renders_wider_than_the_terminal() -> None:
             # first thing dropped: it is what makes the empty state honest.
             body = " ".join(line.strip() for line in lines)
             assert "subagent runs are not listed" in body, (width, body)
+
+
+# --- searching the conversation body ----------------------------------------
+# The reported failure: a session was findable only by the words in its NAME,
+# so a conversation whose title did not happen to contain what the user
+# remembered was unreachable. These pin the widened filter and the marker that
+# keeps its results explicable.
+
+
+def test_a_row_matches_on_its_conversation_body(tmp_path: Path) -> None:
+    rows = [_row("aaa1", "vague title"), _row("bbb2", "another")]
+    assert [r.id for r in filter_rows(rows, "retention", {"aaa1"})] == ["aaa1"]
+
+
+def test_a_body_match_never_reorders_the_list() -> None:
+    """Same invariant as every other filter here: a row that moved under the
+    cursor while the query grew would resume the wrong conversation."""
+    rows = [_row("aaa1", "one"), _row("bbb2", "two"), _row("ccc3", "three")]
+    assert [r.id for r in filter_rows(rows, "topic", {"ccc3", "aaa1"})] == ["aaa1", "ccc3"]
+
+
+def test_a_caller_without_an_index_keeps_the_old_behaviour() -> None:
+    """Hosts with no index — tests, embedders — must not lose the filter."""
+    rows = [_row("aaa1", "asteroids game"), _row("bbb2", "parser crash")]
+    assert [r.id for r in filter_rows(rows, "aster")] == ["aaa1"]
+    assert filter_rows(rows, "retention") == []
+
+
+def test_only_a_body_match_is_marked() -> None:
+    """A row whose visible name contains the query needs no explanation; one
+    that does not would otherwise read as an arbitrary result."""
+    assert matched_in_body(_row("aaa1", "vague"), "retention", {"aaa1"}) is True
+    assert matched_in_body(_row("bbb2", "retention sweep"), "retention", {"bbb2"}) is False
+    assert matched_in_body(_row("ccc3", "vague"), "retention", set()) is False
+    assert matched_in_body(_row("aaa1", "vague"), "", {"aaa1"}) is False
+
+
+def test_a_marked_row_still_occupies_exactly_one_row_width() -> None:
+    """The marker is reserved as a column, so it cannot push the row past the
+    card and silently eat the age and id columns."""
+    row = _row("abc123def456", "a name long enough to need the whole budget here")
+    plain = render_rows([row], 0, 74, NOW)[0].plain
+    marked = render_rows([row], 0, 74, NOW, None, {"abc123def456"})[0].plain
+    assert cell_len(marked) == cell_len(plain)
+    assert BODY_MATCH_MARKER.strip() in marked
+    assert BODY_MATCH_MARKER.strip() not in plain
+    assert "abc123def456" in marked
+
+
+def test_the_marker_never_pushes_the_name_below_its_floor() -> None:
+    """The marker must not jump the queue in which the id and the age give up
+    their cells before the name gives up any.
+
+    Subtracting it from the name AFTER the budget was already spent down to
+    the floor rendered marked names at 14 cells at several reachable widths.
+    """
+    rows = [_row("abc123def456", "a long conversation title"), _row("bbb222ccc333", "another")]
+    for width in range(PICKER_MIN_WIDTH, 140):
+        name_col, _, _ = plan_columns(rows, width, ["1m ago", "1h ago"], True)
+        assert name_col >= NAME_MIN_CELLS, width
+
+
+def test_every_row_starts_its_name_at_the_same_column() -> None:
+    """Reserving the marker only on matched rows ragged the left edge of the
+    one field the user reads down the list."""
+    rows = [_row("abc123def456", "matched inside"), _row("bbb222ccc333", "not matched")]
+    lines = [line.plain for line in render_rows(rows, 0, 74, NOW, None, {"abc123def456"})]
+    # The marker column is reserved on BOTH rows, so each name begins at the
+    # same offset: the marked row spends it on the mark, the other on blanks.
+    assert lines[0].index("matched inside") == lines[1].index("not matched")
+
+
+def test_a_marked_list_fills_the_card_at_every_reachable_width() -> None:
+    rows = [_row("abc123def456", "a long conversation title"), _row("bbb222ccc333", "another")]
+    for width in range(PICKER_MIN_WIDTH, 140):
+        for line in render_rows(rows, 0, width, NOW, None, {"abc123def456"}):
+            assert cell_len(line.plain) == width, width
+
+
+@pytest.mark.asyncio
+async def test_typing_finds_a_session_by_its_conversation_not_its_name() -> None:
+    """End to end through the real screen: the query appears nowhere in the
+    row's name, and the picker still hands that session back."""
+    rows = [_row("aaa111", "a forgettable opening line"), _row("bbb222", "something else")]
+    app = _PickerHost(rows, {"aaa111": "we fixed the retention sweep eviction"})
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app.open_picker()
+        await pilot.pause()
+        for char in "retention":
+            await pilot.press(char)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.chosen == ["aaa111"]
+
+
+def test_the_marker_column_does_not_depend_on_what_is_scrolled_into_view() -> None:
+    """A page is not the result set.
+
+    Deciding the reservation from the rows currently ON SCREEN made it vanish
+    when the one marked row scrolled off, so every name jumped two cells
+    sideways on a single arrow press and truncation changed for rows that had
+    not changed. Needs more rows than a page holds -- the earlier fixtures
+    could not scroll, which is why this was missed.
+    """
+    rows = [_row(f"id{index:09d}", f"session number {index}") for index in range(6)]
+    marked = {"id000000000"}  # only the first row matched inside its body
+    with_marked = render_rows(rows[0:3], 0, 74, NOW, None, marked)
+    without_marked = render_rows(rows[3:6], 0, 74, NOW, None, marked)
+    assert with_marked[0].plain.index("session number 0") == (
+        without_marked[0].plain.index("session number 3")
+    )
+
+
+def test_an_unfiltered_list_reserves_no_marker_column() -> None:
+    """The reservation costs nothing when nothing matched, so an ordinary
+    open of the picker renders exactly as it did before the marker existed.
+
+    Asserted against the marked rendering rather than against another call
+    with the same arguments: comparing a no-match render to a no-match render
+    passes however the reservation behaves, which is a test that cannot fail.
+    """
+    rows = [_row("abc123def456", "one"), _row("bbb222ccc333", "two")]
+    unmarked = render_rows(rows, 0, 74, NOW, None, set())[0].plain
+    marked = render_rows(rows, 0, 74, NOW, None, {"abc123def456"})[0].plain
+    # The name starts flush against the cursor gutter when nothing matched,
+    # and exactly the marker's width later when something did.
+    assert unmarked.index("one") == GUTTER_CELLS
+    assert marked.index("one") == GUTTER_CELLS + cell_len(BODY_MATCH_MARKER)
