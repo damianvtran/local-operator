@@ -1387,17 +1387,28 @@ class AgentLoop:
             # half of R3-1 a snapshot alone does not fix: the loss happens
             # BEFORE the backfill runs, not during its emit.
             #
-            # ONE BOUNDARY REMAINS, and it is inherent rather than unfixed: a
+            # ONE BOUNDARY REMAINS, and it is accepted rather than closed: a
             # cleanup that outruns the whole TURN, not just the drain budget,
             # settles after this generator has closed. There is no longer a
             # stream to emit into, so that call keeps its start and gets no end.
-            # Measured as intermittent at the very edge (a ~2.5s cleanup against
-            # a ~0.5s-per-event consumer) and unreachable below it. Closing it
-            # would mean holding the turn open for the cleanup, which is exactly
-            # what ABORT_DRAIN_TIMEOUT_S exists to refuse — the user pressed Esc
-            # and is owed their prompt back. A consumer that must reconcile such
-            # a record should do it at the turn boundary, as the TUI does when
-            # it retires orphaned cards.
+            #
+            # NOT confined to some extreme corner. It is intermittent wherever a
+            # tool's unwind overshoots ABORT_DRAIN_TIMEOUT_S while a consumer is
+            # slow enough to still owe this generator a resume — observed around
+            # a 2.3s cleanup against a 0.3s-per-event consumer, and an earlier
+            # comment here claiming it was unreachable below ~2.5s/~0.5s was
+            # simply wrong (R9 MAJOR-2). The honest statement is: rare in
+            # practice, reachable in principle, and not bounded by a threshold
+            # anyone should rely on.
+            #
+            # Accepted anyway, because the alternative is worse: closing it
+            # means holding the turn open until the cleanup finishes, which is
+            # exactly what ABORT_DRAIN_TIMEOUT_S exists to refuse — the user
+            # pressed Esc and is owed their prompt back, which is this whole
+            # change's purpose. A consumer holding execution records by id must
+            # therefore reconcile them at the TURN boundary rather than trusting
+            # every start to be followed by an end; the TUI already does exactly
+            # that when it retires orphaned cards.
             #
             # `claimed` is DEFENCE IN DEPTH, not a live guard. It was
             # load-bearing when the two halves could collide; the source-side

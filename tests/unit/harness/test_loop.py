@@ -1517,12 +1517,16 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
             # Settles just past the drain budget: the batch has given up
             # waiting, so this lands while the backfill is mid-emit.
             with contextlib.suppress(asyncio.CancelledError):
-                # Parks just past the drain budget, and the CONSUMER below is
-                # slow enough that the batch is still emitting when it lands.
-                # Both halves matter: overshoot too far and the tool parks after
-                # the batch has settled entirely, which is a different (and
-                # untestable-from-here) shape that made this assertion flaky.
-                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 0.15)
+                # Parks past the drain budget by enough that the event lands on
+                # a queue the drain loop has already abandoned — which is the
+                # window the FLUSH exists to cover, and the only window in which
+                # this test can detect the flush going missing. Shortening this
+                # overshoot moves the park into the range the backfill already
+                # handles, and the test then passes with the flush deleted:
+                # measured 32/32 green at +0.15 against a flush-less tree,
+                # versus 7/8 red at +0.3 (R9 MAJOR-1). The flakiness this once
+                # had is fixed by the `parked` gate below, not by moving this.
+                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 0.3)
             parked.set()
             raise
         return ToolResult(
@@ -1563,10 +1567,18 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
             events.append(event)
             # A consumer that awaits — the TUI paints, the API server writes.
             # Without this the generator never suspends and the loss is not
-            # reachable. These two durations are not arbitrary: the tool must
-            # park AFTER the drain gives up at ABORT_DRAIN_TIMEOUT_S but while
-            # the consumer still owes the generator a resume, which is the
-            # window in which its end event lands on a queue nobody reads.
+            # reachable at all.
+            #
+            # The duration is deliberate and must not be shortened to settle a
+            # flake: the tool has to park AFTER the drain gives up at
+            # ABORT_DRAIN_TIMEOUT_S but while the consumer still owes the
+            # generator a resume, and that window is what the flush covers.
+            # Moving either number moves the park into the range the BACKFILL
+            # already handles, and the test then passes with the flush deleted
+            # (measured 32/32 green against a flush-less tree) — i.e. it stops
+            # testing the thing it is named for. Waiting on the park event
+            # instead was tried and is worse (3/40): it lets the generator
+            # finish before the park it is supposed to be racing.
             await asyncio.sleep(0.3)
 
     task = asyncio.ensure_future(run())
