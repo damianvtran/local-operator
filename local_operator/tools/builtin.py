@@ -60,7 +60,14 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.types import (
@@ -5959,6 +5966,43 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
 # four ops it cannot use and invite it to try them.
 
 
+def _coerce_hub_to(value: Any) -> Any:
+    """Accept the string shapes models emit for ``to`` instead of an array.
+
+    Observed live (2026-08-19, session "Fix analytics widget spacing and
+    alignment"): a parent model retried ``op='ask'`` five times against a
+    running reviewer and never once emitted a real array — ``"<id>"`` (a bare
+    id), ``'["<id>"]'`` (the array JSON-serialized into a string, the form the
+    TUI then prints so it *looks* like a list), and even ``'[<id>]'`` without
+    quotes. Each failed ``to: Input should be a valid list`` and the turn
+    burned on retries while the child kept working unheard. The schema below
+    must stay a plain array — an ``anyOf`` union of two real types is the one
+    construct the provider matrix rejects — so the leniency lives here, in a
+    before-validator: parse a JSON array, fall back to a bracket-stripped
+    split, fall back to the bare string as a single target. Anything that is
+    not one of those shapes passes through untouched and fails validation
+    with the normal message.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            # '[<id>]' with unquoted items is not JSON; the bracket-stripped
+            # split below recovers it.
+            parsed = None
+        if isinstance(parsed, list):
+            return [item if isinstance(item, str) else str(item) for item in parsed]
+        inner = text[1:]
+        if inner.endswith("]"):
+            inner = inner[:-1]
+        items = [item.strip().strip("'\"") for item in inner.split(",")]
+        return [item for item in items if item]
+    return [text] if text else value
+
+
 class HubParams(BaseModel):
     """Parent-side hub arguments."""
 
@@ -5995,6 +6039,15 @@ class HubParams(BaseModel):
             "op='list', which addresses nobody."
         ),
     )
+
+    # Models that serialize the array themselves send ``to`` as a string (a
+    # bare id, or the JSON of the list); see ``_coerce_hub_to`` for the live
+    # observation. Coercing here keeps the retry loop from burning the turn.
+    @field_validator("to", mode="before")
+    @classmethod
+    def _coerce_to(cls, value: Any) -> Any:
+        return _coerce_hub_to(value)
+
     message: str | None = Field(
         default=None,
         description=(

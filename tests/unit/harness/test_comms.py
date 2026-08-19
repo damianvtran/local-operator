@@ -993,6 +993,44 @@ async def test_the_tool_refuses_to_ask_several_children_at_once():
 
 
 @pytest.mark.asyncio
+async def test_the_tool_accepts_the_string_forms_models_send_for_to():
+    """Observed live (2026-08-19): a parent model retried ``op='ask'`` against
+    a running reviewer and never once emitted a real array — a bare id, the
+    JSON of the list as a string (which the TUI then prints so it *looks*
+    like a list), and the bracketed id without quotes. Every attempt failed
+    ``to: Input should be a valid list`` while the child worked unheard. The
+    before-validator coerces those shapes; a real array is untouched."""
+    comms, _jobs, child, _parent = wire()
+    context = ToolContext(cwd=".", subagent_comms=comms)
+
+    for to_value in ('["job-1"]', "[job-1]", "job-1"):
+        result = await execute_hub(
+            "call-1", {"op": "send", "to": to_value, "message": "hi"}, None, None, context
+        )
+        assert not result.is_error, to_value
+        assert child.asides, to_value
+        child.asides.clear()
+
+    listed = await execute_hub("call-2", {"op": "list"}, None, None, context)
+    assert not listed.is_error
+
+    bad = await execute_hub(
+        "call-3", {"op": "send", "to": 42, "message": "hi"}, None, None, context
+    )
+    assert bad.is_error and "valid list" in body(bad)
+
+
+def test_the_hub_schema_still_advertises_a_nullable_array_not_a_union():
+    """The coercion lives in a validator because a ``str | list[str]`` schema
+    would render a non-nullable ``anyOf`` — the one construct the provider
+    matrix rejects for every request in the session. Pin the nullable-array
+    shape the comment on ``HubParams.to`` promises."""
+    tool = hub_tool(job_id=None, comms=wire()[0])
+    kinds = [entry.get("type") for entry in tool.parameters["properties"]["to"]["anyOf"]]
+    assert kinds == ["array", "null"]
+
+
+@pytest.mark.asyncio
 async def test_the_tool_requires_a_body_for_everything_but_cancel():
     comms, _jobs, _child, _parent = wire()
     context = ToolContext(cwd=".", subagent_comms=comms)
