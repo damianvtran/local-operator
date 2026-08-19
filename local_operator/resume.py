@@ -99,7 +99,7 @@ _TITLE_CUSTOM_TYPE = "conversation_name"
 #: windows. The head still holds the ORIGINAL title, so that session is
 #: labelled with the name it was renamed *away from* rather than falling back
 #: to the opener. That is a stale name, and a stale name is stated with exactly
-#: the confidence of a correct one \u2014 so it is a real cost, not a rounding
+#: the confidence of a correct one — so it is a real cost, not a rounding
 #: error, and this comment says so rather than claiming the scan can only ever
 #: miss.
 #:
@@ -108,8 +108,8 @@ _TITLE_CUSTOM_TYPE = "conversation_name"
 #: and because the case requires a mid-session rename specifically: an
 #: auto-named session has its title at the head, and a session renamed near the
 #: end has it in the tail. If it proves to bite, the fix is to journal the
-#: title to a sidecar the way ``mark_session_origin`` does \u2014 one stat and one
-#: small read, no size dependence at all \u2014 rather than widening this window.
+#: title to a sidecar the way ``mark_session_origin`` does — one stat and one
+#: small read, no size dependence at all — rather than widening this window.
 TITLE_SCAN_BYTES = 131_072
 
 #: Matches a journalled title row in raw JSONL, tolerant of whitespace after

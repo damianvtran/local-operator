@@ -29,8 +29,8 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
     BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
-    GUTTER_CELLS,
     CARD_PADDING_ROWS,
+    GUTTER_CELLS,
     NAME_MIN_CELLS,
     PAGE_ROWS_MAX,
     PICKER_MIN_WIDTH,
