@@ -17,17 +17,21 @@ supposed to be the escape hatch.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
+import statistics
 
 import pytest
 from PIL import Image
 
+from local_operator import imaging
 from local_operator.imaging import (
     _REBOUND_CACHE,
     _REBOUND_CACHE_MAX_BYTES,
     IMAGE_MAX_EDGE,
     IMAGE_MAX_PIXELS,
     IMAGE_REFUSAL_MAX_B64_BYTES,
+    _is_line_art,
     bound_image_for_model,
     rebound_oversize_image,
 )
@@ -503,6 +507,42 @@ def test_a_repair_lands_under_the_refusal_line_not_exactly_on_it() -> None:
     assert rebound_oversize_image(base64.b64encode(at_limit).decode("ascii")) is None
 
 
+def test_a_dithered_halftone_is_not_treated_as_line_art() -> None:
+    """Two distinct values is NOT the same predicate as line art, and the right
+    resampler is opposite for the two.
+
+    A halftone encodes tone as the RATIO of alternating black and white pixels,
+    so dropping every other pixel destroys the tone it was encoding — the exact
+    thing NEAREST does. This runs on the INGEST path too (every paste, every
+    ``read``), so getting it wrong silently degrades scans and dithered images
+    that have nothing to do with the archive frames the branch exists for.
+    """
+    dithered = Image.linear_gradient("L").resize((3000, 1200)).convert("1").convert("L")
+    buffer = io.BytesIO()
+    dithered.save(buffer, format="PNG")
+    source = buffer.getvalue()
+
+    assert dithered.getcolors(maxcolors=2) is not None, "the fixture is not two-valued"
+    assert not _is_line_art(Image.open(io.BytesIO(source))), "a halftone was called line art"
+
+    payload, _mime, _summary = bound_image_for_model(source, _sniffed(source))
+    got = Image.open(io.BytesIO(payload)).convert("L")
+    reference = (
+        Image.linear_gradient("L")
+        .resize((3000, 1200))
+        .resize(got.size, Image.Resampling.LANCZOS)
+        .convert("L")
+    )
+    # Both images are single-band ``L``, so the samples are ints; the stub types
+    # these accessors wide enough to include the multi-band tuple form, hence
+    # the explicit narrowing rather than arithmetic on an ``int | tuple``.
+    reference_band = [int(value) for value in reference.tobytes()]
+    got_band = [int(value) for value in got.tobytes()]
+    error = statistics.fmean(abs(a - b) for a, b in zip(reference_band, got_band))
+    # A smooth downscale reconstructs the gradient (~11); NEAREST shreds it (~85).
+    assert error < 30, f"the halftone lost its tone (mean error {error:.1f})"
+
+
 def test_a_photograph_is_still_resized_smoothly_to_the_cheap_bound() -> None:
     """The NEAREST path is for line art only. Photographic content has no
     strokes to lose, is what the 1568 cost argument was measured on, and would
@@ -531,26 +571,60 @@ def test_a_block_under_every_pixel_ceiling_can_still_be_too_heavy() -> None:
     assert len(rebound[0]) < len(encoded), "the repair did not make it lighter"
 
 
-def test_the_memo_survives_a_working_set_larger_than_the_cap() -> None:
+def test_the_memo_survives_a_working_set_larger_than_the_cap(monkeypatch) -> None:
     """Eviction must be oldest-first, not clear-on-overflow.
 
-    The access pattern is a full walk of the same history on every render, not
-    random lookups. Clearing on overflow empties the cache part-way through each
-    walk, so every later frame in that same walk misses and the memo never warms
-    — measured at 3,858 ms per warm walk against 5 ms when the set fits.
+    The access pattern here is a full WALK of the same history on every render,
+    not random lookups, and that is what makes the difference matter: clearing
+    on overflow empties the cache part-way through each walk, so every later
+    frame in that same walk misses and the memo never warms at all — measured at
+    3,858 ms per warm walk against ~5 ms when the set fits.
+
+    The cap is monkeypatched down rather than fed enough real images to reach
+    32 MB. Feeding it the real thing would make this a slow test that only
+    exercises eviction by accident, and the earlier version of this test did
+    exactly that and proved nothing: it used four renders of the SAME text,
+    which are byte-identical and collapse to one cache entry occupying 0.36% of
+    the cap, so eviction never ran and the test passed against the very
+    clear-on-overflow code it was written to forbid (review round 3, F10).
     """
+    sources = [_noise_png((2100 + index * 40, 2000)) for index in range(6)]
+    encoded = [base64.b64encode(source).decode("ascii") for source in sources]
+    assert len({len(item) for item in encoded}) == len(encoded), "fixtures are not distinct"
+
     _REBOUND_CACHE.clear()
-    frames = [_archive_frame("google", "gemini-2.5-pro") for _ in range(4)]
-    encoded = [base64.b64encode(frame).decode("ascii") for frame in frames]
     for item in encoded:
         rebound_oversize_image(item)
-    # Force the cap far below the working set, then walk it twice. Every entry
-    # must still be cached at the end of a walk that exceeded the cap.
-    hits_before = len(_REBOUND_CACHE)
-    assert hits_before >= 1
+    assert len(_REBOUND_CACHE) == len(encoded), "distinct images shared a cache entry"
+
+    # Force a cap that fits THREE entries, then walk the whole set. Three is
+    # the smallest size at which the two policies diverge: at a two-entry cap
+    # both leave the final pair, so a smaller cap would make this test unable to
+    # tell them apart no matter what it asserted.
+    entries = sorted(len(data) for data, _ in _REBOUND_CACHE.values())
+    monkeypatch.setattr(imaging, "_REBOUND_CACHE_MAX_BYTES", sum(entries[:3]))
+    _REBOUND_CACHE.clear()
     for item in encoded:
-        assert rebound_oversize_image(item) is not None
-    assert len(_REBOUND_CACHE) == hits_before, "a walk that fits the cap still evicted"
+        rebound_oversize_image(item)
+
+    retained = sum(len(data) for data, _ in _REBOUND_CACHE.values())
+    assert retained <= imaging._REBOUND_CACHE_MAX_BYTES, "the cap was exceeded"
+
+    # The discriminating assertion, and it has to be about SIZE as well as
+    # identity: clear-on-overflow refills from empty and so ends the walk
+    # holding only the two entries added since it last cleared, while
+    # oldest-first keeps the cache full at three. Both end with a newest-suffix,
+    # so asserting identity alone would pass against either.
+    assert len(_REBOUND_CACHE) == 3, (
+        "eviction did not keep the cache full; a clearing cache refills from "
+        f"empty and ends the walk holding fewer ({len(_REBOUND_CACHE)})"
+    )
+    expected = [hashlib.sha256(source).hexdigest() for source in sources]
+    survivors = list(_REBOUND_CACHE)
+    assert survivors == expected[-len(survivors) :], (
+        "eviction did not keep the newest entries; a clearing cache leaves a "
+        f"different set ({survivors} against {expected[-len(survivors):]})"
+    )
 
 
 def test_an_oversized_archive_frame_is_repaired_without_going_lossy() -> None:

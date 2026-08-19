@@ -257,35 +257,69 @@ def _exif_transposed(image: Any) -> Any:
         return image
 
 
-def _is_bilevel(image: Any) -> bool:
-    """Does this image use only two distinct values (black-and-white line art)?
+#: Fraction of horizontally adjacent pixel pairs that may differ before a
+#: two-valued image is judged DITHERED rather than line art. Line art is made of
+#: solid runs — a pixel font measures 0.010 and flat rules 0.000 — while a
+#: halftone encodes tone as alternating pixels and measures ~0.491, so the two
+#: populations are separated by roughly 50x and the exact threshold is not
+#: delicate. 0.15 sits in the empty middle.
+_LINE_ART_MAX_TRANSITION_DENSITY = 0.15
 
-    Asked of the PIXELS rather than of the mode, because mode is not evidence:
-    snapcompact renders its archive frames as ``L`` and a scanner produces
-    ``1``, while an ordinary grayscale photograph is also ``L`` and must not be
-    treated as line art. What matters is whether the content is made of hard
-    one-pixel strokes, and a two-value histogram is exactly that.
+#: Rows sampled when measuring that density. The statistic is a proportion, so
+#: it converges long before a full read; sampling bounds the check at a few
+#: hundred row reads no matter how large the image is.
+_LINE_ART_SAMPLE_ROWS = 64
 
-    ``getcolors`` is given a small ceiling and returns ``None`` the moment the
-    image exceeds it, so this costs one bounded histogram pass and cannot be
-    made expensive by a photographic input — it gives up almost immediately on
-    anything that is not already nearly bilevel.
 
-    Multi-channel images are excluded outright: two distinct RGB tuples is a
-    two-colour graphic rather than the black-and-white glyph rendering this is
-    protecting, and downsampling that with NEAREST would be a guess.
+def _is_line_art(image: Any) -> bool:
+    """Is this image hard-edged black-and-white line art?
+
+    Decides which resampler a downscale may use, so it has to answer a narrower
+    question than "is it two-valued". Two distinct values covers BOTH the pixel
+    font this protects and a dithered halftone, and the correct filter is
+    opposite for the two: NEAREST keeps a glyph's one-pixel strokes crisp, but
+    on a halftone — where tone is encoded as the RATIO of alternating black and
+    white pixels — dropping every other pixel destroys the tone it was encoding.
+    Measured on a dithered gradient, NEAREST scores a mean tone error of 84.5
+    against 11.4 for LANCZOS (review round 3, F11).
+
+    So two tests, in cost order. The histogram is bounded by ``maxcolors`` and
+    bails immediately on anything photographic. Only then is the transition
+    density measured, and only over sampled rows, because by then the image is
+    known to be two-valued and the question is just how its pixels alternate.
+
+    Asked of the PIXELS rather than the mode: snapcompact renders ``L``, a
+    scanner produces ``1``, and an ordinary grayscale photograph is also ``L``.
+    Multi-channel images are excluded outright — two distinct RGB tuples is a
+    two-colour graphic, not a glyph rendering, and NEAREST on it would be a
+    guess.
     """
     if image.mode not in ("1", "L"):
         return False
     try:
-        colors = image.getcolors(maxcolors=2)
-    except Exception:  # noqa: BLE001 — a histogram must never fail an image
+        if image.getcolors(maxcolors=2) is None:
+            return False
+        gray = image if image.mode == "L" else image.convert("L")
+        width, height = gray.size
+        if width < 2 or height < 1:
+            return False
+        pixels = gray.get_flattened_data()
+        step = max(1, height // _LINE_ART_SAMPLE_ROWS)
+        transitions = 0
+        compared = 0
+        for y in range(0, height, step):
+            row = pixels[y * width : (y + 1) * width]
+            compared += width - 1
+            transitions += sum(1 for x in range(width - 1) if row[x] != row[x + 1])
+        if not compared:
+            return False
+        return transitions / compared <= _LINE_ART_MAX_TRANSITION_DENSITY
+    except Exception:  # noqa: BLE001 — a heuristic must never fail an image
         return False
-    return colors is not None and len(colors) <= 2
 
 
-def _is_bilevel_bytes(data: bytes, info: ImageInfo) -> bool:
-    """:func:`_is_bilevel` for bytes that have not been decoded yet.
+def _is_line_art_bytes(data: bytes, info: ImageInfo) -> bool:
+    """:func:`_is_line_art` for bytes that have not been decoded yet.
 
     Separate from the decoded check because the repair path has to make the
     decision BEFORE it calls into the ladder, and must not fail an image just
@@ -298,7 +332,7 @@ def _is_bilevel_bytes(data: bytes, info: ImageInfo) -> bool:
     try:
         with module.open(io.BytesIO(data)) as image:
             image.load()
-            return _is_bilevel(image)
+            return _is_line_art(image)
     except Exception:  # noqa: BLE001 — the ladder reports decode failures, not this
         return False
 
@@ -432,23 +466,24 @@ def bound_image_for_model(
         if long_edge > edge_cap:
             scale = edge_cap / long_edge
             size = (max(1, round(width * scale)), max(1, round(height * scale)))
-            # LANCZOS everywhere EXCEPT a bilevel source, where it is actively
-            # destructive. A two-value image is a rendering of glyphs or line
-            # art whose strokes are one pixel wide; a smooth filter turns each
-            # stroke into a grey ramp, which both destroys the thing that made
-            # it legible and replaces a 2-value image with a 256-value one that
-            # PNG can no longer compress. Measured on a snapcompact archive
-            # frame: 31 KB of bilevel text became 665 KB after a LANCZOS
-            # downscale — 21x LARGER than the source it was shrinking — while
-            # the glyphs themselves smeared (review round 2, F8).
+            # LANCZOS everywhere EXCEPT hard-edged line art, where it is
+            # actively destructive. Line art's strokes are one pixel wide, so a
+            # smooth filter turns each into a grey ramp — destroying the thing
+            # that made it legible AND replacing a 2-value image with a 256-value
+            # one that PNG can no longer compress. Measured on a snapcompact
+            # archive frame: 31 KB of pixel-font text became 665 KB after a
+            # LANCZOS downscale, 21x LARGER than the source it was shrinking,
+            # with the glyphs smeared (review round 2, F8).
             #
             # NEAREST keeps the two values and the compression, and for pixel
-            # fonts it is also the more faithful resampler: dropping whole rows
-            # and columns leaves the surviving strokes crisp instead of making
-            # every stroke uniformly soft. It is the wrong choice for
-            # photographic content, which is why it is gated on the source
-            # actually being bilevel rather than on the mode being ``L``.
-            resample = image_module.NEAREST if _is_bilevel(image) else image_module.LANCZOS
+            # fonts it is the more faithful resampler: dropping whole rows and
+            # columns leaves surviving strokes crisp instead of making every
+            # stroke uniformly soft. It is the WRONG choice for photographic
+            # content and, less obviously, for a dithered halftone — which is
+            # also two-valued but encodes tone as alternating pixels. See
+            # :func:`_is_line_art` for why the predicate is narrower than
+            # "two distinct values" (review round 3, F11).
+            resample = image_module.NEAREST if _is_line_art(image) else image_module.LANCZOS
             image = image.resize(size, resample)
 
         # Palette and high-bit-depth modes are legal PNG but not legal JPEG,
@@ -655,7 +690,7 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
     #
     # Photographic content keeps the 1568 default: it has no strokes to lose,
     # and it is the case the cost argument for 1568 was measured on.
-    edge = IMAGE_REPAIR_TARGET_EDGE if _is_bilevel_bytes(raw, info) else IMAGE_MAX_EDGE
+    edge = IMAGE_REPAIR_TARGET_EDGE if _is_line_art_bytes(raw, info) else IMAGE_MAX_EDGE
     try:
         payload, wire_mime, _ = bound_image_for_model(raw, info, max_edge=edge)
     except ValueError:
