@@ -457,6 +457,107 @@ async def test_openai_exchange_omits_state() -> None:
     assert result["org_id"] == "acct-1"
 
 
+async def test_callback_pages_are_the_shared_branded_document() -> None:
+    """The browser lands on the same Local Operator page the MCP flow serves.
+
+    Not a styling snapshot — what is pinned is that every outcome of the
+    loopback listener answers with the shared ``callback_page`` document
+    (identity mark + outcome heading), that the provider's display name rides
+    in its labelled trough, and that a provider error's own words land in the
+    data trough rather than in our sentence. A regression to the old bare
+    ``<h1>Login complete</h1>`` bodies passes every flow-mechanics test in
+    this file, which is exactly why these assertions exist.
+    """
+    pages: dict[str, httpx.Response] = {}
+
+    async def drive_success() -> None:
+        # Any settled outcome stops the server, so the mismatch (which settles
+        # the error future and fails run()) gets its own flow below.
+        flow = _EchoFlow(
+            CallbackFlowOptions(preferred_port=0, provider_label="Anthropic"),
+            LoginCallbacks(),
+        )
+        task = asyncio.create_task(flow.run())
+        for _ in range(400):
+            if flow.bound_port is not None and flow.generated:
+                break
+            await asyncio.sleep(0.01)
+        base = f"http://127.0.0.1:{flow.bound_port}"
+        async with httpx.AsyncClient() as client:
+            # A speculative browser fetch is not an outcome and must not be.
+            pages["favicon"] = await client.get(f"{base}/favicon.ico")
+            # The real redirect completes the flow.
+            pages["success"] = await client.get(
+                f"{base}/callback",
+                params={"code": "c", "state": flow.generated["state"]},
+            )
+        await task
+
+    async def drive_mismatch() -> None:
+        flow = _EchoFlow(CallbackFlowOptions(preferred_port=0), LoginCallbacks())
+        task = asyncio.create_task(flow.run())
+        for _ in range(400):
+            if flow.bound_port is not None and flow.generated:
+                break
+            await asyncio.sleep(0.01)
+        async with httpx.AsyncClient() as client:
+            # A forged/stale redirect: wrong state alongside a real-looking code.
+            pages["mismatch"] = await client.get(
+                f"http://127.0.0.1:{flow.bound_port}/callback",
+                params={"code": "c", "state": "not-the-state"},
+            )
+        with pytest.raises(LoginError, match="state mismatch"):
+            await task
+
+    await asyncio.wait_for(drive_success(), timeout=10)
+    await asyncio.wait_for(drive_mismatch(), timeout=10)
+
+    success = pages["success"].text
+    assert "<h1>Signed in</h1>" in success
+    assert 'class="mark"' in success  # the shared branded document, not bare HTML
+    assert 'class="label">Provider<' in success
+    assert 'class="trough">Anthropic<' in success
+    assert "close this tab" in success
+
+    mismatch = pages["mismatch"].text
+    assert "<h1>Sign-in failed</h1>" in mismatch
+    assert 'class="mark"' in mismatch
+
+    favicon = pages["favicon"]
+    assert favicon.status_code == 404
+    assert "<h1>Nothing here</h1>" in favicon.text
+
+
+async def test_provider_denial_lands_in_the_data_trough() -> None:
+    """`error_description` is the provider's text: labelled trough, escaped,
+    never spliced into the sentence spoken in Local Operator's voice."""
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0), LoginCallbacks())
+
+    async def drive() -> httpx.Response:
+        task = asyncio.create_task(flow.run())
+        for _ in range(400):
+            if flow.bound_port is not None and flow.generated:
+                break
+            await asyncio.sleep(0.01)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"http://127.0.0.1:{flow.bound_port}/callback",
+                params={
+                    "error": "access_denied",
+                    "error_description": "<b>User denied</b>",
+                },
+            )
+        with pytest.raises(LoginError, match="access_denied"):
+            await task
+        return response
+
+    response = await asyncio.wait_for(drive(), timeout=10)
+    page = response.text
+    assert 'class="label">Provider response<' in page
+    assert "&lt;b&gt;User denied&lt;/b&gt;" in page  # escaped, not injected
+    assert "<b>User denied</b>" not in page
+
+
 async def test_callback_missing_code_fails_promptly() -> None:
     """PR-14: a redirect carrying neither code nor error fails the login
     immediately — no 300 s hang."""
@@ -543,7 +644,9 @@ def test_kimi_common_headers_carry_device_identity() -> None:
     assert headers["X-Msh-Platform"] == "kimi_cli"
 
 
-async def test_kimi_slow_down_updates_poller_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_kimi_slow_down_updates_poller_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """PR-10: a slow_down payload with a larger interval raises the poller's
     interval via the mutable holder."""
     from local_operator.providers.oauth.kimi import (
@@ -677,7 +780,9 @@ async def test_every_paste_key_provider_can_actually_be_logged_into() -> None:
         assert await login(callbacks) == "sk-pasted-key", definition.id
 
 
-def test_cli_hides_an_api_key_and_echoes_an_oauth_code(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_hides_an_api_key_and_echoes_an_oauth_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Round 1 F2: an API key must not be echoed into the terminal scrollback.
 
     ``CredentialManager`` and the web-search CLI already read this same class of
@@ -1000,7 +1105,10 @@ async def test_qwencloud_token_plan_login_captures_key_and_device_grant() -> Non
                         "AccessToken": "mgmt-access",
                         "RefreshToken": "mgmt-refresh",
                         "ExpireTime": "2030-01-01T00:00:00Z",
-                        "User": {"AliyunId": "damian-aliyun", "Email": "damian@example.com"},
+                        "User": {
+                            "AliyunId": "damian-aliyun",
+                            "Email": "damian@example.com",
+                        },
                     },
                 },
             },
@@ -1056,7 +1164,8 @@ async def test_qwencloud_token_plan_login_expired_device_code_is_terminal() -> N
     callbacks = LoginCallbacks(on_manual_code_input=lambda: "sk-sp-test")
     with pytest.raises(Exception, match="expired"):
         await login_qwencloud_token_plan(
-            callbacks, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            callbacks,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         )
 
 
@@ -1337,7 +1446,8 @@ class TestZaiSignInMintsADurableKey:
             spec, http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire))
         )
         request = ChatRequest(
-            model=spec, messages=[Message(role="user", content=[TextContent(text="ping")])]
+            model=spec,
+            messages=[Message(role="user", content=[TextContent(text="ping")])],
         )
         events = [
             event
@@ -1386,7 +1496,10 @@ class TestPastedCallbackParsing:
             _parse_pasted_callback,
         )
 
-        assert _parse_pasted_callback("https://example.com/cb?code=c1#state=s9") == ("c1", "s9")
+        assert _parse_pasted_callback("https://example.com/cb?code=c1#state=s9") == (
+            "c1",
+            "s9",
+        )
 
     def test_percent_encoding_is_decoded(self) -> None:
         from local_operator.providers.oauth.callback_server import (
@@ -1545,7 +1658,7 @@ class TestABadPasteDoesNotEndTheLogin:
             loop = asyncio.get_running_loop()
             flow = self._flow("http://localhost:54548/cb?error=access_denied", [])
             flow.callbacks = cs.LoginCallbacks(
-                on_manual_code_input=lambda: "http://localhost:54548/cb?error=access_denied",
+                on_manual_code_input=lambda: ("http://localhost:54548/cb?error=access_denied"),
                 **{hook: _boom},
             )
             flow._captured = loop.create_future()

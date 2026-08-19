@@ -79,6 +79,7 @@ class AnthropicOAuthFlow(OAuthCallbackFlow):
                 preferred_port=CALLBACK_PORT,
                 callback_path=CALLBACK_PATH,
                 manual_input_only=manual_input_only,
+                provider_label="Anthropic",
             ),
             callbacks,
             open_browser=open_browser,
@@ -140,7 +141,9 @@ class AnthropicOAuthFlow(OAuthCallbackFlow):
 
 
 async def _fetch_identity(
-    access_token: str, http_client: httpx.AsyncClient | None, model: str = "claude-sonnet-4-5"
+    access_token: str,
+    http_client: httpx.AsyncClient | None,
+    model: str = "claude-sonnet-4-5",
 ) -> dict[str, Any]:
     """Fallback identity source when the token response carries no org info."""
     client = http_client or httpx.AsyncClient(timeout=30.0)

@@ -200,7 +200,10 @@ async def mint_zai_api_key(
 
     customer = _unwrap(
         await _get_json(
-            http, f"{BIZ_BASE}/api/biz/customer/getCustomerInfo", auth, "customer lookup"
+            http,
+            f"{BIZ_BASE}/api/biz/customer/getCustomerInfo",
+            auth,
+            "customer lookup",
         ),
         "customer lookup",
     )
@@ -223,7 +226,10 @@ async def mint_zai_api_key(
         (
             k
             for k in _key_array(
-                _unwrap(await _get_json(http, keys_url, auth, "api key list"), "api key list")
+                _unwrap(
+                    await _get_json(http, keys_url, auth, "api key list"),
+                    "api key list",
+                )
             )
             if k.get("name") == KEY_NAME
         ),
@@ -273,6 +279,7 @@ class ZaiOAuthFlow(OAuthCallbackFlow):
                 # fallback port would produce a redirect the IdP refuses.
                 allow_port_fallback=False,
                 manual_input_only=manual_input_only,
+                provider_label="Z.AI",
             ),
             callbacks,
             open_browser=open_browser,
@@ -306,7 +313,12 @@ class ZaiOAuthFlow(OAuthCallbackFlow):
                 TOKEN_URL,
                 # Deliberately NOT an RFC 6749 body: the provider's own client
                 # posts these fields and the endpoint rejects grant_type.
-                {"provider": "zai", "code": code, "redirect_uri": redirect_uri, "state": state},
+                {
+                    "provider": "zai",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "state": state,
+                },
                 "token exchange",
             )
             data = _unwrap(body, "token exchange")
