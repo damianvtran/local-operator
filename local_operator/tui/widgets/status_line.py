@@ -1506,9 +1506,14 @@ class StatusLine:
         """agents ‹ jobs ‹ context ‹ cost ‹ duration ‹ [!] ‹ name.
 
         ``name_cells`` is the box :meth:`_walk` reserved for the trailing name —
-        zero when the ladder dropped it. The name is PADDED to that box rather
-        than measured, which is what pins every other segment's column; see
-        :data:`NAME_CELLS`.
+        zero when the ladder dropped it. The row always SPENDS that whole box,
+        whatever the title's own width, which is what pins every other segment's
+        column; see :data:`NAME_CELLS`. The title itself is emitted UNPADDED and
+        the remainder (:attr:`_name_slack`) is paid out as blanks just before
+        the seam that introduces it, so the box is filled without the title
+        having to be the thing that fills it — which is what lets the row reach
+        the band's right edge at every title length while the columns to the
+        left of the name stay put.
 
         Colour groups by KIND rather than giving every field its own hue, which
         would be a rainbow: counters share `label`, the two numbers an operator
@@ -1733,22 +1738,24 @@ class StatusLine:
         that exactly fitted its frame `_MIN_GROUP_GAP` cells past it, on trailing
         blanks that aligned nothing.
 
-        The right group is aligned by its BOX, not by its ink: the name arrives
-        padded to the cells :meth:`_walk` reserved (:data:`NAME_CELLS`), so this
-        arithmetic is the same at every title length and a short title leaves its
-        leftover at the band's edge rather than shunting the group right.
+        The right group is aligned by its BOX, not by its ink: the group always
+        spends the cells :meth:`_walk` reserved for the name
+        (:data:`NAME_CELLS`), so this arithmetic is the same at every title
+        length and a short title cannot shunt the group right.
 
-        The box's unused cells are spent INSIDE the name segment, which
-        right-aligns itself in them (see :meth:`_right_text`), so the row's last
-        inked cell is the band's right edge at every title length and there is
-        nothing here to trim.
+        The box's unused cells are spent inside the right group by
+        :meth:`_right_text`, as a run of blanks immediately BEFORE the seam that
+        introduces the title — so the row's last inked cell is the band's right
+        edge at every title length and there is nothing here to trim.
 
-        This method used to `rstrip` a LEFT-aligned name's trailing padding,
+        This method used to `rstrip` a left-aligned name's trailing padding,
         which produced a row that ended early — flush for a long title and up to
-        35 cells short for a brief one. Moving the padding to the other side of
-        the title fixes that at the source: the cells still exist, so the fit
-        arithmetic and every column left of the name are untouched, but they are
-        no longer at the edge where their absence was visible.
+        35 cells short for a brief one. Moving those cells ahead of the title
+        fixes that at the source: they still exist, so the fit arithmetic and
+        every column left of the name are untouched, but they are no longer at
+        the edge where their absence was visible. Putting them between the seam
+        and the title instead reaches the edge too and orphans the chevron by up
+        to 39 cells, which reads as a segment that failed to render.
 
         Aligning the group by its INK rather than its box is the other way to
         reach the edge, and the one this must not do: measured across four
