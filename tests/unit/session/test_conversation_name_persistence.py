@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -382,6 +383,137 @@ async def test_a_wedged_write_cannot_hang_dispose(tmp_path, monkeypatch) -> None
     # two budgets rather than never. Generous ceiling: the assertion is
     # "bounded", not a stopwatch on the scheduler.
     await asyncio.wait_for(session.dispose(), timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_a_transient_write_failure_still_lands_the_title(tmp_path) -> None:
+    """A hiccup must cost a retry, not the name.
+
+    ``_conversation_name_journalled`` is claimed BEFORE the append so the flush
+    can recognise a write in flight (F9). Left standing when that append
+    RAISES, the claim is false — the title is neither in flight nor on disk —
+    and the flush skipped the very retry that exists to rescue it, losing the
+    name outright.
+
+    The always-failing test above cannot catch this: with every append doomed,
+    the retry fails too and "no row on disk" holds either way. It takes a
+    TRANSIENT failure — first append fails, the next would succeed — which is
+    an ENOSPC/EIO/lock blip rather than a broken disk (review round 3, F12).
+    """
+    calls = {"n": 0}
+
+    class FlakyTranscript(Transcript):
+        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("transient hiccup")
+            return await super().append_custom(custom_type, details)
+
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=FlakyTranscript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+    await session.async_init()
+    session.set_conversation_name("Survives a hiccup", user_set=True)
+    await asyncio.sleep(0.05)
+    await session.dispose()
+
+    assert calls["n"] >= 2, "the failed write was never retried"
+    assert _session(tmp_path).conversation_name == "Survives a hiccup"
+
+
+@pytest.mark.asyncio
+async def test_teardown_costs_one_budget_not_two(tmp_path, monkeypatch, caplog) -> None:
+    """The flush's whole cost is ``_NAME_FLUSH_TIMEOUT_S``, once.
+
+    The wait and the retry used to charge a full budget each and ran in
+    sequence, so a wedged volume plus a title that moved under the write made
+    teardown twice what the constant advertises (measured at 10 s). They now
+    share one deadline (review round 3, F14).
+
+    The warning is asserted too, so that bounding the wait stays visible in a
+    log rather than becoming a silent drop.
+    """
+    monkeypatch.setattr(session_mod, "_NAME_FLUSH_TIMEOUT_S", 0.4)
+
+    class WedgedTranscript(Transcript):
+        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable: the sleep outlives the test")
+
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=WedgedTranscript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+    await session.async_init()
+    session.set_conversation_name("Title A", user_set=False)
+    await asyncio.sleep(0.05)
+    # Moves the title under the in-flight write, which is what sends the flush
+    # through BOTH halves — the case that used to cost two budgets.
+    session.set_conversation_name("Title B", user_set=True)
+
+    with caplog.at_level("WARNING"):
+        started = time.monotonic()
+        await session.dispose()
+        elapsed = time.monotonic() - started
+
+    # One budget plus scheduling slack, nowhere near two.
+    assert elapsed < 0.4 * 1.8, f"teardown took {elapsed:.2f}s, more than one budget"
+    assert any("stopped waiting for the conversation name" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_the_timeout_warning_claims_only_what_it_knows(tmp_path, monkeypatch, caplog) -> None:
+    """The log line must not report a loss that has not happened.
+
+    A timed-out retry says nothing about the title's fate: the shielded write it
+    gave up waiting for survives dispose, and its own chase loop re-appends a
+    title that moved — so the row frequently lands moments later. "Gave up
+    journalling the conversation name" reported those as dropped names, and a
+    warning that cries wolf is worth less than none (review round 3, F13).
+
+    Whether a slow write will finish or is wedged forever is not knowable at
+    this point, so the message states the fact it has — teardown stopped
+    waiting — and names the consequence conditionally. This pins that wording
+    against a case where the title DOES land.
+    """
+    monkeypatch.setattr(session_mod, "_NAME_FLUSH_TIMEOUT_S", 0.4)
+
+    class SlowTranscript(Transcript):
+        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+            await asyncio.sleep(1.0)  # outlives the flush, but does finish
+            return await super().append_custom(custom_type, details)
+
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=SlowTranscript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+    )
+    await session.async_init()
+    session.set_conversation_name("Title A", user_set=False)
+    await asyncio.sleep(0.05)
+    session.set_conversation_name("Title B", user_set=True)  # moves under the write
+
+    with caplog.at_level("WARNING"):
+        await session.dispose()
+        await asyncio.sleep(2.5)  # let the shielded write and its chase land
+
+    # The title reached disk despite the flush giving up on it...
+    assert _session(tmp_path).conversation_name == "Title B"
+    # ...so nothing may claim it was lost or dropped.
+    for record in caplog.records:
+        assert "gave up journalling" not in record.message
+        assert "stopped waiting" not in record.message or "if the write does not finish" in (
+            record.message
+        )
 
 
 @pytest.mark.asyncio

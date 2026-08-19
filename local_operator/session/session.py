@@ -1428,11 +1428,22 @@ class Session:
             #
             # "In flight or on disk" is the right claim for this field anyway:
             # its only reader asks whether the title in the holder is already
-            # being written, and an append that is under way answers yes. A
-            # write that dies mid-append leaves the flag dirty, which is what
-            # the flush's retry is for.
+            # being written, and an append that is under way answers yes.
+            #
+            # ROLLED BACK when the append raises, and that is not bookkeeping
+            # tidiness: a failed append is neither in flight nor on disk, so
+            # leaving the claim standing made the dispose flush skip the retry
+            # and the title was LOST outright. It needs a TRANSIENT failure to
+            # bite — first append fails, a later one would have succeeded —
+            # which is why the always-failing test could not see it (review
+            # round 3, F12).
+            previous = self._conversation_name_journalled
             self._conversation_name_journalled = (payload["text"], payload["user_set"])
-            await self._transcript.append_custom(CONVERSATION_NAME_CUSTOM_TYPE, payload)
+            try:
+                await self._transcript.append_custom(CONVERSATION_NAME_CUSTOM_TYPE, payload)
+            except BaseException:
+                self._conversation_name_journalled = previous
+                raise
             if (self._conversation_name.text, self._conversation_name.user_set) == (
                 payload["text"],
                 payload["user_set"],
@@ -1467,19 +1478,29 @@ class Session:
         row (review round 1, F5; the guard's ordering, review round 2, F9).
 
         The retry is itself bounded, and that is the second half of F9. The
-        timeout above bounds only the WAIT: falling through to an unbounded
+        timeout used to bound only the WAIT: falling through to an unbounded
         ``_persist_conversation_name`` put the full write back in front of
         teardown, so a wedged filesystem hung dispose forever — on ctrl+d, for
-        decoration. Both halves are now bounded by the same budget, and a title
-        that cannot be written inside it is dropped with a warning rather than
-        holding the session open. The transcript is append-only and the name is
-        the least important thing in it; a resume that opens nameless is a far
-        better outcome than a session that will not close.
+        decoration. Both halves now share ONE ``_NAME_FLUSH_TIMEOUT_S`` deadline,
+        so that is the whole cost of this method rather than the cost of each
+        half, and a title that cannot be written inside it is dropped rather
+        than holding the session open. The transcript is append-only and the
+        name is the least important thing in it; a resume that opens nameless is
+        a far better outcome than a session that will not close.
         """
+        # ONE deadline shared by both halves rather than one each. Charged
+        # separately they ran in sequence, so teardown could take twice what the
+        # constant advertises — measured at 10.0 s on a wedged transcript with a
+        # moved title, while the constant documents itself as the pause a user
+        # sits through once (review round 3, F14).
+        deadline = time.monotonic() + _NAME_FLUSH_TIMEOUT_S
+
         task = self._conversation_name_task
         if task is not None and not task.done():
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=_NAME_FLUSH_TIMEOUT_S)
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=max(0.0, deadline - time.monotonic())
+                )
             except BaseException:  # noqa: BLE001 — fall through to the retry
                 pass
         if not self._conversation_name_dirty:
@@ -1492,10 +1513,23 @@ class Session:
             # only because that write has not reached its own clear yet.
             return
         try:
-            await asyncio.wait_for(self._persist_conversation_name(), timeout=_NAME_FLUSH_TIMEOUT_S)
+            await asyncio.wait_for(
+                self._persist_conversation_name(),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
         except asyncio.TimeoutError:
+            # Says what is TRUE — teardown stopped waiting — rather than "gave
+            # up journalling the conversation name", which claimed a loss this
+            # code cannot establish. The shielded write survives dispose and its
+            # chase loop re-appends a title that moved, so the row often lands
+            # moments after this line; the old wording reported those as dropped
+            # names (round 3, F13). Whether a write that is merely slow will
+            # finish or is wedged forever is not knowable here, so the message
+            # states the fact it has and names the consequence as conditional.
             logger.warning(
-                "gave up journalling the conversation name after %.1fs", _NAME_FLUSH_TIMEOUT_S
+                "stopped waiting for the conversation name to be journalled after %.1fs; "
+                "if the write does not finish, the next resume opens unnamed",
+                _NAME_FLUSH_TIMEOUT_S,
             )
         except Exception:
             # Decoration must never be the reason a dispose fails: losing the
