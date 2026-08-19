@@ -14,6 +14,9 @@ theme can be invalidated in one shot (a ``getThemeEpoch``-style pattern).
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass, field
+
 from rich.style import Style
 
 #: Brand token ramps, keyed by theme name. Hex values are exact brand kit
@@ -165,6 +168,117 @@ _SEMANTIC_ALIASES: dict[str, dict[str, str]] = {
 
 DEFAULT_THEME = "dark"
 
+#: The canonical semantic token set — the ONE vocabulary every widget, the
+#: TCSS, and the markdown/syntax ramps speak. A theme is precisely a total
+#: function from this set to hexes: `register_theme` rejects a palette that
+#: misses a token (a partial theme would fail at render time, on whichever
+#: widget happened to ask first) or invents one (a token nothing reads is a
+#: palette author's typo, not an extension point).
+SEMANTIC_TOKENS: tuple[str, ...] = tuple(_SEMANTIC_ALIASES["dark"])
+
+#: Palette hexes must be exactly ``#rrggbb``. Short forms and named colors are
+#: rejected at registration: the TCSS variable block and the terminal-theme
+#: mapping both slice these strings positionally.
+_HEX_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+@dataclass(frozen=True)
+class ThemeSpec:
+    """One selectable theme: identity, one-line pitch, and its full ramp.
+
+    ``tokens`` maps every name in :data:`SEMANTIC_TOKENS` to a hex. ``dark``
+    drives the pieces that need a boolean polarity rather than a palette —
+    the ANSI terminal-theme mapping and Textual's own dark/light styling.
+    ``description`` is the picker row's one-liner, so it is written for a
+    user choosing between thirty rows, not for a changelog.
+    """
+
+    name: str
+    label: str
+    description: str
+    dark: bool = True
+    tokens: dict[str, str] = field(default_factory=dict)
+
+
+def _builtin_spec(name: str, label: str, description: str, dark: bool) -> ThemeSpec:
+    """Wrap a :data:`BRAND_TOKENS` ramp in the registry's spec shape.
+
+    The two brand ramps keep their raw-token + alias form because the raw
+    names (``amber``, ``paper``, ``ink``) are pinned by tests and still
+    emitted as TCSS variables; everything else registers semantic-only.
+    """
+    tokens = {
+        semantic: BRAND_TOKENS[name][raw] for semantic, raw in _SEMANTIC_ALIASES[name].items()
+    }
+    return ThemeSpec(name=name, label=label, description=description, dark=dark, tokens=tokens)
+
+
+#: Every registered theme, keyed by name. Seeded with the two brand ramps;
+#: the curated palettes in :mod:`local_operator.tui.palettes` add themselves
+#: on first use (see :func:`_registry` — the import is lazy to keep this
+#: module importable from the palettes package without a cycle).
+_THEMES: dict[str, ThemeSpec] = {
+    "dark": _builtin_spec(
+        "dark", "Operator Dark", "The island night — the Local Operator default", dark=True
+    ),
+    "light": _builtin_spec("light", "Operator Light", "Warm paper, brand ink", dark=False),
+}
+
+_palettes_loaded = False
+
+
+def _registry() -> dict[str, ThemeSpec]:
+    """The theme registry with the curated palettes folded in (lazy, once).
+
+    Lazy because :mod:`local_operator.tui.palettes` imports THIS module for
+    :class:`ThemeSpec`; importing it at module top would be a cycle. The
+    palettes never override the two brand ramps — ``register_theme`` refuses
+    duplicates, so a palette shadowing ``dark`` is a loud error, not a silent
+    rebrand.
+    """
+    global _palettes_loaded
+    if not _palettes_loaded:
+        _palettes_loaded = True
+        from local_operator.tui import palettes
+
+        for spec in palettes.all_palettes():
+            register_theme(spec)
+    return _THEMES
+
+
+def register_theme(spec: ThemeSpec) -> None:
+    """Add ``spec`` to the registry, validating it is total and new.
+
+    A theme is data, so every mistake a palette author can make is caught
+    HERE, at registration, rather than at render time in whichever widget
+    first asks for the missing token.
+    """
+    if spec.name in _THEMES:
+        raise ValueError(f"theme {spec.name!r} is already registered")
+    missing = [token for token in SEMANTIC_TOKENS if token not in spec.tokens]
+    if missing:
+        raise ValueError(f"theme {spec.name!r} is missing tokens: {', '.join(missing)}")
+    unknown = [token for token in spec.tokens if token not in SEMANTIC_TOKENS]
+    if unknown:
+        raise ValueError(f"theme {spec.name!r} has unknown tokens: {', '.join(unknown)}")
+    malformed = [
+        f"{token}={value!r}" for token, value in spec.tokens.items() if not _HEX_RE.fullmatch(value)
+    ]
+    if malformed:
+        raise ValueError(f"theme {spec.name!r} has malformed hexes: {', '.join(malformed)}")
+    _THEMES[spec.name] = spec
+
+
+def theme_spec(name: str | None = None) -> ThemeSpec:
+    """The :class:`ThemeSpec` for ``name`` (default: the active theme)."""
+    registry = _registry()
+    key = name or _current_theme
+    try:
+        return registry[key]
+    except KeyError:
+        raise KeyError(f"unknown theme: {key!r} (have {', '.join(registry)})") from None
+
+
 _current_theme: str = DEFAULT_THEME
 #: Bumped on every theme switch; render caches compare against this to know
 #: when their cached rows/styles are stale.
@@ -172,8 +286,8 @@ _theme_epoch: int = 0
 
 
 def available_themes() -> list[str]:
-    """Names of the built-in theme ramps."""
-    return list(BRAND_TOKENS)
+    """Names of every registered theme, brand ramps first, then curated."""
+    return list(_registry())
 
 
 def current_theme() -> str:
@@ -194,29 +308,34 @@ def set_theme(name: str) -> int:
     Returns the new epoch.
     """
     global _current_theme, _theme_epoch
-    if name not in BRAND_TOKENS:
-        raise KeyError(f"unknown theme: {name!r} (have {', '.join(BRAND_TOKENS)})")
+    registry = _registry()
+    if name not in registry:
+        raise KeyError(f"unknown theme: {name!r} (have {', '.join(registry)})")
     _current_theme = name
     _theme_epoch += 1
     return _theme_epoch
 
 
 def get_tokens(theme: str | None = None) -> dict[str, str]:
-    """Raw brand tokens for ``theme`` (defaults to the current theme)."""
+    """Raw tokens for ``theme`` (defaults to the current theme).
+
+    For the two brand ramps this is the raw :data:`BRAND_TOKENS` vocabulary
+    (``amber``, ``paper``…), preserved because tests and the TCSS variable
+    block pin it; every curated theme answers with its semantic tokens,
+    which ARE its only vocabulary.
+    """
     name = theme or _current_theme
-    try:
+    if name in BRAND_TOKENS:
         return dict(BRAND_TOKENS[name])
-    except KeyError:
-        raise KeyError(f"unknown theme: {name!r} (have {', '.join(BRAND_TOKENS)})") from None
+    return dict(theme_spec(name).tokens)
 
 
 def semantic_color(semantic: str, theme: str | None = None) -> str:
     """Resolve a semantic name (``bg``, ``accent``, ...) to a hex for a ramp."""
-    name = theme or _current_theme
-    aliases = _SEMANTIC_ALIASES[name]
-    if semantic not in aliases:
-        raise KeyError(f"unknown semantic color {semantic!r} for theme {name!r}")
-    return BRAND_TOKENS[name][aliases[semantic]]
+    spec = theme_spec(theme)
+    if semantic not in spec.tokens:
+        raise KeyError(f"unknown semantic color {semantic!r} for theme {spec.name!r}")
+    return spec.tokens[semantic]
 
 
 def tcss_variable_map(theme: str | None = None) -> dict[str, str]:
@@ -229,7 +348,7 @@ def tcss_variable_map(theme: str | None = None) -> dict[str, str]:
     variables: dict[str, str] = {}
     for token, hex_value in get_tokens(name).items():
         variables[f"lo-{token}"] = hex_value
-    for semantic in _SEMANTIC_ALIASES[name]:
+    for semantic in SEMANTIC_TOKENS:
         variables[f"lo-{semantic}"] = semantic_color(semantic, name)
     return variables
 

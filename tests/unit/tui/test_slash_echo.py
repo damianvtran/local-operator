@@ -49,6 +49,9 @@ ECHO_POLICY = {
     # A setting, not words the model is told: the receipt names the level that
     # is now in force and the band carries it from then on.
     "effort": False,
+    # A setting, not words the model is told: the receipt names the theme now
+    # in force, and the screen itself is wearing the change.
+    "theme": False,
     "provider": False,
     "search": False,
     "accounts": False,

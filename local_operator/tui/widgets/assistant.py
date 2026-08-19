@@ -531,6 +531,28 @@ class AssistantBlock(TranscriptBlock):
             return Text("")
         return flatten(Markdown(self._full_text), self._flat_width(), self._flat_console())
 
+    def retheme(self) -> None:
+        """Re-flatten in the new ramp, dropping every theme-baked cache.
+
+        The flatten renders through the app console, whose markdown theme the
+        switch has already re-pushed — but the frozen prefix is cached as
+        FLATTENED TEXT with the old ramp's styles baked into every span, so
+        the caches go first (the same invalidation ``update_text`` performs
+        when it notices an epoch change) and the rebuild re-lexes from source.
+        """
+        if not self._full_text:
+            return
+        self._frozen_rendered = None
+        self._frozen_flat = None
+        self._frozen_epoch = theme_mod.get_theme_epoch()
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            rows = self._flat_whole() if was_finalized else self._flat_rows(self._flat_width())
+            self._apply_rows(rows)
+        finally:
+            self._finalized = was_finalized
+
     def settled_rows(self) -> int:
         """Rows provably stable now: the frozen prefix's render while live."""
         if self._finalized:
