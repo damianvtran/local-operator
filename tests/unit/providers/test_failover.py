@@ -657,7 +657,7 @@ async def test_transport_retries_honor_budget_same_key_first() -> None:
     # 5xx is a PROVIDER fault, so the next ACCOUNT is the thing most likely to
     # succeed. Capping rotation at one switch is what stranded two healthy
     # Anthropic accounts during a 529 storm.
-    assert [key for _provider, key in auth.rotations][:2] == ["k1", "k2"]
+    assert [key for _provider, key in auth.rotations] == ["k1", "k2"]
 
 
 async def test_long_rate_limit_retry_after_rotates_without_sleep(monkeypatch) -> None:
@@ -2510,7 +2510,7 @@ class TestARestoredBudgetIsTheConfiguredOne:
             failover_module._abortable_sleep = original  # type: ignore[assignment]
         return attempts[0]
 
-    @pytest.mark.parametrize("max_retries", [0, 1, 3, 5, 10])
+    @pytest.mark.parametrize("max_retries", list(range(0, 12)))
     async def test_a_lone_credential_spends_exactly_its_configured_budget(
         self, tmp_path: Any, max_retries: int
     ) -> None:
@@ -2523,9 +2523,12 @@ class TestARestoredBudgetIsTheConfiguredOne:
         change whose whole purpose is to stop hammering a provider that is
         already failing.
 
-        Swept across the range because the doubling was nearly invisible at the
-        default (the turn ceiling masked it) and worst for the users who
-        deliberately configured a SMALL budget.
+        Swept across EVERY value rather than a sample. The first version of
+        this test checked 0/1/3/5/10 and stepped straight over the only setting
+        that was wrong: at `maxRetries: 4` the pre-rotation allowance lands
+        exactly ON the budget, and an exclusive `<` comparison skipped the
+        restore and cost the user their last request. A sampled sweep is how a
+        boundary bug survives a test written to catch boundary bugs.
         """
         from local_operator.providers.auth_store import AuthStore
 

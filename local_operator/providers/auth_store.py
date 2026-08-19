@@ -673,9 +673,40 @@ class AuthStore:
             for r in self.list_credentials(provider)
             if r.credential_type == credential_type and not self.is_blocked(r.id, provider)
         ]
-        if source is None:
-            return rows
-        return [r for r in rows if r.data.get("source") == source]
+        if source is not None:
+            rows = [r for r in rows if r.data.get("source") == source]
+        # Drop demoted rows from the TIER, not merely sort them last, when some
+        # other credential is still reachable.
+        #
+        # Ordering alone is not enough here, because the cascade is a sequence
+        # of tiers and a tier is consulted whole: an OAuth row, or an api_key
+        # row with `source="login"`, wins its tier before a row in a later tier
+        # is ever looked at. So a demoted row that is ALONE in its tier kept
+        # winning the cascade -- and `rotate_sibling` kept reporting that a
+        # sibling existed, which told the driver rotation was progressing while
+        # the same failing bearer came back every time. A healthy credential one
+        # tier down never received a single request.
+        #
+        # Dropping is safe precisely because it is conditional: if every
+        # reachable credential is demoted, the marks describe an outage rather
+        # than any one account and :meth:`_selection_order` clears them.
+        demoted = self._active_demotions(provider)
+        if demoted and any(r.id not in demoted for r in self._all_selectable_rows(provider)):
+            remaining = [r for r in rows if r.id not in demoted]
+            if remaining:
+                return remaining
+            # Every row in THIS tier is demoted but another tier still has one:
+            # yield the tier so the cascade moves on to it.
+            return []
+        return rows
+
+    def _all_selectable_rows(self, provider: str) -> list[StoredCredential]:
+        """Every enabled, unblocked row for ``provider``, across all tiers."""
+        return [
+            r
+            for r in self.list_credentials(provider)
+            if r.disabled_cause is None and not self.is_blocked(r.id, provider)
+        ]
 
     # -- the cascade ---------------------------------------------------------
 

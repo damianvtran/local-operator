@@ -818,3 +818,50 @@ class TestARefreshlessOAuthCredentialIsReadable:
 
         assert oauth.credential_type == "oauth"
         assert pasted.credential_type == "api_key"
+
+
+class TestADemotedRowDoesNotHoldItsTier:
+    """R34: demotion must move a turn on, even across cascade TIERS.
+
+    The cascade is a sequence of tiers consulted whole -- an OAuth row, or an
+    api_key row with `source="login"`, wins before a later tier is looked at.
+    Sorting a demoted row last therefore did nothing when it was ALONE in its
+    tier: it kept winning the cascade, while `rotate_sibling` kept reporting a
+    sibling existed, so the driver believed rotation was progressing while the
+    same failing bearer came back every time. A healthy credential one tier down
+    never received a single request -- and this is exactly the shape `zai-oauth`
+    creates beside a pasted key.
+    """
+
+    @staticmethod
+    def _store(tmp_path: Any) -> Any:
+        from local_operator.providers.auth_store import AuthStore
+
+        return AuthStore(db_path=tmp_path / "auth.db")
+
+    async def test_a_sibling_in_another_tier_is_reachable(self, tmp_path: Any) -> None:
+        store = self._store(tmp_path)
+        login_row = store.upsert_credential(
+            "anthropic", {"type": "api_key", "key": "login-key", "source": "login"}
+        )
+        store.upsert_credential("anthropic", {"type": "api_key", "key": "migrated-key"})
+
+        # The tier-4 row fails on a PROVIDER fault, so it is demoted, not blocked.
+        store.deprioritize_credential("anthropic", login_row.id)
+
+        # The cascade must now reach the tier-6 row rather than re-serving the
+        # demoted one from the tier above.
+        assert await store.get_api_key("anthropic") == "migrated-key"
+
+    async def test_the_last_credential_is_still_served_when_all_are_demoted(
+        self, tmp_path: Any
+    ) -> None:
+        """Dropping is conditional: with nothing else reachable the marks
+        describe an outage rather than an account, and must not empty the pool."""
+        store = self._store(tmp_path)
+        row = store.upsert_credential(
+            "anthropic", {"type": "api_key", "key": "only-key", "source": "login"}
+        )
+        store.deprioritize_credential("anthropic", row.id)
+
+        assert await store.get_api_key("anthropic") == "only-key"

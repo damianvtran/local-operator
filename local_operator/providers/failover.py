@@ -1429,7 +1429,7 @@ async def stream_with_failover(
                     if (
                         not exhausted_budget_restored
                         and last_access is not None
-                        and spent_before_rotation < retry.max_retries
+                        and spent_before_rotation <= retry.max_retries
                         and is_server_side_failure(error)
                         and server_fault_requests < MAX_SERVER_FAULT_REQUESTS_PER_TURN
                     ):
@@ -1449,13 +1449,20 @@ async def stream_with_failover(
                         # in a change whose whole purpose is to stop hammering a
                         # provider that is already failing.
                         #
-                        # `spent_before_rotation < max_retries` above is part of
-                        # the same contract: when the pre-rotation allowance has
-                        # already met the configured budget there is nothing
-                        # left to restore, and firing anyway would grant an
-                        # extra request. It also covers `maxRetries: 0`, where a
-                        # user who asked for no retries must get exactly one
-                        # request.
+                        # `spent_before_rotation <= max_retries` above is part of
+                        # the same contract, and the comparison is inclusive on
+                        # purpose. `transport_retries` counts retries, so a
+                        # bearer that has spent exactly `max_retries` has issued
+                        # `max_retries + 1` requests and has none left; but the
+                        # allowance can also land ON the budget (at
+                        # `maxRetries: 4` the pre-rotation allowance of 3 makes
+                        # `spent_before_rotation` 4), and an exclusive test
+                        # skipped the restore there and cost the user their last
+                        # request. Only that one value diverged, which is why a
+                        # sweep of every setting -- not a sample -- is what the
+                        # test does. `maxRetries: 0` is still exactly one
+                        # request: `max()` below leaves the counter at the
+                        # budget, so no retry is allowed through.
                         # Never LESS than what has already been spent: the
                         # restored pass finishes the configured budget, it does
                         # not reopen it. With a small `max_retries` the
