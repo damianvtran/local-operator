@@ -341,3 +341,393 @@ async def test_a_click_dismisses_the_card_early() -> None:
         assert toast.display is False
         assert toast._timer is None
         assert toast.message == ""
+
+
+# -- the slot's two guards ----------------------------------------------------
+#
+# Both exist because a routine editing gesture (a drag over the composer)
+# became able to write this card. A copy receipt is a COURTESY — the user did
+# the thing and can see the result — while an MCP failure names a server and an
+# error they have not read yet. So a courtesy card declines the slot rather
+# than taking it, and `generation` lets a caller withdraw its own card later
+# without being able to touch anyone else's.
+
+
+@pytest.mark.asyncio
+async def test_a_courtesy_card_declines_a_slot_an_actionable_notice_holds() -> None:
+    """The failure the user must act on outranks the receipt for what they did."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+
+        assert toast.message == "⊙ MCP failed: github"
+
+
+@pytest.mark.asyncio
+async def test_a_courtesy_card_takes_a_slot_an_ordinary_notice_holds() -> None:
+    """The deference is to ACTIONABILITY, not to whatever happens to be showing.
+
+    Without this the test above would also pass if a courtesy card had simply
+    stopped being able to show at all.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP ready: 2 servers", duration_ms=TOAST_DEFAULT_MS)
+        await pilot.pause()
+
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+
+        assert toast.message == "copied 9 characters"
+
+
+@pytest.mark.asyncio
+async def test_an_actionable_notice_is_never_refused_the_slot() -> None:
+    """`yield_to_actionable` is opt-in; a failure always gets through."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        toast.show("⊙ MCP failed: gitlab", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        assert toast.message == "⊙ MCP failed: gitlab"
+
+
+@pytest.mark.asyncio
+async def test_dismissing_clears_the_actionable_hold() -> None:
+    """A failure that has been read must not lock the slot for the session."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+
+        assert toast.message == "copied 9 characters"
+
+
+@pytest.mark.asyncio
+async def test_the_generation_names_the_card_that_is_showing() -> None:
+    """Each clause of `generation`'s contract, separately.
+
+    It is load-bearing for the copy receipt: the app holds the generation of
+    the card its own copy raised and dismisses only while that is still what is
+    on screen. Every clause below is independently falsifiable, and the third
+    is the one a real bug turned on — a copy made while a failure was up
+    adopted the FAILURE's generation and withdrew it on the next keystroke.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        # 0 before anything has ever been shown.
+        assert toast.generation == 0
+
+        # +1 per ACCEPTED show.
+        toast.show("first", duration_ms=TOAST_DEFAULT_MS)
+        await pilot.pause()
+        first = toast.generation
+        assert first == 1
+        toast.show("second", duration_ms=TOAST_DEFAULT_MS)
+        await pilot.pause()
+        assert toast.generation == 2
+
+        # UNCHANGED by a show that declined the slot: no card was raised, so
+        # there is nothing for a caller to name.
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        held = toast.generation
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+        assert toast.generation == held
+
+        # Unchanged by dismissal, so a held value can never come to match a
+        # later card by accident. Dismissed twice: the first frees the slot and
+        # lets the deferred receipt take its turn (which is a new card, and so
+        # a new generation), the second retires that.
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.message == "copied 9 characters"
+        after_deferred = toast.generation
+        assert after_deferred == held + 1
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.generation == after_deferred
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_courtesy_card_gets_its_turn_when_the_slot_frees() -> None:
+    """Held, not dropped: the acknowledgement is late rather than lost.
+
+    Deferring fixed the eviction, but it left the copy with no feedback at all
+    — the failure was dismissed and nothing ever said the text had been taken
+    (design round 2, D9). The user had dragged, seen nothing, and the notice
+    they were reading disappeared.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+        assert toast.message == "⊙ MCP failed: github"
+
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        assert toast.message == "copied 9 characters"
+        assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_only_the_latest_deferred_card_is_kept() -> None:
+    """Superseded news is not owed a turn.
+
+    Three drags behind one failure notice must not march three cards down the
+    screen afterwards — that is the stacking the single slot exists to prevent.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        for message in ("copied 3 characters", "copied 5 characters", "copied 9 characters"):
+            toast.show(message, yield_to_actionable=True)
+            await pilot.pause()
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.message == "copied 9 characters"
+
+        # ...and exactly one card is owed. The next dismissal ends it rather
+        # than uncovering another receipt.
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.message == ""
+        assert toast.display is False
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_card_does_not_defer_to_itself() -> None:
+    """The hold is released before the deferred card is shown.
+
+    Dismissal clears `_actionable` first, so the card taking its turn cannot
+    find the slot still held and re-defer — which would either lose it after
+    all or, worse, recurse.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        assert toast.message == "copied 9 characters"
+        assert toast._deferred is None
+        # A courtesy card is not itself actionable, so the slot is takeable.
+        toast.show("copied 4 characters", yield_to_actionable=True)
+        await pilot.pause()
+        assert toast.message == "copied 4 characters"
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_actually_showed_clears_the_deferred_one() -> None:
+    """A receipt that got its own turn is not also owed a later one.
+
+    Without clearing the hold on an accepted `show`, a copy deferred behind a
+    failure would resurface after some unrelated notice minutes later — a
+    receipt for a copy the user made long ago, arriving with no gesture behind
+    it.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        toast.show("copied 9 characters", yield_to_actionable=True)
+        await pilot.pause()
+        assert toast._deferred is not None
+
+        # The failure is replaced by an ordinary notice rather than dismissed,
+        # so the slot never passes through `dismiss_toast`.
+        toast.show("⊙ MCP ready: 2 servers", duration_ms=TOAST_DEFAULT_MS)
+        await pilot.pause()
+        assert toast._deferred is None
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.message == ""
+        assert toast.display is False
+
+
+# -- withdrawal, by owner -----------------------------------------------------
+#
+# The slot is shared, so "retire my card" has to mean *mine*. Four bugs in this
+# PR (F5, D8, D14, F14) were all one signal reaching a card it did not own,
+# patched at four different layers; `withdraw(owner)` asks the question once.
+# These pin it at the widget, where the ownership actually lives — the
+# end-to-end tests in `test_transcript_selection.py` only ever exercise two
+# owners, so the cases that make ownership MEAN something are unpinned there
+# (review round 5, F16).
+
+#: Two distinct callers, as the app's own sentinels are.
+OWNER_A = object()
+OWNER_B = object()
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_retires_a_showing_card_of_your_own() -> None:
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("mine", owner=OWNER_A)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+
+        assert toast.message == ""
+        assert toast.display is False
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_leaves_someone_else_s_showing_card_alone() -> None:
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("theirs", owner=OWNER_B)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+
+        assert toast.message == "theirs"
+        assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_leaves_someone_else_s_held_card_alone() -> None:
+    """...and it still gets its turn when the slot frees."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+        toast.show("theirs", yield_to_actionable=True, owner=OWNER_B)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        assert toast.message == "theirs"
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_drops_the_hold_without_touching_the_card_above_it() -> None:
+    """One owner showing, another held — the shipped failure-plus-copy state."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS, owner=OWNER_B)
+        await pilot.pause()
+        toast.show("mine", yield_to_actionable=True, owner=OWNER_A)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+        assert toast.message == "⊙ MCP failed: github"
+
+        # The slot frees to nothing: the held card was withdrawn, not promoted.
+        toast.dismiss_toast()
+        await pilot.pause()
+        assert toast.message == ""
+        assert toast.display is False
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_the_card_above_promotes_the_hold_beneath_it() -> None:
+    """The same state, withdrawn from the other side."""
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS, owner=OWNER_B)
+        await pilot.pause()
+        toast.show("mine", yield_to_actionable=True, owner=OWNER_A)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_B)
+        await pilot.pause()
+
+        assert toast.message == "mine"
+        assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_drops_the_hold_before_dismissing_the_card() -> None:
+    """The order inside `withdraw` is load-bearing, in a reachable state.
+
+    `dismiss_toast` PROMOTES whatever is held. So if `withdraw` dismissed
+    first, it would raise the very card it is withdrawing and then find the
+    hold already consumed — leaving the claim on screen (review round 5, F15).
+
+    The state is constructed directly because no caller reaches it yet: holding
+    requires the showing card to be actionable, and the only owned card the app
+    raises is a copy receipt at `TOAST_DEFAULT_MS`. That is the point — the
+    order is correct defensively, and this pins it before the first owner that
+    would make the hazard live (round 6, F19).
+
+    Swapping the two statements leaves every other test in the suite passing,
+    which is exactly why this one exists.
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("mine, actionable", duration_ms=TOAST_FAILURE_MS, owner=OWNER_A)
+        await pilot.pause()
+        toast.show("mine, held", yield_to_actionable=True, owner=OWNER_A)
+        await pilot.pause()
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+
+        assert toast.message == ""
+        assert toast.display is False
+        assert toast._deferred is None
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_nothing_is_silent() -> None:
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+
+        toast.withdraw(OWNER_A)
+        await pilot.pause()
+
+        assert toast.message == ""
+        assert toast.display is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["withdraw", "drop_deferred"])
+async def test_none_is_not_an_owner(method: str) -> None:
+    """`None` tags every card that named no owner, so it cannot address one.
+
+    Nothing calls it that way today, but it is a one-word mistake that
+    typechecks (`object` includes `None`) and would silently retire an unread
+    MCP failure — D2 for the third time (review round 5, F17).
+    """
+    async with ToastApp().run_test(size=(80, 24)) as pilot:
+        toast = pilot.app.query_one(Toast)
+        toast.show("⊙ MCP failed: github", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        with pytest.raises(ValueError):
+            getattr(toast, method)(None)
+
+        assert toast.message == "⊙ MCP failed: github"
+        assert toast.display
