@@ -294,6 +294,20 @@ class Toast(Static):
         self._refit()
         self._timer = self.set_timer(duration_ms / 1000, self.dismiss_toast)
 
+    def drop_deferred(self) -> None:
+        """Forget a held card that has stopped being worth showing.
+
+        The counterpart to the hold in :meth:`show`: a deferred notice is news
+        waiting for a slot, and news can go stale before it gets one. The copy
+        receipt does exactly that \u2014 the text it describes can be typed over
+        while an MCP failure is still holding the slot \u2014 and a card that is
+        already false when it is painted is worse than one that never appears.
+
+        Idempotent, and silent when nothing is held: a caller withdrawing a
+        claim should not have to know whether it was ever queued.
+        """
+        self._deferred = None
+
     def dismiss_toast(self) -> None:
         """Hide the card and drop its timer (idempotent).
 

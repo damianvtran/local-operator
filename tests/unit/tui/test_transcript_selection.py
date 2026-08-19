@@ -1673,3 +1673,66 @@ async def test_a_declined_receipt_does_not_adopt_the_notice_it_deferred_to() -> 
 
         assert toast.message.startswith("mcp: failed")
         assert toast.display
+
+
+@pytest.mark.asyncio
+async def test_a_held_receipt_is_withdrawn_if_its_text_is_edited_away() -> None:
+    """A deferred claim can go stale before it is ever painted.
+
+    Promoting the declined receipt to a card that outlives the gesture (D9) put
+    it outside the reach of the staleness retirement: `Editor._copied` is a
+    one-shot flag consumed by the first edit, and that edit lands while the
+    receipt is still held — with nothing showing to retire, because the copy
+    correctly declined to arm one (D13). The card then appeared, already false,
+    when the slot freed (design round 4, D14).
+
+    The window makes it likely rather than exotic: the notice runs ten seconds
+    and the user is typing into the composer the whole time.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+        toast.show("mcp: failed: github — command not found: gh", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 9))
+        assert app._clipboard == "summarise"
+
+        # The user types over what they copied, while the notice still holds
+        # the slot.
+        await pilot.press("z")
+        await pilot.pause()
+
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        assert toast.message == ""
+        assert toast.display is False
+        # The clipboard is untouched, as everywhere else: only the claim goes.
+        assert app._clipboard == "summarise"
+
+
+@pytest.mark.asyncio
+async def test_a_held_receipt_still_arrives_when_its_text_survives() -> None:
+    """The withdrawal is scoped to a claim that became false.
+
+    Without this, D14's fix could pass by dropping every deferred receipt,
+    which would undo D9 — the copy would go unacknowledged again.
+    """
+    app = _pilot_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        toast = app.query_one(Toast)
+        toast.show("mcp: failed: github — command not found: gh", duration_ms=TOAST_FAILURE_MS)
+        await pilot.pause()
+
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 9))
+
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        assert toast.message == "copied 9 characters"
+        assert toast.display

@@ -2466,9 +2466,18 @@ class OperatorApp(App[None]):
         """
         receipt = self._copy_receipt
         self._copy_receipt = None
-        if receipt is None:
-            return
         toast = self.query_one(Toast)
+        if receipt is None:
+            # No card of ours is SHOWING — but one may be waiting. A copy made
+            # while an actionable notice held the slot is held back rather than
+            # dropped (D9), and the edit that falsifies it can easily land in
+            # that window: the notice runs for ten seconds and the user is
+            # typing (design round 4, D14). Withdrawing it before it is ever
+            # painted is the same rule as below, applied one moment earlier —
+            # otherwise the claim escapes the staleness check entirely and
+            # appears, already false, when the slot frees.
+            toast.drop_deferred()
+            return
         # The GENERATION, not the wording: two copies can produce the same
         # string, and what must be true is that the card on screen is still the
         # one this editor's copy put there. Any later `show` — another copy, an
