@@ -57,7 +57,10 @@ def _list_directory(directory: Path) -> str:
     """Render a directory listing: ``name/ (dir)`` for dirs, plain names for
     files, deterministic alphabetical order. Dotfiles are skipped (they are
     unlisted and unreadable by design) and the listing is capped at
-    ``_MAX_LISTING_ENTRIES`` with an overflow marker."""
+    ``_MAX_LISTING_ENTRIES`` with an overflow marker. Names are
+    percent-encoded the same way as the bare-read reference listing, so a
+    name copied from here into a ``skill://<name>/<path>`` URL survives
+    ``urlsplit``/``unquote`` even when it contains ``%``, ``#`` or ``?``."""
     lines: list[str] = []
     try:
         entries = sorted(directory.iterdir(), key=lambda p: (p.name.lower(), p.name))
@@ -69,7 +72,8 @@ def _list_directory(directory: Path) -> str:
             continue
         if shown >= _MAX_LISTING_ENTRIES:
             break
-        lines.append(f"{entry.name}/ (dir)" if entry.is_dir() else entry.name)
+        encoded = quote(entry.name, safe="")
+        lines.append(f"{encoded}/ (dir)" if entry.is_dir() else encoded)
         shown += 1
     hidden = sum(1 for entry in entries if not entry.name.startswith(".")) - shown
     if hidden > 0:
@@ -134,7 +138,9 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
     - symlinks (file or directory) are admitted only when their RESOLVED
       target stays inside ``base_dir`` — the same containment check the
       resolver applies on read — and resolved directories are visited at
-      most once so a link cycle cannot grow the walk;
+      most once so a link cycle cannot grow the walk. Deduplication means
+      one ROUTE per directory is listed when an alias and its target both
+      appear; every route stays readable through the resolver either way;
     - names are percent-encoded exactly as ``_resolve_child``'s ``unquote``
       expects, so a filename containing ``%``, ``#`` or ``?`` survives the
       URL round-trip instead of being listed in a form ``urlsplit`` mangles;
@@ -155,6 +161,12 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
     except OSError:
         return ""
     body_file = resource.file_path
+    try:
+        # Resolved once so a symlink ALIAS of the body file is excluded too:
+        # the caller just returned that content, whatever name it wears.
+        body_resolved = body_file.resolve()
+    except OSError:
+        body_resolved = body_file
     entries: list[str] = []
     overflow = False
     visited: set[str] = set()
@@ -195,8 +207,14 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
             elif child.is_file():
                 if child == body_file:
                     continue
-                if child.is_symlink() and not _contained(child):
-                    continue
+                if child.is_symlink():
+                    if not _contained(child):
+                        continue
+                    try:
+                        if child.resolve() == body_resolved:
+                            continue
+                    except OSError:
+                        continue
                 if len(entries) >= _MAX_REFERENCE_ENTRIES:
                     overflow = True
                     return

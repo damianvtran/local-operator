@@ -412,6 +412,31 @@ class TestReferenceListing:
         assert resolve_skill_url("skill://alpha/notes%20%231.md", skills) == "hash"
         assert resolve_skill_url("skill://alpha/100%25.md", skills) == "percent"
 
+    def test_directory_listing_names_round_trip(self, skills: dict[str, Skill]) -> None:
+        # R2-2: the child-path DIRECTORY listing is where the overflow marker
+        # sends the model, so its names must survive the same URL round-trip
+        # as the bare-read listing — a raw '#' name copied from it would be
+        # cut at the fragment and fail to resolve.
+        refs = skills["alpha"].base_dir / "references"
+        refs.mkdir()
+        (refs / "notes #1.md").write_text("hash", encoding="utf-8")
+        listing = resolve_skill_url("skill://alpha/references", skills)
+        assert listing is not None
+        assert "notes%20%231.md" in listing
+        assert resolve_skill_url("skill://alpha/references/notes%20%231.md", skills) == "hash"
+
+    def test_symlink_alias_of_body_file_not_listed(self, tmp_path: Path) -> None:
+        # R2-3: a symlink whose resolved target IS the body file re-offers
+        # content the caller just returned; exclude it like the body file
+        # itself (resolved-target equality, not path equality).
+        skill = _make_skill(tmp_path, "bodylink")
+        (skill.base_dir / "readme.md").symlink_to(skill.file_path)
+        (skill.base_dir / "real-ref.md").write_text("r", encoding="utf-8")
+        content = resolve_skill_url("skill://bodylink", {"bodylink": skill})
+        assert content is not None
+        assert "readme.md" not in content
+        assert "real-ref.md" in content
+
     def test_listing_bounded_with_overflow_marker(self, skills: dict[str, Skill]) -> None:
         base = skills["alpha"].base_dir
         refs = base / "references"
