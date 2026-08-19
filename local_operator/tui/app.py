@@ -3295,24 +3295,37 @@ class OperatorApp(App[None]):
         #   from mouse to keyboard `_selecting` is already False and the copy
         #   would otherwise not keep the key it just earned.
         #
-        # That second test is deliberately the CONJUNCTION of `_copied` and a
-        # live selection, and neither half is sufficient. `_copied` alone
-        # retires only on an EDIT, so clicking elsewhere or pressing an arrow
-        # left it set with nothing on screen — the user saw a plain draft and
-        # got the interrupt, then quit on the second tap with the draft lost
-        # (D20, design round 6). A live selection alone was the ORIGINAL bug
-        # (D17): a highlight the user made minutes ago is not a copy.
+        # That second test is THE COPY'S OWN highlight still being on screen,
+        # which took three attempts to state correctly and each wrong one cost
+        # a draft:
         #
-        # Together they are self-retiring and, more importantly, VISIBLE: the
-        # key means "interrupt" exactly while the highlight the copy took is on
-        # screen, and reverts to "clear my draft" the moment that highlight
-        # goes — which is the same instant the user stops perceiving a copy.
-        # The discriminating state is the one thing they can actually see.
+        # * `selected_text` alone — a selection persists until the caret moves,
+        #   so a highlight made minutes ago diverted the key (D17).
+        # * `_copied` alone — it retires on an EDIT but not on a caret move, so
+        #   clicking elsewhere or pressing an arrow left it set with nothing on
+        #   screen: the user saw a plain draft, got the interrupt, and quit on
+        #   the second tap (D20). Stale for a SUPERSET of D17's states.
+        # * `_copied` and *a* live selection — an unrelated shift+arrow
+        #   selection made after the copied range was collapsed re-armed the
+        #   deferral, so two pixel-identical frames carried opposite meanings
+        #   (D22). Same lost draft, third route.
+        #
+        # So the editor pins WHICH range it copied, and this compares against
+        # it. That is the claim the comment has made since D20 and the code did
+        # not implement: the key means "interrupt" exactly while the highlight
+        # THE COPY TOOK is on screen, and reverts to "clear my draft" the
+        # moment it goes or is replaced — the same instant the user stops
+        # perceiving that copy. The discriminating state is the one thing they
+        # can actually see, and it is now the thing actually tested.
         #
         # Checked BEFORE the draft branch, because a composer being dragged over
         # always has text in it and would otherwise take that branch every time.
+        copied_range = getattr(editor, "_copied_selection", None)
         mid_copy = getattr(editor, "_selecting", False) or (
-            getattr(editor, "_copied", False) and bool(getattr(editor, "selected_text", ""))
+            getattr(editor, "_copied", False)
+            and copied_range is not None
+            and getattr(editor, "selection", None) == copied_range
+            and bool(getattr(editor, "selected_text", ""))
         )
         if editor.text.strip() and not mid_copy:
             # `remember_draft` refuses while the aside owns the composer, and a

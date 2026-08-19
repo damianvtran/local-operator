@@ -1806,3 +1806,47 @@ async def test_a_receipt_promoted_from_the_hold_can_still_be_retired() -> None:
 
         assert toast.message == ""
         assert toast.display is False
+
+
+@pytest.mark.asyncio
+async def test_a_new_selection_after_a_copy_does_not_rearm_the_interrupt() -> None:
+    """D22, design review round 7. The deferral belongs to ONE highlight.
+
+    Ctrl+C hands the key to an in-flight copy, and the composer's copy lands on
+    mouse release — so the deferral has to outlive the release by exactly as
+    long as the copy's own highlight is on screen. Testing "`_copied` and *a*
+    selection" was one predicate too weak: after the copied range was collapsed
+    by a caret move, an unrelated shift+arrow selection re-armed the deferral,
+    so the first press aborted instead of clearing and the second QUIT with the
+    draft unfiled. Two pixel-identical frames carried opposite meanings.
+
+    Driven with a real drag, so `_copied` is set by the widget's own
+    `_copy_drag` rather than by the test.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
+        assert editor._copied, "the drag should have copied"
+
+        # The caret moves, collapsing the copied range...
+        await pilot.press("right")
+        await pilot.pause()
+        # ...and the user makes a NEW, unrelated selection with the keyboard.
+        await pilot.press("shift+end")
+        await pilot.pause()
+        assert editor.selected_text, "the new selection must be live to mean anything"
+        assert editor._copied, "this is only meaningful while _copied is still set"
+
+        session.aborts.clear()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert session.aborts == [], "an unrelated selection re-armed the copy deferral"
+        assert editor.text == "", "the draft was not cleared"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.is_running, "the second tap quit with the draft unfiled"

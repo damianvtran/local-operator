@@ -591,6 +591,8 @@ class Editor(TextArea):
         #: user's copied draft on the widget buys nothing (review round 2, F9).
         #: See :meth:`edit` and :meth:`load_text`.
         self._copied = False
+        #: The selection `_copy_drag` took, when `_copied` is set. See there.
+        self._copied_selection: Selection | None = None
         self.set_commands(commands or [])
 
     def render_line(self, y: int) -> Strip:
@@ -1573,6 +1575,14 @@ class Editor(TextArea):
         if not text:
             return
         self._copied = True
+        #: WHICH range the copy took, not merely that one happened. The app's
+        #: Ctrl+C rung defers to a copy while its highlight is still on screen,
+        #: and `_copied` alone cannot tell the copy's own highlight from an
+        #: unrelated selection made later — so a shift+arrow selection after a
+        #: copied range had been collapsed silently re-armed that deferral and
+        #: the next two presses quit the app with the draft unfiled (D22, design
+        #: round 7). Pinning the range makes "the copy's highlight" checkable.
+        self._copied_selection = self.selection
         self.post_message(EditorCopied(text))
 
     # -- paste ----------------------------------------------------------------
@@ -1773,6 +1783,7 @@ class Editor(TextArea):
         result = super().edit(edit)
         if stale_receipt:
             self._copied = False
+            self._copied_selection = None
             self.post_message(EditorCopyStale())
         self._sync_picker()
         if touched:
@@ -1842,6 +1853,7 @@ class Editor(TextArea):
         up, is about a copy that remains perfectly true.
         """
         self._copied = False
+        self._copied_selection = None
         super().load_text(text)
         self._sync_picker()
 
