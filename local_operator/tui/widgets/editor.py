@@ -1585,6 +1585,37 @@ class Editor(TextArea):
         self._copied_selection = self.selection
         self.post_message(EditorCopied(text))
 
+    def watch_selection(self, selection: Selection) -> None:
+        """Retire the copy receipt's GESTURE claim when the highlight changes.
+
+        ``_copied`` is edit-scoped: `edit` and `load_text` clear it, because the
+        receipt on screen is a claim about text the user can still see. But the
+        app's Ctrl+C rung asks a GESTURE-scoped question — "is a hand still
+        completing a copy?" — and an edit-scoped flag answers it wrongly in two
+        directions that each cost a user their draft (D20, then D22).
+
+        Retiring here makes the flag answer both questions with one lifetime:
+        the copy's claim ends when the highlight it took stops being the
+        highlight on screen, whether that is a caret move collapsing it or a new
+        selection replacing it. `_copied_selection` is what makes "the same
+        highlight" checkable rather than merely "a highlight".
+
+        Deliberately NOT posting ``EditorCopyStale``: moving the caret is not
+        the user editing the text their receipt describes, so the toast remains
+        true and stays up. Only the gesture claim ends here.
+        """
+        super_watch = getattr(super(), "watch_selection", None)
+        if super_watch is not None:
+            super_watch(selection)
+        # `getattr` with a default because a reactive watcher can fire during
+        # base-class construction, before this subclass has set its own
+        # attributes — an AttributeError there takes the whole widget down.
+        if getattr(self, "_copied", False) and selection != getattr(
+            self, "_copied_selection", None
+        ):
+            self._copied = False
+            self._copied_selection = None
+
     # -- paste ----------------------------------------------------------------
     async def _on_paste(self, event: events.Paste) -> None:
         """Attach pasted images instead of pasting the path to them.

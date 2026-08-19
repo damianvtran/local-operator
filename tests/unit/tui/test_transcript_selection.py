@@ -1838,7 +1838,10 @@ async def test_a_new_selection_after_a_copy_does_not_rearm_the_interrupt() -> No
         await pilot.press("shift+end")
         await pilot.pause()
         assert editor.selected_text, "the new selection must be live to mean anything"
-        assert editor._copied, "this is only meaningful while _copied is still set"
+        # The watcher retired the copy claim when the caret moved off the range
+        # it took; the unrelated selection cannot resurrect it. Asserted because
+        # three previous attempts died on `_copied` outliving its own highlight.
+        assert not editor._copied, "an unrelated selection kept the copy claim alive"
 
         session.aborts.clear()
         await pilot.press("ctrl+c")

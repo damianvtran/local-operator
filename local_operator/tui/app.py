@@ -3310,23 +3310,24 @@ class OperatorApp(App[None]):
         #   deferral, so two pixel-identical frames carried opposite meanings
         #   (D22). Same lost draft, third route.
         #
-        # So the editor pins WHICH range it copied, and this compares against
-        # it. That is the claim the comment has made since D20 and the code did
-        # not implement: the key means "interrupt" exactly while the highlight
-        # THE COPY TOOK is on screen, and reverts to "clear my draft" the
-        # moment it goes or is replaced — the same instant the user stops
-        # perceiving that copy. The discriminating state is the one thing they
-        # can actually see, and it is now the thing actually tested.
+        # Fixed at the SOURCE instead, on the reviewer's diagnosis that the
+        # root cause was one flag answering two questions with the wrong
+        # lifetime: `_copied` is an edit-scoped receipt, and this is a
+        # gesture-scoped question. The editor now retires the gesture claim in
+        # its `selection` watcher — the copy's claim ends when the highlight it
+        # took stops being the highlight on screen, whether a caret move
+        # collapses it or a new selection replaces it.
+        #
+        # So `_copied` is self-retiring here and the guard is finally the plain
+        # statement the comment has been making since D20: the key means
+        # "interrupt" exactly while the copy the user just made is still
+        # visible. Three conjunctions were three attempts to patch a lifetime
+        # from the outside; none of them could, because the flag outlived its
+        # own subject.
         #
         # Checked BEFORE the draft branch, because a composer being dragged over
         # always has text in it and would otherwise take that branch every time.
-        copied_range = getattr(editor, "_copied_selection", None)
-        mid_copy = getattr(editor, "_selecting", False) or (
-            getattr(editor, "_copied", False)
-            and copied_range is not None
-            and getattr(editor, "selection", None) == copied_range
-            and bool(getattr(editor, "selected_text", ""))
-        )
+        mid_copy = getattr(editor, "_selecting", False) or getattr(editor, "_copied", False)
         if editor.text.strip() and not mid_copy:
             # `remember_draft` refuses while the aside owns the composer, and a
             # draft that cannot be filed must not be thrown away either.
