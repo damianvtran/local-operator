@@ -1825,16 +1825,46 @@ class SessionStreamFn:
                 )
                 return
 
-            block_ms = max(
-                60_000,
-                health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS,
-            )
+            # How the account is taken out of the running depends on WHAT the
+            # verdict was, and conflating the two is the incident this split
+            # comes from. "Depleted" is a fact about the provider: it will 429
+            # every request until the spent window resets, so a cross-process
+            # SQLite block until that reset merely records reality. "Reserve"
+            # is the opposite of unusable — the account still HAS quota, held
+            # back so it is there when nothing better remains. Writing a block
+            # for it (as this code once did) stood the reserve on its head:
+            # accounts at 90% of a seven-day window were blocked for DAYS, one
+            # by one, until the last live account genuinely depleted and every
+            # session died reporting "all credentials unusable" while three
+            # accounts still held quota.
+            #
+            # So a reserve account is DEPRIORITIZED instead: an in-process,
+            # self-expiring routing preference (see
+            # ``AuthStore.deprioritize_credential``) that steers this walk and
+            # the session's next resolve toward healthier siblings, while the
+            # cascade's ignore-demotions second pass still serves the account
+            # the moment it is the only thing left. The mark is short-lived on
+            # purpose; the preflight re-checks and re-applies it while the
+            # preference still holds.
+            if health.state == "depleted":
+
+                def take_out_of_rotation(credential_id: int) -> None:
+                    self._auth_store.block_credential(
+                        credential_id,
+                        storage,
+                        block_ms=max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
+                    )
+
+            else:
+
+                def take_out_of_rotation(credential_id: int) -> None:
+                    # Keyed by ``model.provider``, not ``storage``: demotions
+                    # are consulted by ``_resolve`` under the provider name the
+                    # request resolves with.
+                    self._auth_store.deprioritize_credential(model.provider, credential_id)
+
             if siblings:
-                self._auth_store.block_credential(
-                    access.credential_id,
-                    storage,
-                    block_ms=block_ms,
-                )
+                take_out_of_rotation(access.credential_id)
                 await self._notice(
                     f"{model.provider} {condition}{remaining} — trying another "
                     f"{model.provider} account before provider fallback"
@@ -1844,11 +1874,7 @@ class SessionStreamFn:
             assert fallback is not None
             fallback_provider, _model_id = parse_selector(fallback.selector)
             if fallback_provider != model.provider:
-                self._auth_store.block_credential(
-                    access.credential_id,
-                    storage,
-                    block_ms=block_ms,
-                )
+                take_out_of_rotation(access.credential_id)
             await self._route_state.activate(
                 fallback,
                 f"{model.provider} {condition}{remaining}",

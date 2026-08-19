@@ -816,6 +816,13 @@ MAX_SAME_CREDENTIAL_SERVER_RETRIES = 2
 #: behaviour, whatever the pool size.
 MAX_SERVER_FAULT_REQUESTS_PER_TURN = 12
 
+#: Ceiling on the pause before the loop-back sweep re-walks an exhausted
+#: cascade. The sweep honours the shortest wait a provider advertised —
+#: sleeping less would re-ask a question whose answer is already known — but a
+#: long quota reset must not stall the verdict for hours: past this cap the
+#: sweep goes immediately and lets resolution report whatever is still blocked.
+LOOPBACK_MAX_WAIT_MS = 30_000
+
 #: Attempts the FIRST bearer may spend on a server-side fault before the turn
 #: tries another credential. It is deliberately below ``max_retries``: until a
 #: rotation has happened nothing knows whether a sibling exists, and spending
@@ -1328,6 +1335,10 @@ async def stream_with_failover(
             for candidate in expand_fallback_targets(primary_selector, chain):
                 if candidate not in targets:
                     targets.append(candidate)
+    # The list as CONFIGURED, kept before the route-state trim below: the
+    # loop-back sweep at the bottom of the walk re-checks the whole waterfall,
+    # including targets the pin excluded from the first pass.
+    full_targets = list(targets)
     if route_state is not None and route_state.active in targets:
         targets = targets[targets.index(route_state.active) :]
 
@@ -1361,7 +1372,32 @@ async def stream_with_failover(
                 "%s failed: %s", "requested model" if primary else "fallback selector", error
             )
 
-    for target in targets:
+    # One walk down the cascade, then AT MOST one more. The second sweep exists
+    # because "every target failed once" is not the same fact as "every target
+    # is exhausted": by the time the walk reaches the end of the chain, the
+    # failures at the top are minutes old — a 60s credential block written by
+    # another process has expired, a transient outage has passed, a short rate
+    # limit has reset — and targets the route-state pin trimmed off the first
+    # pass were never asked at all this turn. Dying without looking again
+    # reports exhaustion the harness has not actually verified.
+    #
+    # Bounded and discriminating, so the loop-back cannot become a hammer:
+    # exactly one extra sweep per call, revisiting only targets that were never
+    # walked this turn or whose failure was the kind that heals on its own
+    # (quota/timeout/transient — see the `recoverable` marks below). A 400 the
+    # provider meant, or a bearer it rejected past rotation, gets no second ask:
+    # the same bytes would get the same answer.
+    pending = list(targets)
+    walked: set[tuple[str, str | None]] = set()
+    recoverable: set[tuple[str, str | None]] = set()
+    # Server-fault spend per target, carried ACROSS the sweeps: the per-turn
+    # ceiling is about what one provider receives, and a loop-back that reset
+    # the counter would quietly double it.
+    server_faults_by_target: dict[tuple[str, str | None], int] = {}
+    shortest_retry_after_ms: int | None = None
+    looped_back = False
+    while pending:
+        target = pending.pop(0)
         selector = target.selector
         if signal is not None and signal.aborted:
             raise ProviderError(None, signal.reason or "aborted", retryable=False, kind="aborted")
@@ -1370,6 +1406,7 @@ async def stream_with_failover(
         provider, _model_id = parse_selector(selector)
         spec = request.model if target == primary_target else spec_for_target(request.model, target)
         route_key = (selector, target.effort)
+        walked.add(route_key)
         client = clients.get(route_key)
         if client is None:
             built = client_for(spec)
@@ -1399,8 +1436,16 @@ async def stream_with_failover(
         # with no retries -- so a fallback that would have succeeded on its
         # second try never got one, which defeats the entire point of having a
         # chain. Each provider is a different service having a different day,
-        # and the ceiling is about what ONE provider receives.
-        server_fault_requests = 0
+        # and the ceiling is about what ONE provider receives. Loaded from the
+        # cross-sweep ledger so the loop-back sweep finishes the same ceiling
+        # instead of opening a second one.
+        server_fault_requests = server_faults_by_target.get(route_key, 0)
+        if looped_back and server_fault_requests >= MAX_SERVER_FAULT_REQUESTS_PER_TURN:
+            # A revisit must not become a top-up: this target already aimed the
+            # turn's whole server-fault allowance at its provider, and the
+            # loop-back exists to catch freed capacity, not to keep spending
+            # against an outage.
+            continue
         # Attempts this target's FIRST bearer spent before rotation started, so
         # the restore below can hand back the remainder of the user's budget
         # instead of a fresh one.
@@ -1499,10 +1544,15 @@ async def stream_with_failover(
                     # reported frame sent the user off to configure a key they
                     # already had -- the reported `No API key configured for
                     # provider 'openai'` on an account signed in via OAuth.
-                    record(
-                        _no_credential_error(auth, provider),
-                        primary=is_primary,
-                    )
+                    missing = _no_credential_error(auth, provider)
+                    record(missing, primary=is_primary)
+                    if missing.retryable:
+                        # Retryable means blocked-not-absent: backoffs expire on
+                        # their own (and other processes release credentials),
+                        # so the loop-back sweep may find this provider
+                        # serviceable again. A genuinely unconfigured provider
+                        # is not retryable and gets no second visit.
+                        recoverable.add(route_key)
                     break
                 error = None
             retry_same_key = False
@@ -1546,6 +1596,26 @@ async def stream_with_failover(
                 record(exc, primary=is_primary)
                 if is_server_side_failure(exc):
                     server_fault_requests += 1
+                    server_faults_by_target[route_key] = server_fault_requests
+                if (
+                    exc.kind == "quota"
+                    and exc.retry_after_ms
+                    and exc.retry_after_ms <= LOOPBACK_MAX_WAIT_MS
+                ):
+                    # A throttle that clears within the loop-back's wait ceiling
+                    # earns this target a second visit after the walk: the sweep
+                    # sleeps the advertised delay first, so the revisit asks a
+                    # question whose answer can actually have changed. Long
+                    # quota resets are excluded — nothing about them changes in
+                    # the seconds this turn has left — and server-side faults
+                    # are excluded on purpose: their in-place retry budgets
+                    # (`_same_credential_retry_allowed`, the per-target fault
+                    # ceiling) already spent the turn's whole allowance for that
+                    # provider, and a revisit would quietly double it.
+                    recoverable.add(route_key)
+                    shortest_retry_after_ms = min(
+                        shortest_retry_after_ms or exc.retry_after_ms, exc.retry_after_ms
+                    )
                 if not retry.enabled:
                     raise
                 if _same_credential_retry_allowed(
@@ -1596,6 +1666,7 @@ async def stream_with_failover(
                 record(wrapped, primary=is_primary)
                 if is_server_side_failure(wrapped):
                     server_fault_requests += 1
+                    server_faults_by_target[route_key] = server_fault_requests
                 if not retry.enabled:
                     raise wrapped from exc
                 # Same budget rule as the ProviderError arm above, asked the same
@@ -1634,6 +1705,35 @@ async def stream_with_failover(
                 return
 
         # Provider exhausted — walk on to the next fallback selector.
+
+        if pending or looped_back or not retry.enabled:
+            continue
+        # The walk has reached the end of the waterfall. Before declaring the
+        # whole cascade exhausted, sweep it once more from the top: targets the
+        # route-state pin excluded were never asked this turn, and the ones
+        # that failed with a self-healing kind (see `recoverable`) may have
+        # been freed while the rest of the walk was busy failing. Skipping
+        # this check reported "everything is exhausted" on evidence that had
+        # already gone stale — and one expired 60s block is the difference
+        # between a served turn and a dead one.
+        revisit = [
+            candidate
+            for candidate in full_targets
+            if (candidate.selector, candidate.effort) not in walked
+            or (candidate.selector, candidate.effort) in recoverable
+        ]
+        if not revisit:
+            continue
+        looped_back = True
+        # Honour the shortest advertised wait, but never stall an interactive
+        # turn for a long quota reset: past the cap the sweep goes now and lets
+        # resolution report whatever is still blocked.
+        if shortest_retry_after_ms is not None:
+            delay_ms = min(shortest_retry_after_ms, LOOPBACK_MAX_WAIT_MS)
+        else:
+            delay_ms = backoff_delay_ms(retry.base_delay_ms, 1, rng=rng)
+        await _abortable_sleep(delay_ms, signal)
+        pending = revisit
 
     if reported is not None:
         raise reported

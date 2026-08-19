@@ -198,6 +198,24 @@ async def test_blocking_backoff(store: AuthStore) -> None:
     assert await store.get_api_key("openai") == "k1"
 
 
+async def test_a_blocked_row_returns_to_service_when_its_window_passes(
+    store: AuthStore, monkeypatch: Any
+) -> None:
+    """Expiry by TIME, not by an explicit clear. Every other test unblocks via
+    ``clear_blocks``, which leaves the actual recovery path — the comparison
+    against ``blocked_until_ms`` — unpinned; a regression that wrote
+    far-future blocks (the reserve-blocking incident) would have looked
+    exactly like this test never existing."""
+    clock = {"now": 1_000_000}
+    monkeypatch.setattr(AuthStore, "_now_ms", staticmethod(lambda: clock["now"]))
+    row = store.upsert_credential("openai", {"key": "k1", "type": "api_key"})
+    store.block_credential(row.id, "openai", block_ms=60_000)
+    assert await store.get_api_key("openai") is None
+    clock["now"] += 60_001
+    assert not store.is_blocked(row.id, "openai")
+    assert await store.get_api_key("openai") == "k1"
+
+
 async def test_rotate_sibling_blocks_failing_and_reports_remaining(store: AuthStore) -> None:
     store.upsert_credential("openai", {"key": "k1", "type": "api_key"})
     row2 = store.upsert_credential("openai", {"key": "k2", "type": "api_key"})
