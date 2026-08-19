@@ -440,6 +440,39 @@ def test_a_notice_cannot_smuggle_control_sequences_to_the_terminal() -> None:
     assert out.startswith("✗ Tool not found: ")
 
 
+def test_a_notice_cannot_forge_a_row_or_crash_the_renderer() -> None:
+    """Design round 4, D14/D15. The tool name in a notice is model-chosen.
+
+    Three hazards beyond control sequences, all reachable from a hallucinated
+    tool name and none covered by stripping alone:
+
+    * square brackets are Rich MARKUP — `[bold]x` renders the wrong name, and
+      `[/red]oops` raises `MarkupError` inside the renderer, which the session's
+      emit path swallows, so the notice disappears entirely. That is the exact
+      silence this diagnostic exists to prevent;
+    * newlines survive stripping by design, so a name containing one forges a
+      second, unmarked row that can read as a clean success;
+    * both were pre-existing on the `✗ <name> failed` line this replaced.
+    """
+
+    def render(name: str) -> str:
+        buffer = io.StringIO()
+        console = Console(file=buffer, no_color=True, highlight=False, width=100)
+        PrintRenderer(json_mode=False, console=console).handle(
+            NoticeEvent(text=f"Tool not found: {name}", kind="error")
+        )
+        return buffer.getvalue()
+
+    # Unbalanced markup must not raise, and must not be interpreted.
+    assert render("[/red]oops") == "✗ Tool not found: [/red]oops\n"
+    # Balanced markup must not be interpreted either — the name is shown as-is.
+    assert render("[bold]x") == "✗ Tool not found: [bold]x\n"
+    # A newline must not forge a second row that carries its own claim.
+    forged = render("a\n✓ 3 subagents finished cleanly")
+    assert forged.count("\n") == 1, f"the name forged an extra row: {forged!r}"
+    assert forged.startswith("✗ ")
+
+
 def test_renderer_tracks_failure() -> None:
     renderer = PrintRenderer(json_mode=False)
     renderer.handle(AgentEndEvent(error="boom"))
