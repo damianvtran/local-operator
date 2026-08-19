@@ -487,9 +487,20 @@ DOUBLE_INTERRUPT_WINDOW_S = 1.5
 
 #: Sessions the ``/resume`` picker offers. Higher than the recovery listing's
 #: ten because the picker can scroll and filter, and a conversation from a
-#: fortnight ago is exactly the one worth searching for; low enough that
-#: opening it never costs more than a few dozen short transcript reads.
-RESUME_PICKER_LIMIT = 50
+#: fortnight ago is exactly the one worth searching for.
+#:
+#: Raised from 50 to cover the whole store a retention sweep is willing to
+#: keep (``retention.DEFAULT_MAX_SESSIONS`` is 200). At 50 the picker silently
+#: hid every session past the newest fifty — on the reporting machine, 20 of
+#: 70 — so a search that should have found a conversation returned nothing and
+#: the session was indistinguishable from one that had been deleted. A filter
+#: that cannot see a row cannot find it, and "not found" is the one answer a
+#: search must not give wrongly.
+#:
+#: Affordable because the per-row cost is bounded (one tail read for the title,
+#: one cached digest lookup): measured at 10 ms for 50 rows and 36 ms for a
+#: full 204-session store, both inside a frame.
+RESUME_PICKER_LIMIT = 200
 
 #: The working line's PHASE while a turn is parked on something the USER owes —
 #: a tool-approval prompt, or an `ask` picker waiting for a decision. One phase
@@ -1378,6 +1389,12 @@ class OperatorApp(App[None]):
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
         self._render_resumed_history(session)
+        # AFTER the history is on screen, because that is where the fallback
+        # label comes from: a session resumed from a transcript written before
+        # titles were journalled has no stored name to restore, and the band
+        # would wear the cwd for a conversation whose subject is right there in
+        # the replayed opener.
+        self._restore_resumed_name(session)
         # BEFORE the measurement, and the order is load-bearing: this installs
         # the provider's own exact reading for a resumed conversation, and
         # `_measure_preloaded_context` refuses to spend an estimate once an
@@ -1428,6 +1445,49 @@ class OperatorApp(App[None]):
             return
         self._adopt_session(session)
         await self._preflight_usage(session)
+
+    def _restore_resumed_name(self, session: Any) -> None:
+        """Give a resumed conversation a label even when none was stored.
+
+        Two ways a resumed session arrives with something to show, and this
+        handles the second:
+
+        * It carries a journalled title (``Session._load_conversation_name``),
+          which ``_adopt_session`` has already painted. Nothing to do — and
+          nothing may be done, because that name is the store of record and a
+          stand-in must never displace it.
+        * It carries none. Every transcript written before titles were
+          journalled is in this state, and so is any session closed before its
+          naming call landed. The band would fall back to the working
+          directory, which is the failure the terminal title exists to fix: a
+          sidebar of resumed sessions all reading ``lo › <dir>``.
+
+        The fallback is the SAME text ``/resume``'s picker labels its rows with
+        — the conversation's opening user message (``resume.session_name``
+        derives it from the transcript; here it is read from the replayed
+        history, which is the same message). So the row a user picked and the
+        tab they land on agree by construction rather than by coincidence.
+
+        Held as a provisional label rather than stored on the session, exactly
+        as an opener-derived label is for a live conversation: it is a display
+        stand-in, not a title anyone chose, and writing it into the session
+        would tell the naming errand this conversation is already named and
+        retire the one call that could give it a real one.
+        """
+        if self._status is None or session.conversation_name or self._provisional_name:
+            return
+        try:
+            history = list(session.history())
+        except Exception:
+            return  # reduced hosts (embedders, pilot fakes) may lack it
+        for message in history:
+            if getattr(message, "role", None) != "user":
+                continue
+            text = getattr(message, "text", "") or ""
+            if not isinstance(text, str) or not text.strip():
+                continue
+            self._show_provisional_name(text)
+            return
 
     def _restore_reported_usage(self, session: Any) -> None:
         """Put a RESUMED conversation's own token and cost figures on the band.
@@ -2147,6 +2207,7 @@ class OperatorApp(App[None]):
         """
         from local_operator.paths import config_dir
         from local_operator.resume import RESUME_LATEST, recent_session_rows
+        from local_operator.session.search_index import build_index
 
         # Rejections go through ``_system_notice`` (see `_cmd_usage`): nothing
         # ran, so the boot composition must survive them.
@@ -2166,6 +2227,17 @@ class OperatorApp(App[None]):
                 self._system_notice(RESUME_EMPTY_NOTICE, "warning")
                 return
 
+            # AFTER the empty check, so a store with nothing to offer does no
+            # scanning, and BEFORE the screen is pushed, so the first keystroke
+            # filters against a complete index rather than a half-built one.
+            # Incremental (only transcripts that changed since the last open are
+            # re-read) and best-effort: a store whose cache cannot be written
+            # still gets the name-and-id filter the picker had before.
+            try:
+                digests = build_index(config_dir(), [row.id for row in rows])
+            except Exception:
+                digests = {}
+
             def _resume_choice(session_id: str | None) -> None:
                 # Dismissed with Esc (or on an empty filter) — the session on
                 # screen is left exactly as it was, with nothing said: a
@@ -2173,7 +2245,7 @@ class OperatorApp(App[None]):
                 if session_id:
                     self._resume_session(session_id, notice)
 
-            self.push_screen(SessionPickerScreen(rows, time.time()), _resume_choice)
+            self.push_screen(SessionPickerScreen(rows, time.time(), digests), _resume_choice)
             return
 
         # ``@latest`` is the oldest part of the CLI vocabulary (--resume

@@ -33,6 +33,7 @@ from local_operator.tui.widgets.session_picker import (
     PAGE_ROWS_MAX,
     SessionPickerScreen,
     filter_rows,
+    matched_in_body,
     plan_columns,
     render_rows,
 )
@@ -297,16 +298,17 @@ def test_an_unnamed_session_says_so_rather_than_rendering_a_blank() -> None:
 class _PickerHost(App[None]):
     """A host whose only job is to own the modal under test."""
 
-    def __init__(self, rows: list[SessionRow]) -> None:
+    def __init__(self, rows: list[SessionRow], digests: dict[str, str] | None = None) -> None:
         super().__init__()
         self._rows = rows
+        self._digests = digests
         self.chosen: list[str | None] = []
 
     def compose(self) -> ComposeResult:
         return iter(())
 
     async def open_picker(self) -> SessionPickerScreen:
-        screen = SessionPickerScreen(self._rows, NOW)
+        screen = SessionPickerScreen(self._rows, NOW, self._digests)
         self.push_screen(screen, self.chosen.append)
         return screen
 
@@ -953,3 +955,66 @@ async def test_the_empty_card_never_renders_wider_than_the_terminal() -> None:
             # first thing dropped: it is what makes the empty state honest.
             body = " ".join(line.strip() for line in lines)
             assert "subagent runs are not listed" in body, (width, body)
+
+
+# --- searching the conversation body ----------------------------------------
+# The reported failure: a session was findable only by the words in its NAME,
+# so a conversation whose title did not happen to contain what the user
+# remembered was unreachable. These pin the widened filter and the marker that
+# keeps its results explicable.
+
+
+def test_a_row_matches_on_its_conversation_body(tmp_path: Path) -> None:
+    rows = [_row("aaa1", "vague title"), _row("bbb2", "another")]
+    assert [r.id for r in filter_rows(rows, "retention", {"aaa1"})] == ["aaa1"]
+
+
+def test_a_body_match_never_reorders_the_list() -> None:
+    """Same invariant as every other filter here: a row that moved under the
+    cursor while the query grew would resume the wrong conversation."""
+    rows = [_row("aaa1", "one"), _row("bbb2", "two"), _row("ccc3", "three")]
+    assert [r.id for r in filter_rows(rows, "topic", {"ccc3", "aaa1"})] == ["aaa1", "ccc3"]
+
+
+def test_a_caller_without_an_index_keeps_the_old_behaviour() -> None:
+    """Hosts with no index — tests, embedders — must not lose the filter."""
+    rows = [_row("aaa1", "asteroids game"), _row("bbb2", "parser crash")]
+    assert [r.id for r in filter_rows(rows, "aster")] == ["aaa1"]
+    assert filter_rows(rows, "retention") == []
+
+
+def test_only_a_body_match_is_marked() -> None:
+    """A row whose visible name contains the query needs no explanation; one
+    that does not would otherwise read as an arbitrary result."""
+    assert matched_in_body(_row("aaa1", "vague"), "retention", {"aaa1"}) is True
+    assert matched_in_body(_row("bbb2", "retention sweep"), "retention", {"bbb2"}) is False
+    assert matched_in_body(_row("ccc3", "vague"), "retention", set()) is False
+    assert matched_in_body(_row("aaa1", "vague"), "", {"aaa1"}) is False
+
+
+def test_a_marked_row_still_occupies_exactly_one_row_width() -> None:
+    """The marker is counted against the name budget, so it cannot push the
+    row past the card and silently eat the age and id columns."""
+    row = _row("abc123def456", "a name long enough to need the whole budget here")
+    plain = render_rows([row], 0, 74, NOW)[0].plain
+    marked = render_rows([row], 0, 74, NOW, None, {"abc123def456"})[0].plain
+    assert cell_len(marked) == cell_len(plain)
+    assert "·" in marked and "·" not in plain
+    assert "abc123def456" in marked
+
+
+@pytest.mark.asyncio
+async def test_typing_finds_a_session_by_its_conversation_not_its_name() -> None:
+    """End to end through the real screen: the query appears nowhere in the
+    row's name, and the picker still hands that session back."""
+    rows = [_row("aaa111", "a forgettable opening line"), _row("bbb222", "something else")]
+    app = _PickerHost(rows, {"aaa111": "we fixed the retention sweep eviction"})
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app.open_picker()
+        await pilot.pause()
+        for char in "retention":
+            await pilot.press(char)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.chosen == ["aaa111"]
