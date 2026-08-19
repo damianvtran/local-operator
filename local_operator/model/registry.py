@@ -299,6 +299,13 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     elif hosting == "alibaba":
         if model in qwen_models:
             return qwen_models[model]
+    elif hosting in ("alibaba-token-plan", "alibaba-token-plan-oauth"):
+        # Both login flavours serve the same catalogue; `store_credentials_as`
+        # already aliases the oauth id to `alibaba-token-plan` on the discovery
+        # path, but this chain is reachable directly (build_model_spec on a
+        # session config), so it must answer for both spellings itself.
+        if model in qwencloud_token_plan_models:
+            return qwencloud_token_plan_models[model]
     elif hosting == "kimi":
         if model in kimi_models:
             return kimi_models[model]
@@ -1481,6 +1488,146 @@ qwen_models: Dict[str, ModelInfo] = {
     ),
 }
 
+qwencloud_token_plan_models: Dict[str, ModelInfo] = {
+    # QwenCloud Token Plan (provider id `alibaba-token-plan`): the subscription
+    # gateway at token-plan.ap-southeast-1.maas.aliyuncs.com. Its `/models`
+    # listing was checked directly (2026-08-18) and returns ONLY ids — no
+    # context_window, no max_tokens, no pricing — so live discovery cannot
+    # correct these rows and this map is the sole source of the numbers the
+    # session runs on. Compaction thresholds derive from context_window, which
+    # is why these entries exist at all: without them the spec fell back to the
+    # 128k unknown default and a 1M-window model compacted (or 400'd) at 128k.
+    #
+    # OUTPUT CAPS come from the endpoint itself, which is the one first-party
+    # source available here. It validates `max_tokens` and names the range in
+    # the rejection, so the number can be asked for rather than transcribed:
+    #
+    #   $ POST /chat/completions {"model": "qwen3.8-max", "max_tokens": 9999999}
+    #   {"error": {"message": "Range of max_tokens should be [1, 131072]"}}
+    #
+    # Run that against a SKU to re-derive its cap. Two rows (deepseek-v4-pro,
+    # deepseek-v4-flash-0731) accept any value without validating, so their caps
+    # are OpenRouter's figure for the same upstream model — the endpoint
+    # declines to state one and nothing is gained by inventing a smaller number.
+    #
+    # CONTEXT WINDOWS cannot be probed the same way: a prompt large enough to
+    # test the boundary is refused by a body-size limit (`RequestTooLarge`)
+    # before any window check runs. They are transcribed from Alibaba's
+    # published specs at 1,000,000, which OpenRouter corroborates for the qwen
+    # rows. It reports 1,048,576 for glm-5.2 and deepseek-v4-pro; those keep
+    # 1,000,000 because OpenRouter quotes the largest window across its whole
+    # routing pool (glm-5.2 spans 96,890-1,048,576 over 31 routes) rather than
+    # this gateway's, and understating a window only compacts early where
+    # overstating one overflows mid-turn.
+    #
+    # Prices are deliberately 0.0: the Token Plan bills subscription CREDITS,
+    # not per-token dollars, so any USD rate written here would be an invention.
+    # 0.0 renders as "cost unavailable" rather than "free", per the registry's
+    # zero-means-unknown convention for keyed providers.
+    "qwen3.8-max": ModelInfo(
+        id="qwen3.8-max",
+        name="Qwen3.8 Max",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=False,
+        description="Alibaba's flagship Qwen3.8 model via the Token Plan subscription",
+        # The only row marked recommended: it is the plan's flagship, the model
+        # the subscription is bought for, and the one both available sources
+        # describe identically.
+        recommended=True,
+    ),
+    "qwen3.7-max": ModelInfo(
+        id="qwen3.7-max",
+        name="Qwen3.7 Max",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=False,
+        supports_prompt_cache=False,
+        description="Previous-generation flagship Qwen model on the Token Plan",
+        recommended=False,
+    ),
+    "qwen3.7-plus": ModelInfo(
+        id="qwen3.7-plus",
+        name="Qwen3.7 Plus",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=False,
+        description="Balanced Qwen model on the Token Plan",
+        recommended=False,
+    ),
+    "qwen3.6-flash": ModelInfo(
+        id="qwen3.6-flash",
+        name="Qwen3.6 Flash",
+        max_tokens=65_536,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=False,
+        description="Fast, lightweight Qwen model on the Token Plan",
+        recommended=False,
+    ),
+    "glm-5.2": ModelInfo(
+        id="glm-5.2",
+        # Suffixed because `zai/glm-5.2` already answers to the bare name and
+        # shipped names must be globally unique (see
+        # test_no_two_shipped_rows_share_a_curated_name) — without the suffix
+        # BOTH rows lose their name as ambiguous and neither band can say which
+        # endpoint is serving. This fixes the FULL label only: `_drop_qualifier`
+        # strips the suffix for the compact form, `_names_one` then rejects the
+        # stripped name against the ambiguous `glm-5.2` bucket, and the compact
+        # rung falls back to the bare id. Under width pressure the two rows
+        # still read `GLM-5.2` and `glm-5.2`, which is a naming-module limit,
+        # not something a registry name can repair.
+        name="GLM-5.2 (Token Plan)",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=False,
+        supports_prompt_cache=False,
+        description="Zhipu's GLM-5.2 served through the Token Plan",
+        recommended=False,
+    ),
+    "deepseek-v4-flash-0731": ModelInfo(
+        id="deepseek-v4-flash-0731",
+        # In the gateway's listing and a working reasoning chat model — verified
+        # with a live completion that came back stamped with this id and
+        # `reasoning_tokens` in its usage. It was missed on the first pass
+        # because the id sits among the image/audio entries, and without a row
+        # it resolved to the 128k default: the exact defect this map fixes, one
+        # line away from a sibling that got it right.
+        #
+        # Deliberately NOT suffixed "(Token Plan)" like the two rows below, even
+        # though `deepseek/deepseek-v4-flash-0731` also ships. The suffix exists
+        # only to break a collision between two IDENTICAL curated names, and
+        # there is none here — the direct row is "DeepSeek V4 Flash (2026-07-31)"
+        # — so adding one would be ceremony rather than a fix. It would not be
+        # harmful either: verified against `naming.py`, a suffixed spelling
+        # strips to "DeepSeek V4 Flash 0731" where the direct row strips to
+        # "DeepSeek V4 Flash", so the two stay distinct in both label forms.
+        name="DeepSeek V4 Flash 0731",
+        max_tokens=393_216,
+        context_window=1_000_000,
+        supports_images=False,
+        supports_prompt_cache=False,
+        description="DeepSeek V4 Flash (0731) served through the Token Plan",
+        recommended=False,
+    ),
+    "deepseek-v4-pro": ModelInfo(
+        id="deepseek-v4-pro",
+        # Suffixed for the same reason as `glm-5.2` above, with the same
+        # full-label-only caveat: `deepseek/deepseek-v4-pro` already answers to
+        # the bare name, and shipped names must be globally unique (see
+        # test_no_two_shipped_rows_share_a_curated_name).
+        name="DeepSeek V4 Pro (Token Plan)",
+        max_tokens=384_000,
+        context_window=1_000_000,
+        supports_images=False,
+        supports_prompt_cache=False,
+        description="DeepSeek V4 Pro served through the Token Plan",
+        recommended=False,
+    ),
+}
+
 mistral_models: Dict[str, ModelInfo] = {
     "mistral-large-latest": ModelInfo(
         id="mistral-large-latest",
@@ -2087,6 +2234,16 @@ _STATIC_MODEL_MAPS: Dict[str, Dict[str, "ModelInfo"]] = {
     "google": google_models,
     "deepseek": deepseek_models,
     "alibaba": qwen_models,
+    # Token Plan models are keyed under the canonical storage id only, so a walk
+    # of this map cannot count them twice. DISCOVERY reaches them under the
+    # `alibaba-token-plan-oauth` spelling through `store_credentials_as`
+    # (`discovery._static_rows`), the same way `xai-oauth` reaches `xai` — but
+    # `naming._unambiguous_name` calls `static_models(provider)` WITHOUT that
+    # resolution, so the oauth spelling renders as its bare selector rather than
+    # the curated name. That is the pre-existing `xai-oauth` behaviour, not
+    # something these rows introduce; the window itself is unaffected because
+    # `get_model_info` answers for both spellings directly.
+    "alibaba-token-plan": qwencloud_token_plan_models,
     "mistral": mistral_models,
     "kimi": kimi_models,
     "xai": xai_models,

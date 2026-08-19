@@ -7,6 +7,8 @@ from local_operator.model.registry import (
     anthropic_family_model_info,
     anthropic_models,
     get_model_info,
+    qwencloud_token_plan_models,
+    static_models,
 )
 
 
@@ -112,6 +114,152 @@ def test_get_model_info() -> None:
     # Test Unsupported hosting provider
     with pytest.raises(ValueError, match="Unsupported hosting provider: unknown"):
         get_model_info("unknown", "any")
+
+
+# -- QwenCloud Token Plan -----------------------------------------------------
+#
+# The Token Plan gateway's `/models` listing carries ONLY ids (checked live,
+# 2026-08-18): no context_window, no max_tokens, no prices. Discovery therefore
+# cannot correct these rows, and the registry is the sole source of the numbers
+# a session runs on. Before these rows existed, `build_model_spec` fell through
+# to the 128k unknown default and a 1M-window model compacted at 128k — the
+# status band read `113.9%/128k` mid-conversation.
+
+
+def test_token_plan_models_ship_their_real_windows() -> None:
+    """Every row pinned to its exact numbers, not merely to "something positive".
+
+    Output caps are what the endpoint's own `max_tokens` validator reports;
+    windows are Alibaba's published figure, since the window cannot be probed
+    (a boundary-sized prompt is refused for body size first). Where OpenRouter
+    differs it is because it quotes the largest window across its whole routing
+    pool, which is not a claim about this gateway \u2014 the reasoning is recorded
+    beside the map.
+
+    Pinning only the corroborated row would leave the deliberate deviations free
+    to drift silently, so every row is asserted: a change to any of them is a
+    changed compaction threshold and has to be a conscious edit.
+    """
+    assert {
+        model_id: (info.context_window, info.max_tokens)
+        for model_id, info in qwencloud_token_plan_models.items()
+    } == {
+        # Output caps as the endpoint's own `max_tokens` validator reports them
+        # ("Range of max_tokens should be [1, N]"); see the note beside the map.
+        "qwen3.8-max": (1_000_000, 131_072),
+        "qwen3.7-max": (1_000_000, 131_072),
+        "qwen3.7-plus": (1_000_000, 131_072),
+        "qwen3.6-flash": (1_000_000, 65_536),
+        "glm-5.2": (1_000_000, 131_072),
+        # The two the endpoint does not validate; OpenRouter's figure stands.
+        "deepseek-v4-pro": (1_000_000, 384_000),
+        "deepseek-v4-flash-0731": (1_000_000, 393_216),
+    }
+    assert qwencloud_token_plan_models["qwen3.8-max"].supports_images is True
+
+    # Both the exact-id chain and the enumerable map must answer, because
+    # `build_model_spec` reaches the former and discovery merges over the
+    # latter — a row present in only one leaves the other path at 128k.
+    assert get_model_info("alibaba-token-plan", "qwen3.8-max").context_window == 1_000_000
+    assert get_model_info("alibaba-token-plan-oauth", "qwen3.8-max").context_window == 1_000_000
+    assert static_models("alibaba-token-plan")["qwen3.8-max"].context_window == 1_000_000
+
+    # Every chat row in the map carries a usable window: a zero or missing one
+    # would silently disable compaction for that model (see build_model_spec).
+    # The exact-value assertion above already covers today's rows; this is the
+    # guard for whatever is added next.
+    for model_id, info in qwencloud_token_plan_models.items():
+        assert info.context_window and info.context_window > 0, model_id
+        assert info.max_tokens and info.max_tokens > 0, model_id
+
+
+def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None:
+    """The SET, not just the values — a missing row is silent.
+
+    A model absent from this map does not fail; it resolves to the 128k unknown
+    default and runs with a wrong compaction threshold, which is exactly the
+    defect this map exists to fix. `deepseek-v4-flash-0731` shipped that way in
+    the first cut of this PR precisely because its id sits among the image and
+    audio entries in the listing, so nothing but an explicit set comparison
+    would have caught it.
+
+    The two lists below are the gateway's `/models` response, split by whether a
+    chat completion against the id returns a chat payload (verified live,
+    2026-08-19). Re-run that when the listing changes rather than guessing from
+    the id: `wan2.7-image` reads like an image-only model and answers chat
+    requests with an empty body, while `deepseek-v4-flash-0731` reads like one
+    of a family and is a full reasoning chat model.
+
+    WHEN THIS FAILS, suspect the expected side first. Both literals are a
+    snapshot of a remote catalogue, dated below; a provider that adds or
+    withdraws a model breaks this test without anything in the repo changing.
+    That is the intended trade-off — a new chat model must not reach users at
+    the 128k default just because nobody noticed it — but it means the fix is
+    usually to re-derive the snapshot, not to edit the map.
+    """
+    # Snapshot of GET /compatible-mode/v1/models, 2026-08-19.
+    gateway_chat_models = {
+        "qwen3.8-max",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-flash",
+        "glm-5.2",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash-0731",
+    }
+    # Same snapshot, same date: listed by the gateway but NOT chat models — they
+    # return no chat payload (the image/TTS entries) or reject the route
+    # outright (the realtime one). Kept as a named set because it is the half of
+    # the listing this map deliberately omits, and a reader checking the map
+    # against the gateway needs to see that the omission was a decision.
+    gateway_non_chat_models = {
+        "wan2.7-image",
+        "wan2.7-image-pro",
+        "qwen-audio-3.0-tts-plus",
+        "qwen-audio-3.0-realtime-plus",
+    }
+    assert set(qwencloud_token_plan_models) == gateway_chat_models
+    # The two sets partition the listing. This is the only non-redundant claim
+    # left once the map is pinned above: it says the snapshot itself is
+    # coherent, so an id moved from one literal to the other without being
+    # removed from the first fails here rather than quietly widening the map.
+    assert gateway_chat_models.isdisjoint(gateway_non_chat_models)
+    assert gateway_chat_models | gateway_non_chat_models == {
+        "qwen3.8-max",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-flash",
+        "glm-5.2",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash-0731",
+        "wan2.7-image",
+        "wan2.7-image-pro",
+        "qwen-audio-3.0-tts-plus",
+        "qwen-audio-3.0-realtime-plus",
+    }
+
+
+def test_token_plan_ships_no_row_the_gateway_serves_under_another_id() -> None:
+    """`qwen3.8-max-preview` was shipped and then removed, and the removal is
+    the point: a completion requested against that id comes back stamped
+    ``"model": "qwen3.8-max"``, so it is an ALIAS the gateway resolves rather
+    than a distinct SKU. Carrying it as its own row put a second, different
+    window (983,616) on the same underlying model and offered a duplicate in the
+    picker — and, because the listing does not advertise it, one that only the
+    registry believed in."""
+    assert "qwen3.8-max-preview" not in qwencloud_token_plan_models
+
+
+def test_token_plan_spec_carries_the_window_to_the_session() -> None:
+    """The spec IS what the session runs on — compaction thresholds derive from
+    `context_window` — so the assertion is on the end of the pipe, not the map."""
+    spec = build_model_spec("alibaba-token-plan", "qwen3.8-max")
+    assert spec.context_window == 1_000_000
+    assert spec.max_output_tokens == 131_072
+    # The oauth login flavour serves the same catalogue and must not regress to
+    # the 128k default just because the session config spelled the provider id
+    # the way `/login` did.
+    assert build_model_spec("alibaba-token-plan-oauth", "qwen3.8-max").context_window == 1_000_000
 
 
 # -- Anthropic family inheritance ---------------------------------------------
