@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import os
 import sqlite3
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -1082,6 +1084,83 @@ def test_resume_latest_picks_the_newest_transcript(tmp_path: Path) -> None:
     assert directory == sessions / "newer"
 
 
+def test_resume_latest_skips_a_subagent_that_finished_last(tmp_path: Path) -> None:
+    """``@latest`` means the newest conversation THE USER had.
+
+    A subagent writes its child transcript into the same ``sessions/`` tree, and
+    a delegated review routinely settles after the parent's final turn — which
+    made the child the newest directory on disk, so a bare ``--resume`` reopened
+    the reviewer instead of the session that launched it.
+    """
+    sessions = tmp_path / "sessions"
+    for name, when in (("mine", 1_000_000), ("child", 2_000_000)):
+        (sessions / name).mkdir(parents=True)
+        transcript = sessions / name / "transcript.jsonl"
+        transcript.write_text("{}\n", encoding="utf-8")
+        os.utime(transcript, (when, when))
+    resume_mod.mark_session_origin(sessions / "child", resume_mod.ORIGIN_SUBAGENT, label="review")
+    registry = FakeRegistry(tmp_path)
+
+    directory, _ = session_factory._transcript_dir_and_agent_id(
+        None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
+    )
+    assert directory == sessions / "mine"
+
+
+def test_a_subagent_session_still_resumes_by_explicit_id(tmp_path: Path) -> None:
+    """Filtering narrows what is OFFERED, never what exists.
+
+    ``hub op='resume'`` continues a stopped child on its own directory, and an
+    operator debugging a delegated run has only its id to go on. Hiding the row
+    must not amputate the path that reaches it.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "child").mkdir(parents=True)
+    (sessions / "child" / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    resume_mod.mark_session_origin(sessions / "child", resume_mod.ORIGIN_SUBAGENT, label="review")
+
+    assert resume_mod.resume_dir(tmp_path, "child") == sessions / "child"
+
+
+def test_an_unreadable_origin_marker_leaves_the_session_the_user_s(tmp_path: Path) -> None:
+    """Absence and corruption both mean USER, and that direction is deliberate.
+
+    Marking user sessions instead would have hidden every conversation that
+    predates the marker. A listing showing one stale row is fixed by typing a
+    filter; one that hides your own work is not recoverable at all.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "mine").mkdir(parents=True)
+    (sessions / "mine" / resume_mod.ORIGIN_NAME).write_text("{not json", encoding="utf-8")
+    assert resume_mod.session_origin(sessions / "mine") == ""
+    assert resume_mod.is_user_session(sessions / "mine")
+
+    # A well-formed file that is not an object, and one with a non-string
+    # origin: both are the same "cannot read a claim off this" case.
+    (sessions / "mine" / resume_mod.ORIGIN_NAME).write_text("[1, 2]", encoding="utf-8")
+    assert resume_mod.is_user_session(sessions / "mine")
+    (sessions / "mine" / resume_mod.ORIGIN_NAME).write_text('{"origin": 7}', encoding="utf-8")
+    assert resume_mod.is_user_session(sessions / "mine")
+
+
+def test_marking_a_session_never_takes_the_run_down(tmp_path: Path, monkeypatch) -> None:
+    """Marking is bookkeeping for a listing; a child that cannot write it runs.
+
+    The cost of a failed write is one extra row in a picker. Raising here would
+    take down a delegated task for a directory a retention sweep just removed
+    or a volume that went read-only.
+    """
+    target = tmp_path / "sessions" / "child"
+
+    def denied(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise PermissionError("read-only volume")
+
+    monkeypatch.setattr(Path, "write_text", denied)
+    resume_mod.mark_session_origin(target, resume_mod.ORIGIN_SUBAGENT)
+    monkeypatch.undo()
+    assert resume_mod.is_user_session(target)
+
+
 @pytest.mark.parametrize("requested", ["nope", "..", "../../etc", "sub/dir", ""])
 def test_resume_refuses_a_session_it_cannot_verify(tmp_path: Path, requested: str) -> None:
     """A typo must FAIL, not start an empty session that looks resumed.
@@ -1730,3 +1809,137 @@ async def test_an_unreadable_profile_says_so_in_the_log(
         and "OSError" in record.getMessage()
         for record in caplog.records
     ), [record.getMessage() for record in caplog.records]
+
+
+def test_a_marker_truncated_mid_character_does_not_take_the_picker_down(tmp_path: Path) -> None:
+    """`mark_session_origin` writes non-atomically, so a child killed mid-write
+    leaves the file cut INSIDE a multi-byte character.
+
+    A strict decode raises `UnicodeDecodeError`, which is a `ValueError` and
+    sails past `except OSError` — so one truncated sidecar took down the whole
+    picker, and `--resume` with no id, for every session on the machine until
+    the user found and deleted the file by hand.
+    """
+    sessions = tmp_path / "sessions"
+    (sessions / "cut").mkdir(parents=True)
+    (sessions / "cut" / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    # 0xc3 opens a two-byte sequence that never arrives.
+    (sessions / "cut" / resume_mod.ORIGIN_NAME).write_bytes(b'{"origin": "subagent", "l": "caf\xc3')
+
+    assert resume_mod.session_origin(sessions / "cut") == ""
+    assert resume_mod.recent_sessions(tmp_path) == [
+        ("cut", (sessions / "cut" / resume_mod.TRANSCRIPT_NAME).stat().st_mtime)
+    ]
+    # The `@latest` resolver reads the same marker and must survive it too.
+    assert resume_mod.resume_dir(tmp_path, resume_mod.RESUME_LATEST).name == "cut"
+
+
+def test_the_backfill_stamps_only_what_the_machine_itself_wrote(tmp_path: Path) -> None:
+    """Sessions predating the marker are classified once, at startup.
+
+    Without this the fix applies only to sessions created after the upgrade,
+    so the person who reported a picker full of `[role: reviewer]` rows would
+    upgrade, run `/resume`, and see the same wall.
+
+    The direction of the risk decides the strictness: a false positive HIDES
+    one of the user's own conversations, so only the two openings the subagent
+    runner itself writes are matched, anchored at offset 0.
+    """
+    sessions = tmp_path / "sessions"
+
+    def seed(name: str, opening: str) -> None:
+        directory = sessions / name
+        directory.mkdir(parents=True)
+        entry = {
+            "id": "e1",
+            "ts": 0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": opening}]},
+        }
+        (directory / resume_mod.TRANSCRIPT_NAME).write_text(
+            json.dumps(entry) + "\n", encoding="utf-8"
+        )
+
+    seed("child_role", "[role: reviewer]\nYou are an INDEPENDENT reviewer.")
+    seed("child_scout", "[scout mode: you are a READ-ONLY research agent.]\n\nfind it")
+    seed("mine_plain", "fix the resume picker")
+    # The user QUOTING a preamble mid-message is not a delegated run: the
+    # machine's preambles are stamped in front, so matching is anchored.
+    seed("mine_quoting", "why does my subagent say [role: reviewer] in its prompt?")
+
+    assert resume_mod.backfill_session_origins(tmp_path) == 2
+    assert not resume_mod.is_user_session(sessions / "child_role")
+    assert not resume_mod.is_user_session(sessions / "child_scout")
+    assert resume_mod.is_user_session(sessions / "mine_plain")
+    assert resume_mod.is_user_session(sessions / "mine_quoting")
+
+    # Idempotent: a second startup stamps nothing, so a marker the user
+    # deleted by hand to un-hide a session is not silently written back.
+    assert resume_mod.backfill_session_origins(tmp_path) == 0
+    (sessions / "child_role" / resume_mod.ORIGIN_NAME).unlink()
+    assert resume_mod.backfill_session_origins(tmp_path) == 1
+
+
+def test_stamping_a_session_does_not_reset_its_retention_clock(tmp_path: Path) -> None:
+    """Retention sorts and age-expires on the DIRECTORY's mtime, and creating
+    a file inside a directory moves it.
+
+    So stamping an existing session silently reset its clock to now: the
+    backfill resurrected delegated runs that were already past the age ceiling
+    and, because eviction is oldest-first, spent their retained slots on the
+    user's own conversations. Writing a marker is bookkeeping ABOUT a session,
+    never activity IN it, so it must not answer "when was this last used".
+    """
+    sessions = tmp_path / "sessions"
+    directory = sessions / "child"
+    directory.mkdir(parents=True)
+    (directory / resume_mod.TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    aged = time.time() - 40 * 86400
+    os.utime(directory, (aged, aged))
+
+    resume_mod.mark_session_origin(directory, resume_mod.ORIGIN_SUBAGENT, label="review")
+
+    assert not resume_mod.is_user_session(directory), "the marker must still be written"
+    assert abs(directory.stat().st_mtime - aged) < 1, "stamping moved the retention clock"
+
+
+def test_the_backfill_reaches_every_directory_not_just_the_first_page(tmp_path: Path) -> None:
+    """The cap is on work done, never on how far the scan reaches.
+
+    Slicing the directory list instead sounds equivalent and is not: the list
+    sorts by hex NAME and the same prefix is recomputed every startup, so a
+    directory sorting past the cut was never visited on any run, ever — its
+    origin decided by where its random name fell in an alphabet.
+    """
+    sessions = tmp_path / "sessions"
+
+    def seed(name: str, opening: str) -> None:
+        directory = sessions / name
+        directory.mkdir(parents=True)
+        entry = {
+            "id": "e1",
+            "ts": 0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": opening}]},
+        }
+        (directory / resume_mod.TRANSCRIPT_NAME).write_text(
+            json.dumps(entry) + "\n", encoding="utf-8"
+        )
+
+    # Children sort AFTER every user session, and past a small cap.
+    for index in range(12):
+        seed(f"0{index:04d}", "my own work")
+    for index in range(4):
+        seed(f"f{index:04d}", "[role: reviewer]\nreview the diff")
+
+    assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 4
+    for index in range(4):
+        assert not resume_mod.is_user_session(sessions / f"f{index:04d}")
+
+    # The cap still bounds the work: with more children than the limit, a run
+    # stamps at most ``limit`` and the next startup continues.
+    for index in range(4, 12):
+        seed(f"f{index:04d}", "[role: reviewer]\nreview the diff")
+    assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 5
+    assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 3
+    assert resume_mod.backfill_session_origins(tmp_path, limit=5) == 0

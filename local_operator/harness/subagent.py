@@ -114,6 +114,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.paths import config_dir
+from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 
 if TYPE_CHECKING:
     from local_operator.agent_profiles import AgentProfile
@@ -721,6 +722,14 @@ async def _build_child_session(
     session_dir = (
         resume_dir if resume_dir is not None else config_dir() / "sessions" / uuid.uuid4().hex[:12]
     )
+    # Stamp the directory as the machine's BEFORE the transcript exists, so a
+    # picker painted while this child is mid-run already knows what it is. A
+    # child's directory is shape-identical to a user conversation, which is how
+    # every delegated reviewer, designer and scout run ended up offered under
+    # ``/resume`` as if the user had opened it. Re-stamped on resume as well:
+    # ``hub op='resume'`` rebuilds a child on its old directory, and a marker
+    # lost to an earlier failed write is worth retrying while we are here.
+    mark_session_origin(session_dir, ORIGIN_SUBAGENT, label=label, agent=agent)
     transcript = Transcript(session_dir)
     # The operator's standing instructions are machine-wide, so a delegated
     # slice inherits them for the same reason it inherits the goal: the parent

@@ -30,6 +30,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from local_operator.resume import ORIGIN_NAME
+
 logger = logging.getLogger(__name__)
 
 #: Directory under the config dir holding ephemeral per-run transcripts.
@@ -79,11 +81,22 @@ class _Candidate:
 
 def _dir_size(directory: Path) -> int:
     """Bytes under ``directory``. Files that vanish mid-walk are skipped: a
-    concurrent process disposing its own session is normal, not an error."""
+    concurrent process disposing its own session is normal, not an error.
+
+    The origin marker is EXCLUDED from the total, which is what keeps the
+    "empty directories are always reaped" rule meaning what it says. A session
+    is stamped before its transcript exists, so a run that aborts in between
+    leaves a directory holding nothing but a 43-byte marker. Counting those
+    bytes turned a directory that carried nothing to lose into an ordinary
+    keep candidate occupying a retention slot — measured: with a count ceiling
+    of 3, two aborted children evicted two of the user's real transcripts to
+    keep two empty markers. The marker is bookkeeping ABOUT the session, never
+    session content, so it is not what the ceilings are budgeting.
+    """
     total = 0
     for entry in directory.rglob("*"):
         try:
-            if entry.is_file():
+            if entry.is_file() and entry.name != ORIGIN_NAME:
                 total += entry.stat().st_size
         except OSError:
             continue

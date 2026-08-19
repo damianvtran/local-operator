@@ -826,3 +826,58 @@ async def test_the_loop_stays_responsive_while_several_subagents_run(tmp_path, m
         "a synchronous stretch is starving concurrent children"
     )
     await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_launched_subagent_stays_out_of_the_resume_picker(tmp_path, monkeypatch):
+    """The reported bug, end to end: `/resume` listed the machine's own runs.
+
+    A child session is an ephemeral directory under ``sessions/`` with exactly
+    the shape of a real conversation, so nothing on disk told them apart and
+    the picker named each delegated run by its role preamble. This drives the
+    production launch path and then asks the same function the picker calls,
+    rather than asserting on the marker file — the marker is the mechanism, and
+    the row count is the promise.
+    """
+    from local_operator.resume import (
+        ORIGIN_SUBAGENT,
+        recent_session_rows,
+        session_origin,
+    )
+
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+
+    # The parent is a user session: an ephemeral directory under sessions/,
+    # which is what session_factory hands a TUI run.
+    parent_dir = config / "sessions" / "parentsession"
+    transcript = Transcript(parent_dir)
+    await transcript.append_message(Message.user("fix the resume picker"))
+    parent = Session(
+        model=MODEL,
+        stream_fn=OneShotStream(),
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+
+    events: list[AgentEvent] = []
+    parent.subscribe(events.append)
+    parent._launch_subagent(label="reviewer", prompt="[role: reviewer] review the diff")
+    await wait_for(lambda: any(e.type == "subagent_end" for e in events))
+
+    sessions = sorted(p.name for p in (config / "sessions").iterdir())
+    assert len(sessions) == 2, f"expected the parent and its child on disk, got {sessions}"
+    child_dir = next(p for p in (config / "sessions").iterdir() if p.name != "parentsession")
+    # The nonzero control: the child really did write a transcript, so an empty
+    # picker row set below cannot be a directory that was never created.
+    assert (child_dir / "transcript.jsonl").is_file()
+
+    # The promise first, then the mechanism that delivers it: a reader who
+    # only trusts one line should trust the row set.
+    rows = recent_session_rows(config, limit=50)
+    assert [row.id for row in rows] == ["parentsession"]
+    assert [row.name for row in rows] == ["fix the resume picker"]
+    assert session_origin(child_dir) == ORIGIN_SUBAGENT
+
+    await parent.dispose()

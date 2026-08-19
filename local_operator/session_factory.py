@@ -936,6 +936,17 @@ async def _prepare(
 
     sweep_from_config(config_manager, Path(agent_registry.config_dir), transcript_dir)
 
+    # Stamp session directories that predate the origin marker, so the
+    # ``/resume`` picker stops offering delegated runs on the FIRST launch
+    # after an upgrade rather than once natural churn has cleared the store.
+    # Runs beside the sweep for the same reason it does: startup is when the
+    # store is quiet, and both are best-effort by construction. A no-op on
+    # every later launch — each directory is answered once and never
+    # re-stamped.
+    from local_operator.resume import backfill_session_origins
+
+    backfill_session_origins(Path(agent_registry.config_dir))
+
     # --- model + stream fn (stream B contracts) ---------------------------
     from local_operator.env import get_env_config
     from local_operator.model.configure import configure_model, create_stream_fn

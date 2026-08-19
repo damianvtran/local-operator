@@ -1631,3 +1631,74 @@ def test_a_swept_row_with_a_transcript_is_still_resumable(tmp_path):
     assert row.resumable is True
     # And the invariant: nothing in resume() disagrees.
     assert comms._live_twin(comms._records["job-1"]) is None
+
+
+def test_the_roster_carries_the_session_id_a_resume_would_take(tmp_path):
+    """The roster is now the ONLY surface that can show a child's session id.
+
+    Children are deliberately kept out of the `/resume` picker — they are the
+    machine's own runs, not the user's conversations — and the job row that
+    carries `job_id` is swept minutes after a child settles. Without the
+    session id here, an operator investigating a subagent that crashed an hour
+    ago has no in-product path to its transcript, which is precisely the case
+    this roster exists to cover.
+
+    Note it is NOT the job id: `--resume` takes the transcript directory name.
+    """
+    session_dir = tmp_path / "9f2c1a0b7e44"
+    session_dir.mkdir()
+    comms, jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), session_dir)
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.record_outcome("job-1", "failed", "provider 500")
+    comms.detach("job-1")
+    del jobs.jobs["job-1"]  # the sweep that used to take the id with it
+
+    [row] = comms.roster()
+
+    assert row.resumable is True
+    assert row.session_id == "9f2c1a0b7e44"
+    assert row.session_id != row.job_id
+
+
+def test_a_child_that_never_started_has_no_session_id_to_offer():
+    """No transcript directory, so there is nothing to print. A blank is
+    honest; the job id in its place would be an id that resumes nothing."""
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].status = "cancelled"
+
+    [row] = comms.roster()
+
+    assert row.session_id is None
+
+
+def test_the_roster_text_tells_the_two_ids_apart(tmp_path):
+    """Both ids are `uuid4().hex[:12]`, so they are visually identical.
+
+    The roster prints a job id and a transcript id two lines apart, and the
+    line under them said "Resume one with hub op='resume'" — which takes the
+    JOB id and rejects the transcript id with `unknown subagent`. Two
+    indistinguishable ids beside an instruction that fits only one is a
+    coin-flip, so each id now names what it is for.
+    """
+    from local_operator.tools.builtin import _hub_list
+
+    session_dir = tmp_path / "9f2c1a0b7e44"
+    session_dir.mkdir()
+    comms, jobs, _child, _parent = wire()
+    comms.attach("job-1", FakeChild(), session_dir)
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.record_outcome("job-1", "failed", "provider 500")
+    comms.detach("job-1")
+    del jobs.jobs["job-1"]
+
+    block = _hub_list("call-1", comms).content[0]
+    assert isinstance(block, TextContent)
+    text = block.text
+
+    # The transcript id is shown with the command that actually takes it.
+    assert "local-operator --resume 9f2c1a0b7e44" in text
+    # And the resume instruction says which id it wants, so the transcript id
+    # sitting above it is not read as the argument.
+    assert "JOB id" in text
+    assert "not a job id" in text
