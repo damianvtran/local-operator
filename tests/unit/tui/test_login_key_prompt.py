@@ -759,3 +759,59 @@ async def test_a_settled_prompt_does_not_retain_the_pasted_value() -> None:
         # The receipt still reports the length, or the assertion above could be
         # satisfied by a block that simply stopped describing the paste.
         assert "21 chars" in _rendered(block)
+
+
+@pytest.mark.asyncio
+async def test_an_interrupt_mid_paste_still_lets_the_receipt_be_corrected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 5, Z11: a teardown between handover and parse stranded
+    a false success receipt.
+
+    A paste settles the block immediately — its receipt provisionally reads
+    "code received" — but whether the value parses is decided one layer out, so
+    there is a real window in which the block is settled and the flow has not
+    yet ruled on it. `_settle_key_prompt` clearing the retained reference
+    unconditionally meant an interrupt landing in that window left nothing to
+    correct, and the false `✓` stayed on screen: design round 1's D1(b),
+    reintroduced through the back door.
+
+    Also pins the other half, or the fix would be "never clear it": cancelling a
+    LIVE prompt still drops the reference, because no value was handed over and
+    so no correction can ever be owed.
+    """
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: True)
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(_LoginSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        settled = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        app._key_prompt = settled
+        app._last_login_prompt = settled
+        app._append_block(settled)
+        await pilot.pause()
+        # The paste is handed over; the flow has not parsed it yet.
+        settled.resolve("http://localhost:54548/callback?error=access_denied")
+        await pilot.pause()
+
+        app._settle_key_prompt()  # the interrupt
+        await pilot.pause()
+
+        assert app._last_login_prompt is settled, (
+            "the reference was dropped while a correction was still owed"
+        )
+        app._last_login_prompt.mark_unusable()
+        await pilot.pause()
+        assert "not usable" in _rendered(settled)
+
+        # A LIVE prompt cancelled by the same path owes no correction, so the
+        # reference is released rather than retained for the session.
+        live = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        app._key_prompt = live
+        app._last_login_prompt = live
+        app._append_block(live)
+        await pilot.pause()
+        app._settle_key_prompt()
+        await pilot.pause()
+        assert app._last_login_prompt is None

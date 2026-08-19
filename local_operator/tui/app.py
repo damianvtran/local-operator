@@ -2760,11 +2760,22 @@ class OperatorApp(App[None]):
         """
         block = self._key_prompt
         self._key_prompt = None
-        # Dropped here too: this is the "the login is over" path, so there is no
-        # longer a receipt anyone can be asked to correct, and keeping the
-        # reference would outlive every path that clears the transcript.
-        self._last_login_prompt = None
         if block is not None:
+            # Dropped only when this call actually CANCELS a live prompt, so the
+            # reference does not outlive the paths that clear the transcript.
+            #
+            # Keyed on "was it still awaiting an answer?" rather than on the
+            # reference being set, because of the window between a paste being
+            # handed over and the flow resuming to parse it: in there the block
+            # is already settled (its receipt provisionally reads "code
+            # received") while this method can still be reached by an interrupt.
+            # Clearing unconditionally meant the rejection that followed found
+            # nothing to correct and the false success receipt stayed on screen
+            # -- the defect design round 1 filed as D1(b). An already-settled
+            # block may still be owed its correction; a live one never is,
+            # because no value was ever handed over.
+            if not block.answered:
+                self._last_login_prompt = None
             try:
                 block.resolve(None)
             except Exception:  # pragma: no cover - teardown races only
