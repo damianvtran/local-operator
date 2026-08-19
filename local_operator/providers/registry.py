@@ -556,6 +556,29 @@ def list_login_providers() -> list[ProviderDefinition]:
 AGGREGATOR_PROVIDERS = frozenset({"openrouter", "radient"})
 
 
+def credential_provider_id(provider_id: str) -> str:
+    """The provider id a credential for ``provider_id`` is actually STORED under.
+
+    Login flavours do not own their credentials. ``xai-oauth``, ``openai-device``
+    and ``alibaba-token-plan-oauth`` are alternate ways of authenticating
+    ``xai``, ``openai`` and ``alibaba-token-plan``, and their login writes ONE
+    row under the aliased name (``store_credentials_as``) so that logging in
+    either way yields one account rather than two half-configured ones.
+
+    Every credential lookup therefore has to be translated before it reaches a
+    store whose queries are exact (``WHERE provider = ?``). Asking for the
+    literal flavour id matches no row, which does not read as "translate this" —
+    it reads as "this provider has no credential", i.e. the "No API key
+    configured for provider 'xai-oauth'" that an OAuth login is specifically
+    supposed to make impossible.
+
+    Unknown ids and providers that store under their own name pass through, so
+    this is safe to call unconditionally on any provider id.
+    """
+    definition = get_provider_definition(provider_id)
+    return (definition.store_credentials_as or definition.id) if definition else provider_id
+
+
 def resolve_env_key(provider_id: str) -> str | None:
     """Resolve the provider's API key from the environment.
 

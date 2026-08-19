@@ -42,8 +42,9 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.paths import config_dir
 from local_operator.providers.registry import (
-    ProviderDefinition,
+    GetApiKeyFn,
     RefreshFn,
+    credential_provider_id,
     get_provider_definition,
 )
 
@@ -296,11 +297,56 @@ class AuthStore:
             updated_at=row[7],
         )
 
+    @staticmethod
+    def _oauth_key_fn(provider: str) -> GetApiKeyFn | None:
+        """The extractor that pulls the WIRE token out of an OAuth row.
+
+        Which field is the bearer is a property of the row, and the row belongs
+        to the storage provider — so the storage definition's extractor is the
+        authoritative one, and the flavour's own is preferred only where it has
+        one. QwenCloud is why this cannot just read ``creds["access"]``: its row
+        holds a management token in ``access`` and the ``sk-sp-…`` inference key
+        in ``api_key``, and only ``alibaba-token-plan`` (the STORAGE id) carries
+        the extractor that knows to prefer the latter. Resolving the ``-oauth``
+        flavour by its own definition would authenticate inference with the
+        token the inference endpoint rejects.
+        """
+        definition = get_provider_definition(provider)
+        if definition is not None and definition.get_api_key is not None:
+            return definition.get_api_key
+        storage = get_provider_definition(credential_provider_id(provider))
+        return storage.get_api_key if storage is not None else None
+
+    @staticmethod
+    def _storage_id(provider: str) -> str:
+        """The provider id whose ROWS answer a query about ``provider``.
+
+        Login flavours (``xai-oauth``, ``openai-device``,
+        ``alibaba-token-plan-oauth``) deliberately store their credential under
+        the base provider's name, so every query here — which is exact SQL —
+        has to be asked in terms of the storage id or it matches nothing. Doing
+        it once, at the boundary of the store, is what keeps the translation
+        from having to be remembered at each of the dozen call sites that ask
+        this class about a provider; forgetting it does not fail loudly, it
+        silently reports the provider as having no credential at all.
+
+        Applied to row lookups, blocks and session stickiness alike: an alias
+        and its base are ONE credential, so a backoff earned by a request under
+        one name must be honoured under the other, and a session that stuck to
+        an account must stay on it across both spellings.
+        """
+        return credential_provider_id(provider)
+
     def list_credentials(
         self, provider: str | None = None, include_disabled: bool = False
     ) -> list[StoredCredential]:
-        """Enabled credentials (all providers or one), oldest first."""
+        """Enabled credentials (all providers or one), oldest first.
+
+        ``provider`` is resolved through :meth:`_storage_id`, so asking for a
+        login flavour returns the rows its login actually wrote.
+        """
         if provider is not None:
+            provider = self._storage_id(provider)
             rows = self._conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials WHERE provider = ? ORDER BY id",
@@ -320,8 +366,16 @@ class AuthStore:
         """Insert, or update the row for the same identity (org scope ⇒ rows).
 
         Revives soft-deleted rows for the same identity (re-login).
-        ``store_credentials_as`` aliasing happens at the caller (login path).
+
+        The login path already resolves ``store_credentials_as`` before calling
+        here, so this normalization is usually a no-op. It is applied anyway
+        because the READS now alias unconditionally: a caller that passed a
+        flavour id would otherwise write a row under ``xai-oauth`` that no
+        lookup for either ``xai-oauth`` or ``xai`` would ever return, which is
+        a worse failure than the one being fixed and an invisible one. Writes
+        and reads must agree on where a credential lives.
         """
+        provider = self._storage_id(provider)
         # An EXPLICIT type wins; the structural guess is the fallback for the
         # callers (and stored rows) that never declared one.
         #
@@ -423,8 +477,9 @@ class AuthStore:
         block_scope: str = "",
         block_ms: int = DEFAULT_BLOCK_MS,
     ) -> None:
-        """Record a backoff keyed by ``provider:type``."""
+        """Record a backoff keyed by ``provider:type`` (storage id)."""
         credential = self.get_credential(credential_id)
+        provider = self._storage_id(provider)
         provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
         until = self._now_ms() + max(1000, int(block_ms))
         self._conn.execute(
@@ -439,6 +494,7 @@ class AuthStore:
 
     def is_blocked(self, credential_id: int, provider: str) -> bool:
         credential = self.get_credential(credential_id)
+        provider = self._storage_id(provider)
         provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
         row = self._conn.execute(
             "SELECT blocked_until_ms FROM auth_credential_blocks"
@@ -456,6 +512,15 @@ class AuthStore:
     # -- OAuth refresh -----------------------------------------------------------
 
     def _refresh_fn(self, provider: str) -> RefreshFn | None:
+        """The refresh callable for rows stored under ``provider``.
+
+        Rows live under the STORAGE id, so the definition that owns the refresh
+        is frequently not the one named by that id: a row under ``xai`` may have
+        been written by ``xai-oauth``'s login, and only the flavour carries a
+        ``refresh_token``. Hence the reverse scan — base definition first (a
+        provider that refreshes its own rows), then the flavour that aliases
+        onto it.
+        """
         definition = get_provider_definition(provider)
         if definition is not None and definition.refresh_token is not None:
             return definition.refresh_token
@@ -566,8 +631,12 @@ class AuthStore:
         left an account bottom-of-pool for the life of the process -- the same
         "healthy account effectively out of rotation" outcome this whole change
         exists to prevent, arrived at the slow way.
+
+        Keyed by the STORAGE id, like blocks and stickiness: an alias and its
+        base are one credential pool, so a demotion earned under one spelling
+        must reorder the other's selection too.
         """
-        marks = self._deprioritized.setdefault(provider, {})
+        marks = self._deprioritized.setdefault(self._storage_id(provider), {})
         marks[credential_id] = self._now_ms() + DEPRIORITIZE_TTL_MS
 
     def clear_deprioritized(
@@ -580,6 +649,7 @@ class AuthStore:
         subset of rows: a one-row tier finding its only row demoted must not
         drop the marks belonging to rows in another tier that it never saw.
         """
+        provider = self._storage_id(provider)
         marks = self._deprioritized.get(provider)
         if marks is None:
             return
@@ -599,6 +669,7 @@ class AuthStore:
         consulted here, so a lazy sweep is both sufficient and free of a
         background task that would have to be owned and cancelled.
         """
+        provider = self._storage_id(provider)
         marks = self._deprioritized.get(provider)
         if not marks:
             return set()
@@ -620,6 +691,12 @@ class AuthStore:
     ) -> list[StoredCredential]:
         if not rows:
             return []
+        # Same key as ``_set_sticky`` writes: an alias and its base share one
+        # credential, so they must share one stickiness and one round-robin
+        # cursor, or a session alternating spellings would alternate accounts.
+        # Normalized here, ahead of both the demotion marks and the base order,
+        # so every keyed structure below sees one spelling.
+        provider = self._storage_id(provider)
         ordered = self._base_selection_order(rows, provider, session_id)
         # Demotion is applied LAST, to the finished order.
         #
@@ -671,7 +748,11 @@ class AuthStore:
     def _base_selection_order(
         self, rows: list[StoredCredential], provider: str, session_id: str | None
     ) -> list[StoredCredential]:
-        """Stickiness, then a per-session hash, then round-robin."""
+        """Stickiness, then a per-session hash, then round-robin.
+
+        ``provider`` arrives already normalized by :meth:`_selection_order`,
+        its only caller.
+        """
         if session_id:
             sticky_id = self._sticky.get((provider, session_id))
             sticky = next((r for r in rows if r.id == sticky_id), None)
@@ -689,6 +770,7 @@ class AuthStore:
     def _set_sticky(self, provider: str, session_id: str | None, credential_id: int | None) -> None:
         if not session_id:
             return
+        provider = self._storage_id(provider)
         if credential_id is None:
             self._sticky.pop((provider, session_id), None)
         else:
@@ -855,8 +937,7 @@ class AuthStore:
         """
         if self._runtime_overrides.get(provider) or self._config_overrides.get(provider):
             return []
-        definition: ProviderDefinition | None = get_provider_definition(provider)
-        key_fn = definition.get_api_key if definition else None
+        key_fn = self._oauth_key_fn(provider)
         rows = [r for r in self.list_credentials(provider) if r.credential_type == "oauth"]
         accesses: list[OAuthAccess] = []
         for row in sorted(rows, key=lambda r: r.id):
@@ -915,7 +996,6 @@ class AuthStore:
         account's own bookkeeping, not a decision about where requests go, and
         dropping it would throw away a single-use refresh token.
         """
-        definition: ProviderDefinition | None = get_provider_definition(provider)
 
         def pin(credential_id: int | None) -> None:
             """Write (or, with ``None``, clear) session stickiness — unless this
@@ -944,7 +1024,7 @@ class AuthStore:
                 if not read_only:
                     self.block_credential(row.id, provider)  # try a sibling
                 continue
-            key_fn = definition.get_api_key if definition else None
+            key_fn = self._oauth_key_fn(provider)
             key = key_fn(creds) if key_fn else creds.get("access")
             if key:
                 pin(row.id)
@@ -1024,7 +1104,14 @@ class AuthStore:
         return None, None
 
     def _env_api_key(self, provider: str) -> str | None:
+        # A login flavour declares no env var of its own (there is no
+        # ``XAI_OAUTH_API_KEY``), but it serves the same endpoint as the
+        # provider it stores under, so the base provider's var is the one that
+        # authenticates it. Without this fallback a user with ``XAI_API_KEY``
+        # set could run `xai` and not `xai-oauth`, for one wire and one key.
         definition = get_provider_definition(provider)
+        if definition is None or definition.env_keys is None:
+            definition = get_provider_definition(credential_provider_id(provider))
         if definition is not None and definition.env_keys is not None:
             if callable(definition.env_keys):
                 value = definition.env_keys()
@@ -1078,8 +1165,16 @@ class AuthStore:
         if api_key is not None:
             failing = next((r for r in rows if self._row_matches_key(r, api_key)), None)
         elif session_id:
+            # Stickiness is written under the storage id (`_set_sticky`), so the
+            # lookup must ask with the same spelling or a flavour id would never
+            # find the failing row it is sticky to.
             failing = next(
-                (r for r in rows if r.id == self._sticky.get((provider, session_id))), None
+                (
+                    r
+                    for r in rows
+                    if r.id == self._sticky.get((self._storage_id(provider), session_id))
+                ),
+                None,
             )
         else:
             failing = None

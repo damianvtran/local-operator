@@ -819,10 +819,9 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
     store = None
     try:
         from local_operator.providers.auth_store import AuthStore
-        from local_operator.providers.registry import get_provider_definition
+        from local_operator.providers.registry import credential_provider_id
 
-        definition = get_provider_definition(provider)
-        storage = (definition.store_credentials_as or provider) if definition else provider
+        storage = credential_provider_id(provider)
         store = AuthStore()
         rows = store.list_credentials(provider=storage)
         for row in reversed(rows):
@@ -1677,10 +1676,9 @@ class SessionStreamFn:
 
     @staticmethod
     def _storage_provider(provider: str) -> str:
-        from local_operator.providers.registry import get_provider_definition
+        from local_operator.providers.registry import credential_provider_id
 
-        definition = get_provider_definition(provider)
-        return definition.store_credentials_as or provider if definition is not None else provider
+        return credential_provider_id(provider)
 
     async def _primary_has_auth(self, model: ModelSpec) -> bool:
         from local_operator.providers.failover import FallbackTarget
