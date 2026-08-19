@@ -52,6 +52,14 @@ from dataclasses import dataclass
 MAX_TITLE_CHARS = 80
 MAX_TITLE_WORDS = 12
 
+#: The custom transcript entry a conversation's title is journalled under, so a
+#: RESUMED session wears the name it earned instead of booting nameless. The
+#: constant lives here beside the holder it describes, exactly as
+#: ``WAKE_SCHEDULES_CUSTOM_TYPE`` lives beside the scheduler: writer and reader
+#: sit in different modules, and a literal spelled twice is one rename away
+#: from a session that quietly stops restoring its own name.
+CONVERSATION_NAME_CUSTOM_TYPE = "conversation_name"
+
 #: How long a title generation may run before it is abandoned. Single attempt,
 #: so this is the WHOLE budget — there is no retry behind it, which is what
 #: makes the number worth measuring rather than guessing: seven naming and

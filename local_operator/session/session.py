@@ -95,7 +95,11 @@ from local_operator.harness.wake import (
 from local_operator.incidents import SESSION_INCIDENT_MESSAGE_TYPE
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
-from local_operator.session.naming import ConversationName
+from local_operator.session.naming import (
+    CONVERSATION_NAME_CUSTOM_TYPE,
+    MAX_TITLE_CHARS,
+    ConversationName,
+)
 from local_operator.session.protocol import CompactionOutcome
 from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import (
@@ -706,6 +710,14 @@ class Session:
         self._conversation_name = (
             conversation_name if conversation_name is not None else ConversationName()
         )
+        #: True while a stored title has not reached the transcript yet. The
+        #: write is a background task, so this is what lets dispose tell "the
+        #: name is on disk" from "the write was cancelled on the way there".
+        self._conversation_name_dirty = False
+        #: The in-flight journal write for the title, tracked apart from
+        #: ``_background_tasks`` because dispose CANCELS those and this one has
+        #: to be awaited instead — see :meth:`_spawn_conversation_name_write`.
+        self._conversation_name_task: "asyncio.Future[None] | None" = None
         self._system_blocks_provider = system_blocks_provider
         self._convert_to_llm = convert_to_llm or _default_convert_to_llm
         #: Set once a provider refuses a request because of an image block, and
@@ -832,6 +844,14 @@ class Session:
             persist=self._persist_wake_schedules,
         )
         self._load_wake_schedules()
+        # The conversation's title is restored from the SAME transcript the
+        # history came from, and for the same reason: a resumed session is the
+        # same conversation, so the band and the terminal tab must name it the
+        # way it was named before. Loaded here rather than by the host because
+        # the transcript is the session's to read — every front end resuming a
+        # session would otherwise need its own copy of this, and the one that
+        # forgot would boot nameless.
+        self._load_conversation_name()
         # Owned here, not by the browser tool, for the same reason the wake
         # scheduler is: _build_tool_context runs at the start of EVERY turn, so
         # a handle the tool stored on the ToolContext lived exactly one turn.
@@ -1228,8 +1248,146 @@ class Session:
         ``user_set=True`` (an explicit rename) wins permanently: a generated
         title landing later is discarded rather than overwriting a name the
         user chose. Auto-naming passes ``user_set=False``.
+
+        Journalled as a side effect, so the name survives to the next
+        ``--resume``. The write is FIRE-AND-FORGET on purpose: this method is
+        called from the TUI's synchronous paint path (``_store_title``,
+        ``_cmd_rename``), which cannot await, and a title is decoration — a
+        transcript append that fails must cost the name on disk, never the
+        turn. Only a store that actually CHANGED something is journalled: a
+        generated title that lost to a user-set one returns the standing name,
+        and re-appending it would grow the transcript by a line per turn.
         """
-        return self._conversation_name.set(text, user_set=user_set)
+        before = (self._conversation_name.text, self._conversation_name.user_set)
+        stored = self._conversation_name.set(text, user_set=user_set)
+        if (stored, self._conversation_name.user_set) != before:
+            self._conversation_name_dirty = True
+            self._spawn_conversation_name_write()
+        return stored
+
+    def _spawn_conversation_name_write(self) -> None:
+        """Start (or coalesce onto) the background journal write for the title.
+
+        Deliberately NOT ``_spawn_background``. That helper's tasks are
+        cancelled wholesale by ``dispose``, and a name stored in the closing
+        moments of a session is exactly the case that must still reach disk —
+        so this task is tracked separately and AWAITED by
+        :meth:`_flush_conversation_name` instead of being cancelled with the
+        rest.
+
+        One task at a time, because the payload is read at write time rather
+        than captured at call time: a rename landing while a write is in flight
+        is already covered by that write's own read, and a second task would
+        append a duplicate row for one change.
+        """
+        if self._disposed:
+            return
+        task = self._conversation_name_task
+        if task is not None and not task.done():
+            return
+        try:
+            self._conversation_name_task = asyncio.ensure_future(self._persist_conversation_name())
+        except RuntimeError:
+            # No running loop (a session constructed and named outside one).
+            # The dispose flush is the backstop; the name is not lost.
+            self._conversation_name_task = None
+
+    def _load_conversation_name(self) -> None:
+        """Adopt the title journalled by the session this one resumes.
+
+        Silently tolerant of a malformed entry, matching
+        :meth:`_load_wake_schedules`: a resume must not be refused because a
+        decoration could not be read. ``user_set`` rides along because it is
+        precedence, not display — a name the USER typed has to keep outranking
+        generated titles across a resume, or the first re-title check in the
+        resumed session would quietly overwrite it.
+
+        Writes through the holder's fields rather than through
+        :meth:`ConversationName.set`, since ``set`` cannot express "restore a
+        user-set title" without also claiming it as a fresh user action, and a
+        restore is neither a rename nor a generation — it is the same name it
+        already was.
+        """
+        details = self._transcript.latest_custom(CONVERSATION_NAME_CUSTOM_TYPE)
+        if not details:
+            return
+        text = details.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return
+        self._conversation_name.text = " ".join(text.split())[:MAX_TITLE_CHARS]
+        self._conversation_name.user_set = bool(details.get("user_set"))
+        # A restored conversation has already SPENT its naming attempt: the
+        # title on disk is the result of it. Without this latch a host that
+        # asks "has naming been requested?" would spend a second provider call
+        # to re-derive a name the session is already wearing.
+        self._conversation_name.requested = True
+
+    async def _persist_conversation_name(self) -> None:
+        """Journal the title in force (newest entry wins on replay).
+
+        The payload is SNAPSHOTTED before the append and compared against the
+        holder afterwards, and the dirty flag is cleared only when they still
+        agree. Two races make that necessary rather than fussy:
+
+        * A rename landing while the append is in flight (the file lock is
+          held, so the window is real) leaves a newer title in the holder than
+          the row that just went to disk. Clearing unconditionally marked that
+          newer title as saved and the next ``--resume`` restored the OLD one —
+          reproduced with a transcript whose append was slowed to 150 ms.
+        * A write cancelled at teardown never reaches this line at all, so the
+          entry still reads as outstanding to :meth:`_flush_conversation_name`
+          and is retried there instead of lost.
+
+        Left dirty, the write is re-driven by the flush at dispose, so the last
+        title a user chose is the one on disk.
+        """
+        payload = {
+            "text": self._conversation_name.text,
+            "user_set": self._conversation_name.user_set,
+        }
+        await self._transcript.append_custom(CONVERSATION_NAME_CUSTOM_TYPE, payload)
+        if (self._conversation_name.text, self._conversation_name.user_set) == (
+            payload["text"],
+            payload["user_set"],
+        ):
+            self._conversation_name_dirty = False
+            return
+        # The title moved under the append. Chase it now rather than leaving the
+        # newer name to the dispose flush: a session can run for hours after a
+        # rename, and "correct only if you quit" is not a property worth having
+        # when the retry is one more append. Recursion is bounded by renames
+        # actually landing inside a write, and each pass narrows the window.
+        await self._persist_conversation_name()
+
+    async def _flush_conversation_name(self) -> None:
+        """Land an outstanding title write before the session tears down.
+
+        The ordinary write is a background task and :meth:`dispose` CANCELS
+        background tasks, so a title stored in the closing moments of a session
+        — a ``/rename`` just before ctrl+d, or a generated title arriving as
+        the user quits — would be cancelled before reaching disk and the next
+        ``--resume`` would open nameless. Reproduced exactly that way: a name
+        set and then disposed with no intervening await never got a turn of the
+        event loop, and the transcript carried no entry at all.
+
+        Any write already in flight is awaited first, so the ordinary path
+        costs nothing here and the retry below only runs when that write never
+        happened (never scheduled, or cancelled).
+        """
+        task = self._conversation_name_task
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except BaseException:  # noqa: BLE001 — fall through to the retry
+                pass
+        if not self._conversation_name_dirty:
+            return
+        try:
+            await self._persist_conversation_name()
+        except Exception:
+            # Decoration must never be the reason a dispose fails: losing the
+            # name is survivable, losing the conversation is not.
+            logger.warning("failed to persist the conversation name", exc_info=True)
 
     @property
     def wake_scheduler(self) -> WakeScheduler:
@@ -3060,6 +3218,11 @@ class Session:
             # After the turn has stopped (so nothing is mid-navigation on it)
             # and before the task group closes, since this awaits a subprocess.
             await self._close_browser_surface()
+            # BEFORE the background tasks are cancelled: the title's own write
+            # is one of them, and a name stored in the last moments of the
+            # session (a `/rename` before ctrl+d) would be cancelled in flight
+            # and never reach the transcript the next `--resume` reads.
+            await self._flush_conversation_name()
             # HC-11: cancel tracked background tasks (wake deliveries, aside
             # persistence), then close the session task group.
             for task in list(self._background_tasks):

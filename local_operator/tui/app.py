@@ -1378,6 +1378,12 @@ class OperatorApp(App[None]):
         self._wire_mcp_status(session)
         self._report_mcp_startup(session)
         self._render_resumed_history(session)
+        # AFTER the history is on screen, because that is where the fallback
+        # label comes from: a session resumed from a transcript written before
+        # titles were journalled has no stored name to restore, and the band
+        # would wear the cwd for a conversation whose subject is right there in
+        # the replayed opener.
+        self._restore_resumed_name(session)
         # BEFORE the measurement, and the order is load-bearing: this installs
         # the provider's own exact reading for a resumed conversation, and
         # `_measure_preloaded_context` refuses to spend an estimate once an
@@ -1428,6 +1434,49 @@ class OperatorApp(App[None]):
             return
         self._adopt_session(session)
         await self._preflight_usage(session)
+
+    def _restore_resumed_name(self, session: Any) -> None:
+        """Give a resumed conversation a label even when none was stored.
+
+        Two ways a resumed session arrives with something to show, and this
+        handles the second:
+
+        * It carries a journalled title (``Session._load_conversation_name``),
+          which ``_adopt_session`` has already painted. Nothing to do — and
+          nothing may be done, because that name is the store of record and a
+          stand-in must never displace it.
+        * It carries none. Every transcript written before titles were
+          journalled is in this state, and so is any session closed before its
+          naming call landed. The band would fall back to the working
+          directory, which is the failure the terminal title exists to fix: a
+          sidebar of resumed sessions all reading ``lo › <dir>``.
+
+        The fallback is the SAME text ``/resume``'s picker labels its rows with
+        — the conversation's opening user message (``resume.session_name``
+        derives it from the transcript; here it is read from the replayed
+        history, which is the same message). So the row a user picked and the
+        tab they land on agree by construction rather than by coincidence.
+
+        Held as a provisional label rather than stored on the session, exactly
+        as an opener-derived label is for a live conversation: it is a display
+        stand-in, not a title anyone chose, and writing it into the session
+        would tell the naming errand this conversation is already named and
+        retire the one call that could give it a real one.
+        """
+        if self._status is None or session.conversation_name or self._provisional_name:
+            return
+        try:
+            history = list(session.history())
+        except Exception:
+            return  # reduced hosts (embedders, pilot fakes) may lack it
+        for message in history:
+            if getattr(message, "role", None) != "user":
+                continue
+            text = getattr(message, "text", "") or ""
+            if not isinstance(text, str) or not text.strip():
+                continue
+            self._show_provisional_name(text)
+            return
 
     def _restore_reported_usage(self, session: Any) -> None:
         """Put a RESUMED conversation's own token and cost figures on the band.
