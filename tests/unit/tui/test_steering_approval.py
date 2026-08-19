@@ -2920,3 +2920,53 @@ async def test_a_stale_highlight_does_not_divert_ctrl_c_from_the_draft() -> None
         await pilot.press("ctrl+c")
         await pilot.pause(0.1)
         assert app.is_running, "a second reflexive tap exited the app"
+
+
+@pytest.mark.asyncio
+async def test_moving_the_caret_after_a_copy_gives_ctrl_c_back_to_the_draft() -> None:
+    """D20, design review round 6. The deferral must retire when the copy does.
+
+    `_copied` alone retires only on an EDIT, so clicking elsewhere or pressing
+    an arrow left it set with nothing on screen: the user saw a plain draft,
+    got the interrupt instead, and the second reflexive tap quit with the draft
+    lost. That is the D17 damage again, reached by swapping one invisible
+    long-lived flag for another.
+
+    The guard is therefore `_copied` AND a live highlight. The pair is
+    self-retiring and, more to the point, VISIBLE — the key means "interrupt"
+    exactly while the highlight the copy took is on screen, which is the same
+    window in which the user perceives a copy at all.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.streaming = True
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "a half-typed prompt I do not want to lose"
+        await pilot.pause()
+
+        # Stand in for a completed drag-copy: the flag is set and the highlight
+        # it took is still on screen.
+        editor.selection = Selection((0, 0), (0, 10))
+        editor._copied = True
+        await pilot.pause()
+
+        # Moving the caret collapses the highlight — the copy is over, and the
+        # user can see that it is.
+        await pilot.press("right")
+        await pilot.pause()
+        assert not editor.selected_text, "the highlight should be gone"
+        assert editor._copied, "this test is only meaningful while _copied is still set"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+
+        assert session.aborts == [], "a retired copy still diverted the key"
+        assert editor.text == "", "the draft was not cleared"
+        assert "a half-typed prompt I do not want to lose" in editor.prompt_history()
+
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.1)
+        assert app.is_running, "the second tap quit with the draft lost"

@@ -3285,21 +3285,35 @@ class OperatorApp(App[None]):
         # design round 5). It also caught two things that are not copies at all,
         # a shift+arrow selection and the app's own marker-click selection.
         #
-        # Two flags, because a copy spans two moments and the key must defer
-        # through both:
+        # Two moments, because a copy spans both and the key must defer through
+        # each:
         #
         # * ``_selecting`` — this widget is mid-drag. The same predicate
         #   `Editor._copy_drag` gates on, for the same documented reason.
-        # * ``_copied`` — a drag-copy just completed and has not been edited
-        #   past. The composer's copy lands on mouse RELEASE, so by the time a
-        #   hand moves from mouse to keyboard `_selecting` is already False;
-        #   without this the copy would still buy itself the key back. The
-        #   editor retires this flag on the first edit, so it cannot go stale
-        #   the way a selection does.
+        # * a just-completed drag-copy WHOSE HIGHLIGHT IS STILL ON SCREEN. The
+        #   composer's copy lands on mouse RELEASE, so by the time a hand moves
+        #   from mouse to keyboard `_selecting` is already False and the copy
+        #   would otherwise not keep the key it just earned.
+        #
+        # That second test is deliberately the CONJUNCTION of `_copied` and a
+        # live selection, and neither half is sufficient. `_copied` alone
+        # retires only on an EDIT, so clicking elsewhere or pressing an arrow
+        # left it set with nothing on screen — the user saw a plain draft and
+        # got the interrupt, then quit on the second tap with the draft lost
+        # (D20, design round 6). A live selection alone was the ORIGINAL bug
+        # (D17): a highlight the user made minutes ago is not a copy.
+        #
+        # Together they are self-retiring and, more importantly, VISIBLE: the
+        # key means "interrupt" exactly while the highlight the copy took is on
+        # screen, and reverts to "clear my draft" the moment that highlight
+        # goes — which is the same instant the user stops perceiving a copy.
+        # The discriminating state is the one thing they can actually see.
         #
         # Checked BEFORE the draft branch, because a composer being dragged over
         # always has text in it and would otherwise take that branch every time.
-        mid_copy = getattr(editor, "_selecting", False) or getattr(editor, "_copied", False)
+        mid_copy = getattr(editor, "_selecting", False) or (
+            getattr(editor, "_copied", False) and bool(getattr(editor, "selected_text", ""))
+        )
         if editor.text.strip() and not mid_copy:
             # `remember_draft` refuses while the aside owns the composer, and a
             # draft that cannot be filed must not be thrown away either.
