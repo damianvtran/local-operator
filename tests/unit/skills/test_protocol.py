@@ -320,8 +320,11 @@ class TestReferenceListing:
         (base / "extra.md").write_text("x", encoding="utf-8")
         content = resolve_skill_url("skill://alpha", skills)
         assert content is not None
-        listing = content.split("---")[-1]
+        # Anchor on the listing header, not on "---" (frontmatter and
+        # horizontal rules use the same delimiter).
+        listing = content.split("Reference files (read with")[-1]
         assert "SKILL.md" not in listing
+        assert "extra.md" in listing
 
     def test_dotfiles_not_listed(self, skills: dict[str, Skill]) -> None:
         base = skills["alpha"].base_dir
@@ -336,7 +339,7 @@ class TestReferenceListing:
         assert ".git" not in content
         assert "visible.md" in content
 
-    def test_symlinked_directory_not_followed(self, tmp_path: Path) -> None:
+    def test_escaping_symlinked_directory_not_followed(self, tmp_path: Path) -> None:
         # A symlink pointing outside base_dir must not leak foreign paths
         # into the listing (the resolver would reject reading them anyway).
         outside = tmp_path / "outside"
@@ -347,6 +350,67 @@ class TestReferenceListing:
         content = resolve_skill_url("skill://linky", {"linky": skill})
         assert content is not None
         assert "leak.md" not in content
+
+    def test_escaping_symlinked_file_not_listed(self, tmp_path: Path) -> None:
+        # R1-1: a symlinked FILE whose target escapes base_dir passes
+        # is_file() (which follows links) but _resolve_child rejects reading
+        # it — so listing it would advertise a guaranteed failure. The
+        # listing applies the resolver's own containment check instead.
+        outside = tmp_path / "outside-file.md"
+        outside.write_text("secret", encoding="utf-8")
+        skill = _make_skill(tmp_path, "filelink")
+        (skill.base_dir / "escape.md").symlink_to(outside)
+        content = resolve_skill_url("skill://filelink", {"filelink": skill})
+        assert content is not None
+        assert "escape.md" not in content
+
+    def test_internal_symlinks_listed_and_followed(self, tmp_path: Path) -> None:
+        # R1-3: symlinks resolving INSIDE base_dir are readable by the
+        # resolver, so hiding them would be the reverse parity gap. Both a
+        # linked file and a linked directory must appear.
+        skill = _make_skill(tmp_path, "inlink")
+        base = skill.base_dir
+        (base / "real.md").write_text("real", encoding="utf-8")
+        (base / "alias.md").symlink_to(base / "real.md")
+        subdir = base / "docs"
+        subdir.mkdir()
+        (subdir / "inner.md").write_text("inner", encoding="utf-8")
+        (base / "docs-link").symlink_to(subdir, target_is_directory=True)
+        content = resolve_skill_url("skill://inlink", {"inlink": skill})
+        assert content is not None
+        assert "alias.md" in content
+        assert "docs/inner.md" in content
+        assert resolve_skill_url("skill://inlink/alias.md", {"inlink": skill}) == "real"
+
+    def test_symlink_cycle_terminates(self, tmp_path: Path) -> None:
+        # An internal directory link cycle must not hang or duplicate the
+        # walk: resolved directories are visited at most once.
+        skill = _make_skill(tmp_path, "cycle")
+        base = skill.base_dir
+        subdir = base / "docs"
+        subdir.mkdir()
+        (subdir / "page.md").write_text("p", encoding="utf-8")
+        (subdir / "loop").symlink_to(base, target_is_directory=True)
+        content = resolve_skill_url("skill://cycle", {"cycle": skill})
+        assert content is not None
+        assert content.count("docs/page.md") == 1
+
+    def test_special_characters_round_trip(self, skills: dict[str, Skill]) -> None:
+        # R1-2: a filename with '#' or '%' must be listed in a form the URL
+        # parser survives — urlsplit treats a raw '#' as a fragment and
+        # unquote mangles a raw '%'. The listing percent-encodes, and the
+        # encoded path must actually resolve.
+        base = skills["alpha"].base_dir
+        (base / "notes #1.md").write_text("hash", encoding="utf-8")
+        (base / "100%.md").write_text("percent", encoding="utf-8")
+        content = resolve_skill_url("skill://alpha", skills)
+        assert content is not None
+        listing = content.split("Reference files (read with")[-1]
+        listed = [line for line in listing.splitlines() if line.endswith(".md")]
+        assert "notes%20%231.md" in listed
+        assert "100%25.md" in listed
+        assert resolve_skill_url("skill://alpha/notes%20%231.md", skills) == "hash"
+        assert resolve_skill_url("skill://alpha/100%25.md", skills) == "percent"
 
     def test_listing_bounded_with_overflow_marker(self, skills: dict[str, Skill]) -> None:
         base = skills["alpha"].base_dir

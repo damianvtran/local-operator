@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from local_operator.skills.discovery import Skill
 
@@ -123,31 +123,62 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
     ``<scheme>://<name>/<relpath>`` form makes the protocol read the obvious
     next move.
 
-    Constraints, matching the resolver's own rules so the listing never
-    advertises a path a follow-up read would then reject:
+    Constraints, matching the resolver's own rules (``_resolve_child``) so
+    the listing never advertises a path a follow-up read would then reject,
+    and never hides one it would accept:
 
     - dotfiles and dot-directories are skipped (unlisted and unreadable by
       design);
     - the body file itself (``SKILL.md``/``GUIDE.md``) is excluded — the
       caller just returned it;
-    - symlinked directories are not followed (a link cycle or an escape
-      outside ``base_dir`` must not grow or poison the walk);
+    - symlinks (file or directory) are admitted only when their RESOLVED
+      target stays inside ``base_dir`` — the same containment check the
+      resolver applies on read — and resolved directories are visited at
+      most once so a link cycle cannot grow the walk;
+    - names are percent-encoded exactly as ``_resolve_child``'s ``unquote``
+      expects, so a filename containing ``%``, ``#`` or ``?`` survives the
+      URL round-trip instead of being listed in a form ``urlsplit`` mangles;
     - output is deterministic (sorted relative paths) and bounded by
-      :data:`_MAX_REFERENCE_ENTRIES` and :data:`_MAX_REFERENCE_DEPTH`, with
-      an explicit overflow marker instead of silent truncation.
+      :data:`_MAX_REFERENCE_ENTRIES` (explicit overflow marker) and
+      :data:`_MAX_REFERENCE_DEPTH` (deeper files are silently omitted — a
+      directory read of their parent still finds them, and a marker per
+      pruned subtree would cost more than it informs). An unreadable
+      subdirectory is likewise skipped without a marker, mirroring the
+      resolver's own degradation.
 
     Returns an empty string when the resource has no reference files, so a
     body-only skill read stays byte-identical to the pre-listing behaviour.
     """
     base = resource.base_dir
+    try:
+        base_resolved = base.resolve()
+    except OSError:
+        return ""
     body_file = resource.file_path
     entries: list[str] = []
     overflow = False
+    visited: set[str] = set()
+
+    def _contained(child: Path) -> bool:
+        """True when the child's resolved target stays inside base_dir — the
+        same check ``_resolve_child`` applies, so listing and read agree on
+        every symlink."""
+        try:
+            return child.resolve().is_relative_to(base_resolved)
+        except OSError:
+            return False
 
     def _walk(directory: Path, depth: int) -> None:
         nonlocal overflow
         if depth > _MAX_REFERENCE_DEPTH or overflow:
             return
+        try:
+            key = str(directory.resolve())
+        except OSError:
+            return
+        if key in visited:
+            return
+        visited.add(key)
         try:
             children = sorted(directory.iterdir(), key=lambda p: (p.name.lower(), p.name))
         except OSError:
@@ -158,16 +189,18 @@ def _reference_listing(resource: Skill, *, scheme: str) -> str:
             if child.name.startswith("."):
                 continue
             if child.is_dir():
-                if child.is_symlink():
+                if child.is_symlink() and not _contained(child):
                     continue
                 _walk(child, depth + 1)
             elif child.is_file():
                 if child == body_file:
                     continue
+                if child.is_symlink() and not _contained(child):
+                    continue
                 if len(entries) >= _MAX_REFERENCE_ENTRIES:
                     overflow = True
                     return
-                entries.append(child.relative_to(base).as_posix())
+                entries.append(quote(child.relative_to(base).as_posix(), safe="/"))
 
     _walk(base, 1)
     if not entries:
