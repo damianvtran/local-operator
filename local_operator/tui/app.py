@@ -5694,13 +5694,27 @@ class OperatorApp(App[None]):
                 f"model: {old_label} → {session.model_label} "
                 f"(this session){suffix} — {PERSIST_HINT}"
             )
-            # MID-TURN is the one moment "starting when" is a live question, and
-            # the next receipt cannot answer it because the answer is visible
-            # before then: the agent goes on working on the old model until the
-            # step in flight ends. On its own row and only while streaming — see
-            # MODEL_SWITCH_MID_TURN_NOTICE for why it is not a third clause.
-            if session.is_streaming:
-                notice(MODEL_SWITCH_MID_TURN_NOTICE, "note")
+        # MID-TURN is the one moment "starting when" is a live question, and the
+        # next receipt cannot answer it because the answer is visible before
+        # then: the agent goes on working on the old model until the step in
+        # flight ends. On its own row — see MODEL_SWITCH_MID_TURN_NOTICE for why
+        # it is not a third clause on the receipt.
+        #
+        # OUTSIDE the branches above, and that placement is the fix for a real
+        # defect (design review D1): ``/model default <p>/<id>`` performs the
+        # SAME live switch, and while it was nested in the else-branch that
+        # spelling printed only "used from the next launch" — a receipt that
+        # contradicted the band beside it, which had already repainted to the
+        # new model. Every spelling that switches the session owes the same
+        # answer to "starting when".
+        #
+        # ``old_label != session.model_label`` because re-selecting the model
+        # already in force is a no-op, and promising that "this one finishes on
+        # the old model" describes a handover that will not happen (D4). The
+        # session layer already declines to re-derive anything for a same-model
+        # write; this is the UI half of that rule.
+        if session.is_streaming and old_label != session.model_label:
+            notice(MODEL_SWITCH_MID_TURN_NOTICE, "note")
         if warning:
             notice(warning, "warning")
 

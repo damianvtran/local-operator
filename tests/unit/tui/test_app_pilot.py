@@ -3257,6 +3257,59 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_default_mid_turn_also_says_when_it_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/model default p/id`` switches the LIVE session too, so it owes the same answer.
+
+    Design review D1: the timing row was nested in the plain-switch branch, so
+    this spelling printed only "used from the next launch" while the status band
+    beside it had already repainted to the new model — a receipt contradicting
+    the band on the same frame, which is the exact class of bug this PR fixes.
+    """
+    import yaml  # noqa: F401  (parity with the sibling default tests)
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
+    session = _SwitchableSession()
+    session.streaming = True
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/model default anthropic/claude-opus-5")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+
+    assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
+    # Still the persistence receipt, not the session one: this asserts the row
+    # was ADDED to that branch rather than the branch being changed.
+    assert _unwrapped("used from the next launch") in text, text
+
+
+@pytest.mark.asyncio
+async def test_reselecting_the_model_already_in_force_promises_no_handover() -> None:
+    """A no-op switch must not promise a handover that will never happen (D4).
+
+    "this one finishes on the old model" describes a transition between two
+    models. Re-picking the running model — easy to do from the picker, where the
+    current row is one Enter away — has no old model to finish on.
+    """
+    session = _SwitchableSession()
+    session.streaming = True
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await pilot.pause()
+        # Whatever the fake reports as current, selected again.
+        app._run_slash_command(f"/model {session.model_label}")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+
+    assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) not in text, text
+
+
+@pytest.mark.asyncio
 async def test_an_idle_switch_does_not_talk_about_steps() -> None:
     """Between turns there is no step to wait for, so the timing clause is noise.
 
