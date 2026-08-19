@@ -500,6 +500,15 @@ logger = logging.getLogger("local_operator.tui.app")
 #: resume command — where omp's only clears the editor.)
 DOUBLE_INTERRUPT_WINDOW_S = 1.5
 
+#: How long a second Esc counts as the "also stop the subagents" press. Longer
+#: than the Ctrl+C window because the two gestures answer different questions.
+#: Ctrl+C's second press QUITS, so its window is deliberately too short to hit
+#: by accident; Esc's second press only widens the stop, and the user has to
+#: read a line of text ("N subagents still running — esc again to stop them")
+#: before deciding. A window that expires while they are still reading would
+#: silently demote the press back to a no-op.
+DOUBLE_STOP_WINDOW_S = 4.0
+
 #: Sessions the ``/resume`` picker offers. Higher than the recovery listing's
 #: ten because the picker can scroll and filter, and a conversation from a
 #: fortnight ago is exactly the one worth searching for.
@@ -1132,6 +1141,20 @@ class OperatorApp(App[None]):
         # The one live "ctrl+c again to exit" hint, replaced rather than
         # repeated so a run of interrupts leaves one row instead of N.
         self._exit_hint: NoticeBlock | None = None
+        # Esc ladder: when the first press stopped the parent while subagents
+        # were still running, this stamps WHEN the wider stop was offered. A
+        # second press inside DOUBLE_STOP_WINDOW_S takes the offer up.
+        self._stop_offered_at: float | None = None
+        # How many children the standing offer NAMED. Kept beside the stamp so
+        # the escalation can tell "nothing was ever delegated" apart from "the
+        # children the offer counted finished before the second press landed" —
+        # two states that otherwise print the same flat denial of a row the user
+        # is still looking at (D2, design round 1).
+        self._stop_offer_count: int = 0
+        # The one live stop-ladder line ("N subagents still running…" /
+        # "stopped N subagents"), replaced rather than repeated for the same
+        # reason `_exit_hint` is.
+        self._stop_notice: NoticeBlock | None = None
         # The MAIN transcript, held rather than looked up. Once the full-page
         # subagent view is open there are two `TranscriptView`s in the screen,
         # so `query_one(TranscriptView)` is ambiguous exactly while a turn may
@@ -1893,6 +1916,17 @@ class OperatorApp(App[None]):
         # first aborted turn would suppress its notice on the strength of cards
         # that belonged to a conversation the user cannot see any more.
         self._interrupted_cards = 0
+        # And the stop ladder's offer, which is the sharpest instance of this
+        # family: it is an armed ESCALATION. Left standing across a session
+        # swap, an Esc pressed moments after `/new` or `/reload` would take up
+        # an offer made about the OLD conversation's children and cancel the
+        # new session's subagents instead — destroying work on the strength of
+        # a count the user was shown for a different conversation. The notice
+        # reference goes too; `clear_blocks` unmounts the widget but cannot
+        # clear a reference it does not own.
+        self._stop_offered_at = None
+        self._stop_offer_count = 0
+        self._stop_notice = None
         # And a deferred completion belongs to the dying conversation too. Left
         # set, the replacement session's first settling background job would
         # announce "task complete" for a turn the user can no longer see — the
@@ -3216,7 +3250,117 @@ class OperatorApp(App[None]):
         so a further Ctrl+C never reaches this method — a rung that cannot fire
         is worse than no rung, because the docstring promises an escape the user
         does not have.
+
+        A DRAFT in the composer takes the first press, ahead of every rung
+        below. Ctrl+C on a half-typed prompt means "scrap that", and the exit
+        ladder should not start while there is something cheaper and more
+        likely for the key to mean. It also removes the ladder's sharpest edge:
+        the press that quits was previously two taps away while the user was
+        typing, so a reflexive double-tap at the composer could exit the app
+        with a drafted prompt on screen. Clearing consumes the press WITHOUT
+        arming the ladder, so the next Ctrl+C is a first press again.
+
+        The draft is not silently destroyed: it goes to the editor's own
+        history, which is what ``up`` recalls, so the text is one keystroke
+        away rather than gone.
+
+        The ASIDE is handled by closing the card instead. Its draft may not be
+        recorded — the card promises "off the record", and honouring that is
+        why ``remember_draft`` can refuse — so clearing the composer there
+        would destroy the question outright. ``_close_aside`` is the path that
+        already exists for "the user is done with this card": it discards the
+        aside and hands back the main-chat draft it borrowed.
         """
+        editor = self._editor()
+        # A COPY GESTURE IN FLIGHT is not a draft the user is scrapping, so
+        # Ctrl+C keeps its older meaning there — the interrupt and the first
+        # rung of the exit ladder — rather than being captured by this rung.
+        #
+        # Gated on the GESTURE, never on ``selected_text``. A selection is STATE
+        # that persists until the caret moves, so "has a highlight" diverted the
+        # key long after any gesture ended: a composer holding a stale range
+        # took the interrupt, armed the ladder, and the second reflexive tap
+        # EXITED THE APP with the draft never filed to history — the precise
+        # hazard this rung exists to remove, reintroduced by its own guard (D17,
+        # design round 5). It also caught two things that are not copies at all,
+        # a shift+arrow selection and the app's own marker-click selection.
+        #
+        # Two moments, because a copy spans both and the key must defer through
+        # each:
+        #
+        # * ``_selecting`` — this widget is mid-drag. The same predicate
+        #   `Editor._copy_drag` gates on, for the same documented reason.
+        # * a just-completed drag-copy WHOSE HIGHLIGHT IS STILL ON SCREEN. The
+        #   composer's copy lands on mouse RELEASE, so by the time a hand moves
+        #   from mouse to keyboard `_selecting` is already False and the copy
+        #   would otherwise not keep the key it just earned.
+        #
+        # That second test is THE COPY'S OWN highlight still being on screen,
+        # which took three attempts to state correctly and each wrong one cost
+        # a draft:
+        #
+        # * `selected_text` alone — a selection persists until the caret moves,
+        #   so a highlight made minutes ago diverted the key (D17).
+        # * `_copied` alone — it retires on an EDIT but not on a caret move, so
+        #   clicking elsewhere or pressing an arrow left it set with nothing on
+        #   screen: the user saw a plain draft, got the interrupt, and quit on
+        #   the second tap (D20). Stale for a SUPERSET of D17's states.
+        # * `_copied` and *a* live selection — an unrelated shift+arrow
+        #   selection made after the copied range was collapsed re-armed the
+        #   deferral, so two pixel-identical frames carried opposite meanings
+        #   (D22). Same lost draft, third route.
+        #
+        # Fixed at the SOURCE instead, on the reviewer's diagnosis that the
+        # root cause was one flag answering two questions with the wrong
+        # lifetime: `_copied` is an edit-scoped receipt, and this is a
+        # gesture-scoped question. The editor now retires the gesture claim in
+        # its `selection` watcher — the copy's claim ends when the highlight it
+        # took stops being the highlight on screen, whether a caret move
+        # collapses it or a new selection replaces it.
+        #
+        # So `_copied` is self-retiring here and the guard is finally the plain
+        # statement the comment has been making since D20: the key means
+        # "interrupt" exactly while the copy the user just made is still
+        # visible. Three conjunctions were three attempts to patch a lifetime
+        # from the outside; none of them could, because the flag outlived its
+        # own subject.
+        #
+        # Checked BEFORE the draft branch, because a composer being dragged over
+        # always has text in it and would otherwise take that branch every time.
+        mid_copy = editor.copy_in_flight
+        if editor.text.strip() and not mid_copy:
+            # `remember_draft` refuses while the aside owns the composer, and a
+            # draft that cannot be filed must not be thrown away either.
+            if not editor.remember_draft():
+                if self._close_aside():
+                    return
+                # Not the aside, but recording is off for some other reason:
+                # leave the text alone rather than destroying it unrecoverably,
+                # and let the press fall through to its interrupt meaning.
+                pass
+            else:
+                editor.clear_content()
+                # The ladder is NOT armed and any live exit hint is stale: this
+                # press meant the composer, and leaving "ctrl+c again to exit"
+                # on screen would promise an exit the next press does not make.
+                self._last_interrupt_at = 0.0
+                if self._exit_hint is not None:
+                    self._transcript_view().remove_block(self._exit_hint)
+                    self._exit_hint = None
+                # Say where the text went. Filing the draft into history rather
+                # than the bin is the whole point of this rung, but all the user
+                # SEES is their sentence vanishing — and recoverability nobody
+                # can discover is worth very little, because they retype it
+                # anyway (D6, design round 1). One quiet receipt, in the `note`
+                # weight that answers something the user just did.
+                #
+                # The GLYPH, not the word: every other arrow hint in the TUI
+                # renders one (`session_picker`, `usage_panel`, `aside_panel`,
+                # `subagent_view`), and "up to" garden-paths on the idiom before
+                # it resolves as a key name (D10, design round 2).
+                self._append_block(NoticeBlock("draft cleared — ↑ to recover", "note"))
+                return
+
         now = time.monotonic()
         if now - self._last_interrupt_at < DOUBLE_INTERRUPT_WINDOW_S:
             self._interrupt()  # stop the work before dropping the terminal
@@ -3335,6 +3479,20 @@ class OperatorApp(App[None]):
         With nothing running Esc does nothing — in particular it must not clear
         the composer, which would throw away typed text on the key people press
         to cancel.
+
+        SUBAGENTS take the second press. The first Esc stops the parent turn,
+        which is what the user is watching; delegated children keep going,
+        because a child can be minutes into useful work and the foreground key
+        should not be able to destroy it by reflex. When any child is still
+        running the stop says so and offers the wider stop, and a second press
+        within :data:`DOUBLE_STOP_WINDOW_S` cancels every child too. Both
+        presses are honest about what they did: a stop that silently left three
+        agents burning tokens is the bug this ladder exists to fix, and one
+        that silently killed them would be the opposite bug.
+
+        Backgrounded ``bash`` jobs are never touched by either press —
+        ``background=true`` exists to outlive the turn. ``jobs cancel`` stops
+        those.
         """
         if self._close_aside():
             return
@@ -3376,9 +3534,273 @@ class OperatorApp(App[None]):
         ):
             self._settle_ask_picker()
             return
-        pending = self._approval is not None and not self._approval.answered
-        if pending or (self._session is not None and self._session.is_streaming):
+
+        session = self._session
+        now = time.monotonic()
+
+        # The escalation press: offered only after a first press that reported
+        # children still running, and only inside the window. It sits BELOW the
+        # picker branch above for the reason that branch states — answering a
+        # question the agent asked is not an abort — and above the ordinary
+        # stop, because by this point the user has already read the offer and
+        # pressed again to take it.
+        # ...and only when no prompt is waiting on the user. The picker branch
+        # above gates on `_live_prompt()` for this reason; without the same
+        # guard here an APPROVAL raised after the offer was armed was outranked
+        # by the escalation, so one Esc cancelled every child on a press the
+        # user could reasonably have meant for the `rm -rf` prompt in front of
+        # them (R1, agent review round 2). `_live_prompt` ranks an unanswered
+        # approval first precisely because it is a permission gate the engine is
+        # blocked on and the most recently raised thing on screen; an armed
+        # offer is older than it by construction, and the older, cheaper-to-
+        # repeat gesture must not outrank the newer, unrecoverable one.
+        #
+        # The offer is NOT disarmed here: the user answers the prompt and their
+        # next press still escalates if it lands inside the window.
+        if (
+            self._stop_offered_at is not None
+            and now - self._stop_offered_at < DOUBLE_STOP_WINDOW_S
+            and session is not None
+            and self._live_prompt() is None
+        ):
+            self._stop_offered_at = None
+            offered = self._stop_offer_count
+            self._stop_offer_count = 0
+            stopped = session.cancel_subagents("interrupted")
+            # Re-aborting the parent is deliberate and not redundant: a child
+            # settling can hand its result back to a parent that has since
+            # started a follow-up turn, and the user's second press means that
+            # too. It is idempotent when the parent is already stopped.
             self._interrupt()
+            if stopped:
+                text = f"stopped {stopped} subagent{'s' if stopped != 1 else ''}"
+                # Sparing backgrounded `bash` is deliberate (`background=true`
+                # exists so a build outlives the turn) and genuinely surprising
+                # to a user who just escalated a stop, which reads as "stop all
+                # of it". Naming the survivors here, and only when there ARE
+                # any, prevents the "I stopped everything, why is the build
+                # still running" question at the one moment the answer is
+                # wanted (D3, design round 1). Unconditional, it would be noise.
+                spared = self._job_count("bash")
+                if spared:
+                    text += (
+                        f"; {spared} background job{'s' if spared != 1 else ''} "
+                        "still running — jobs cancel to stop"
+                    )
+            elif offered:
+                # The children finished on their own between the two presses.
+                # `cancel_subagents` recounts at press time, so this is
+                # reachable in production and not a fake-session artifact.
+                #
+                # The wording matters more than it looks. Saying "no subagents
+                # were running" here REPLACES a row that just said "2 subagents
+                # still running", so the user reads a flat denial of what they
+                # were told one keypress ago — which re-raises the exact
+                # credibility problem this whole change exists to fix. What
+                # actually happened is better news than the offer implied, and
+                # the line should say so (D2, design round 1).
+                text = (
+                    f"{offered} subagent{'s' if offered != 1 else ''} "
+                    "finished before the stop landed"
+                )
+            else:
+                text = "no subagents were running"
+            self._replace_stop_notice(text, "note")
+            return
+
+        pending = self._approval is not None and not self._approval.answered
+        streaming = session is not None and session.is_streaming
+        # The SESSION's predicate, not the band's `_job_count("task")`. The two
+        # disagree on children parked at the capacity gate, and the number
+        # offered here must be the number the second press actually stops —
+        # otherwise the confirmation contradicts the offer, and a press that
+        # finds only queued children arms nothing and leaves them unstoppable
+        # from the keyboard. `_job_count` remains right for the status band,
+        # which is reporting work in progress rather than work Esc can reach.
+        children = self._running_subagents(session)
+
+        if not (pending or streaming or children):
+            # Nothing to stop. Explicitly NOT clearing the composer.
+            return
+
+        if pending or streaming:
+            self._interrupt()
+
+        if children:
+            # The offer is the whole point of the first press when children are
+            # up: without a line on screen the user has no way to know that a
+            # stop left work running, and no way to learn the second press
+            # exists.
+            #
+            # A press that lands here while an offer was ALREADY up is a press
+            # that arrived too late to escalate (the branch above took every
+            # press inside the window). Re-arming and reprinting the identical
+            # string made that press a silent no-op — the rendered frame was
+            # byte-identical, so it was indistinguishable from a dropped
+            # keystroke on the one key whose job in this change is to stop
+            # lying about what it did (D1, design round 1). The re-armed offer
+            # therefore says so, which both acknowledges the press and states
+            # the constraint that defeated it.
+            #
+            # "esc again", not "press esc twice": THIS press re-armed the offer,
+            # so the ladder is armed by the time the row is painted and the very
+            # next single press escalates. "Twice" overstated the cost by one on
+            # the one key this change exists to make honest (D9, design round 2).
+            expired = self._stop_offered_at is not None
+            self._stop_offered_at = now
+            self._stop_offer_count = children
+            plural = "s" if children != 1 else ""
+            self._replace_stop_notice(
+                (
+                    f"{children} subagent{plural} still running "
+                    f"— too slow; esc again within {DOUBLE_STOP_WINDOW_S:g}s to stop them"
+                    if expired
+                    else f"{children} subagent{plural} still running " "— esc again to stop them"
+                ),
+                "warning",
+            )
+            # Retire the INSTRUCTION when the window that makes it true closes.
+            # Nothing else cleared the row, so a transcript kept a warning-amber
+            # line reading "esc again to stop them" for the rest of the session,
+            # scrolling up through the history as a standing offer that no key
+            # would honour — and with no visible expiry there was no way to tell
+            # a live offer from a dead one (D4, design round 1). The fact stays
+            # (the children really are still running); only the promise goes.
+            armed_at = now
+            self.set_timer(DOUBLE_STOP_WINDOW_S, lambda: self._expire_stop_offer(armed_at))
+        else:
+            self._stop_offered_at = None
+            self._stop_offer_count = 0
+
+    def _expire_stop_offer(self, armed_at: float) -> None:
+        """Drop the escalation promise from a standing offer once it lapses.
+
+        Keyed on the stamp it was armed with, so a timer from an earlier press
+        cannot retire a NEWER offer: a second press inside the window re-arms
+        with a fresh ``now``, and this fires for the old one a moment later.
+        Any other outcome (taken, cleared, session swapped) leaves
+        ``_stop_offered_at`` unequal and this does nothing.
+        """
+        if self._stop_offered_at != armed_at:
+            return
+        self._stop_offered_at = None
+        self._stop_offer_count = 0
+        notice = self._stop_notice
+        if notice is None or not notice.is_attached:
+            return
+        # RECOUNTED, not the number the offer was armed with. The surviving row
+        # is a present-tense statement of fact in the calm receipt weight, and
+        # children settle on their own schedule — so restating the arm-time
+        # count asserted "2 subagents still running" about children that had
+        # finished during the window, which is a settled-looking lie rather than
+        # a lapsed offer (R3-3, agent review round 3).
+        count = self._running_subagents(self._session)
+        if count <= 0:
+            # Nothing left to report. The row goes rather than settling into a
+            # statement about work that no longer exists.
+            self._transcript_view().remove_block(notice)
+            self._stop_notice = None
+            return
+        # `note`, not `warning`: it is no longer a state the user must act on
+        # within a window, just a fact about what is still running.
+        notice.restate(
+            f"{count} subagent{'s' if count != 1 else ''} still running",
+            "note",
+        )
+
+    @staticmethod
+    def _running_subagents(session: Any | None) -> int:
+        """Children the stop ladder can reach, via the session's own predicate.
+
+        ``getattr`` because reduced hosts and the test fakes need not implement
+        every method on the protocol; a host that cannot answer simply has no
+        children to offer. Never raises — this runs on a keystroke.
+        """
+        if session is None:
+            return 0
+        counter = getattr(session, "running_subagents", None)
+        if counter is None:
+            return 0
+        try:
+            return int(counter())
+        except Exception:  # noqa: BLE001 — a stop must never fail on its count
+            logger.warning("counting subagents failed", exc_info=True)
+            return 0
+
+    def _replace_stop_notice(self, text: str, kind: NoticeKind) -> None:
+        """Show the stop ladder's one line, replacing any previous one.
+
+        Replaced rather than appended for the reason the Ctrl+C hint is: a user
+        pressing Esc twice would otherwise leave two contradictory rows ("still
+        running" above "stopped them"), and the stale one is the one that reads
+        as current.
+
+        Restated IN PLACE rather than removed and re-appended. Re-appending put
+        the row back at the transcript end, so a notice that arrived between the
+        two presses — the aborted turn's own ``interrupted`` row is the ordinary
+        case — ended up ABOVE a row the user had already read, and the
+        transcript stopped being chronological (D5, design round 1).
+        :meth:`NoticeBlock.restate` exists for exactly this "notice that
+        outlived its own truth" case and is what the queued-steer row uses.
+
+        Falls back to appending when the block is gone (``/clear``, a session
+        swap, or a transcript that never mounted it), because restating a block
+        that is no longer in the view would silently write to nothing.
+
+        ...and ALSO when the row has scrolled out of sight, which is the harder
+        case. ``_stop_notice`` outlives the turn that created it, so a later
+        press can find it buried far up the transcript — and restating it there
+        repaints a row the user cannot see, leaving the visible frame unchanged.
+        That is the silent no-op D1 was filed for, reintroduced by D5's in-place
+        restate on a different axis (R3-2, agent review round 3).
+
+        VISIBILITY is the discriminator, not position in the block list. D5's
+        case — a notice arriving between the two presses — leaves the ladder row
+        one row up and plainly on screen, and moving it there is precisely the
+        reordering D5 objected to. R3-2's case has it off screen entirely, where
+        leaving it is indistinguishable from a dropped keystroke. "Can the user
+        see it?" is the question both answers turn on, so it is the one asked.
+        """
+        notice = self._stop_notice
+        if notice is not None and notice.is_attached:
+            if self._is_on_screen(notice):
+                notice.restate(text, kind)
+                return
+            # Out of sight: the row has to move to where the user is looking.
+            # Dropping the old one keeps the replace-don't-stack promise, which
+            # is the whole reason this method exists.
+            self._transcript_view().remove_block(notice)
+        self._stop_notice = NoticeBlock(text, kind)
+        self._append_block(self._stop_notice)
+
+    def _is_on_screen(self, block: Widget) -> bool:
+        """Whether ``block`` currently occupies rows the user can see.
+
+        Compared against the TRANSCRIPT's own viewport rather than the screen's:
+        the transcript is the scrolling container, so a block scrolled past its
+        fold is out of sight even though it is mounted and inside the app.
+
+        ``block.region`` is already SCREEN-relative — Textual has resolved the
+        scroll offset into it — so the comparison is against the container's
+        on-screen rectangle (``view.region``), not its ``window_region``, which
+        is expressed in the scrolled virtual coordinate space. Mixing the two
+        compares a viewport row number against a virtual one and answers "never
+        visible" for every block once the transcript has scrolled at all.
+
+        Never raises. This runs on a keystroke, and a geometry question that
+        cannot be answered must not be able to swallow a stop — an unanswerable
+        one reports "not visible", which costs a moved row and never a lost
+        press.
+        """
+        try:
+            view = self._transcript_view()
+            region = block.region
+            if not region.height:
+                return False
+            return region.overlaps(view.region)
+        except Exception:  # noqa: BLE001 — visibility is advisory, never fatal
+            logger.debug("could not resolve stop-notice visibility", exc_info=True)
+            return False
 
     # -- tool approvals -------------------------------------------------------
     async def request_tool_approval(
@@ -4179,6 +4601,14 @@ class OperatorApp(App[None]):
         # again. Cancelling frees both.
         self._settle_key_prompt()
         self._exit_hint = None  # its widget went with the transcript
+        # The stop ladder's line went with it, for the same reason. Left set,
+        # `_replace_stop_notice` would try to remove a block the transcript no
+        # longer holds. The OFFER is dropped with it: the line that explained
+        # what a second Esc would do is no longer on screen, and an escalation
+        # the user can no longer see the terms of must not stay armed.
+        self._stop_notice = None
+        self._stop_offered_at = None
+        self._stop_offer_count = 0
         self._streaming_block = None
         self._tool_cards = {}
         self._composing_cards = {}

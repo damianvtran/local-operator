@@ -16,6 +16,7 @@ touches nothing the user opened over it.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from textual.app import ComposeResult
@@ -244,3 +245,40 @@ async def test_escape_answers_the_prompt_the_user_is_looking_at() -> None:
             await asked
         except (asyncio.CancelledError, Exception):
             pass
+
+
+@pytest.mark.asyncio
+async def test_escape_skips_a_live_question_rather_than_escalating_the_stop() -> None:
+    """The two Escape meanings must not collide.
+
+    The stop ladder's second press cancels every subagent, and an `ask` picker
+    can be on screen while that offer is armed — a delegated child is exactly
+    the kind of work that raises a question. Escape has to keep meaning "skip
+    this question" there, which is what the card's own footer advertises;
+    escalating instead would destroy delegated work from a keypress the user
+    read as answering the agent.
+
+    The ordering in `action_stop` is what guarantees it, so this pins the
+    behaviour rather than the branch: with the offer armed AND a question up,
+    one press settles the question and cancels nothing.
+    """
+    session = FakeSession()
+    session.running_children = 2
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause()
+        # Arm the ladder exactly as a first Esc during a turn would.
+        app._stop_offered_at = time.monotonic()
+        asked = asyncio.create_task(app.request_user_choice([_question()]))
+        await pilot.pause()
+        await pilot.pause()
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert await asyncio.wait_for(asked, 2) is None, "the question was not skipped"
+        assert (
+            session.subagent_cancels == []
+        ), "Escape on a live question escalated the stop and killed the subagents"
+        # The offer is untouched, so the user can still take it deliberately.
+        assert app._stop_offered_at is not None

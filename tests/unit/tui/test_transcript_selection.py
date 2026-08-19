@@ -1806,3 +1806,162 @@ async def test_a_receipt_promoted_from_the_hold_can_still_be_retired() -> None:
 
         assert toast.message == ""
         assert toast.display is False
+
+
+@pytest.mark.asyncio
+async def test_a_new_selection_after_a_copy_does_not_rearm_the_interrupt() -> None:
+    """D22, design review round 7. The deferral belongs to ONE highlight.
+
+    Ctrl+C hands the key to an in-flight copy, and the composer's copy lands on
+    mouse release — so the deferral has to outlive the release by exactly as
+    long as the copy's own highlight is on screen. Testing "`_copied` and *a*
+    selection" was one predicate too weak: after the copied range was collapsed
+    by a caret move, an unrelated shift+arrow selection re-armed the deferral,
+    so the first press aborted instead of clearing and the second QUIT with the
+    draft unfiled. Two pixel-identical frames carried opposite meanings.
+
+    Driven with a real drag, so `_copied` is set by the widget's own
+    `_copy_drag` rather than by the test.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
+        assert editor._copy_gesture, "the drag should have started a copy gesture"
+
+        # The caret moves, collapsing the copied range...
+        await pilot.press("right")
+        await pilot.pause()
+        # ...and the user makes a NEW, unrelated selection with the keyboard.
+        await pilot.press("shift+end")
+        await pilot.pause()
+        assert editor.selected_text, "the new selection must be live to mean anything"
+        # The watcher retired the GESTURE claim when the caret moved off the
+        # range it took, and an unrelated selection cannot resurrect it. The
+        # receipt flag is deliberately untouched: the clipboard still holds what
+        # it took, so the toast is still true (R18-1).
+        assert not editor._copy_gesture, "an unrelated selection kept the gesture claim alive"
+        assert editor._copied, "the receipt was destroyed along with the gesture"
+
+        session.aborts.clear()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert session.aborts == [], "an unrelated selection re-armed the copy deferral"
+        assert editor.text == "", "the draft was not cleared"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.is_running, "the second tap quit with the draft unfiled"
+
+
+@pytest.mark.asyncio
+async def test_a_blurred_composer_still_paints_the_copy_it_is_deferring_to() -> None:
+    """D25, design review round 8. "On screen" must not quietly become "focused".
+
+    Ctrl+C hands the key to a copy while the highlight that copy took is still
+    VISIBLE, and the user learns that rule from the pixels. Blur is the one
+    place where "on screen" and "focused" come apart: the composer can lose
+    focus with its selection still painted, and the deferral correctly follows
+    the paint rather than the focus.
+
+    That makes the promise true today by a property nothing pins — a future
+    change to blurred-selection styling would silently turn this into the fifth
+    lost draft in this rung's history. This asserts the paint, so such a change
+    fails here loudly instead.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
+        assert editor._copy_gesture, "the drag should have started a copy gesture"
+
+        def selection_is_painted() -> bool:
+            """Is the composer's selection tint anywhere on its row?
+
+            Text alone would not catch a regression here — a composer that
+            stopped HIGHLIGHTING its selection still paints the same
+            characters, so the STYLE is the whole subject. The tint is read
+            from the live paint while focused rather than hard-coded, so a
+            theme change cannot turn this into a false alarm.
+            """
+            row = editor.region.y
+            strip = app.screen._compositor.render_strips()[row]
+            return tint in {
+                str(segment.style.bgcolor)
+                for segment in strip
+                if segment.style is not None and segment.style.bgcolor is not None
+            }
+
+        row = editor.region.y
+        focused_strip = app.screen._compositor.render_strips()[row]
+        tints = [
+            str(segment.style.bgcolor)
+            for segment in focused_strip
+            if segment.style is not None and segment.style.bgcolor is not None
+        ]
+        assert tints, "the focused composer painted no selection tint at all"
+        tint = tints[0]
+
+        # Blur the composer WITHOUT touching the selection.
+        app.set_focus(None)
+        await pilot.pause()
+        assert not editor.has_focus, "the composer should be blurred"
+        assert editor.selected_text, "blur must not clear the selection itself"
+
+        # The highlight the deferral promises the user is still on screen, so
+        # the rule the comment states still describes what they can see.
+        assert selection_is_painted(), (
+            "a blurred composer stopped painting the copy's highlight, so the "
+            "Ctrl+C deferral now rests on state the user cannot see"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_receipt_retires_even_when_the_caret_moved_before_the_edit() -> None:
+    """R18-1, agent review round 18. Two claims, two lifetimes, one flag each.
+
+    The copy receipt is edit-scoped: it asserts something about text the user
+    can still see, so the first edit to that text withdraws it (design round 1,
+    D3). The Ctrl+C deferral is gesture-scoped: it ends when the highlight the
+    copy took stops being the highlight on screen.
+
+    Pointing the single `_copied` flag at the gesture lifetime gave the right
+    answer to the second question and destroyed the first — a caret move
+    retired the receipt's flag, so a later edit had nothing left to withdraw and
+    the toast sat there claiming a copy of characters that no longer existed.
+
+    Every other D3 test edits immediately after the drag with the highlight
+    still up, which is the one path a selection watcher leaves alone. This is
+    the path that was broken: caret move FIRST, edit second.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
+        assert editor._copied, "the drag should have posted a receipt"
+
+        # The caret moves off the copied range, retiring the GESTURE claim only.
+        await pilot.press("right")
+        await pilot.pause()
+        assert not editor._copy_gesture, "the gesture claim should have retired"
+        assert editor._copied, "the receipt is still true and must survive a caret move"
+
+        # NOW the user edits the copied characters away.
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert not editor._copied, (
+            "the receipt outlived the text it describes: a caret move before the "
+            "edit left nothing for the edit to withdraw"
+        )
+        rows = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert not any(
+            "copied" in row.lower() for row in rows
+        ), f"a stale copy receipt is still painted: {[r for r in rows if 'copied' in r.lower()]}"

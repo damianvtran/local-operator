@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import json
 import sys
 from collections.abc import Callable, Sequence
@@ -19,6 +20,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from rich.console import Console
 
 from local_operator import exec_mode, exec_worker
 from local_operator.exec_mode import ExecArgs, build_worker_argv, slugify
@@ -33,6 +35,7 @@ from local_operator.harness.types import (
     MessageStartEvent,
     MessageUpdateEvent,
     ModelSpec,
+    NoticeEvent,
     TextContent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -145,7 +148,16 @@ class FakeSession:
     def abort(self, reason: str = "interrupted") -> None:
         pass
 
+    def cancel_subagents(self, reason: str = "interrupted") -> int:
+        """No subagents in this fake; the protocol requires the method."""
+        return 0
+
+    def running_subagents(self) -> int:
+        """No subagents in this fake; the protocol requires the method."""
+        return 0
+
     # events
+
     def subscribe(self, handler: Any) -> Any:
         self.handlers.append(handler)
 
@@ -374,6 +386,127 @@ def test_run_exec_prompt_raising_exits_one(fake_factory, capsys) -> None:
     code = exec_mode.run_exec("explode", ExecArgs())
     assert code == 1
     assert "turn blew up" in capsys.readouterr().err
+
+
+def test_an_error_notice_is_marked_by_a_glyph_not_only_by_colour() -> None:
+    """Design round 3, D11. Piped logs and NO_COLOR strip the only signal.
+
+    This renderer writes to a real terminal, but its output is also redirected
+    into logs and read with colour disabled — and there an error notice was
+    byte-identical to an informational one. It matters most for the line that
+    prompted it: an unrunnable tool call used to print `✗ <name> failed`, which
+    DID carry a marker, so moving that diagnostic onto a notice dropped one.
+
+    `info` stays bare on purpose: a marker on every routine line is noise, and
+    it is the one kind with nothing to warn about.
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, no_color=True, highlight=False, width=100)
+    renderer = PrintRenderer(json_mode=False, console=console)
+
+    renderer.handle(NoticeEvent(text="Tool not found: reed_file", kind="error"))
+    renderer.handle(NoticeEvent(text="running low on context", kind="warning"))
+    renderer.handle(NoticeEvent(text="compacted", kind="info"))
+
+    lines = buffer.getvalue().splitlines()
+    assert lines[0] == "✗ Tool not found: reed_file"
+    assert lines[1] == "! running low on context"
+    assert lines[2] == "compacted"
+
+
+def test_a_notice_cannot_smuggle_control_sequences_to_the_terminal() -> None:
+    """Round 7, R7-1. Notice text is no longer only ours.
+
+    The unrunnable-call diagnostic carries a MODEL-CHOSEN tool name, so an
+    erase-display escape inside it reaches a real terminal and clears the
+    operator's screen. The `✗ <name> failed` line this diagnostic replaced was
+    stripped for exactly that reason; moving the message onto a notice moved it
+    off the guard.
+
+    Asserted on the RENDERER rather than the producer, because that is where
+    the guard now lives: the next notice to carry untrusted text should not
+    have to remember to sanitize itself.
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, no_color=True, highlight=False, width=100)
+    renderer = PrintRenderer(json_mode=False, console=console)
+
+    renderer.handle(NoticeEvent(text="Tool not found: ru\x1b[2Jn", kind="error"))
+
+    out = buffer.getvalue()
+    assert "\x1b" not in out, f"a control sequence reached the terminal: {out!r}"
+    assert "2J" not in out, f"an erase-display escape survived stripping: {out!r}"
+    # The message itself still arrives, with its severity marker.
+    assert out.startswith("✗ Tool not found: ")
+
+
+def test_a_notice_cannot_forge_a_row_or_crash_the_renderer() -> None:
+    """Design round 4, D14/D15. The tool name in a notice is model-chosen.
+
+    Three hazards beyond control sequences, all reachable from a hallucinated
+    tool name and none covered by stripping alone:
+
+    * square brackets are Rich MARKUP — `[bold]x` renders the wrong name, and
+      `[/red]oops` raises `MarkupError` inside the renderer, which the session's
+      emit path swallows, so the notice disappears entirely. That is the exact
+      silence this diagnostic exists to prevent;
+    * newlines survive stripping by design, so a name containing one forges a
+      second, unmarked row that can read as a clean success;
+    * both were pre-existing on the `✗ <name> failed` line this replaced.
+    """
+
+    def render(name: str) -> str:
+        buffer = io.StringIO()
+        console = Console(file=buffer, no_color=True, highlight=False, width=100)
+        PrintRenderer(json_mode=False, console=console).handle(
+            NoticeEvent(text=f"Tool not found: {name}", kind="error")
+        )
+        return buffer.getvalue()
+
+    # Unbalanced markup must not raise, and must not be interpreted.
+    assert render("[/red]oops") == "✗ Tool not found: [/red]oops\n"
+    # Balanced markup must not be interpreted either — the name is shown as-is.
+    assert render("[bold]x") == "✗ Tool not found: [bold]x\n"
+    # A newline must not forge a second row that carries its own claim.
+    forged = render("a\n✓ 3 subagents finished cleanly")
+    assert forged.count("\n") == 1, f"the name forged an extra row: {forged!r}"
+    assert forged.startswith("✗ ")
+
+
+def test_no_renderer_branch_interprets_a_tool_name_as_markup() -> None:
+    """Round 14, R14-2. The rule has to hold for every branch, not the newest.
+
+    The tool NAME is model-chosen, and a `[` in it is Rich markup: `[/red]x`
+    raises `MarkupError`, which the session's emit path swallows, so the row
+    vanishes and the operator watches a tool run with no line at all. The
+    notice branch was fixed for D14; the two tool-event branches above it had
+    the same defect (pre-existing on main) and the fix's own comment
+    generalised the rule further than the code did.
+    """
+    name = "[/red]oops"
+
+    def render(event: object) -> str:
+        buffer = io.StringIO()
+        console = Console(file=buffer, no_color=True, highlight=False, width=100)
+        PrintRenderer(json_mode=False, console=console).handle(event)  # type: ignore[arg-type]
+        return buffer.getvalue()
+
+    started = render(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name=name, args={}, intent="do it")
+    )
+    assert started == "● [/red]oops do it\n"
+
+    result = ToolResult(
+        tool_call_id="c1", tool_name=name, is_error=True, content=[TextContent(text="x")]
+    )
+    ended = render(
+        ToolExecutionEndEvent(tool_call_id="c1", tool_name=name, result=result, is_error=True)
+    )
+    assert ended == "✗ [/red]oops failed\n"
+
+    assert render(NoticeEvent(text=f"Tool not found: {name}", kind="error")) == (
+        "✗ Tool not found: [/red]oops\n"
+    )
 
 
 def test_renderer_tracks_failure() -> None:

@@ -44,6 +44,32 @@ from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.conftest import caret_cells, chevron_colour, composer_cells
 
 
+class _FakeJobs:
+    """The slice of ``AsyncJobManager`` the app reads: ``list()`` of rows.
+
+    Rows are derived from ``running_children`` so a test states the fact it
+    cares about ("two children are up") instead of assembling job models.
+
+    ``running_bash_jobs`` does the same for backgrounded shell work, which the
+    stop ladder deliberately SPARES and now names when confirming a stop — so a
+    test needs to be able to say "a build is also running" as plainly.
+    """
+
+    def __init__(self, session: "FakeSession") -> None:
+        self._session = session
+
+    def list(self) -> list[Any]:
+        rows = [
+            SimpleNamespace(id=f"job{i}", status="running", type="task", queued=False)
+            for i in range(self._session.running_children)
+        ]
+        rows += [
+            SimpleNamespace(id=f"bash{i}", status="running", type="bash", queued=False)
+            for i in range(self._session.running_bash_jobs)
+        ]
+        return rows
+
+
 class FakeSession:
     """Records prompts/aborts; satisfies SessionProtocol."""
 
@@ -53,6 +79,19 @@ class FakeSession:
     def __init__(self) -> None:
         self.prompts: list[str] = []
         self.aborts: list[str] = []
+        #: Reasons passed to `cancel_subagents`, and how many children the next
+        #: call should report stopping. Staged by tests that exercise the Esc
+        #: ladder's second press.
+        self.subagent_cancels: list[str] = []
+        self.running_children = 0
+        #: Backgrounded `bash` jobs, which Esc never stops (`background=true`
+        #: exists so a build outlives the turn). Staged separately from
+        #: `running_children` because the ladder treats them as opposites.
+        self.running_bash_jobs = 0
+        #: The job ledger the app counts children in. A real manager's rows are
+        #: what `_job_count` reads, so the fake presents the same shape rather
+        #: than having the app special-case a test double.
+        self.jobs = _FakeJobs(self)
         self.completions: list[tuple[str, str]] = []
         self.asides: list[list[Any]] = []
         self.adopted: list[list[Any]] = []
@@ -138,6 +177,22 @@ class FakeSession:
 
     def abort(self, reason: str = "interrupted") -> None:
         self.aborts.append(reason)
+
+    def running_subagents(self) -> int:
+        """The count the stop ladder offers. Staged by tests via
+        ``running_children``, mirroring the real session's single predicate."""
+        return self.running_children
+
+    def cancel_subagents(self, reason: str = "interrupted") -> int:
+        """Record the wider stop and report how many children it stopped.
+
+        Reports the SAME number ``running_subagents`` would, which is the
+        invariant the real session guarantees by sharing one predicate.
+        """
+        self.subagent_cancels.append(reason)
+        stopped = self.running_children
+        self.running_children = 0
+        return stopped
 
     def subscribe(self, handler: Any) -> Any:
         self._handlers.append(handler)

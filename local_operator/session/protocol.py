@@ -249,6 +249,29 @@ class SessionProtocol(Protocol):
         """Abort the running turn; the engine emits an aborted agent_end."""
         ...
 
+    def cancel_subagents(self, reason: str = "interrupted") -> int:
+        """Cancel every running subagent; returns how many were stopped.
+
+        Separate from :meth:`abort`, which stops only THIS session's turn. A
+        subagent is a child session with its own turn and its own spend, so a
+        stopped parent does not stop it. Backgrounded ``bash`` jobs are not
+        touched — ``background=true`` exists to outlive the turn.
+
+        The count is part of the contract: a host prints it, and "nothing was
+        running" has to be distinguishable from "children were stopped".
+        """
+        ...
+
+    def running_subagents(self) -> int:
+        """How many subagents :meth:`cancel_subagents` would stop right now.
+
+        The counterpart to that call, so a host can OFFER the stop ("N still
+        running — press again") with the same number the stop will report. The
+        two must come from one predicate or the confirmation can contradict the
+        offer the user just acted on.
+        """
+        ...
+
     def set_approval_handler(self, handler: ApprovalGate | None) -> None:
         """Replace the host's tool-approval gate for write/exec tier tools.
 
