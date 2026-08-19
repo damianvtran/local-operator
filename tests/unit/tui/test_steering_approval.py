@@ -2958,11 +2958,13 @@ async def test_moving_the_caret_after_a_copy_gives_ctrl_c_back_to_the_draft() ->
         await pilot.press("right")
         await pilot.pause()
         assert not editor.selected_text, "the highlight should be gone"
-        # `_copied` is retired by the selection watcher the moment the highlight
-        # it took stops being the one on screen, which is the root-cause fix for
-        # this family of bugs. The assertion that matters is the BEHAVIOUR
-        # below, not which flag carries it.
-        assert not editor._copied, "the copy claim should retire with its highlight"
+        # The GESTURE claim retires with the highlight it took; the RECEIPT
+        # flag does not, because the toast it drives is still true (the text
+        # really is on the clipboard). Asserting both is what keeps the two
+        # lifetimes from being fused again — doing so cost a stale receipt once
+        # already (R18-1).
+        assert not editor._copy_gesture, "the gesture claim should retire with its highlight"
+        assert editor._copied, "the receipt is still true and must not be retired here"
 
         await pilot.press("ctrl+c")
         await pilot.pause(0.1)

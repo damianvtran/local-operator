@@ -1829,7 +1829,7 @@ async def test_a_new_selection_after_a_copy_does_not_rearm_the_interrupt() -> No
         await pilot.pause()
         editor = await _composer(app, pilot, "summarise the ingest path please")
         await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
-        assert editor._copied, "the drag should have copied"
+        assert editor._copy_gesture, "the drag should have started a copy gesture"
 
         # The caret moves, collapsing the copied range...
         await pilot.press("right")
@@ -1838,10 +1838,12 @@ async def test_a_new_selection_after_a_copy_does_not_rearm_the_interrupt() -> No
         await pilot.press("shift+end")
         await pilot.pause()
         assert editor.selected_text, "the new selection must be live to mean anything"
-        # The watcher retired the copy claim when the caret moved off the range
-        # it took; the unrelated selection cannot resurrect it. Asserted because
-        # three previous attempts died on `_copied` outliving its own highlight.
-        assert not editor._copied, "an unrelated selection kept the copy claim alive"
+        # The watcher retired the GESTURE claim when the caret moved off the
+        # range it took, and an unrelated selection cannot resurrect it. The
+        # receipt flag is deliberately untouched: the clipboard still holds what
+        # it took, so the toast is still true (R18-1).
+        assert not editor._copy_gesture, "an unrelated selection kept the gesture claim alive"
+        assert editor._copied, "the receipt was destroyed along with the gesture"
 
         session.aborts.clear()
         await pilot.press("ctrl+c")
@@ -1876,7 +1878,7 @@ async def test_a_blurred_composer_still_paints_the_copy_it_is_deferring_to() -> 
         await pilot.pause()
         editor = await _composer(app, pilot, "summarise the ingest path please")
         await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
-        assert editor._copied, "the drag should have copied"
+        assert editor._copy_gesture, "the drag should have started a copy gesture"
 
         def selection_is_painted() -> bool:
             """Is the composer's selection tint anywhere on its row?
@@ -1917,3 +1919,49 @@ async def test_a_blurred_composer_still_paints_the_copy_it_is_deferring_to() -> 
             "a blurred composer stopped painting the copy's highlight, so the "
             "Ctrl+C deferral now rests on state the user cannot see"
         )
+
+
+@pytest.mark.asyncio
+async def test_a_receipt_retires_even_when_the_caret_moved_before_the_edit() -> None:
+    """R18-1, agent review round 18. Two claims, two lifetimes, one flag each.
+
+    The copy receipt is edit-scoped: it asserts something about text the user
+    can still see, so the first edit to that text withdraws it (design round 1,
+    D3). The Ctrl+C deferral is gesture-scoped: it ends when the highlight the
+    copy took stops being the highlight on screen.
+
+    Pointing the single `_copied` flag at the gesture lifetime gave the right
+    answer to the second question and destroyed the first — a caret move
+    retired the receipt's flag, so a later edit had nothing left to withdraw and
+    the toast sat there claiming a copy of characters that no longer existed.
+
+    Every other D3 test edits immediately after the drag with the highlight
+    still up, which is the one path a selection watcher leaves alone. This is
+    the path that was broken: caret move FIRST, edit second.
+    """
+    session = FakeSession()
+    app = _pilot_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = await _composer(app, pilot, "summarise the ingest path please")
+        await _composer_drag(app, pilot, _cell(editor, 0, 0), _cell(editor, 0, 20))
+        assert editor._copied, "the drag should have posted a receipt"
+
+        # The caret moves off the copied range, retiring the GESTURE claim only.
+        await pilot.press("right")
+        await pilot.pause()
+        assert not editor._copy_gesture, "the gesture claim should have retired"
+        assert editor._copied, "the receipt is still true and must survive a caret move"
+
+        # NOW the user edits the copied characters away.
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert not editor._copied, (
+            "the receipt outlived the text it describes: a caret move before the "
+            "edit left nothing for the edit to withdraw"
+        )
+        rows = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert not any(
+            "copied" in row.lower() for row in rows
+        ), f"a stale copy receipt is still painted: {[r for r in rows if 'copied' in r.lower()]}"

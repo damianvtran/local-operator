@@ -591,7 +591,15 @@ class Editor(TextArea):
         #: user's copied draft on the widget buys nothing (review round 2, F9).
         #: See :meth:`edit` and :meth:`load_text`.
         self._copied = False
-        #: The selection `_copy_drag` took, when `_copied` is set. See there.
+        #: The GESTURE claim, distinct from the receipt flag above and with a
+        #: different lifetime. `_copied` answers "is the receipt on screen still
+        #: true?", which ends at the first EDIT to the copied text. This answers
+        #: "is a hand still completing a copy?", which ends as soon as the
+        #: highlight the copy took stops being the highlight on screen. Fusing
+        #: them gave one of the two the wrong lifetime in whichever direction
+        #: the fusion leaned (R18-1, agent review round 18).
+        self._copy_gesture = False
+        #: The selection `_copy_drag` took, while `_copy_gesture` holds.
         self._copied_selection: Selection | None = None
         self.set_commands(commands or [])
 
@@ -1575,6 +1583,7 @@ class Editor(TextArea):
         if not text:
             return
         self._copied = True
+        self._copy_gesture = True
         # WHICH range the copy took, so `watch_selection` can tell this copy's
         # own highlight from any later one and retire the claim when it goes.
         # Without that distinction a shift+arrow selection made after the copied
@@ -1602,7 +1611,7 @@ class Editor(TextArea):
         true, so neither flag can outlive the gesture the way three earlier
         predicates did.
         """
-        return self._selecting or self._copied
+        return self._selecting or self._copy_gesture
 
     def watch_selection(self, selection: Selection) -> None:
         """Retire the copy receipt's GESTURE claim when the highlight changes.
@@ -1621,7 +1630,11 @@ class Editor(TextArea):
 
         Deliberately NOT posting ``EditorCopyStale``: moving the caret is not
         the user editing the text their receipt describes, so the toast remains
-        true and stays up. Only the gesture claim ends here.
+        true and stays up. Only ``_copy_gesture`` ends here, and it is a
+        SEPARATE field from ``_copied`` for exactly that reason — pointing the
+        receipt flag at this lifetime left a receipt on screen asserting a copy
+        of characters the user had since deleted, which is design round 1's D3
+        verbatim (R18-1, agent review round 18).
         """
         super_watch = getattr(super(), "watch_selection", None)
         if super_watch is not None:
@@ -1629,10 +1642,10 @@ class Editor(TextArea):
         # `getattr` with a default because a reactive watcher can fire during
         # base-class construction, before this subclass has set its own
         # attributes — an AttributeError there takes the whole widget down.
-        if getattr(self, "_copied", False) and selection != getattr(
+        if getattr(self, "_copy_gesture", False) and selection != getattr(
             self, "_copied_selection", None
         ):
-            self._copied = False
+            self._copy_gesture = False
             self._copied_selection = None
 
     # -- paste ----------------------------------------------------------------
@@ -1833,6 +1846,7 @@ class Editor(TextArea):
         result = super().edit(edit)
         if stale_receipt:
             self._copied = False
+            self._copy_gesture = False
             self._copied_selection = None
             self.post_message(EditorCopyStale())
         self._sync_picker()
@@ -1903,6 +1917,7 @@ class Editor(TextArea):
         up, is about a copy that remains perfectly true.
         """
         self._copied = False
+        self._copy_gesture = False
         self._copied_selection = None
         super().load_text(text)
         self._sync_picker()
