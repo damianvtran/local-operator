@@ -248,7 +248,9 @@ class TestRenderBlock:
         ]
         assert render_block(skills) == (
             "Skills are specialized knowledge. If one matches your task, you MUST read "
-            "`skill://<name>` before proceeding.\n"
+            "`skill://<name>` before proceeding. The skill body ends with its "
+            "reference files; read those with `skill://<name>/<path>`, never a "
+            "raw filesystem path.\n"
             "<skills>\n"
             "- alpha: first skill\n"
             "- beta: second skill\n"

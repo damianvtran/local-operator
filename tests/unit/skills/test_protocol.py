@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.skills import protocol
 from local_operator.skills.discovery import Skill
 from local_operator.skills.protocol import MAX_READ_BYTES, resolve_skill_url
 
@@ -271,6 +272,203 @@ class TestTruncation:
         content = resolve_skill_url("skill://alpha/exact.txt", skills)
         assert content is not None
         assert content == "y" * MAX_READ_BYTES
+
+
+class TestReferenceListing:
+    """A bare read discloses the skill's reference files as PROTOCOL paths.
+
+    The gap this closes: after reading `skill://<name>`, a model that saw
+    references mentioned in the body used to guess raw filesystem paths
+    (wrong on any machine with a different skills root). The bare read now
+    ends with the exact `skill://<name>/<relpath>` form for every reference,
+    so the protocol read is the discoverable next step.
+    """
+
+    def test_bare_read_lists_references(self, skills: dict[str, Skill]) -> None:
+        base = skills["alpha"].base_dir
+        refs = base / "references"
+        refs.mkdir()
+        (refs / "admin-api.md").write_text("# Admin API", encoding="utf-8")
+        (base / "NOTES.md").write_text("notes", encoding="utf-8")
+        content = resolve_skill_url("skill://alpha", skills)
+        assert content is not None
+        # Body still present, listing appended after it.
+        assert "# Test skill body" in content
+        assert "skill://alpha/<path>" in content
+        assert "references/admin-api.md" in content
+        assert "NOTES.md" in content
+        assert content.index("# Test skill body") < content.index("references/admin-api.md")
+
+    def test_listed_paths_resolve_via_protocol(self, skills: dict[str, Skill]) -> None:
+        # The listing must never advertise a path the resolver then rejects.
+        base = skills["alpha"].base_dir
+        refs = base / "references"
+        refs.mkdir()
+        (refs / "guide.md").write_text("ref body", encoding="utf-8")
+        content = resolve_skill_url("skill://alpha", skills)
+        assert content is not None and "references/guide.md" in content
+        assert resolve_skill_url("skill://alpha/references/guide.md", skills) == "ref body"
+
+    def test_body_only_skill_is_byte_identical(self, skills: dict[str, Skill]) -> None:
+        # No reference files -> no listing, no trailing separator: the
+        # pre-listing output is preserved byte for byte.
+        body = skills["alpha"].file_path.read_text(encoding="utf-8")
+        assert resolve_skill_url("skill://alpha", skills) == body
+
+    def test_skill_md_itself_not_listed(self, skills: dict[str, Skill]) -> None:
+        base = skills["alpha"].base_dir
+        (base / "extra.md").write_text("x", encoding="utf-8")
+        content = resolve_skill_url("skill://alpha", skills)
+        assert content is not None
+        # Anchor on the listing header, not on "---" (frontmatter and
+        # horizontal rules use the same delimiter).
+        listing = content.split("Reference files (read with")[-1]
+        assert "SKILL.md" not in listing
+        assert "extra.md" in listing
+
+    def test_dotfiles_not_listed(self, skills: dict[str, Skill]) -> None:
+        base = skills["alpha"].base_dir
+        (base / ".secret").write_text("hidden", encoding="utf-8")
+        hidden_dir = base / ".git"
+        hidden_dir.mkdir()
+        (hidden_dir / "config").write_text("repo", encoding="utf-8")
+        (base / "visible.md").write_text("v", encoding="utf-8")
+        content = resolve_skill_url("skill://alpha", skills)
+        assert content is not None
+        assert ".secret" not in content
+        assert ".git" not in content
+        assert "visible.md" in content
+
+    def test_escaping_symlinked_directory_not_followed(self, tmp_path: Path) -> None:
+        # A symlink pointing outside base_dir must not leak foreign paths
+        # into the listing (the resolver would reject reading them anyway).
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "leak.md").write_text("leak", encoding="utf-8")
+        skill = _make_skill(tmp_path, "linky")
+        (skill.base_dir / "escape").symlink_to(outside, target_is_directory=True)
+        content = resolve_skill_url("skill://linky", {"linky": skill})
+        assert content is not None
+        assert "leak.md" not in content
+
+    def test_escaping_symlinked_file_not_listed(self, tmp_path: Path) -> None:
+        # R1-1: a symlinked FILE whose target escapes base_dir passes
+        # is_file() (which follows links) but _resolve_child rejects reading
+        # it — so listing it would advertise a guaranteed failure. The
+        # listing applies the resolver's own containment check instead.
+        outside = tmp_path / "outside-file.md"
+        outside.write_text("secret", encoding="utf-8")
+        skill = _make_skill(tmp_path, "filelink")
+        (skill.base_dir / "escape.md").symlink_to(outside)
+        content = resolve_skill_url("skill://filelink", {"filelink": skill})
+        assert content is not None
+        assert "escape.md" not in content
+
+    def test_internal_symlinks_listed_and_followed(self, tmp_path: Path) -> None:
+        # R1-3: symlinks resolving INSIDE base_dir are readable by the
+        # resolver, so hiding them would be the reverse parity gap. Both a
+        # linked file and a linked directory must appear.
+        skill = _make_skill(tmp_path, "inlink")
+        base = skill.base_dir
+        (base / "real.md").write_text("real", encoding="utf-8")
+        (base / "alias.md").symlink_to(base / "real.md")
+        subdir = base / "docs"
+        subdir.mkdir()
+        (subdir / "inner.md").write_text("inner", encoding="utf-8")
+        (base / "docs-link").symlink_to(subdir, target_is_directory=True)
+        content = resolve_skill_url("skill://inlink", {"inlink": skill})
+        assert content is not None
+        assert "alias.md" in content
+        assert "docs/inner.md" in content
+        assert resolve_skill_url("skill://inlink/alias.md", {"inlink": skill}) == "real"
+
+    def test_symlink_cycle_terminates(self, tmp_path: Path) -> None:
+        # An internal directory link cycle must not hang or duplicate the
+        # walk: resolved directories are visited at most once.
+        skill = _make_skill(tmp_path, "cycle")
+        base = skill.base_dir
+        subdir = base / "docs"
+        subdir.mkdir()
+        (subdir / "page.md").write_text("p", encoding="utf-8")
+        (subdir / "loop").symlink_to(base, target_is_directory=True)
+        content = resolve_skill_url("skill://cycle", {"cycle": skill})
+        assert content is not None
+        assert content.count("docs/page.md") == 1
+
+    def test_special_characters_round_trip(self, skills: dict[str, Skill]) -> None:
+        # R1-2: a filename with '#' or '%' must be listed in a form the URL
+        # parser survives — urlsplit treats a raw '#' as a fragment and
+        # unquote mangles a raw '%'. The listing percent-encodes, and the
+        # encoded path must actually resolve.
+        base = skills["alpha"].base_dir
+        (base / "notes #1.md").write_text("hash", encoding="utf-8")
+        (base / "100%.md").write_text("percent", encoding="utf-8")
+        content = resolve_skill_url("skill://alpha", skills)
+        assert content is not None
+        listing = content.split("Reference files (read with")[-1]
+        listed = [line for line in listing.splitlines() if line.endswith(".md")]
+        assert "notes%20%231.md" in listed
+        assert "100%25.md" in listed
+        assert resolve_skill_url("skill://alpha/notes%20%231.md", skills) == "hash"
+        assert resolve_skill_url("skill://alpha/100%25.md", skills) == "percent"
+
+    def test_directory_listing_names_round_trip(self, skills: dict[str, Skill]) -> None:
+        # R2-2: the child-path DIRECTORY listing is where the overflow marker
+        # sends the model, so its names must survive the same URL round-trip
+        # as the bare-read listing — a raw '#' name copied from it would be
+        # cut at the fragment and fail to resolve.
+        refs = skills["alpha"].base_dir / "references"
+        refs.mkdir()
+        (refs / "notes #1.md").write_text("hash", encoding="utf-8")
+        listing = resolve_skill_url("skill://alpha/references", skills)
+        assert listing is not None
+        assert "notes%20%231.md" in listing
+        assert resolve_skill_url("skill://alpha/references/notes%20%231.md", skills) == "hash"
+
+    def test_symlink_alias_of_body_file_not_listed(self, tmp_path: Path) -> None:
+        # R2-3: a symlink whose resolved target IS the body file re-offers
+        # content the caller just returned; exclude it like the body file
+        # itself (resolved-target equality, not path equality).
+        skill = _make_skill(tmp_path, "bodylink")
+        (skill.base_dir / "readme.md").symlink_to(skill.file_path)
+        (skill.base_dir / "real-ref.md").write_text("r", encoding="utf-8")
+        content = resolve_skill_url("skill://bodylink", {"bodylink": skill})
+        assert content is not None
+        assert "readme.md" not in content
+        assert "real-ref.md" in content
+
+    def test_listing_bounded_with_overflow_marker(self, skills: dict[str, Skill]) -> None:
+        base = skills["alpha"].base_dir
+        refs = base / "references"
+        refs.mkdir()
+        for i in range(protocol._MAX_REFERENCE_ENTRIES + 20):
+            (refs / f"ref-{i:04d}.md").write_text("r", encoding="utf-8")
+        content = resolve_skill_url("skill://alpha", skills)
+        assert content is not None
+        listed = [line for line in content.splitlines() if line.startswith("references/ref-")]
+        assert len(listed) == protocol._MAX_REFERENCE_ENTRIES
+        assert "more files not shown" in content
+
+    def test_depth_capped(self, skills: dict[str, Skill]) -> None:
+        base = skills["alpha"].base_dir
+        deep = base / "a" / "b" / "c" / "d"
+        deep.mkdir(parents=True)
+        (base / "a" / "shallow.md").write_text("s", encoding="utf-8")
+        (deep / "too-deep.md").write_text("d", encoding="utf-8")
+        content = resolve_skill_url("skill://alpha", skills)
+        assert content is not None
+        assert "a/shallow.md" in content
+        assert "too-deep.md" not in content
+
+    def test_child_path_reads_unchanged(self, skills: dict[str, Skill]) -> None:
+        # The listing rides only the BARE read; a child read returns the file
+        # alone, and a directory read returns the flat listing as before.
+        base = skills["alpha"].base_dir
+        refs = base / "references"
+        refs.mkdir()
+        (refs / "one.md").write_text("one", encoding="utf-8")
+        assert resolve_skill_url("skill://alpha/references/one.md", skills) == "one"
+        assert resolve_skill_url("skill://alpha/references", skills) == "one.md"
 
 
 if __name__ == "__main__":
