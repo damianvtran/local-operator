@@ -88,12 +88,20 @@ class SessionProtocol(Protocol):
         ...
 
     def set_model(self, model: ModelSpec) -> None:
-        """Swap the model spec; takes effect from the next turn onward.
+        """Swap the model spec; in force from the very next provider call.
 
         The TUI's ``/model <provider>/<id>`` path calls this after building a
-        new spec — the loop reads the spec fresh on every turn, so no session
-        teardown is required. Also changes compaction thresholds for the new
-        context window.
+        new spec, so no session teardown is required. Also changes compaction
+        thresholds for the new context window.
+
+        Not "from the next turn": an implementation is expected to reach the
+        RUNNING turn too. A turn is a chain of provider calls with tool batches
+        between them, and a user switching model mid-turn is doing it because
+        the running model is doing badly, so the switch lands at the next call
+        boundary. Whatever is already in flight finishes on the spec it was
+        issued with \u2014 a switch must never split one response across two models.
+        :class:`~local_operator.session.session.Session` implements this by
+        handing the loop a ``LoopConfig.get_model`` resolver.
         """
         ...
 

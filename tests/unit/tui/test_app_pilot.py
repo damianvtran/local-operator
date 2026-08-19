@@ -3247,6 +3247,7 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
         app._run_slash_command("/model anthropic/claude-opus-5")
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
+        blocks = list(app.query_one(TranscriptView).blocks())
 
     assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
     # On its OWN row: the receipt keeps its two-clause budget, which is what
@@ -3254,6 +3255,20 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
     # timing into the scope parenthetical measured three.
     assert _unwrapped("(this session)") in text, text
     assert _unwrapped("/model default") in text, text
+    # SAME INK as the receipt it qualifies (design review D3). At `note` the
+    # subordinate row measured 8.62:1 against the receipt's 4.55:1 and the eye
+    # landed on the qualifier first; the token is asserted rather than the
+    # colour so this survives a palette change.
+    notices = [b for b in blocks if isinstance(b, NoticeBlock)]
+    qualifier = next(
+        b
+        for b in notices
+        if MODEL_SWITCH_MID_TURN_NOTICE in _renderable_plain(getattr(b, "renderable", ""))
+    )
+    receipt = next(
+        b for b in notices if "\u2192" in _renderable_plain(getattr(b, "renderable", ""))
+    )
+    assert qualifier._token == receipt._token, (qualifier._token, receipt._token)
 
 
 @pytest.mark.asyncio

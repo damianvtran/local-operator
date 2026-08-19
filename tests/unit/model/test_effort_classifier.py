@@ -186,8 +186,103 @@ async def test_a_mid_message_model_switch_reclassifies_effort(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_model_switch_reopens_the_quota_preflight(monkeypatch) -> None:
-    """The preflight's 60s memo is per selector; a switch must not be skipped by it."""
+async def test_the_preflight_itself_reopens_on_a_switch(monkeypatch) -> None:
+    """The quota memo is reopened by `preflight_usage`, not by the hook (review F1).
+
+    The hook used to zero `_usage_checked_at` as well, with a comment claiming
+    the old model's 60s TTL would otherwise skip the new model's check. It could
+    not: the TTL is gated on the selector matching, and `preflight_usage` clears
+    both the route and the timestamp on any selector change — which is the only
+    condition under which the hook fires at all. This pins the real mechanism so
+    the redundant line is not reintroduced.
+    """
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers.failover import FallbackTarget
+
+    class FakeAuth:
+        async def get_oauth_access(self, *args, **kwargs):
+            return None
+
+    stream = SessionStreamFn(cast(Any, FakeAuth()), {}, "session-x")
+    first = ModelSpec(provider="test", model_id="first")
+    await stream.preflight_usage(first)
+    assert stream._usage_checked_at != 0.0
+    assert stream._primary_selector == "test/first"
+
+    # Switching selector is what reopens the check, with no help from the hook:
+    # the timestamp is zeroed and the route dropped the moment the selector
+    # differs, BEFORE the TTL comparison is ever reached.
+    stream._route_state.active = FallbackTarget("test/fallback", None)
+    await stream.preflight_usage(ModelSpec(provider="test", model_id="second"))
+    assert stream._primary_selector == "test/second"
+    assert stream._route_state.active is None
+    await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_a_switch_after_steering_keeps_the_prompts_own_depth(monkeypatch) -> None:
+    """A mid-turn switch must not re-read the conversation to pick effort (review F2).
+
+    The classifier reads the newest ``role="user"`` message, and mid-turn that
+    is very often NOT the user's prompt: steering, wake, hub, job-result and
+    todo-reminder asides all render as user turns. Re-classifying on a switch
+    therefore graded the aside — a task opened at ``high`` silently continued at
+    ``low`` after a "hurry up" nudge, with an ``auto effort:`` notice for text
+    the user never submitted. The remembered TIER is re-mapped instead.
+    """
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers import failover
+
+    captured: list[ChatRequest] = []
+
+    async def fake_stream(request, *args, **kwargs):
+        captured.append(request)
+        yield StreamEndEvent(stop_reason="stop")
+
+    monkeypatch.setattr(failover, "stream_with_failover", fake_stream)
+
+    class FakeAuth:
+        async def get_oauth_access(self, *args, **kwargs):
+            return None
+
+    stream = SessionStreamFn(cast(Any, FakeAuth()), {"effort": {"auto": True}}, "session-x")
+
+    async def _preflight(model) -> None:
+        stream._message_boundary_pending = False
+
+    monkeypatch.setattr(stream, "preflight_usage", _preflight)
+    ladder = ("minimal", "low", "medium", "high", "max")
+    first = ModelSpec(provider="test", model_id="first", reasoning_efforts=ladder)
+    second = ModelSpec(provider="test", model_id="second", reasoning_efforts=ladder)
+
+    heavy = (
+        "Implement, refactor, debug, review, deploy, and release this migration.\n"
+        + "\n".join(f"- acceptance {i}" for i in range(20))
+        + "\n```python\ndef f(): ...\n```"
+    )
+    _ = [
+        event
+        async for event in stream(ChatRequest(model=first, messages=[Message.user(heavy)]), None)
+    ]
+    opened_at = captured[-1].model.reasoning_effort
+    assert opened_at == "high", opened_at
+
+    # Mid-turn: a steering nudge has landed (it renders as a user turn), and the
+    # user switches model.
+    stream.on_model_changed(second)
+    mid_turn = [
+        Message.user(heavy),
+        Message.assistant("working on it"),
+        Message.user("hurry up"),
+    ]
+    _ = [event async for event in stream(ChatRequest(model=second, messages=mid_turn), None)]
+    assert captured[-1].model.reasoning_effort == "high", captured[-1].model.reasoning_effort
+    await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_a_switch_with_auto_effort_off_stays_off(monkeypatch) -> None:
+    """No classification in force means nothing to re-fit, and nothing invented."""
     from local_operator.model.configure import SessionStreamFn
 
     class FakeAuth:
@@ -195,11 +290,10 @@ async def test_a_model_switch_reopens_the_quota_preflight(monkeypatch) -> None:
             return None
 
     stream = SessionStreamFn(cast(Any, FakeAuth()), {}, "session-x")
-    stream._usage_checked_at = 1234.0
-    stream._message_boundary_pending = False
-    stream.on_model_changed(ModelSpec(provider="test", model_id="other"))
-    assert stream._usage_checked_at == 0.0
-    assert stream._message_boundary_pending is True
+    stream.on_model_changed(
+        ModelSpec(provider="test", model_id="other", reasoning_efforts=("low",))
+    )
+    assert stream._message_effort is None
     await stream.close()
 
 

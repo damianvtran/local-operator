@@ -1493,6 +1493,11 @@ class SessionStreamFn:
         # tool calls would bust the provider cache and make one task reason at
         # several depths.
         self._message_effort: str | None = None
+        # The coarse tier (lo/med/hi) the level above was mapped from, kept so a
+        # mid-message model switch can re-fit the SAME judgement onto the new
+        # model's ladder instead of re-reading the conversation — see
+        # ``on_model_changed``.
+        self._message_tier: str | None = None
         self._primary_selector: str | None = None
         self._usage_checked_selector: str | None = None
         self._usage_checked_at = 0.0
@@ -1516,31 +1521,65 @@ class SessionStreamFn:
         """Mark the next model call as a user-message boundary."""
         self._message_boundary_pending = True
         self._message_effort = None
+        self._message_tier = None
 
     def on_model_changed(self, model: ModelSpec) -> None:
-        """The session switched model mid-message; drop what was frozen for the old one.
+        """The session switched model mid-message; re-fit the frozen effort to it.
 
-        Two pieces of state are deliberately frozen for the duration of one
-        user message, and both are frozen AGAINST A PARTICULAR MODEL:
+        The auto-classified reasoning level is frozen for the duration of one
+        user message so a tool loop reasons at one depth. It is a rung on THAT
+        MODEL's ladder, though, and ladders differ: carrying ``xhigh`` onto a
+        model that stops at ``high`` is an HTTP 400 on the next call, which
+        reads as the switch having broken the session.
 
-        * ``_message_effort`` — the auto-classified reasoning level, mapped onto
-          the old model's effort ladder. Ladders differ between models, so
-          carrying the level across a switch either sends a rung the new model
-          rejects (an HTTP 400 that reads as a broken switch) or silently
-          re-tiers the request. It is re-classified for the new model instead.
-        * the quota preflight's cooldown memo — keyed on the selector, so a
-          switch already invalidates the route via ``_primary_selector``. The
-          check timestamp is cleared here too so the new model is actually
-          preflighted rather than skipped by the old one's 60s TTL.
+        So the TIER is re-mapped onto the new ladder rather than the level being
+        carried, and rather than the message being re-classified from scratch.
+        Re-classifying was the obvious move and it is wrong (review F2): the
+        classifier reads the newest ``role="user"`` message, and mid-turn that
+        is very often not the user's prompt — steering, wake, hub, job-result
+        and todo-reminder asides all render as user turns
+        (``session._default_convert_to_llm``). Switching model after a "hurry
+        up" nudge therefore re-classified the NUDGE: a task the user opened at
+        ``high`` silently continued at ``low``, and an ``auto effort:`` notice
+        was emitted for text they never submitted as a prompt.
+
+        Re-mapping keeps the user's actual prompt as the thing that decided the
+        depth, which is what freezing was for in the first place.
+
+        ``_message_boundary_pending`` is deliberately NOT re-armed, for the same
+        reason: the boundary belongs to the user's message, and the switch did
+        not start a new one.
 
         Only called when the provider/model pair genuinely changed — ``/effort``
         and per-request sampling overrides write the spec constantly and must
-        not each pay for a re-classification (see ``Session.set_model``).
+        not each pay for this (see ``Session.set_model``).
+
+        Must stay SYNCHRONOUS: ``Session.set_model`` is a sync method and
+        discards a returned awaitable, which is the right contract for what is
+        only a cache re-fit.
+
+        Nothing is done for the quota preflight here: it is keyed on the
+        selector and ``preflight_usage`` already clears its route and its check
+        timestamp whenever the selector changes — which is the only condition
+        under which this hook fires (review F1).
         """
-        del model  # the next request carries it; this is a cache invalidation
-        self._message_boundary_pending = True
-        self._message_effort = None
-        self._usage_checked_at = 0.0
+        if self._message_tier is None:
+            # No classification in force (auto-effort off, or no boundary spent
+            # yet): nothing was frozen, so there is nothing to re-fit.
+            return
+        from local_operator.model.effort_classifier import map_tier_to_effort
+
+        cfg = self._settings.get("effort", {}) if isinstance(self._settings, Mapping) else {}
+        allow_max = (
+            bool(cfg.get("allowMax", cfg.get("allow_max", False)))
+            if isinstance(cfg, Mapping)
+            else False
+        )
+        self._message_effort = map_tier_to_effort(
+            self._message_tier,
+            model.reasoning_efforts,
+            allow_max=allow_max,
+        )
 
     async def _notice(self, text: str, kind: str = "warning") -> None:
         if self._notice_handler is None:
@@ -1810,6 +1849,9 @@ class SessionStreamFn:
                 request.model.reasoning_efforts,
                 self._settings,
             )
+            # Remembered so a mid-message model switch can re-map this same
+            # judgement onto a different ladder (``on_model_changed``).
+            self._message_tier = classification.tier if classification is not None else None
             if classification is not None and self._message_effort is not None:
                 await self._notice(
                     f"auto effort: {self._message_effort} ({classification.tier}, "

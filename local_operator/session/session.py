@@ -1209,8 +1209,10 @@ class Session:
 
         Tells the stream fn the model changed, so state frozen per user message
         against the OLD model — the auto-effort level, the quota preflight's
-        route — is re-derived for the new one rather than carried across a
-        switch it was never computed for.
+        route — is re-fitted to the new one rather than carried across a switch
+        it was never computed for. That hook must be SYNCHRONOUS: this method is
+        sync and would discard a returned coroutine, which is the right contract
+        for what is only a cache re-fit.
         """
         previous = self._model
         self._model = model
@@ -1218,7 +1220,14 @@ class Session:
             # Same model, different knobs (effort, sampling): nothing routing
             # or quota related has moved, so leave the frozen per-message state
             # alone. `/effort` and the server's option overrides take this path
-            # on every call and must not each cost a re-classification.
+            # on every call and must not each cost a re-fit.
+            #
+            # `base_url` is deliberately NOT part of the key. It is derived from
+            # the provider definition rather than chosen per call, so it cannot
+            # vary independently of the pair above; and the state this guards is
+            # itself selector-keyed (`SessionStreamFn._primary_selector`), so a
+            # third component here would invalidate more often than the thing
+            # being invalidated can actually change.
             return
         notify = getattr(self._stream_fn, "on_model_changed", None)
         if callable(notify):

@@ -1033,7 +1033,13 @@ class LoopConfig(BaseModel):
     # in-flight request keeps the spec it was issued with, so a switch cannot
     # tear down a stream that is already producing tokens or split one response
     # across two models.
-    get_model: Callable[[], "ModelSpec"] | None = Field(default=None, exclude=True)
+    #
+    # ``ModelSpec | None`` in the return, and the None is part of the contract
+    # rather than defensive slack: it lets a host say "nothing better than the
+    # snapshot right now" (still starting, spec briefly unavailable) without
+    # having to invent a spec, and the loop treats it exactly like having no
+    # resolver at all.
+    get_model: Callable[[], "ModelSpec | None"] | None = Field(default=None, exclude=True)
 
     # Required: render transcript messages (incl. custom entries) into the
     # LLM-visible list sent to the provider.

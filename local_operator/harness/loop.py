@@ -410,8 +410,8 @@ class AgentLoop:
         except Exception:  # host accessor bug — never fatal to a running turn
             logger.exception("get_model resolver failed; using the run's model")
             return config.model
-        # A resolver returning None is the same "host has nothing better to
-        # say" case as having no resolver at all.
+        # A resolver returning None is the declared "host has nothing better to
+        # say" case (see the field), handled the same as having no resolver.
         return live if live is not None else config.model
 
     async def _model_turn(
