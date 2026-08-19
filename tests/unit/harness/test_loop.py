@@ -1592,15 +1592,16 @@ async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill()
             # and is worse (3/40): it lets the generator finish before the park
             # it is supposed to be racing.
             #
-            # `test_a_duplicate_call_id_does_not_suppress_the_real_calls_end`
-            # `_event` carries the IDENTICAL literal
-            # `ABORT_DRAIN_TIMEOUT_S + 0.3`, which
-            # is what a grep or a search-and-replace would actually collide with
-            # — and it is INDEPENDENT of this one: it exercises the duplicate-id
-            # suppression rule, not the flush window, so nothing about it needs
-            # to move if this does. (`test_a_slow_unwind_still_reports_the_tool
-            # _as_ENDED` overshoots by `+ 2` and is independent for the same
-            # reason; only the identical literal is a real hazard.)
+            # The IDENTICAL literal `ABORT_DRAIN_TIMEOUT_S + 0.3` appears once
+            # more in this file, in the duplicate-call-id suppression test —
+            # grep `does_not_suppress_the_real_calls` — and that is the copy a
+            # search-and-replace would collide with. It is INDEPENDENT of this
+            # one: it exercises the suppression rule, not the flush window, so
+            # nothing about it needs to move if this does.
+            #
+            # (The slow-unwind test — grep `still_reports_the_tool_as_ENDED` —
+            # overshoots by `+ 2` and is independent for the same reason. Only
+            # the identical literal is a real hazard.)
             await asyncio.sleep(0.3)
 
     task = asyncio.ensure_future(run())
