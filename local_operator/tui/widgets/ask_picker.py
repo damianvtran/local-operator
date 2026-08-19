@@ -777,7 +777,12 @@ class AskPickerScreen(Container):
 
     # -- geometry ------------------------------------------------------------
     def _screen_size(self) -> tuple[int, int]:
-        """The box the card budgets itself against: the SCREEN's content box.
+        """The SCREEN's content box, which is what the card budgets its ROWS against.
+
+        Rows, and — only before the card has been placed — the fallback width in
+        :meth:`_card_width`. The laid-out width does NOT come from here: it is
+        imposed by the stylesheet's ``width: 1fr`` and read back off the card's
+        own box. See :meth:`_card_width` for why the two axes differ.
 
         Deliberately not ``self.size``, which is the inverse of what the modal
         version did and is forced by the move into the dock. A docked container
@@ -1341,8 +1346,13 @@ class AskPickerScreen(Container):
         self.call_after_refresh(self._repaint)
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-measure: the width, the page size and the descriptions all come
-        from the screen."""
+        """Re-measure: every quantity the card lays out against has just moved.
+
+        The width comes from the COLUMN the dock assigned this card
+        (:meth:`_card_width`); the row budget, the page size and whether
+        descriptions are affordable come from the screen (:meth:`_screen_size`).
+        Two different sources, and this is the event that invalidates both.
+        """
         self._move_to(self.state.selected)
 
     def remeasure(self) -> None:

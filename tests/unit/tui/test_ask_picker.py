@@ -405,12 +405,17 @@ async def test_no_row_overflows_the_card_at_any_width() -> None:
             screen = await app.open_picker()
             await pilot.pause()
             # The card's OWN content box, read back from the layout rather than
-            # re-derived here. The card budgets its text against the column the
-            # dock gave it, so a test that recomputed that column from the
-            # terminal width would be a second opinion about the one number the
-            # widget is not free to be wrong about — and it would agree with a
-            # card that had gone back to capping itself, which is the regression
-            # this file now has to catch.
+            # re-derived here: recomputing the column from the terminal width
+            # would be a second opinion about the one number the widget is not
+            # free to be wrong about.
+            #
+            # This assertion guards OVERFLOW ONLY, which is all its name claims.
+            # Measured (agent review round 1, F4): forcing `_card_width` to
+            # over-return by 10 fails it, while UNDER-returning by 10 passes it
+            # silently — a card that went back to capping its text would satisfy
+            # every line here. `test_the_card_spends_the_whole_column_the_dock_
+            # gave_it` is the guard for that half, and it is the one verified to
+            # fail against the old 74-cell cap.
             budget = screen.size.width
             for line in screen.render_lines_for_test():
                 assert cell_len(line) <= budget, (width, line)
