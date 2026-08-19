@@ -65,6 +65,62 @@ _SCOUT_PREAMBLE = "[scout mode:"
 #: two days' work apart, short enough that a column of them still scans.
 NAME_MAX_CHARS = 64
 
+#: The custom-entry type a session journals its title under. Spelled here as
+#: well as in ``session/naming.py`` because this module may not import the
+#: engine (see the module docstring — the CLI's startup guard fails if it
+#: does), and :func:`stored_session_title` scans the raw JSONL rather than
+#: replaying it. ``test_the_journalled_title_type_matches_the_writer`` pins the
+#: two spellings together, so a rename breaks a test instead of silently
+#: returning every session to its opening message.
+_TITLE_CUSTOM_TYPE = "conversation_name"
+
+#: Bytes of the transcript the stored-title scan reads at EACH END. Both ends,
+#: because the two facts about a title pull in opposite directions:
+#:
+#: * The title in force is the NEWEST one — a rename appends a fresh row rather
+#:   than rewriting the old one — so a rename made an hour into a long session
+#:   is only findable near the tail.
+#: * The FIRST title is journalled when the session is auto-named, at turn 2,
+#:   which is near the head and is pushed further from the tail by every turn
+#:   that follows.
+#:
+#: A tail-only scan therefore missed the title on most real sessions: measured
+#: on this store, 145 of 187 transcripts (78%) are larger than this window, so
+#: a session named at turn 2 and then worked in for an hour silently reverted
+#: to being labelled by its opening message — the exact failure this function
+#: exists to fix, and the long sessions it hit hardest are the ones a user is
+#: most likely to be hunting for a week later.
+#:
+#: Reading both ends rather than the whole file is what keeps the cost per
+#: picker row bounded on a 6 MB transcript.
+#:
+#: **The known gap, stated honestly.** A rename made mid-conversation, then
+#: buried under a further 128 KB and never renamed again, falls between the two
+#: windows. The head still holds the ORIGINAL title, so that session is
+#: labelled with the name it was renamed *away from* rather than falling back
+#: to the opener. That is a stale name, and a stale name is stated with exactly
+#: the confidence of a correct one — so it is a real cost, not a rounding
+#: error, and this comment says so rather than claiming the scan can only ever
+#: miss.
+#:
+#: It is accepted for now because the alternative is reading whole transcripts
+#: on the picker's synchronous path (400 ms against 64 ms across a real store),
+#: and because the case requires a mid-session rename specifically: an
+#: auto-named session has its title at the head, and a session renamed near the
+#: end has it in the tail. If it proves to bite, the fix is to journal the
+#: title to a sidecar the way ``mark_session_origin`` does — one stat and one
+#: small read, no size dependence at all — rather than widening this window.
+TITLE_SCAN_BYTES = 131_072
+
+#: Matches a journalled title row in raw JSONL, tolerant of whitespace after
+#: the colons for the same reason :data:`_FRAGMENT_USER_RE` is: the session
+#: writer emits compact JSON, but a transcript written by a fixture or a future
+#: exporter is the same document. ``(?:[^"\\]|\\.)*`` steps over escaped quotes
+#: so a title containing one is not cut at it.
+_TITLE_ROW_RE = re.compile(
+    r'"custom_type"\s*:\s*"' + _TITLE_CUSTOM_TYPE + r'".*?"text"\s*:\s*"((?:[^"\\]|\\.)*)"'
+)
+
 #: Characters of a transcript the name scan will read before giving up — not
 #: bytes: the file is opened in text mode, so this bounds the decoded string,
 #: which is what actually occupies memory here. A name is a convenience; a
@@ -381,16 +437,87 @@ class SessionRow(NamedTuple):
     name: str
 
 
+def stored_session_title(session_dir: Path) -> str:
+    """The title this session was last named, or ``""`` when it has none.
+
+    The name a user searches by is the name they last SAW, and that is the
+    stored title — auto-generated on the first substantive turn, or typed at
+    ``/rename``. Before this existed the picker labelled every row with the
+    session's opening message, so a conversation renamed to something
+    memorable was still listed under whatever happened to be typed first, and
+    a user who could not recall that opening line could not find the session
+    at all. That is the reported failure this function closes.
+
+    Scanned out of the raw JSONL rather than replayed through ``Transcript``
+    on purpose. This module is import-guarded (see the module docstring): a
+    picker row must not drag the engine, the providers or ``asyncio`` onto
+    ``local-operator --help``. A regex over two bounded windows is the same
+    question asked cheaply.
+
+    BOTH ENDS are read — see :data:`TITLE_SCAN_BYTES` for why a tail-only scan
+    missed the title on 78% of real sessions. The LAST match wins across the
+    two windows, because each rename appends a full snapshot and the newest row
+    is the title in force.
+
+    Tolerant like everything else on this path — an unreadable or truncated
+    transcript yields ``""`` and the caller falls back to the opening message
+    rather than the picker failing.
+    """
+    transcript = session_dir / TRANSCRIPT_NAME
+    try:
+        with transcript.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            if size > TITLE_SCAN_BYTES * 2:
+                # Large enough for two disjoint windows: read the head, then
+                # seek to the last TITLE_SCAN_BYTES for the tail.
+                handle.seek(0)
+                head = handle.read(TITLE_SCAN_BYTES)
+                handle.seek(size - TITLE_SCAN_BYTES)
+                tail = handle.read()
+            else:
+                # Small enough that the two windows would overlap: read the
+                # WHOLE file once and let it serve as both. Splitting it here
+                # is what broke this the first time round -- the head was read,
+                # the handle was left at EOF by the size probe, and the `else`
+                # branch's read returned b"", so files between 1x and 2x the
+                # window (30% of a real store) were searched head-only. That
+                # silently reverted a late rename to the name it was renamed
+                # AWAY from, which is worse than the missing name this function
+                # exists to prevent.
+                handle.seek(0)
+                head = tail = handle.read()
+    except OSError:
+        return ""
+    # The tail is searched FIRST and wins: a rename made late in a long session
+    # is the newest title, and the head can only hold older ones.
+    for window in (tail, head):
+        matches = _TITLE_ROW_RE.findall(window.decode("utf-8", errors="replace"))
+        if matches:
+            break
+    if not matches:
+        return ""
+    try:
+        # Through the JSON decoder rather than a manual unescape, so a title
+        # holding a quote, a backslash or a \uXXXX escape reads back as the
+        # characters the user actually saw.
+        title = json.loads(f'"{matches[-1]}"')
+    except ValueError:
+        return ""
+    return " ".join(str(title).split())
+
+
 def session_name(
     session_dir: Path, *, max_chars: int = NAME_MAX_CHARS, condense: bool = True
 ) -> str:
-    """A conversation's display name: its opening user message, on one line.
+    """A conversation's display name: its stored title, else its opening message.
 
-    Read from the TRANSCRIPT rather than from a stored title because there is
-    no stored title: ``ConversationName`` lives in memory for the life of a
-    session and is never journalled, so the only per-session name on disk is
-    what the user actually typed first. That turns out to be the better name
-    anyway — it is the thing the user remembers about the session.
+    The stored title comes first because it is the name the user last saw on
+    the band and in the terminal tab, and therefore the one they will search
+    for. The opening message is the FALLBACK, for the two cases that have no
+    stored title: a transcript written before titles were journalled, and a
+    session closed before its naming call landed. Both still deserve a
+    recognisable row, and the opener is what the picker always used.
 
     Deliberately tolerant. This runs over every session directory to paint a
     picker, so a transcript that is truncated, half-written by a session still
@@ -399,6 +526,9 @@ def session_name(
     :data:`NAME_SCAN_CHARS`, so it costs one short read per session instead of
     a full parse of a file that can be hundreds of kilobytes.
     """
+    stored = stored_session_title(session_dir)
+    if stored:
+        return _condense(stored, max_chars) if condense else stored
     transcript = session_dir / TRANSCRIPT_NAME
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as handle:
