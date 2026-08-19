@@ -679,6 +679,22 @@ class SubagentComms:
                     # arms each question with the future created for THAT
                     # message, so the question lands at the child's first
                     # injection boundary and the answer comes back here.
+                    #
+                    # RE-CHECK after the grace, the way the attached path does.
+                    # The guard at the top of ``ask`` ran before this await, and
+                    # this path only claims ``record.ask`` after it — so without
+                    # this, two concurrent asks both pass the guard and the
+                    # second orphans the first (review round 4, R8; reproduced
+                    # as ``REFUSED COUNT: 0``). Unreachable today because the
+                    # ``hub`` tool is ``concurrency="exclusive"`` and the loop
+                    # batches it alone, but that is a property of a tool
+                    # declaration elsewhere, not an invariant of this layer.
+                    if record.ask is not None and not record.ask.done():
+                        return Reply(
+                            job_id,
+                            record.label,
+                            error="a question is already pending for this subagent",
+                        )
                     future = asyncio.get_running_loop().create_future()
                     record.ask = future
                     record.armed = False

@@ -1715,6 +1715,8 @@ def test_the_roster_text_tells_the_two_ids_apart(tmp_path):
     # sitting above it is not read as the argument.
     assert "JOB id" in text
     assert "not a job id" in text
+
+
 # --- the running-but-unattached window ----------------------------------------
 #
 # ``_await_child`` already covers the child that is merely SCHEDULED: it yields
@@ -1886,3 +1888,34 @@ async def test_a_second_question_is_refused_on_the_buffered_path_too():
     assert [m.details["body"] for m in comms._records["job-1"].pending] == ["Q-A"]
     first_reply = await first
     assert first_reply.timed_out is True  # it ended on its OWN terms, not orphaned
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_asks_cannot_both_pass_the_guard():
+    """The guard is check-then-act, so the buffered path re-checks after its
+    attach grace.
+
+    The top-of-``ask`` guard runs BEFORE the grace await, and the buffered path
+    only claims ``record.ask`` after it — so two asks entering together both
+    passed and the second orphaned the first (review round 4, R8). Unreachable
+    through the `hub` tool today, which is ``concurrency="exclusive"`` and is
+    therefore batched alone, but that is a property of a tool declaration
+    elsewhere rather than an invariant of this layer, and it becomes reachable
+    the moment `hub` goes ``shared``.
+    """
+    comms, jobs, _child, _parent = wire(attach=False)
+    jobs.jobs["job-1"].started_at = time.time() - 1800
+
+    first, second = await asyncio.gather(
+        comms.ask("job-1", "Q-A", 4_000),
+        comms.ask("job-1", "Q-B", 4_000),
+    )
+
+    refused = [
+        reply for reply in (first, second) if reply.error and "already pending" in reply.error
+    ]
+    served = [reply for reply in (first, second) if reply.error is None]
+    assert len(refused) == 1, "both asks passed the guard; one caller is orphaned"
+    assert len(served) == 1 and served[0].timed_out is True
+    assert comms._records["job-1"].ask is None, "the surviving ask leaked its future"
+    assert not comms._records["job-1"].pending_asks
