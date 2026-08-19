@@ -7,6 +7,7 @@ hits the same endpoints as before through a descriptor table.
 """
 
 import json
+import zlib
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -464,6 +465,142 @@ async def test_usage_reserve_can_reduce_effort_without_blocking_account(tmp_path
 
         assert not store.is_blocked(account.id, "anthropic")
         assert stream._route_state.active == FallbackTarget("anthropic/claude-opus-5", "low")
+    finally:
+        await stream.close()
+        store.close()
+
+
+def _session_hashing_to_first_row(row_count: int) -> str:
+    """A session id whose crc32 lands the selection order on row index 0.
+
+    ``AuthStore._base_selection_order`` rotates the pool by
+    ``crc32(session_id) % len(rows)`` when no sticky credential is set, so a
+    fixed literal makes "which account does the walk meet first" an accident
+    of the string. These tests need the FIRST-INSERTED account visited first
+    for their scenario to exist at all, so the id is derived, not guessed.
+    """
+    candidates = (f"session-{i}" for i in range(64))
+    return next(s for s in candidates if zlib.crc32(s.encode()) % row_count == 0)
+
+
+@pytest.mark.asyncio
+async def test_usage_preflight_demotes_rather_than_blocks_a_reserve_account(tmp_path) -> None:
+    """An account in reserve still has quota, so it must never be written into
+    the cross-process block table.
+
+    The block preflight used to write lasted until the BINDING window's reset
+    — for a seven-day window at 90 % that is a multi-day outage recorded in
+    SQLite against an account that could still serve. Reserve is a routing
+    preference, so it gets the in-process, self-expiring demotion instead."""
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    second = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    session = _session_hashing_to_first_row(2)
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id=session,
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return _anthropic_usage(95.0 if access_token == "oauth-a" else 25.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert not store.is_blocked(first.id, "anthropic")
+        assert not store.is_blocked(second.id, "anthropic")
+        # The preference still holds: the healthy sibling serves next.
+        selected = await store.get_oauth_access("anthropic", session)
+        assert selected is not None and selected.credential_id == second.id
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_reserve_account_still_serves_after_the_healthy_sibling_depletes(tmp_path) -> None:
+    """The incident this change fixes, replayed end to end.
+
+    One account sits in reserve (95 % of a window used), the other is healthy.
+    Preflight steers to the healthy account; later that account genuinely
+    exhausts and the 429 path blocks it for its advertised reset. The reserve
+    account is now the only thing left — and it MUST serve. When preflight
+    recorded reserve as a SQLite block, this exact sequence left the provider
+    with four configured credentials and zero usable ones, and every live
+    session died with "all credentials not usable" while quota remained."""
+    from local_operator.providers.failover import ProviderError
+
+    store = AuthStore(tmp_path / "auth.db")
+    reserve = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    healthy = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    session = _session_hashing_to_first_row(2)
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id=session,
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return _anthropic_usage(95.0 if access_token == "oauth-a" else 25.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+        # The healthy account served and is sticky; now it runs out for real.
+        store.rotate_sibling(
+            "anthropic",
+            session,
+            ProviderError(429, "rate limited", retryable=True, retry_after_ms=3 * 3_600_000),
+        )
+        assert store.is_blocked(healthy.id, "anthropic")
+
+        survivor = await store.get_oauth_access("anthropic", session)
+        assert survivor is not None and survivor.credential_id == reserve.id
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_reserve_account_is_not_blocked_when_falling_back_cross_provider(tmp_path) -> None:
+    """The no-siblings branch takes the same depleted/reserve split.
+
+    A lone reserve account with a cross-provider fallback used to be blocked
+    until its window reset before the session moved to the fallback. The block
+    is cross-process, so it also stranded every OTHER session — including ones
+    whose fallback chains could not rescue them."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(95.0),
+        ):
+            await stream.preflight_usage(model)
+
+        assert not store.is_blocked(account.id, "anthropic")
+        assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+        # Another session (or process) with no fallback still reaches the account.
+        access = await store.get_oauth_access("anthropic", "some-other-session")
+        assert access is not None and access.credential_id == account.id
     finally:
         await stream.close()
         store.close()

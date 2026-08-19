@@ -121,6 +121,39 @@ def test_usage_health_shared_window_reaches_reserve() -> None:
     assert health.reset_after_ms == 10_000
 
 
+def test_usage_health_depleted_reset_ignores_windows_merely_in_reserve() -> None:
+    """The depleted horizon counts only fully-spent windows.
+
+    ``reset_after_ms`` on a depleted verdict feeds a credential block of that
+    length, so it must answer "when is the SPENT window back". Computing it
+    over every binding window let a seven-day window sitting at 91 % stretch a
+    two-hour 5h-window block out to five days — a days-long outage written
+    against an account that was usable again the same afternoon."""
+    report = UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:5h",
+                label="5 hour",
+                amount=UsageAmount(used_fraction=1.0),
+                shared=True,
+                resets_at_ms=2 * 3_600_000,
+            ),
+            UsageLimit(
+                id="anthropic:7d",
+                label="7 day",
+                amount=UsageAmount(used_fraction=0.91),
+                shared=True,
+                resets_at_ms=5 * 86_400_000,
+            ),
+        ],
+    )
+    health = usage_health(report, "claude-opus-5", reserve_percent=10, now_ms=0)
+    assert health.state == "depleted"
+    assert health.scope == "account"
+    assert health.reset_after_ms == 2 * 3_600_000
+
+
 def test_usage_health_ignores_unrelated_model_tier() -> None:
     report = UsageReport(
         provider="anthropic",

@@ -734,7 +734,13 @@ async def test_short_rate_limit_retries_twice_per_credential(monkeypatch) -> Non
             pass
 
     assert attempts == ["k1", "k1", "k1", "k2", "k2", "k2"]
-    assert len(sleeps) == 4
+    # Four in-place retry sleeps, plus ONE loop-back pause: a short throttle
+    # arms the end-of-cascade sweep, which sleeps the advertised delay and
+    # re-resolves — finding nothing (both keys rotated out), hence no seventh
+    # attempt. The attempts list above is the budget contract; the fifth sleep
+    # is the sweep's, not a fifth retry.
+    assert len(sleeps) == 5
+    assert sleeps[-1] == 5
 
 
 async def test_403_rotates_once_per_credential_no_double_rotation() -> None:
@@ -2570,3 +2576,472 @@ class TestARestoredBudgetIsTheConfiguredOne:
         )
 
         assert await self._requests_for(store, max_retries) == max_retries + 1
+
+
+class TestRotationPermutations:
+    """The credential shapes users actually hold, each driven END TO END
+    through ``stream_with_failover`` on a real ``AuthStore``.
+
+    Rotation policy and cascade tiers each had unit coverage, but the
+    incident that motivated this class was a composition failure: every
+    session died reporting four credentials unusable while three still held
+    quota. So each permutation here asserts the thing a user cares about —
+    after the failure, SOMEBODY serves — not the mechanism that got there.
+    """
+
+    @staticmethod
+    def _no_sleep():
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        return no_sleep
+
+    async def test_oauth_429_rotates_to_the_sibling_account(self, tmp_path: Any) -> None:
+        """OAuth → OAuth inside one provider: the first account's 429 blocks it
+        for the advertised reset and the sibling serves the SAME request."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        store.upsert_credential(
+            "anthropic",
+            # Distinct emails: OAuth rows without an identity field dedupe to
+            # one per-provider row (see `_identity_key_for`), silently turning
+            # a two-account pool into a single account.
+            {
+                "type": "oauth",
+                "access": "acct-a",
+                "refresh": "r",
+                "expires": None,
+                "email": "a@example.com",
+            },
+        )
+        store.upsert_credential(
+            "anthropic",
+            {
+                "type": "oauth",
+                "access": "acct-b",
+                "refresh": "r",
+                "expires": None,
+                "email": "b@example.com",
+            },
+        )
+        served: list[str | None] = []
+
+        def first_account_exhausted(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            if api_key == "acct-a":
+                raise ProviderError(
+                    429, "quota reset pending", retryable=True, retry_after_ms=3 * 3_600_000
+                )
+            served.append(api_key)
+            return _clean_stream()
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(first_account_exhausted)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = self._no_sleep()  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request("anthropic", "claude-opus-5"),
+                store,
+                {"retry": {"enabled": True}},
+                client_for,
+                session_id="s0",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert served == ["acct-b"]
+        rows = {r.data["access"]: r for r in store.list_credentials("anthropic")}
+        assert store.is_blocked(rows["acct-a"].id, "anthropic")
+        assert not store.is_blocked(rows["acct-b"].id, "anthropic")
+
+    async def test_a_429d_oauth_row_falls_through_to_an_api_key_row(self, tmp_path: Any) -> None:
+        """OAuth → API key inside one provider. ``rotate_sibling`` only counts
+        same-type siblings, so the cross-type hop happens in the cascade: the
+        blocked OAuth tier empties and tier 6 hands over the stored key. This
+        is the whole request surviving that hop, not the tier unit test."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "oauth-token", "refresh": "r", "expires": None},
+        )
+        store.upsert_credential("anthropic", {"type": "api_key", "key": "sk-stored"})
+        served: list[str | None] = []
+
+        def oauth_exhausted(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            if api_key == "oauth-token":
+                raise ProviderError(
+                    429, "quota reset pending", retryable=True, retry_after_ms=3 * 3_600_000
+                )
+            served.append(api_key)
+            return _clean_stream()
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(oauth_exhausted)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = self._no_sleep()  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request("anthropic", "claude-opus-5"),
+                store,
+                {"retry": {"enabled": True}},
+                client_for,
+                session_id="s0",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert served == ["sk-stored"]
+
+    async def test_a_multi_key_pool_walks_every_key_until_one_serves(self, tmp_path: Any) -> None:
+        """API key → API key → API key: the token-plan shape (several pasted
+        keys under one provider). Two keys 429; the third serves."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        for i in range(3):
+            store.upsert_credential(
+                "alibaba-token-plan", {"type": "api_key", "key": f"plan-key-{i}"}
+            )
+        served: list[str | None] = []
+        rejected: list[str | None] = []
+
+        def two_exhausted(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            # Order-independent on purpose: which key the walk meets first is a
+            # session-hash accident, so the first two DISTINCT keys are the
+            # exhausted ones and whichever remains serves.
+            if len(rejected) < 2:
+                rejected.append(api_key)
+                raise ProviderError(
+                    429, "quota reset pending", retryable=True, retry_after_ms=3 * 3_600_000
+                )
+            served.append(api_key)
+            return _clean_stream()
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(two_exhausted)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = self._no_sleep()  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request("alibaba-token-plan", "qwen3-max"),
+                store,
+                {"retry": {"enabled": True}},
+                client_for,
+                session_id="s0",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert len(rejected) == 2 and len(set(rejected)) == 2
+        assert len(served) == 1
+        assert {*rejected, *served} == {"plan-key-0", "plan-key-1", "plan-key-2"}
+
+    async def test_cross_provider_fallback_resolves_an_api_key_provider(
+        self, tmp_path: Any
+    ) -> None:
+        """OAuth primary exhausted → chain hops providers → the fallback's
+        LOGIN API key resolves through the real cascade and serves."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "acct-a", "refresh": "r", "expires": None},
+        )
+        store.upsert_credential(
+            "openai", {"type": "api_key", "key": "sk-openai", "source": "login"}
+        )
+        served: list[tuple[str, str | None]] = []
+
+        def primary_exhausted(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            if request.model.provider == "anthropic":
+                raise ProviderError(
+                    429, "quota reset pending", retryable=True, retry_after_ms=3 * 3_600_000
+                )
+            served.append((request.model.provider, api_key))
+            return _clean_stream()
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(primary_exhausted)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = self._no_sleep()  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request("anthropic", "claude-opus-5"),
+                store,
+                {
+                    "retry": {
+                        "enabled": True,
+                        "fallbackChains": {"default": ["openai/gpt-5.4"]},
+                    }
+                },
+                client_for,
+                session_id="s0",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert served == [("openai", "sk-openai")]
+
+
+class TestTheLoopBackSweep:
+    """An exhausted walk gets ONE more look at the waterfall before the verdict.
+
+    "Every target failed once" is stale evidence by the time the walk ends:
+    blocks written by other processes expire, short throttles clear, and
+    targets the route-state pin trimmed off were never asked at all. The sweep
+    is bounded (one revisit per call) and discriminating (never-walked targets,
+    short-throttle quota failures, and blocked-not-absent credential pools —
+    never server faults, whose budgets were already spent in place).
+    """
+
+    async def test_the_sweep_revisits_targets_the_route_pin_excluded(self) -> None:
+        """The 'sample upwards' case: pinned to the last fallback, which dies —
+        the sweep walks back up and the recovered primary serves the turn."""
+        served: list[str] = []
+        sleeps: list[int] = []
+
+        def fallback_dead_primary_alive(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            if request.model.provider == "openai":
+                raise ProviderError(400, "schema rejected", retryable=False, kind="request")
+            served.append(request.model.provider)
+            return _clean_stream()
+
+        async def record_sleep(delay_ms: int, signal: Any) -> None:
+            sleeps.append(delay_ms)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(fallback_dead_primary_alive)
+
+        route_state = FailoverRouteState()
+        fallback = FallbackTarget("openai/gpt-5.4")
+        await route_state.activate(fallback, "provider failure", cooldown_ms=600_000)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = record_sleep  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request("anthropic", "claude-opus-5"),
+                FakeAuth({"anthropic": ["acct"], "openai": ["sk"]}),
+                {
+                    "retry": {
+                        "enabled": True,
+                        "baseDelayMs": 1,
+                        "fallbackChains": {"default": ["openai/gpt-5.4"]},
+                    }
+                },
+                client_for,
+                session_id="s0",
+                route_state=route_state,
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        # The pinned walk asked only openai; the sweep asked the primary.
+        assert served == ["anthropic"]
+
+    async def test_a_short_throttle_is_swept_once_and_can_serve(self) -> None:
+        """A bearer with no store row (env-var shaped) 429s through its budget;
+        the sweep waits the advertised delay and the SAME bearer serves."""
+        attempts: list[str | None] = []
+        sleeps: list[int] = []
+
+        class EnvAuth:
+            """get_api_key-only store: one bearer, nothing to block."""
+
+            async def get_api_key(
+                self, provider: str, session_id: str | None = None, **kwargs: Any
+            ) -> str | None:
+                return "env-key"
+
+            def rotate_sibling(
+                self, provider: str, session_id: str | None, error: Any, api_key: str | None = None
+            ) -> bool:
+                return False
+
+        def throttled_then_clear(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts.append(api_key)
+            if len(attempts) < 4:
+                raise ProviderError(429, "brief throttle", retryable=True, retry_after_ms=5)
+            return _clean_stream()
+
+        async def record_sleep(delay_ms: int, signal: Any) -> None:
+            sleeps.append(delay_ms)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(throttled_then_clear)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = record_sleep  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request(),
+                EnvAuth(),
+                {"retry": {"enabled": True, "baseDelayMs": 1, "fallbackChains": {}}},
+                client_for,
+                session_id="s0",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        # Three in-place attempts (initial + the short-throttle pair), then the
+        # sweep's fourth after sleeping the advertised 5 ms.
+        assert attempts == ["env-key"] * 4
+        assert sleeps[-1] == 5
+
+    async def test_the_sweep_runs_at_most_once(self) -> None:
+        """A throttle that never clears gets exactly one revisit — the sweep
+        must not turn the walk into a spin."""
+        attempts: list[str | None] = []
+
+        class EnvAuth:
+            async def get_api_key(
+                self, provider: str, session_id: str | None = None, **kwargs: Any
+            ) -> str | None:
+                return "env-key"
+
+            def rotate_sibling(
+                self, provider: str, session_id: str | None, error: Any, api_key: str | None = None
+            ) -> bool:
+                return False
+
+        def always_throttled(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            attempts.append(api_key)
+            raise ProviderError(429, "brief throttle", retryable=True, retry_after_ms=5)
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(always_throttled)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError) as excinfo:
+                async for _ in stream_with_failover(
+                    _request(),
+                    EnvAuth(),
+                    {"retry": {"enabled": True, "baseDelayMs": 1, "fallbackChains": {}}},
+                    client_for,
+                    session_id="s0",
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert excinfo.value.status == 429
+        # Three attempts per walk, exactly two walks.
+        assert attempts == ["env-key"] * 6
+
+    async def test_a_block_expiring_mid_walk_is_caught_by_the_sweep(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """The incident, inverted: every credential blocked at resolve time is
+        a RETRYABLE verdict, so the sweep re-resolves — and a block that
+        expired while the walk was busy failing puts the account back in
+        service instead of the turn dying on stale evidence."""
+        clock = {"now": 1_000_000}
+        monkeypatch.setattr(AuthStore, "_now_ms", staticmethod(lambda: clock["now"]))
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        row = store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "acct-a", "refresh": "r", "expires": None},
+        )
+        store.block_credential(row.id, "anthropic", block_ms=2_000)
+        served: list[str | None] = []
+
+        def serves(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            served.append(api_key)
+            return _clean_stream()
+
+        async def sleep_advances_clock(delay_ms: int, signal: Any) -> None:
+            clock["now"] += 5_000
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(serves)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = sleep_advances_clock  # type: ignore[assignment]
+        try:
+            async for _ in stream_with_failover(
+                _request("anthropic", "claude-opus-5"),
+                store,
+                {"retry": {"enabled": True, "baseDelayMs": 1}},
+                client_for,
+                session_id="s0",
+            ):
+                pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert served == ["acct-a"]
+
+    async def test_a_still_blocked_pool_keeps_the_quota_verdict(self, tmp_path: Any) -> None:
+        """When the sweep finds the pool still blocked, the verdict is the
+        retryable quota error naming the blocked credentials — never the
+        'No API key configured' misdiagnosis."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        for access, email in (("acct-a", "a@example.com"), ("acct-b", "b@example.com")):
+            row = store.upsert_credential(
+                "anthropic",
+                {
+                    "type": "oauth",
+                    "access": access,
+                    "refresh": "r",
+                    "expires": None,
+                    "email": email,
+                },
+            )
+            store.block_credential(row.id, "anthropic", block_ms=3_600_000)
+
+        def never_reached(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            raise AssertionError("no bearer should resolve")
+
+        async def no_sleep(delay_ms: int, signal: Any) -> None:
+            return None
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return _FnClient(never_reached)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = no_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError) as excinfo:
+                async for _ in stream_with_failover(
+                    _request("anthropic", "claude-opus-5"),
+                    store,
+                    {"retry": {"enabled": True, "baseDelayMs": 1}},
+                    client_for,
+                    session_id="s0",
+                ):
+                    pass
+        finally:
+            failover_module._abortable_sleep = original  # type: ignore[assignment]
+
+        assert excinfo.value.kind == "quota"
+        assert excinfo.value.retryable
+        assert "not usable right now" in excinfo.value.message
