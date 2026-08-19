@@ -28,6 +28,16 @@ summarized with a marker rather than streamed into context."""
 
 _TRUNCATION_MARKER = "\n\n[... content truncated at 200KB ...]"
 
+_MAX_REFERENCE_ENTRIES = 100
+"""A bare resource read appends at most this many reference paths. Skills ship
+a handful of reference docs; a runaway directory (a vendored node_modules, a
+data dump) must not turn every skill read into a directory bomb."""
+
+_MAX_REFERENCE_DEPTH = 4
+"""Reference discovery descends at most this many directory levels. Deep
+trees are almost never authored skill references, and the cap bounds the walk
+itself, not just the output."""
+
 
 def _read_text_capped(path: Path) -> str:
     """Read a file as UTF-8 (lossy), truncating at MAX_READ_BYTES.
@@ -99,6 +109,85 @@ def _resolve_child(
     return _read_text_capped(target)
 
 
+def _reference_listing(resource: Skill, *, scheme: str) -> str:
+    """List a resource's reference files as protocol-readable child paths.
+
+    Progressive disclosure has three steps: the prompt carries only names and
+    descriptions, a bare ``skill://<name>`` read returns the body, and the
+    reference files enter context only when individually read. This listing
+    closes the gap between steps two and three: without it the model knows
+    references exist (the body mentions them) but not how to reach them, and
+    the observed failure mode is guessing a RAW filesystem path
+    (``~/.<harness>/skills/<name>/references/x.md``) that is wrong on any
+    machine whose skills live under a different root. Appending the exact
+    ``<scheme>://<name>/<relpath>`` form makes the protocol read the obvious
+    next move.
+
+    Constraints, matching the resolver's own rules so the listing never
+    advertises a path a follow-up read would then reject:
+
+    - dotfiles and dot-directories are skipped (unlisted and unreadable by
+      design);
+    - the body file itself (``SKILL.md``/``GUIDE.md``) is excluded — the
+      caller just returned it;
+    - symlinked directories are not followed (a link cycle or an escape
+      outside ``base_dir`` must not grow or poison the walk);
+    - output is deterministic (sorted relative paths) and bounded by
+      :data:`_MAX_REFERENCE_ENTRIES` and :data:`_MAX_REFERENCE_DEPTH`, with
+      an explicit overflow marker instead of silent truncation.
+
+    Returns an empty string when the resource has no reference files, so a
+    body-only skill read stays byte-identical to the pre-listing behaviour.
+    """
+    base = resource.base_dir
+    body_file = resource.file_path
+    entries: list[str] = []
+    overflow = False
+
+    def _walk(directory: Path, depth: int) -> None:
+        nonlocal overflow
+        if depth > _MAX_REFERENCE_DEPTH or overflow:
+            return
+        try:
+            children = sorted(directory.iterdir(), key=lambda p: (p.name.lower(), p.name))
+        except OSError:
+            return
+        for child in children:
+            if overflow:
+                return
+            if child.name.startswith("."):
+                continue
+            if child.is_dir():
+                if child.is_symlink():
+                    continue
+                _walk(child, depth + 1)
+            elif child.is_file():
+                if child == body_file:
+                    continue
+                if len(entries) >= _MAX_REFERENCE_ENTRIES:
+                    overflow = True
+                    return
+                entries.append(child.relative_to(base).as_posix())
+
+    _walk(base, 1)
+    if not entries:
+        return ""
+
+    lines = [
+        "",
+        "---",
+        f"Reference files (read with `{scheme}://{resource.name}/<path>` — "
+        "never a raw filesystem path):",
+    ]
+    lines.extend(sorted(entries))
+    if overflow:
+        lines.append(
+            f"[... more files not shown; list a directory with "
+            f"`{scheme}://{resource.name}/<dir>` ...]"
+        )
+    return "\n".join(lines)
+
+
 def resolve_resource_url(
     url: str,
     resources: Mapping[str, Skill],
@@ -129,7 +218,9 @@ def resolve_resource_url(
 
     path = parts.path
     if not path or not path.strip("/"):
-        return _read_text_capped(resource.file_path)
+        body = _read_text_capped(resource.file_path)
+        listing = _reference_listing(resource, scheme=scheme)
+        return body + "\n" + listing if listing else body
     return _resolve_child(resource, path, scheme=scheme, label=label)
 
 
