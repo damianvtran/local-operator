@@ -7261,11 +7261,15 @@ class OperatorApp(App[None]):
         self._interrupted_cards = 0
         # EVERY turn end reconciles its queued rows, because the invariant is
         # simply stated: a row still held when a turn ends is one this turn did
-        # not deliver. A clean end can leave one — the model answers with no
-        # further tool calls, so the loop reaches no boundary and never drains
-        # the queue — and that row would otherwise go on promising until some
-        # later turn's first boundary settled it, minutes away and unrelated to
-        # anything on screen.
+        # not deliver. What leaves one behind is an ABORT or a stream error:
+        # both return from the run before the outer loop's yield boundary, which
+        # is where `_collect_yield_injections` drains. A turn that ends cleanly
+        # — even one the model answers with no tool calls at all — does reach
+        # that boundary and does drain (verified against the real `AgentLoop`:
+        # clean turn -> one SteeringDelivered, queue empty; aborted mid-stream
+        # -> no event, message still queued). The reconciliation runs on every
+        # path regardless, because "held when the turn ended" is a fact this
+        # handler can check and "which boundary the loop reached" is not.
         self._settle_queued_steer_notices_unsent()
         # LAST, and only after the turn's outcome is known, because the outcome
         # decides which of the three notifications this is:
@@ -7775,19 +7779,20 @@ class OperatorApp(App[None]):
         """Retire queued-steer rows the turn that just ended did not deliver.
 
         The delivery receipt only fires when ``_drain_steering`` actually takes
-        messages, and three ordinary paths end a turn without one: the turn was
-        interrupted (Ctrl+C), it failed, or it ended cleanly with the model
-        answering and no further tool calls. All three leave a row promising a
-        delivery the app has no receipt for — the defect the receipt exists to
-        prevent, reached by every path that is not the delivery path.
+        messages, and two paths end a turn without one: the turn was interrupted
+        (Ctrl+C) or it failed. Both return from the run before the outer loop's
+        yield boundary, which is where the queue would have been drained, so
+        both leave a row promising a delivery the app has no receipt for — the
+        defect the receipt exists to prevent, reached by every path that is not
+        the delivery path.
 
-        ONE message for all three, because from the user's side they are one
-        fact: the message is still queued (``abort`` stops the run without
-        draining the queue) and goes with their next message. Naming the cause
-        in the row was tried and removed — it restated the ``interrupted`` or
-        error notice sitting a row below it, cost the only string in the set
-        that wraps under 61 columns, and was simply wrong on the error path,
-        where nobody stopped anything.
+        ONE message for both, because from the user's side they are one fact:
+        the message is still queued (``abort`` stops the run without draining
+        the queue) and goes with their next message. Naming the cause in the row
+        was tried and removed — it restated the ``interrupted`` or error notice
+        sitting a row below it, cost the only string in the set that wraps under
+        61 columns, and was simply wrong on the error path, where nobody stopped
+        anything.
 
         ``note``, the weight the row already had: the state has not got worse,
         so the row has no business getting louder — and the loud ink is already
@@ -7807,11 +7812,10 @@ class OperatorApp(App[None]):
                 block.restate(DEFERRED_STEER_NOTICE, "note")
             except Exception:  # a receipt must never take the app down
                 logger.debug("queued-steer notice could not be retired", exc_info=True)
-        # Order matters and is the queue's own: these rows were steered before
-        # anything queued against a LATER turn, and the engine drains FIFO. They
-        # are appended (not prepended) because a turn cannot end with rows
-        # queued against a turn that has not started — `_queued_steer_notices`
-        # is empty of anything newer at this point, by construction.
+        # APPENDED, not prepended: a turn cannot end holding rows queued against
+        # a turn that has not started, so everything already deferred is older
+        # than everything being handed over. See `_deferred_steer_notices` for
+        # why that order is the one the engine settles in.
         self._deferred_steer_notices.extend(self._queued_steer_notices)
         self._queued_steer_notices.clear()
 
@@ -7829,14 +7833,9 @@ class OperatorApp(App[None]):
         already exited. It is genuinely still queued and will go at the next
         boundary, so settling its row here would claim a delivery that has not
         happened. FIFO matches the queue's own order, so "the first ``count``
-        rows" and "the messages that went" are the same set.
-
-        DEFERRED rows come first in that order. A row whose turn ended before
-        any boundary is older than anything steered into the turn now running,
-        and the engine's queue never reordered them — it was never drained. So
-        the two lists concatenate into the one FIFO the engine is working
-        through, and this delivery may well settle a row painted several turns
-        ago: that is the point of holding them (issue #151).
+        rows" and "the messages that went" are the same set — across BOTH held
+        lists, which is why they concatenate here; see
+        `_deferred_steer_notices` for why deferred rows lead.
         """
         if not self._deferred_steer_notices and not self._queued_steer_notices:
             return  # a delivery for rows this app is no longer holding
@@ -7864,17 +7863,26 @@ class OperatorApp(App[None]):
         held = self._deferred_steer_notices + self._queued_steer_notices
         taken = max(1, min(count, len(held)))
         settled, remaining = held[:taken], held[taken:]
-        # Split back apart by identity rather than by arithmetic on `taken`:
-        # the lists were concatenated for ordering only, and each row goes back
-        # to whichever list it came from so a row that survives this delivery
-        # keeps its meaning (deferred rows are already restated; queued rows are
-        # still promising the current turn).
-        surviving = {id(block) for block in remaining}
+        # Split back apart by MEMBERSHIP rather than by arithmetic on `taken`:
+        # the lists were concatenated for ordering only, and each survivor goes
+        # back to whichever list it came from, because the two mean different
+        # things. A deferred row has already been restated and must not be
+        # restated again at the next turn end; a queued row is still promising
+        # the current turn and must be. Arithmetic gets this right only while
+        # `taken == count` and the deferred list is consumed whole — the
+        # defensive coercion above exists precisely because that cannot be
+        # assumed of a field this app does not produce.
+        #
+        # A set of the blocks themselves: `NoticeBlock` inherits identity
+        # equality and hashing from `object` (verified: two rows with identical
+        # text compare unequal and occupy two slots in a set), so membership
+        # here is identity, which is what this needs.
+        surviving = set(remaining)
         self._deferred_steer_notices = [
-            block for block in self._deferred_steer_notices if id(block) in surviving
+            block for block in self._deferred_steer_notices if block in surviving
         ]
         self._queued_steer_notices = [
-            block for block in self._queued_steer_notices if id(block) in surviving
+            block for block in self._queued_steer_notices if block in surviving
         ]
         for block in settled:
             try:

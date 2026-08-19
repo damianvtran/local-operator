@@ -339,6 +339,65 @@ async def test_a_deferred_row_settles_before_one_queued_against_the_new_turn() -
 
 
 @pytest.mark.asyncio
+async def test_a_surviving_deferred_row_stays_deferred_and_is_not_restated_again() -> None:
+    """A PARTIAL settle must not migrate the survivor into the queued list.
+
+    The two lists are concatenated for ordering only, and splitting the
+    survivors back by arithmetic on `taken` instead of by membership silently
+    puts a leftover deferred row into `_queued_steer_notices`. Nothing is
+    visibly wrong at that moment — and then the next turn end finds it there
+    and restates it a second time, which is exactly the redundant rebuild and
+    gap re-measure the two-list split exists to prevent.
+
+    Reached through the count guard rather than a contrived call: `count`
+    crosses a thread boundary from a producer this app does not own, an
+    unusable value degrades to ONE delivery, and one delivery against two held
+    rows is the partial case. Review round 1, F1 \u2014 the arithmetic version of
+    this split passed all fifteen other tests in this file.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for text in ("the first instruction", "the second instruction"):
+            await _submit(pilot, app, text)
+
+        app.post_message(TurnEnded(True, None))
+        await pilot.pause()
+        assert len(app._deferred_steer_notices) == 2
+
+        older, younger = app._deferred_steer_notices
+
+        # An unusable `count` degrades to one delivery, so ONE of the two goes.
+        garbled = SteeringDelivered(1)
+        garbled.count = "not a number"  # type: ignore[assignment]
+        app.post_message(garbled)
+        await pilot.pause()
+
+        assert older._text == SENT_STEER_NOTICE
+        assert younger._text == DEFERRED_STEER_NOTICE
+        # The survivor is still DEFERRED. Landing in the queued list instead
+        # would be invisible here and wrong on the next turn end, below.
+        assert app._deferred_steer_notices == [younger]
+        assert app._queued_steer_notices == []
+
+        restatements: list[str] = []
+        original = type(younger).restate
+
+        def _record(self: NoticeBlock, text: str, kind: str) -> None:
+            if self is younger:
+                restatements.append(text)
+            original(self, text, kind)  # type: ignore[arg-type]
+
+        with patch.object(type(younger), "restate", _record):
+            app.post_message(TurnEnded(False, None))
+            await pilot.pause()
+
+        assert restatements == [], "the survivor was retired a second time"
+        assert younger._text == DEFERRED_STEER_NOTICE
+
+
+@pytest.mark.asyncio
 async def test_a_second_turn_end_does_not_restate_a_row_it_already_retired() -> None:
     """Rows move OUT of the queued list when they are retired, once.
 
