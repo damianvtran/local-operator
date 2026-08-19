@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import logging
 import secrets
 import urllib.parse
 import webbrowser
@@ -29,6 +30,66 @@ from typing import Any, Awaitable, Callable, TypeVar
 from local_operator.harness.types import AbortSignal
 
 DEFAULT_TIMEOUT_SECONDS = 300.0
+
+
+def _parse_pasted_callback(pasted: str) -> tuple[str, str]:
+    """Pull ``(code, state)`` out of whatever the user actually pasted.
+
+    Three shapes reach this prompt, and which one a user produces depends on
+    what their provider's browser page shows them, not on what we asked for:
+
+    1. The whole redirect URL (``http://localhost:54548/callback?code=..&state=..``),
+       which is what a user copies from the address bar when the browser is on
+       another machine and cannot reach this loopback port. This is the shape
+       the "paste the redirect URL" fallback exists for.
+    2. ``code#state``, which Anthropic renders as a single copy target.
+    3. A bare authorization code.
+
+    Handling only (2) and (3) meant a pasted URL was sent to the token endpoint
+    verbatim AS the authorization code, so the fallback advertised for remote
+    and headless sessions could not complete a login at all. Query parameters
+    are tried first because a URL is unambiguous: it has a scheme and a
+    ``code`` parameter, neither of which a bare code or a ``code#state`` pair
+    can produce.
+    """
+    if "://" in pasted:
+        parsed = urllib.parse.urlsplit(pasted)
+        query = urllib.parse.parse_qs(parsed.query)
+        code = (query.get("code") or [""])[0].strip()
+        if code:
+            # `state` may ride in the query (the ordinary case) or in the
+            # fragment, which some providers use to keep it out of server logs.
+            state = (query.get("state") or [""])[0].strip()
+            if not state and parsed.fragment:
+                frag = urllib.parse.parse_qs(parsed.fragment)
+                state = (frag.get("state") or [""])[0].strip() or parsed.fragment.strip()
+            return code, state
+        # A URL with no `code` is an error redirect or a mis-copy. Falling
+        # through would send the whole URL as the code and produce an opaque
+        # provider-side rejection, so say what is wrong while the user is still
+        # at the prompt.
+        error = (query.get("error") or [""])[0].strip()
+        if error:
+            # The raw OAuth error code is kept deliberately. This is a
+            # developer-facing CLI, and the code is the string a user searches
+            # for and quotes in a support thread; translating it would remove
+            # the only durable handle on the failure. What follows it is the
+            # part that was missing: what to do next.
+            description = (query.get("error_description") or [""])[0].strip()
+            detail = f" ({description})" if description else ""
+            raise LoginError(
+                f"Authorization failed: {error}{detail}. Approve the sign-in in "
+                "your browser, then paste the address bar contents again."
+            )
+        raise LoginError(
+            "That URL carries no authorization code. Approve the sign-in in your "
+            "browser, then copy the whole address bar and paste it here."
+        )
+    # Providers hand users "code#state" in the redirect URL fragment.
+    if "#" in pasted:
+        code, _, frag_state = pasted.partition("#")
+        return code.strip(), frag_state.strip()
+    return pasted, ""
 
 
 class LoginError(Exception):
@@ -67,14 +128,62 @@ class LoginCallbacks:
     ``instructions`` string (the short ``/launch`` redirect when a loopback
     server is up). ``on_manual_code_input`` is only invoked for paste-code
     providers; returning ``None`` declines.
+
+    ``on_warning`` reports something that WENT WRONG but did not end the login
+    (a paste the flow could not use), as distinct from ``on_progress``, which
+    narrates what is happening normally. They are separate hooks because a host
+    styles them differently: routed through ``on_progress``, a failed
+    authorization rendered in the same dim treatment as "opening your
+    browser…", so the one line that explained why nothing happened read as
+    routine narration. Optional, and falls back to ``on_progress`` when a host
+    does not implement it, so no existing host loses the message.
+
+    ``on_input_rejected`` fires when a value returned by
+    ``on_manual_code_input`` could not be parsed, just before the flow asks
+    again. It carries no message (``on_warning`` already delivered the reason)
+    and exists so a host that RENDERED the paste can correct what it showed:
+    the TUI settles its prompt into a receipt the moment the value is handed
+    over, so without this it painted a success receipt over a paste the flow
+    had rejected. A host with no such surface simply omits it.
     """
 
     on_auth_url: Callable[..., Awaitable[None] | None] | None = None
     on_progress: Callable[[str], Awaitable[None] | None] | None = None
+    on_warning: Callable[[str], Awaitable[None] | None] | None = None
+    on_input_rejected: Callable[[], Awaitable[None] | None] | None = None
     on_manual_code_input: Callable[[], Awaitable[str | None] | str | None] | None = None
 
 
 _T = TypeVar("_T")
+
+
+logger = logging.getLogger(__name__)
+
+
+async def report_safely(
+    hook: Callable[..., Awaitable[None] | None] | None,
+    *args: Any,
+) -> None:
+    """Invoke a host REPORTING hook, swallowing anything it raises.
+
+    Reporting hooks (``on_progress``, ``on_warning``, ``on_input_rejected``)
+    tell the user what is happening; they take no part in deciding the login.
+    An embedding host whose sink raises would otherwise propagate out of the
+    waiter and out of ``_await_code`` -- losing a sign-in the browser callback
+    was about to complete, which is the exact failure the surrounding code
+    exists to prevent. A host that cannot render a message must not be able to
+    destroy a credential grant.
+
+    Deliberately NOT used for ``on_manual_code_input``: that hook returns a
+    value the flow acts on, so an exception there is a real failure and has to
+    surface rather than be swallowed.
+    """
+    if hook is None:
+        return
+    try:
+        await maybe_await(hook(*args))
+    except Exception:  # pragma: no cover - host-defined sinks
+        logger.debug("a login reporting hook raised; continuing", exc_info=True)
 
 
 async def maybe_await(value: Awaitable[_T] | _T) -> _T:
@@ -359,15 +468,69 @@ class OAuthCallbackFlow(ABC):
             prompt = self.callbacks.on_manual_code_input
             while prompt is None:
                 await asyncio.Future()  # park forever
-            pasted = await maybe_await(prompt())
-            while pasted is None:
-                await asyncio.Future()  # declined; keep waiting for the browser
-            pasted = pasted.strip()
-            # Providers hand users "code#state" in the redirect URL fragment.
-            if "#" in pasted:
-                code, _, frag_state = pasted.partition("#")
-                return code.strip(), frag_state.strip()
-            return pasted, ""
+            while True:
+                pasted = await maybe_await(prompt())
+                while pasted is None:
+                    await asyncio.Future()  # declined; keep waiting for the browser
+                try:
+                    return _parse_pasted_callback(pasted.strip())
+                except LoginError as exc:
+                    # A paste this task cannot use must not end the login, AND
+                    # must not leave the user with nowhere to put a corrected
+                    # one. Two rules meet here:
+                    #
+                    # The prompt RACES the loopback callback -- it is the
+                    # fallback for a browser that cannot reach this machine --
+                    # so raising would let a mistyped URL kill a sign-in the
+                    # browser was about to finish. That is why the line above
+                    # re-parks on a DECLINED paste rather than failing.
+                    #
+                    # But parking is only the right answer when the callback can
+                    # still win, and for the user this fallback EXISTS for it
+                    # cannot: their browser is on another machine. For them a
+                    # single mis-paste meant a settled prompt, a message telling
+                    # them to copy the address bar, and no field left to paste
+                    # it into -- then silence until the timeout. So the reason
+                    # is reported and the prompt is offered AGAIN, which is the
+                    # only outcome that matches what the message asks for.
+                    #
+                    # Declining the re-prompt still parks, so a user who has
+                    # given up waits for the browser or the timeout exactly as
+                    # before, and the callback keeps its chance to win either
+                    # way because this loop never blocks it.
+                    await report_safely(
+                        self.callbacks.on_warning or self.callbacks.on_progress, str(exc)
+                    )
+                    # Ordered after the message so a host that repaints on
+                    # rejection does so with the reason already on screen
+                    # above it.
+                    await report_safely(self.callbacks.on_input_rejected)
+                    # Yield before asking again. A host may implement
+                    # ``on_manual_code_input`` SYNCHRONOUSLY (the callbacks are
+                    # documented to allow it, and the CLI host and the tests
+                    # both do), in which case nothing in this loop body ever
+                    # suspends: ``maybe_await`` returns without awaiting on a
+                    # plain value, so the loop would spin without returning
+                    # control to the scheduler. That starves the whole event
+                    # loop -- the loopback callback future can never be
+                    # resolved, and the flow's own timeout can never fire, so a
+                    # single bad paste hangs the login forever instead of
+                    # merely ending it. Handing one iteration back to the
+                    # scheduler is what keeps the race the comment above
+                    # describes actually winnable.
+                    #
+                    # A host that returns a value WITHOUT waiting for the user
+                    # (a test double, not a real prompt -- the TUI awaits a
+                    # mounted block's future and the CLI awaits
+                    # `asyncio.to_thread(read_line)`) will re-offer in a tight
+                    # loop until another waiter wins or the flow's timeout
+                    # fires. Bounded in TIME, not in WORK: the loop also
+                    # reports each rejection, so such a host would see tens of
+                    # thousands of warnings inside one timeout window (~37k in
+                    # 1s when measured). Liveness is what the yield restores;
+                    # an immediate-return prompt is a host bug, and this note
+                    # exists so it reads as one rather than as merely wasteful.
+                    await asyncio.sleep(0)
 
         async def _abort_watch() -> tuple[str, str]:
             assert self._signal is not None

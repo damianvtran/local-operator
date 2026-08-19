@@ -644,3 +644,236 @@ async def test_teardown_settles_a_live_prompt(
 
     assert prompt.answered, "unmount left the login parked on an unresolved future"
     assert prompt.wait().result() is None
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_paste_does_not_claim_a_successful_receipt() -> None:
+    """Design round 1 D1(b): a paste the flow could not use settled as
+    `✓ … code received (107 chars)`.
+
+    The prompt settles the instant the value is handed over, but whether that
+    value parses is decided one layer out in `_parse_pasted_callback`. So a
+    mis-copied URL painted a success glyph, the word "received", and a
+    character count that read as corroboration — directly above the notice
+    saying the authorization had failed. The login is still live at that point
+    (the flow re-prompts, the loopback callback is still racing), so this is
+    not a cancel either.
+    """
+    app = _PromptHost()
+    async with app.run_test() as pilot:
+        block = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        await app.mount(block)
+        await pilot.pause()
+        block.resolve("http://localhost:54548/callback?error=access_denied")
+        await pilot.pause()
+
+        # Before the flow rules on it, the receipt is the ordinary success one.
+        assert "received" in _rendered(block)
+
+        block.mark_unusable()
+        await pilot.pause()
+        receipt = _rendered(block)
+        assert "received" not in receipt, receipt
+        assert "cancelled" not in receipt, receipt
+        assert "not usable" in receipt, receipt
+        assert "still waiting for the browser" in receipt, receipt
+        # The length is gone: it read as evidence the paste was fine.
+        assert "chars" not in receipt, receipt
+
+        # Control: an accepted paste is untouched by the same instrument, so
+        # the assertions above distinguish the two outcomes rather than
+        # describing every receipt.
+        good = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        await app.mount(good)
+        await pilot.pause()
+        good.resolve("code#state")
+        await pilot.pause()
+        assert "received" in _rendered(good)
+
+
+@pytest.mark.asyncio
+async def test_mark_unusable_cannot_rewrite_a_cancel_or_a_live_prompt() -> None:
+    """`mark_unusable` corrects a SUCCESS claim and nothing else.
+
+    A declined paste and a still-open prompt both reach the flow's rejection
+    path in principle (a host may call the hook at any time), and neither has a
+    success claim to correct — turning either into "paste not usable" would
+    invent a paste the user never made.
+
+    Asserts the FLAG and not only the rendered row (agent review round 4, Z9):
+    `_build`'s precedence tests `_superseded` and "nothing submitted" before it
+    reaches the `_unusable` branch, so the renderer produces the right output
+    even with the guard deleted. A rendering-only assertion therefore passes
+    for a reason other than the one it names, and this test's whole subject is
+    the guard.
+    """
+    app = _PromptHost()
+    async with app.run_test() as pilot:
+        declined = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        await app.mount(declined)
+        await pilot.pause()
+        declined.resolve(None)
+        await pilot.pause()
+        before = _rendered(declined)
+        declined.mark_unusable()
+        await pilot.pause()
+        assert declined._unusable is False, "a cancel was rewritten as an unusable paste"
+        assert _rendered(declined) == before
+
+        live = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        await app.mount(live)
+        await pilot.pause()
+        before_live = _rendered(live)
+        live.mark_unusable()
+        await pilot.pause()
+        assert live._unusable is False, "a live prompt was rewritten as an unusable paste"
+        assert _rendered(live) == before_live
+        assert not live.answered
+
+
+@pytest.mark.asyncio
+async def test_a_settled_prompt_does_not_retain_the_pasted_value() -> None:
+    """Agent review round 4, Z7: the block held the submitted value verbatim.
+
+    `resolve` drops `_typed` precisely so a settled block in the transcript is
+    not still holding the user's key, but the value was then kept under
+    `_submitted` for the receipt's character count — and the app retains the
+    last prompt to correct its receipt, so that reference outlived even
+    `/clear`. The receipt only ever needed the LENGTH.
+    """
+    app = _PromptHost()
+    async with app.run_test() as pilot:
+        block = KeyPromptBlock("Alibaba Cloud")
+        await app.mount(block)
+        await pilot.pause()
+        block.resolve("sk-SUPERSECRET-abcdef")
+        await pilot.pause()
+
+        held = [
+            value
+            for value in vars(block).values()
+            if isinstance(value, str) and "SUPERSECRET" in value
+        ]
+        assert held == [], f"the settled block still holds the pasted value: {held}"
+
+        # The receipt still reports the length, or the assertion above could be
+        # satisfied by a block that simply stopped describing the paste.
+        assert "21 chars" in _rendered(block)
+
+
+@pytest.mark.asyncio
+async def test_an_interrupt_mid_paste_still_lets_the_receipt_be_corrected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 5, Z11: a teardown between handover and parse stranded
+    a false success receipt.
+
+    A paste settles the block immediately — its receipt provisionally reads
+    "code received" — but whether the value parses is decided one layer out, so
+    there is a real window in which the block is settled and the flow has not
+    yet ruled on it. `_settle_key_prompt` clearing the retained reference
+    unconditionally meant an interrupt landing in that window left nothing to
+    correct, and the false `✓` stayed on screen: design round 1's D1(b),
+    reintroduced through the back door.
+
+    Also pins the other half, or the fix would be "never clear it": cancelling a
+    LIVE prompt still drops the reference, because no value was handed over and
+    so no correction can ever be owed.
+    """
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: True)
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(_LoginSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        settled = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        app._key_prompt = settled
+        app._last_login_prompt = settled
+        app._append_block(settled)
+        await pilot.pause()
+        # The paste is handed over; the flow has not parsed it yet.
+        settled.resolve("http://localhost:54548/callback?error=access_denied")
+        await pilot.pause()
+
+        app._settle_key_prompt()  # the interrupt
+        await pilot.pause()
+
+        assert (
+            app._last_login_prompt is settled
+        ), "the reference was dropped while a correction was still owed"
+        app._last_login_prompt.mark_unusable()
+        await pilot.pause()
+        assert "not usable" in _rendered(settled)
+
+        # A LIVE prompt cancelled by the same path owes no correction, so the
+        # reference is released rather than retained for the session.
+        live = KeyPromptBlock("Z.AI", secret=False, sole_path=False)
+        app._key_prompt = live
+        app._last_login_prompt = live
+        app._append_block(live)
+        await pilot.pause()
+        app._settle_key_prompt()
+        await pilot.pause()
+        assert app._last_login_prompt is None
+
+
+@pytest.mark.asyncio
+async def test_a_completed_login_stops_holding_the_pasted_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 6, Z12: the success path kept the credential reachable.
+
+    The block that retains a correction target still holds the pasted secret —
+    `resolve` drops `_typed`, but it also resolves the future, and a future
+    keeps its result for as long as the block holds it. So the retained
+    reference is a credential lifetime, not merely memory.
+
+    On a login that SUCCEEDS, `_request_login_key`'s `finally` has already
+    cleared `_key_prompt`, so a release nested behind "is a prompt live?" never
+    ran and the key survived `/clear` and unmount — reopening the retention
+    finding a previous round landed. The distinguishing signal is that
+    `_key_prompt` is still set during the narrow window a correction can be
+    owed, and cleared once the login is over.
+    """
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: True)
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(_LoginSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        block = KeyPromptBlock("Alibaba Cloud")
+        app._key_prompt = block
+        app._last_login_prompt = block
+        app._append_block(block)
+        await pilot.pause()
+        block.resolve("sk-real-key")
+        await pilot.pause()
+        # What `_request_login_key`'s `finally` does once the value is returned.
+        app._key_prompt = None
+
+        app._settle_key_prompt()  # reached by /clear, reload and unmount
+        await pilot.pause()
+
+        assert (
+            app._last_login_prompt is None
+        ), "a completed login left the pasted key reachable through the block"
+
+        # The block itself still holds the value — that is why the reference
+        # above has to go, and asserting it here is what stops this test from
+        # passing for the wrong reason if the block ever stops carrying it.
+        assert block.wait().result() == "sk-real-key"
+
+        # Scan the app's own attributes rather than re-reading the one already
+        # asserted None: agent review round 7 (Z14) pointed out that iterating
+        # `_last_login_prompt` again cannot fail independently, so it read as
+        # corroboration while proving nothing. This walks every attribute for
+        # any prompt block still holding the pasted key, and so would also
+        # catch the reference being parked somewhere new.
+        reachable = [
+            name
+            for name, value in vars(app).items()
+            if isinstance(value, KeyPromptBlock)
+            and value.wait().done()
+            and value.wait().result() == "sk-real-key"
+        ]
+        assert reachable == [], f"the app still reaches a block holding the pasted key: {reachable}"

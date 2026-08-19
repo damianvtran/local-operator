@@ -369,7 +369,11 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
             "bigmodel",
             "z-ai",
         ),
-        name="Z.AI (GLM)",
+        # Names the CREDENTIAL, not the plan. Both Z.AI entries route to the
+        # same coding-plan base URL, so a name implying a plan difference sends
+        # a user to the wrong row for the wrong reason. `xai`/`xai-oauth` set
+        # the precedent this follows.
+        name="Z.AI (GLM API key)",
         env_keys="ZAI_API_KEY",
         # No instruction line: the prompt row below it already reads "Paste your
         # Z.AI API key", and Z.AI's dashboard calls it exactly that, so there is
@@ -390,7 +394,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
             "bigmodel",
             "z-ai",
         ),
-        name="Z.AI (GLM Coding Plan · Sign in)",
+        name="Z.AI (GLM browser sign-in)",
         # Browser sign-in rather than a pasted key. The flow ends by minting a
         # durable `id.secret` API key, which is what `access` holds and what the
         # wire receives -- so this shares `zai`'s credential row, base URL and
@@ -401,8 +405,11 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # Pinned by the provider's OAuth client registration; port fallback is
         # refused, which `ZaiOAuthFlow` states again as `allow_port_fallback`.
         callback_port=54548,
-        # Paste-the-redirect-URL fallback for when the browser cannot reach this
-        # machine (a remote or headless session), as for anthropic.
+        # Paste fallback for when the browser cannot reach this machine (a
+        # remote or headless session), as for anthropic. The prompt accepts the
+        # whole redirect URL from the address bar, which is what a user has in
+        # front of them in that situation, as well as a bare authorization
+        # code; `_parse_pasted_callback` owns the shapes.
         paste_code_flow=True,
         base_url="https://api.z.ai/api/coding/paas/v4",
         # No refresh_token: the minted key never expires, so there is nothing to

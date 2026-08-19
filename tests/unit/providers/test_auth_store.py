@@ -819,6 +819,46 @@ class TestARefreshlessOAuthCredentialIsReadable:
         assert oauth.credential_type == "oauth"
         assert pasted.credential_type == "api_key"
 
+    async def test_signing_in_repeatedly_keeps_one_row(self, tmp_path: Any) -> None:
+        """Z1: a refreshless OAuth credential must dedupe like every other one.
+
+        `_identity_key_for`'s per-provider constant asked "is this OAuth?" by
+        testing for a refresh token -- the same blind spot the type derivation
+        had. A credential whose token never expires carries none, so it fell
+        through to `None` and each re-login left another row. Five sign-ins
+        meant five rows, and `/usage` rendered one account five times.
+
+        Z.AI's token response makes the `user` block optional, so the identity
+        fields cannot be relied on to cover this.
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        # No email/account_id: the shape Z.AI returns without a `user` block.
+        payload = {"type": "oauth", "access": "key-id.sec-ret", "expires": None}
+        for attempt in range(5):
+            store.upsert_credential("zai", dict(payload, authorized_at=attempt))
+
+        rows = store.list_credentials("zai")
+        assert len(rows) == 1, [r.id for r in rows]
+        assert await store.get_api_key("zai") == "key-id.sec-ret"
+
+    async def test_a_pasted_key_still_gets_its_own_row(self, tmp_path: Any) -> None:
+        """The control: deduping OAuth must not start deduping API keys.
+
+        Each pasted key is a distinct credential and has always earned its own
+        row -- that is what the `source == "login"` guard at the top of
+        `_identity_key_for` is for. Without this, the fix above would read as
+        correct while silently collapsing a user's key pool to one row.
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        store.upsert_credential("zai", {"key": "sk-1", "source": "login", "type": "api_key"})
+        store.upsert_credential("zai", {"key": "sk-2", "source": "login", "type": "api_key"})
+
+        assert len(store.list_credentials("zai")) == 2
+
 
 class TestADemotedRowDoesNotHoldItsTier:
     """R34: demotion must move a turn on, even across cascade TIERS.
