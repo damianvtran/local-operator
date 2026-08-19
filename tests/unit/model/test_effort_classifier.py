@@ -297,5 +297,185 @@ async def test_a_switch_with_auto_effort_off_stays_off(monkeypatch) -> None:
     await stream.close()
 
 
+@pytest.mark.asyncio
+async def test_a_mid_turn_switch_still_quota_checks_the_new_provider(monkeypatch) -> None:
+    """The new provider owes a quota check even though the boundary was spent (review F7).
+
+    ``preflight_usage``'s body sits behind a one-shot token that the turn's FIRST
+    call consumes. A mid-message switch brings a provider this turn has never
+    checked, so it needs a gate of its own — re-arming the message boundary would
+    also re-grade the turn's effort from whatever aside is newest (F2), which is
+    why the two flags are separate.
+    """
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers import failover
+
+    async def fake_stream(request, *args, **kwargs):
+        yield StreamEndEvent(stop_reason="stop")
+
+    monkeypatch.setattr(failover, "stream_with_failover", fake_stream)
+
+    class FakeAuth:
+        async def get_oauth_access(self, *args, **kwargs):
+            return None
+
+    stream = SessionStreamFn(
+        cast(Any, FakeAuth()), {"retry": {"usageAwareFallback": True}}, "session-x"
+    )
+    # Observe the CREDENTIAL LOOKUP the check body performs, not the flag that
+    # gates it: asserting the flag would pass even if the gate never opened.
+    checked: list[str] = []
+
+    class WatchedAuth:
+        """Records which providers the check body actually looked up."""
+
+        async def get_oauth_access(self, provider, *args, **kwargs):
+            checked.append(provider)
+            return None
+
+        def list_credentials(self, *args, **kwargs):
+            return []
+
+        def is_blocked(self, *args, **kwargs):
+            return False
+
+    stream._auth_store = cast(Any, WatchedAuth())
+    first = ModelSpec(provider="pa", model_id="m")
+    second = ModelSpec(provider="pb", model_id="m")
+
+    stream.begin_message()
+    _ = [
+        event
+        async for event in stream(ChatRequest(model=first, messages=[Message.user("go")]), None)
+    ]
+    stream.on_model_changed(second)
+    _ = [
+        event
+        async for event in stream(ChatRequest(model=second, messages=[Message.user("go")]), None)
+    ]
+
+    assert checked == ["pa", "pb"], checked
+    await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_the_effort_is_fitted_to_the_spec_actually_being_sent(monkeypatch) -> None:
+    """Fit at APPLY time, not at switch time (review F9).
+
+    The loop's resolver can fall back to the run's snapshot, so the model handed
+    to ``on_model_changed`` is not guaranteed to be the model the next request
+    carries. Fitting to one and applying to the other sends a rung the request's
+    model may not have — the HTTP 400 this mechanism exists to prevent. Here the
+    switch announces a wide-ladder model but the request that follows carries the
+    narrow one.
+    """
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers import failover
+
+    captured: list[ChatRequest] = []
+
+    async def fake_stream(request, *args, **kwargs):
+        captured.append(request)
+        yield StreamEndEvent(stop_reason="stop")
+
+    monkeypatch.setattr(failover, "stream_with_failover", fake_stream)
+
+    class FakeAuth:
+        async def get_oauth_access(self, *args, **kwargs):
+            return None
+
+    stream = SessionStreamFn(cast(Any, FakeAuth()), {"effort": {"auto": True}}, "session-x")
+
+    async def _preflight(model) -> None:
+        stream._message_boundary_pending = False
+        stream._quota_recheck_pending = False
+
+    monkeypatch.setattr(stream, "preflight_usage", _preflight)
+    wide = ModelSpec(
+        provider="test", model_id="wide", reasoning_efforts=("minimal", "low", "medium", "high")
+    )
+    narrow = ModelSpec(provider="test", model_id="narrow", reasoning_efforts=("medium", "high"))
+
+    _ = [
+        event
+        async for event in stream(
+            ChatRequest(model=wide, messages=[Message.user("show status")]), None
+        )
+    ]
+    assert captured[-1].model.reasoning_effort == "low"
+
+    # The hook is told about `wide` again (a resolver fallback), but the request
+    # that follows carries `narrow`.
+    stream.on_model_changed(wide)
+    _ = [
+        event
+        async for event in stream(
+            ChatRequest(model=narrow, messages=[Message.user("show status")]), None
+        )
+    ]
+    sent = captured[-1].model.reasoning_effort
+    assert sent in narrow.reasoning_efforts, sent
+    await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_a_switch_never_applies_an_effort_the_user_was_not_shown(monkeypatch) -> None:
+    """No silent auto-effort on a ladder-less -> ladder switch (review F8).
+
+    On a model with no ladder the classifier yields a tier but no level, and no
+    ``auto effort:`` notice is printed because there is no level to announce.
+    Switching to a model that HAS a ladder must not quietly turn that unannounced
+    tier into a real rung.
+    """
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers import failover
+
+    captured: list[ChatRequest] = []
+    notices: list[str] = []
+
+    async def fake_stream(request, *args, **kwargs):
+        captured.append(request)
+        yield StreamEndEvent(stop_reason="stop")
+
+    monkeypatch.setattr(failover, "stream_with_failover", fake_stream)
+
+    class FakeAuth:
+        async def get_oauth_access(self, *args, **kwargs):
+            return None
+
+    stream = SessionStreamFn(cast(Any, FakeAuth()), {"effort": {"auto": True}}, "session-x")
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+
+    async def _preflight(model) -> None:
+        stream._message_boundary_pending = False
+        stream._quota_recheck_pending = False
+
+    monkeypatch.setattr(stream, "preflight_usage", _preflight)
+    ladderless = ModelSpec(provider="test", model_id="plain", reasoning_efforts=())
+    reasoner = ModelSpec(
+        provider="test", model_id="reasoner", reasoning_efforts=("low", "medium", "high")
+    )
+
+    _ = [
+        event
+        async for event in stream(
+            ChatRequest(model=ladderless, messages=[Message.user("show status")]), None
+        )
+    ]
+    assert stream._message_effort is None
+    assert not any("auto effort" in text for text in notices)
+
+    stream.on_model_changed(reasoner)
+    _ = [
+        event
+        async for event in stream(
+            ChatRequest(model=reasoner, messages=[Message.user("show status")]), None
+        )
+    ]
+    assert captured[-1].model.reasoning_effort is None, captured[-1].model.reasoning_effort
+    assert not any("auto effort" in text for text in notices), notices
+    await stream.close()
+
+
 async def _noop() -> None:
     return None
