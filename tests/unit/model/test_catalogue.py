@@ -1289,6 +1289,8 @@ def test_an_unshipped_xai_id_does_not_keep_the_unknown_placeholder_name(monkeypa
         # be caught by the k3 arm's "k<digit>" shape.
         ("kimi", "k3", False),
         ("kimi", "k3-256k", False),
+        # Live-probed alongside k3: pins the pair the same way.
+        ("kimi", "k2-thinking", False),
         ("kimi", "kimi-for-coding", False),
         ("kimi", "kimi-for-coding-highspeed", False),
         ("kimi", "kimi-k2-0711-preview", True),

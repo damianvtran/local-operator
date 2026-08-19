@@ -559,11 +559,12 @@ AGGREGATOR_PROVIDERS = frozenset({"openrouter", "radient"})
 def credential_provider_id(provider_id: str) -> str:
     """The provider id a credential for ``provider_id`` is actually STORED under.
 
-    Login flavours do not own their credentials. ``xai-oauth``, ``openai-device``
-    and ``alibaba-token-plan-oauth`` are alternate ways of authenticating
-    ``xai``, ``openai`` and ``alibaba-token-plan``, and their login writes ONE
-    row under the aliased name (``store_credentials_as``) so that logging in
-    either way yields one account rather than two half-configured ones.
+    Login flavours do not own their credentials. ``xai-oauth``, ``openai-device``,
+    ``alibaba-token-plan-oauth`` and ``zai-oauth`` are alternate ways of
+    authenticating ``xai``, ``openai``, ``alibaba-token-plan`` and ``zai``, and
+    their login writes ONE row under the aliased name (``store_credentials_as``)
+    so that logging in either way yields one account rather than two
+    half-configured ones.
 
     Every credential lookup therefore has to be translated before it reaches a
     store whose queries are exact (``WHERE provider = ?``). Asking for the
@@ -584,8 +585,17 @@ def resolve_env_key(provider_id: str) -> str | None:
 
     Handles both forms of ``env_keys``: a plain variable name, or a callable
     that picks among several (feature-flag style).
+
+    Alias-aware: a login flavour declares no env var of its own (there is no
+    ``XAI_OAUTH_API_KEY``), but it serves the same endpoint as the provider it
+    stores under, so the base provider's var authenticates it too. This is the
+    ONE env reader the store's ``_env_api_key``, the controller's ``is_usable``
+    and the catalogue enrichment share; a second, literal one is how a flavour
+    resolves at stream time yet reads "needs login" on every status surface.
     """
     definition = get_provider_definition(provider_id)
+    if definition is None or definition.env_keys is None:
+        definition = get_provider_definition(credential_provider_id(provider_id))
     if definition is None or definition.env_keys is None:
         return None
     if callable(definition.env_keys):

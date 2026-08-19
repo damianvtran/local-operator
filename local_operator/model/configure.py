@@ -225,9 +225,11 @@ _NO_SAMPLING_PARAMS = re.compile(
 #: :data:`_NO_SAMPLING_PARAMS`, because this is NOT a property of a model
 #: family across routes: the mainland ``api.moonshot.cn`` host serves
 #: ``kimi-k2-*``/``moonshot-*`` under the same ``kimi`` provider id and
-#: accepts the pair. The ids below (``k3``, ``k3-256k``, ``kimi-for-coding``,
-#: ``kimi-for-coding-highspeed``) exist only on the coding host, so matching
-#: them is matching the endpoint that pins the values. Anchored at the start:
+#: accepts the pair. The rule is "any k-numbered coding-host id, now or
+#: later": ``k3``, ``k3-256k``, ``k2-thinking`` (the live probe confirmed it
+#: pins the pair too) and ``kimi-for-coding*`` all exist only on the coding
+#: host, so matching the ``k<digit>``/``kimi-for-coding`` shapes is matching
+#: the endpoint that pins the values. Anchored at the start:
 #: ``kimi-k2-0711-preview`` must not match on its ``k2`` fragment.
 _KIMI_PINNED_SAMPLING = re.compile(r"^(?:k\d+(?:-|$)|kimi-for-coding)")
 

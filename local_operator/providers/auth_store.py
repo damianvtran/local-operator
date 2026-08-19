@@ -46,6 +46,7 @@ from local_operator.providers.registry import (
     RefreshFn,
     credential_provider_id,
     get_provider_definition,
+    resolve_env_key,
 )
 
 if TYPE_CHECKING:  # the legacy reader stays an optional, import-guarded tier
@@ -322,8 +323,9 @@ class AuthStore:
         """The provider id whose ROWS answer a query about ``provider``.
 
         Login flavours (``xai-oauth``, ``openai-device``,
-        ``alibaba-token-plan-oauth``) deliberately store their credential under
-        the base provider's name, so every query here — which is exact SQL —
+        ``alibaba-token-plan-oauth``, ``zai-oauth``) deliberately store their
+        credential under the base provider's name, so every query here — which
+        is exact SQL —
         has to be asked in terms of the storage id or it matches nothing. Doing
         it once, at the boundary of the store, is what keeps the translation
         from having to be remembered at each of the dozen call sites that ask
@@ -1104,23 +1106,18 @@ class AuthStore:
         return None, None
 
     def _env_api_key(self, provider: str) -> str | None:
-        # A login flavour declares no env var of its own (there is no
-        # ``XAI_OAUTH_API_KEY``), but it serves the same endpoint as the
-        # provider it stores under, so the base provider's var is the one that
-        # authenticates it. Without this fallback a user with ``XAI_API_KEY``
-        # set could run `xai` and not `xai-oauth`, for one wire and one key.
+        # The env leg is the SAME reader every other surface uses —
+        # ``registry.resolve_env_key`` is alias-aware (a flavour authenticates
+        # with its base provider's var), so the cascade, ``is_usable`` and the
+        # catalogue enrichment cannot disagree about whether an env key runs a
+        # flavour. The store adds only the legacy ``credentials.env`` tier on
+        # top, which predates the store and no other reader sees.
         definition = get_provider_definition(provider)
         if definition is None or definition.env_keys is None:
             definition = get_provider_definition(credential_provider_id(provider))
-        if definition is not None and definition.env_keys is not None:
-            if callable(definition.env_keys):
-                value = definition.env_keys()
-                if value:
-                    return value
-            else:
-                value = os.environ.get(definition.env_keys)
-                if value:
-                    return value
+        value = resolve_env_key(provider)
+        if value:
+            return value
         # Legacy credentials.env tier via CredentialManager (lazy import so a
         # missing legacy module degrades to env-only).
         if self._credential_manager is None:
@@ -1235,7 +1232,14 @@ class AuthStore:
     def _row_matches_key(row: StoredCredential, api_key: str) -> bool:
         if row.credential_type == "api_key":
             return row.data.get("key") == api_key
-        return row.data.get("access") == api_key
+        # Compare against the SAME extractor the cascade used to produce the
+        # wire key, not ``data["access"]`` directly: a QwenCloud row holds a
+        # management token in ``access`` and the ``sk-sp-…`` inference key in
+        # ``api_key``, so the failing bearer failover reports is the extractor's
+        # output and a raw-field compare would find no row — no block, no
+        # demotion, no sticky clear for a credential that just failed.
+        key_fn = AuthStore._oauth_key_fn(row.provider)
+        return (key_fn(row.data) if key_fn else row.data.get("access")) == api_key
 
     def credential_id_for_key(self, provider: str, api_key: str) -> int | None:
         """Reverse lookup used by failover to block the exact bearer."""

@@ -227,6 +227,36 @@ async def test_rotate_sibling_usage_limit_preserves_sticky(store: AuthStore) -> 
     assert sticky is not None
 
 
+async def test_rotate_sibling_finds_a_token_plan_row_by_its_wire_key(
+    store: AuthStore,
+) -> None:
+    """The failing bearer is the EXTRACTOR's output, not ``data["access"]``.
+
+    A QwenCloud row holds the management token in ``access`` and the ``sk-sp-…``
+    inference key in ``api_key``; the cascade authenticates with the latter, so
+    the key failover reports on failure is the latter. Matching the raw field
+    found no row and the failing credential was never blocked, demoted or
+    unstuck — the failover layer could not rotate away from it."""
+    row = store.upsert_credential(
+        "alibaba-token-plan",
+        {"type": "oauth", "access": "mgmt-token", "api_key": "sk-sp-wire"},
+    )
+    from local_operator.providers.failover import ProviderError
+
+    error = ProviderError(401, "invalid api key", auth_error=True)
+    # The management token is NOT the wire key: reporting it rotates nothing —
+    # no row matches, so the lone row is still its own untried sibling (True)
+    # and nothing is blocked.
+    assert store.rotate_sibling("alibaba-token-plan", None, error, api_key="mgmt-token") is True
+    assert store.is_blocked(row.id, "alibaba-token-plan") is False
+    # Asked under the flavour id, with the WIRE key the request actually
+    # carried: the row is found and blocked, and no sibling remains (False).
+    assert (
+        store.rotate_sibling("alibaba-token-plan-oauth", None, error, api_key="sk-sp-wire") is False
+    )
+    assert store.is_blocked(row.id, "alibaba-token-plan-oauth") is True
+
+
 async def test_invalidated_token_soft_deletes_row(store: AuthStore) -> None:
     """Only TRUE invalidation signals soft-delete (PR-03): an explicit
     revocation marker, never a generic expired/unauthorized 401."""
@@ -1096,6 +1126,8 @@ class TestLoginFlavourAliases:
             ("xai-oauth", "xai"),
             ("openai-device", "openai"),
             ("alibaba-token-plan-oauth", "alibaba-token-plan"),
+            # The flavour the bug was actually reported for.
+            ("zai-oauth", "zai"),
         ):
             store.upsert_credential(storage, _oauth(access=f"{storage}-access"))
             assert await store.get_api_key(flavour) == f"{storage}-access"
