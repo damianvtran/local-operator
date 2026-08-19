@@ -1238,8 +1238,18 @@ class AuthStore:
         # ``api_key``, so the failing bearer failover reports is the extractor's
         # output and a raw-field compare would find no row — no block, no
         # demotion, no sticky clear for a credential that just failed.
+        # A malformed row (neither ``access`` nor ``api_key``) must not raise
+        # here: this runs inside failover's failure path, where an exception
+        # would replace "rotate away from the failing credential" with a crash.
+        # The extractor reads fields directly, so fall back to the raw compare
+        # when it cannot produce a key.
         key_fn = AuthStore._oauth_key_fn(row.provider)
-        return (key_fn(row.data) if key_fn else row.data.get("access")) == api_key
+        if key_fn is not None:
+            try:
+                return key_fn(row.data) == api_key
+            except KeyError:
+                return False
+        return row.data.get("access") == api_key
 
     def credential_id_for_key(self, provider: str, api_key: str) -> int | None:
         """Reverse lookup used by failover to block the exact bearer."""

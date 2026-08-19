@@ -257,6 +257,26 @@ async def test_rotate_sibling_finds_a_token_plan_row_by_its_wire_key(
     assert store.is_blocked(row.id, "alibaba-token-plan-oauth") is True
 
 
+async def test_rotate_sibling_survives_a_malformed_oauth_row(store: AuthStore) -> None:
+    """A hand-written row with neither ``access`` nor ``api_key`` must not turn
+    the failure path into a crash: the extractor raises KeyError on it, and
+    ``_row_matches_key`` has to swallow that and report "no match" so failover
+    still rotates. The healthy sibling must still be found and served."""
+    bad = store.upsert_credential("alibaba-token-plan", {"type": "oauth"})
+    failing = store.upsert_credential("alibaba-token-plan", {"key": "k-good", "type": "api_key"})
+    sibling = store.upsert_credential("alibaba-token-plan", {"key": "k-other", "type": "api_key"})
+    from local_operator.providers.failover import ProviderError
+
+    error = ProviderError(401, "invalid api key", auth_error=True)
+    # The bad row is walked FIRST and must read as "not the failing key", not
+    # raise; the real failing row is blocked and the sibling reported.
+    assert store.rotate_sibling("alibaba-token-plan", None, error, api_key="k-good") is True
+    assert store.is_blocked(failing.id, "alibaba-token-plan") is True
+    assert store.is_blocked(bad.id, "alibaba-token-plan") is False
+    assert await store.get_api_key("alibaba-token-plan") == "k-other"
+    _ = sibling
+
+
 async def test_invalidated_token_soft_deletes_row(store: AuthStore) -> None:
     """Only TRUE invalidation signals soft-delete (PR-03): an explicit
     revocation marker, never a generic expired/unauthorized 401."""
