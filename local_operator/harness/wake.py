@@ -401,21 +401,24 @@ def advance_wake_schedule(schedule: WakeSchedule, now_ms: int) -> WakeAdvanceRes
 
 
 def due_while_down(schedule: WakeSchedule, now_ms: int) -> int:
-    """How many of ``schedule``'s occurrences came strictly due before
-    ``now_ms`` — the honest "this is how far behind we are" count, with NO
-    clamp to the delivery budget.
+    """How many of ``schedule``'s occurrences came due at or before ``now_ms``
+    — the honest "this is how far behind we are" count, with NO clamp to the
+    delivery budget.
 
     This is the count the agent should SEE (review round 2, M2): for an
-    ``every 1h, limit 1`` wake resumed five hours late, four occurrences came
+    ``every 1h, limit 1`` wake resumed five hours late, FIVE occurrences came
     due while the process was down even though the schedule would only ever
     have delivered one of them — and "1 occurrence was missed" misinforms the
-    model about how stale the wake's subject is. Occurrences past ``until_at``
-    do not count (the schedule was already retired by then); a one-shot
-    contributes at most its single occurrence.
+    model about how stale the wake's subject is. "At or before", not
+    "strictly before": an occurrence due exactly at ``now_ms`` has come due,
+    and the resume owes it. Occurrences past ``until_at`` do not count (the
+    schedule was already retired by then); a one-shot contributes at most its
+    single occurrence.
     """
     if schedule.every_ms is None:
-        return 1 if schedule.next_due_at < now_ms else 0
-    if schedule.next_due_at >= now_ms:
+        # ``<=`` matches the recurring arm's "due at or before now".
+        return 1 if schedule.next_due_at <= now_ms else 0
+    if schedule.next_due_at > now_ms:
         return 0
     due = (now_ms - schedule.next_due_at) // schedule.every_ms
     if schedule.until_at is not None and schedule.next_due_at <= schedule.until_at:

@@ -472,6 +472,95 @@ async def test_resume_aggregates_overdue_wakes_into_one_catchup(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_catchup_inlines_before_first_user_prompt(tmp_path):
+    """Review round 3, M2: a pending catch-up must reach the model BEFORE the
+    user's first prompt, inlined into the SAME turn (user message last), not
+    spawned as a competing turn that queues behind it."""
+    import time as _time
+
+    from local_operator.harness.wake import WakeSchedule
+
+    now = int(_time.time() * 1000)
+    overdue = WakeSchedule(
+        id="w1", message="check the backup", next_due_at=now - 3_600_000, created_at=now - 4_000_000
+    )
+    transcript = Transcript(tmp_path / "sess")
+    await transcript.append_custom("wake_schedules", _persisted_wakes_payload([overdue]))
+
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = Session(
+        model=MODEL,
+        stream_fn=stream,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: [],
+    )
+    session._resume_grace_ends_ms = 0  # grace already expired
+    await session.prompt("hello")
+    await asyncio.sleep(0.05)
+
+    # ONE turn (not a user turn + a queued catch-up turn), and inside it the
+    # catch-up precedes the user's text.
+    assert len(stream.requests) == 1
+    texts = [getattr(m, "text", "") for m in stream.requests[0].messages]
+    catchup_at = next(i for i, t in enumerate(texts) if "resumed after being closed" in t)
+    user_at = next(i for i, t in enumerate(texts) if t == "hello")
+    assert catchup_at < user_at
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_shim_swallows_only_the_folded_wakes(tmp_path):
+    """Review round 3, M1: while the catch-up is pending the shim swallows
+    ONLY the overdue schedules it folds — a wake that comes due AFTER load
+    (not in the folded text) must still be delivered, not lost."""
+    import time as _time
+
+    from local_operator.harness.wake import WakeSchedule
+
+    now = int(_time.time() * 1000)
+    overdue = WakeSchedule(
+        id="w1", message="overdue wake", next_due_at=now - 3_600_000, created_at=now - 4_000_000
+    )
+    later = WakeSchedule(
+        id="w2", message="future wake", next_due_at=now + 3_000, created_at=now - 2_000_000
+    )
+    transcript = Transcript(tmp_path / "sess")
+    await transcript.append_custom("wake_schedules", _persisted_wakes_payload([overdue, later]))
+
+    turns: list[list[StreamEvent]] = [
+        [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]
+    ] * 4
+    stream = ScriptedStream(turns)
+    session = Session(
+        model=MODEL,
+        stream_fn=stream,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: [],
+    )
+    # Only the overdue wake is folded into the catch-up.
+    assert session._resume_catchup_ids == {"w1"}
+
+    # w2 comes due while the catch-up is still pending; pump fires it.
+    await session.wake_scheduler.update(
+        [
+            s.model_copy(update={"next_due_at": now - 1}) if s.id == "w2" else s
+            for s in session.wake_scheduler.schedules
+        ]
+    )
+    await session._wake.pump()
+    await wait_for(lambda: bool(stream.requests))
+
+    # w2's message was delivered (its own turn), NOT swallowed by the shim.
+    delivered = [getattr(m, "text", "") for r in stream.requests for m in r.messages]
+    assert any("future wake" in t for t in delivered)
+    # And the overdue w1 has NOT fired its own turn — it is still folded.
+    assert not any("overdue wake" in t and "resumed after being closed" not in t for t in delivered)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_late_one_shot_delivery_is_annotated_as_missed(tmp_path):
     """A wake delivered after a resume says so — the agent must not read a
     stale fire as a punctual one."""

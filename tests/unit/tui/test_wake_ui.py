@@ -50,7 +50,11 @@ class TestWakeBlock:
         block = WakeBlock(CATCHUP_TEXT, catchup=True)
         rendered = str(block._build())
         assert "Wake catch-up" in rendered
-        assert "missed wake(s)" in rendered
+        assert "1 missed wake" in rendered
+        assert "w1" in rendered
+        # The model-facing "(alarm) The session resumed…" preamble must NOT
+        # leak into the user-facing headline (review round 3, m3).
+        assert "(alarm)" not in rendered
 
     def test_activate_toggles_like_the_tool_ledger(self) -> None:
         block = WakeBlock(LIVE_TEXT)

@@ -279,7 +279,10 @@ class TestMissedOccurrences:
     def test_one_shot_is_zero_or_one(self):
         one_shot = self.recurring(every_ms=None)
         assert missed_occurrences(one_shot, NOW + 3_600_000) == 1
-        assert missed_occurrences(one_shot, NOW) == 0
+        # Due exactly at ``now`` counts as come-due ("at or before", matching
+        # the recurring arm); only a future due time is not yet owed.
+        assert missed_occurrences(one_shot, NOW) == 1
+        assert missed_occurrences(one_shot, NOW - 1) == 0
 
     def test_clamped_to_remaining_limit(self):
         """A limit-3 wake resumed a week late never claims more misses than it

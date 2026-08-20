@@ -980,7 +980,24 @@ class WakeBlock(TranscriptBlock):
         # user wants WHICH wake fired, not how to stop it.
         head = head.split(" — cancel with wake(", 1)[0]
         if self._catchup:
-            return f"Wake catch-up — {head}", "missed wake(s)", message
+            # The catch-up's first line is itself a model-facing preamble
+            # ("(alarm) The session resumed after being closed; the following
+            # scheduled wake(s) came due…"), not a wake's envelope — folding it
+            # into the headline leaks envelope noise. Name the folded wakes
+            # from the per-schedule lines instead (review round 3, m3).
+            # The folded lines look like "- w1 (due …): …" / "- w2 (every …):
+            # …", so the id is the token after the "- " marker.
+            ids = []
+            for line in message.splitlines():
+                stripped = line.lstrip()
+                if stripped.startswith("- "):
+                    ids.append(stripped[2:].split(" ", 1)[0].split("(", 1)[0].strip())
+            count = len(ids)
+            label = f"{count} missed wake{'s' if count != 1 else ''}"
+            headline = f"Wake catch-up — {label}"
+            if ids:
+                headline += f" ({', '.join(ids)})"
+            return headline, "details", message
         return head, "message", message
 
 
