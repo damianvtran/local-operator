@@ -2316,3 +2316,80 @@ class TestRefusalsAreSurfacedNotSwallowed:
         )
         end = self._end(events)
         assert end.error is not None and "delta.refusal" in end.error
+
+    async def test_chat_content_filter_after_prose_says_cut_short(self) -> None:
+        """Review R3-1: a third-party filter (Azure-style) commonly terminates
+        with ``content_filter`` AFTER answer chunks rendered and sends no
+        refusal prose — 'sent no message' under that partial reply is the D1
+        contradiction on this wire."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"choices": [{"delta": {"content": "The document says"}}]},
+                        {"choices": [{"delta": {}, "finish_reason": "content_filter"}]},
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.test.example/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None
+        assert "cut the reply short" in end.error
+        assert "sent no message" not in end.error
+
+    async def test_responses_content_filter_after_prose_says_cut_short(self) -> None:
+        """Same R3-1 state on the Responses wire: output text streamed, then
+        ``response.incomplete`` with ``reason=content_filter`` and no refusal
+        deltas."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"type": "response.output_text.delta", "delta": "The document says"},
+                        {
+                            "type": "response.incomplete",
+                            "response": {
+                                "id": "resp_5",
+                                "incomplete_details": {"reason": "content_filter"},
+                                "usage": {"input_tokens": 5, "output_tokens": 3},
+                            },
+                        },
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.openai.com/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            openai_api="responses",
+        )
+        events = await _collect(
+            client.stream(
+                ChatRequest(
+                    model=_spec("openai", "gpt-5.4").model_copy(
+                        update={"supports_responses_api": True}
+                    ),
+                    messages=[Message.user("hi")],
+                ),
+                "sk-test",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None
+        assert "cut the reply short" in end.error
+        assert "sent no message" not in end.error

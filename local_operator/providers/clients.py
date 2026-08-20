@@ -1017,6 +1017,7 @@ class OpenAICompatClient:
         # not an answer, and forwarding it as prose would leave the transcript
         # reading as if the model replied normally.
         refusal_parts: list[str] = []
+        streamed_text = False
 
         async with self._http.stream(
             "POST",
@@ -1062,6 +1063,7 @@ class OpenAICompatClient:
                 delta = choice.get("delta") or {}
                 text = delta.get("content")
                 if text:
+                    streamed_text = True
                     yield StreamTextDelta(delta=text)
                 refusal = delta.get("refusal")
                 if refusal:
@@ -1106,7 +1108,11 @@ class OpenAICompatClient:
             marker = f"finish_reason={finish_reason or 'stop'}"
             if finish_reason != "content_filter":
                 marker = f"delta.refusal, {marker}"
-            error = _refusal_error(marker, "".join(refusal_parts))
+            # ``streamed_text`` matters on the content_filter path, where a
+            # third-party filter commonly terminates AFTER answer chunks have
+            # rendered and there is no refusal prose: "sent no message" under a
+            # partial reply is the D1 contradiction again (review R3-1).
+            error = _refusal_error(marker, "".join(refusal_parts), streamed_text=streamed_text)
         yield StreamEndEvent(
             stop_reason=stop_reason,
             usage=usage,
@@ -1138,6 +1144,7 @@ class OpenAICompatClient:
         # and is collected, not yielded as text: it is not an answer, and the
         # transcript must not read as if the model replied normally.
         refusal_parts: list[str] = []
+        streamed_text = False
         # Output item/call ids -> normalized tool-call index.
         call_indexes: dict[str, int] = {}
 
@@ -1182,6 +1189,7 @@ class OpenAICompatClient:
                 elif event_type == "response.output_text.delta":
                     delta = payload.get("delta")
                     if delta:
+                        streamed_text = True
                         yield StreamTextDelta(delta=delta)
                 elif event_type == "response.refusal.delta":
                     delta = payload.get("delta")
@@ -1248,9 +1256,14 @@ class OpenAICompatClient:
                             # failover's retry machinery for a request the
                             # provider had already declined on content grounds.
                             terminal_stop = "refusal"
+                            # ``streamed_text`` for the same reason as the
+                            # chat-completions filter terminal: a filter that
+                            # cut a partially-rendered answer must not claim
+                            # "sent no message" under it (review R3-1).
                             terminal_error = _refusal_error(
                                 "incomplete_details.reason=content_filter",
                                 "".join(refusal_parts),
+                                streamed_text=streamed_text,
                             )
                         else:
                             raise ProviderError(
