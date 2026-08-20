@@ -3756,6 +3756,9 @@ class Session:
         text, self._resume_catchup_text = self._resume_catchup_text, None
         self._resume_catchup_sent = True
         self._missed_wake_occurrences = {}
+        # Clear the fold set too, so the post-send shim is a passthrough by
+        # STRUCTURE (empty set), not only by the _resume_catchup_sent guard.
+        self._resume_catchup_ids = set()
         # The receipt event fires HERE, at take time, so both delivery modes
         # (own turn via ``_deliver_resume_catchup``, or inlined ahead of a user
         # turn in ``prompt``) paint the expandable catch-up line. It is a

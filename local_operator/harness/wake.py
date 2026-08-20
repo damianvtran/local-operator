@@ -256,12 +256,21 @@ def format_duration(ms: int) -> str:
         if ms % step == 0:
             return f"{ms // step}{unit}"
         # Two-term compound: split at this unit, then render the remainder
-        # against the first smaller unit that divides it exactly.
+        # against a smaller unit. The second term must read as a NATURAL count
+        # of its unit: for m/d/h/w that means below the next unit up (``30m``
+        # not ``61m``, ``1h30m`` not ``1h61m``); for ``s`` (no smaller wake
+        # unit) it means below one MINUTE, because ``1h61s`` reads as a carry
+        # error (review round 4, m2). Anything else falls to the ``ms``
+        # fallback. ``1h15s`` (15 < 60) and ``1h30m`` (30 < 60) still render.
         head, rem = divmod(ms, step)
         for smaller in units[i + 1 :]:
             sub_step = _DURATION_UNITS_MS[smaller]
-            if rem % sub_step == 0:
-                return f"{head}{unit}{rem // sub_step}{smaller}"
+            if rem % sub_step != 0:
+                continue
+            quotient = rem // sub_step
+            cap = _DURATION_UNITS_MS["m"] // sub_step if smaller == "s" else step // sub_step
+            if quotient < cap:
+                return f"{head}{unit}{quotient}{smaller}"
         break
     # Unrepresentable as a clean one/two-term duration (e.g. a sub-second or
     # odd-millisecond value). ``ms`` is NOT a parseable unit, so this does not
@@ -405,20 +414,21 @@ def due_while_down(schedule: WakeSchedule, now_ms: int) -> int:
     — the honest "this is how far behind we are" count, with NO clamp to the
     delivery budget.
 
-    This is the count the agent should SEE (review round 2, M2): for an
-    ``every 1h, limit 1`` wake resumed five hours late, FIVE occurrences came
-    due while the process was down even though the schedule would only ever
+    This is the count the agent should SEE (review round 2, M2): the SKIPPED
+    occurrences, not the one the resume is about to deliver. For an
+    ``every 1h, limit 1`` wake resumed five hours late, four occurrences came
+    due strictly before the resume even though the schedule would only ever
     have delivered one of them — and "1 occurrence was missed" misinforms the
-    model about how stale the wake's subject is. "At or before", not
-    "strictly before": an occurrence due exactly at ``now_ms`` has come due,
-    and the resume owes it. Occurrences past ``until_at`` do not count (the
-    schedule was already retired by then); a one-shot contributes at most its
-    single occurrence.
+    model about how stale the wake's subject is. "Strictly before", not "at
+    or before": an occurrence due exactly at ``now_ms`` is the one the resume
+    delivers NOW, not a skip, so it is excluded. Occurrences past ``until_at``
+    do not count (the schedule was already retired by then); a one-shot
+    contributes at most its single occurrence.
     """
     if schedule.every_ms is None:
-        # ``<=`` matches the recurring arm's "due at or before now".
-        return 1 if schedule.next_due_at <= now_ms else 0
-    if schedule.next_due_at > now_ms:
+        # ``<`` matches the recurring arm's "strictly before now".
+        return 1 if schedule.next_due_at < now_ms else 0
+    if schedule.next_due_at >= now_ms:
         return 0
     due = (now_ms - schedule.next_due_at) // schedule.every_ms
     if schedule.until_at is not None and schedule.next_due_at <= schedule.until_at:
