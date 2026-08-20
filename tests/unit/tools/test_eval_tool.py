@@ -415,6 +415,220 @@ def test_describe_approval_shows_code_first_line() -> None:
     assert sentence.startswith("eval: ")
 
 
+# ---------------------------------------------------------------------------
+# Disclosure-gated argv redaction in subprocess error rendering
+# ---------------------------------------------------------------------------
+# A cell that spawns a subprocess can put a credential in argv; the stdlib
+# re-renders that argv into CalledProcessError/TimeoutExpired tracebacks. The
+# worker must re-render an argument ONLY when its exact bytes already appear in
+# code the model wrote, replacing everything else with a length-only marker.
+# These tests drive the real ``_handle`` with a reset ledger.
+
+
+@pytest.fixture
+def _fresh_argv_ledger():
+    """Reset the worker's disclosure ledger so each test controls disclosure."""
+    from local_operator.tools import eval_worker
+
+    eval_worker._ARGV_LEDGER._entries.clear()
+    eval_worker._ARGV_LEDGER._bytes = 0
+    yield
+    eval_worker._ARGV_LEDGER._entries.clear()
+    eval_worker._ARGV_LEDGER._bytes = 0
+
+
+def _run_cell(code: str) -> dict[str, Any]:
+    from local_operator.tools.eval_worker import _handle
+
+    return _handle({}, {"id": "argv", "code": code})
+
+
+def test_an_undisclosed_argv_secret_is_redacted_from_the_traceback(
+    _fresh_argv_ledger, tmp_path
+) -> None:
+    """The leak this guard exists for: a credential read from a file (never in
+    source) must not appear in the model-visible CalledProcessError."""
+    secret = "postgres://u:Sup3rSecretPW@db:5432/prod"
+    dsn_file = tmp_path / "dsn.txt"
+    dsn_file.write_text(secret)
+    payload = _run_cell(
+        "import subprocess\n"
+        f"dsn = open({str(dsn_file)!r}).read()\n"
+        "subprocess.run(['false', 'db', dsn], check=True)\n"
+    )
+    assert payload["ok"] is False
+    assert secret not in payload["error"]
+    assert "<redacted:" in payload["error"]
+    # argv[0] is preserved verbatim and the exit status is untouched.
+    assert "'false'" in payload["error"]
+    assert "exit status" in payload["error"]
+
+
+def test_a_disclosed_command_renders_byte_identical(_fresh_argv_ledger) -> None:
+    """An all-disclosed invocation is invisible to the guard."""
+    payload = _run_cell(
+        "import subprocess\nsubprocess.run(['false', 'git', 'status', '--porcelain'], check=True)\n"
+    )
+    assert "'false', 'git', 'status', '--porcelain'" in payload["error"]
+    assert "<redacted:" not in payload["error"]
+
+
+def test_a_literal_from_an_earlier_cell_counts_as_disclosed(_fresh_argv_ledger) -> None:
+    """A persistent kernel keeps state: a literal in cell 1 may reach argv in
+    cell 5. Checking only the failing cell would redact a value plainly visible
+    in the transcript."""
+    _run_cell('MARKER = "literal-in-source-abc123"')
+    payload = _run_cell(
+        "import subprocess\n"
+        "subprocess.run(\n"
+        "    ['false', 'h', 'Authorization: Bearer literal-in-source-abc123'], check=True\n"
+        ")\n"
+    )
+    assert "literal-in-source-abc123" in payload["error"]
+
+
+def test_an_env_derived_value_is_redacted(_fresh_argv_ledger) -> None:
+    """A value pulled from the environment was never in source, so it is
+    undisclosed even though the agent chose to pass it."""
+    import os
+
+    home = os.environ["HOME"]
+    payload = _run_cell(
+        "import subprocess, os\nsubprocess.run(['false', 'h', os.environ['HOME']], check=True)\n"
+    )
+    assert home not in payload["error"]
+    assert "<redacted:" in payload["error"]
+
+
+def test_timeout_expired_also_redacts_argv(_fresh_argv_ledger, tmp_path) -> None:
+    """The worst case: a timing-out child has no output, so the argv is the
+    entire content of the error."""
+    secret = "deadbeef-timeout-secret"
+    secret_file = tmp_path / "s.txt"
+    secret_file.write_text(secret)
+    # ``env`` keeps the secret in argv while ``sleep`` runs long enough to hit
+    # the timeout (passing it as sleep's interval would just exit 1 instead).
+    payload = _run_cell(
+        "import subprocess\n"
+        f"token = open({str(secret_file)!r}).read()\n"
+        "subprocess.run(['env', 'S=' + token, 'sleep', '5'], timeout=0.2, check=True)\n"
+    )
+    assert payload["ok"] is False
+    assert secret not in payload["error"]
+    assert "TimeoutExpired" in payload["error"]
+
+
+def test_a_caught_error_is_an_explicit_disclosure_and_untouched(
+    _fresh_argv_ledger, tmp_path
+) -> None:
+    """Deliberate disclosure still works: a cell that catches the error and
+    prints it made an explicit choice. Only the UNCAUGHT rendering is filtered;
+    the live exception object still carries the real argv."""
+    secret = "caught-explicit-secret"
+    sf = tmp_path / "s.txt"
+    sf.write_text(secret)
+    payload = _run_cell(
+        "import subprocess\n"
+        f"token = open({str(sf)!r}).read()\n"
+        "try:\n"
+        "    subprocess.run(['false', 'h', token], check=True)\n"
+        "except subprocess.CalledProcessError as e:\n"
+        "    print('CAUGHT:', e.cmd)\n"
+    )
+    # The cell chose to print e.cmd, so the real argv is in stdout (an explicit
+    # disclosure), and the call SUCCEEDS because the error was caught.
+    assert payload["ok"] is True
+    assert secret in payload["stdout"]
+
+
+def test_a_context_chain_also_redacts_the_inner_process_error(_fresh_argv_ledger, tmp_path) -> None:
+    """format_exception renders the WHOLE __context__/__cause__ chain, so
+    redacting only the outermost exception leaks the secret in the inner one.
+    A bare ``raise`` inside ``except`` is the common shape."""
+    secret = "context-chain-secret"
+    sf = tmp_path / "s.txt"
+    sf.write_text(secret)
+    payload = _run_cell(
+        "import subprocess\n"
+        f"tok = open({str(sf)!r}).read()\n"
+        "try:\n"
+        "    subprocess.run(['false', 'h', tok], check=True)\n"
+        "except subprocess.CalledProcessError:\n"
+        "    raise ValueError('wrapper')\n"
+    )
+    assert secret not in payload["error"]
+    # The wrapper and the inner error are both rendered, but the secret is not.
+    assert "ValueError" in payload["error"] and "CalledProcessError" in payload["error"]
+
+
+def test_an_exception_group_leaf_also_redacts_argv(_fresh_argv_ledger, tmp_path) -> None:
+    """format_exception renders ExceptionGroup leaves: a CalledProcessError
+    raised inside an asyncio.TaskGroup task is part of the model-visible
+    traceback, so the walk must descend into .exceptions, not stop at the
+    group."""
+    secret = "taskgroup-secret"
+    sf = tmp_path / "s.txt"
+    sf.write_text(secret)
+    payload = _run_cell(
+        "import subprocess, asyncio\n"
+        f"tok = open({str(sf)!r}).read()\n"
+        "async def job():\n"
+        "    subprocess.run(['false', 'h', tok], check=True)\n"
+        "async def main():\n"
+        "    async with asyncio.TaskGroup() as tg:\n"
+        "        tg.create_task(job())\n"
+        "asyncio.run(main())\n"
+    )
+    assert "ExceptionGroup" in payload["error"]
+    assert secret not in payload["error"]
+
+
+def test_raise_from_redacts_the_cause_chain(_fresh_argv_ledger, tmp_path) -> None:
+    """``raise ... from e`` names the cause explicitly; its argv is redacted."""
+    secret = "raise-from-secret"
+    sf = tmp_path / "s.txt"
+    sf.write_text(secret)
+    payload = _run_cell(
+        "import subprocess\n"
+        f"tok = open({str(sf)!r}).read()\n"
+        "try:\n"
+        "    subprocess.run(['false', 'h', tok], check=True)\n"
+        "except subprocess.CalledProcessError as e:\n"
+        "    raise KeyError('k') from e\n"
+    )
+    assert secret not in payload["error"]
+
+
+def test_an_unparseable_string_cmd_is_ledger_gated_not_passed_through(
+    _fresh_argv_ledger,
+) -> None:
+    """A string cmd shlex cannot parse (one unbalanced quote) must not be
+    rendered verbatim with the secret inside: the whole string is disclosed or
+    collapsed to a length marker."""
+    import subprocess as sp
+
+    from local_operator.tools import eval_worker
+
+    undisclosed = "curl -H 'Authorization: Bearer unbalanced-secret"
+    exc = sp.CalledProcessError(1, undisclosed)
+    eval_worker._redact_process_exception(exc)
+    assert exc.cmd == "<redacted:%dc>" % len(undisclosed)
+
+    # ...but a string the model literally wrote stays readable.
+    eval_worker._ARGV_LEDGER.record(undisclosed)
+    exc2 = sp.CalledProcessError(1, undisclosed)
+    eval_worker._redact_process_exception(exc2)
+    assert exc2.cmd == undisclosed
+
+
+def test_a_plain_traceback_without_a_command_is_untouched(_fresh_argv_ledger) -> None:
+    """The guard must not mangle ordinary errors. A ValueError whose message is
+    prose (no process invocation) renders word for word."""
+    payload = _run_cell("raise ValueError('plain words with spaces and no command')\n")
+    assert "plain words with spaces and no command" in payload["error"]
+    assert "<redacted" not in payload["error"]
+
+
 def test_worker_caps_stdout_stderr_display_and_repr_before_json() -> None:
     """Containment is worker-side: huge output never reaches the parent or
     json.dumps unbounded, even before the eval tool's 8KiB spill layer."""
