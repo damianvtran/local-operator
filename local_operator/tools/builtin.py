@@ -2915,24 +2915,44 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
             found = _load_ignore_rules(directory, rel_dir)
             if found:
                 local_rules = rules + [(rel_dir, found)]
+        # os.scandir, not Path.iterdir + per-entry Path.is_symlink/is_dir/
+        # is_file: a DirEntry carries the d_type the kernel already returned
+        # with the directory listing, so the symlink/dir/file classification
+        # below costs zero extra syscalls on the common path where iterdir
+        # paid three stat(2) calls PER ENTRY. On the 60k-entry trees this
+        # walk actually meets (a workspace with vendored checkouts) that is
+        # the difference between a scan and a stall — and this function runs
+        # under a worker thread on behalf of a TUI whose frame budget the
+        # caller is protecting, so raw walk speed is part of the contract.
+        # Sorting by name matches the old sorted(iterdir()) order exactly:
+        # within one directory, Path ordering IS name ordering.
         try:
-            entries = sorted(directory.iterdir())
+            with os.scandir(directory) as scan:
+                entries = sorted(scan, key=lambda e: e.name)
         except OSError:
             return
         for entry in entries:
-            if entry.is_symlink():
-                continue  # never follow links: cycles and out-of-tree escapes
+            try:
+                if entry.is_symlink():
+                    continue  # never follow links: cycles and out-of-tree escapes
+                is_dir = entry.is_dir(follow_symlinks=False)
+                is_file = entry.is_file(follow_symlinks=False)
+            except OSError:
+                # An entry that vanished or cannot be classified mid-walk is
+                # skipped, matching the directory-level OSError handling: a
+                # concurrent delete is normal filesystem life, not an error.
+                continue
             rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
-            if entry.is_dir():
+            if is_dir:
                 if entry.name in _GREP_PRUNE_DIRS or entry.name.startswith("."):
                     continue
                 if respect_ignore and _ignored(rel, True, local_rules):
                     continue
-                _walk(entry, rel, local_rules)
-            elif entry.is_file():
+                _walk(Path(entry.path), rel, local_rules)
+            elif is_file:
                 if respect_ignore and _ignored(rel, False, local_rules):
                     continue
-                files.append(entry)
+                files.append(Path(entry.path))
 
     _walk(root, "", [])
     return files
@@ -2941,6 +2961,44 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
 def _walk_files(root: Path) -> list[Path]:
     """The grep file set: the ignore-aware walk."""
     return _walk_entries(root)
+
+
+def _grep_file_set(target: Path) -> tuple[list[Path], Path]:
+    """``(files, base)`` for one grep target, file or directory.
+
+    Synchronous by design: the walk is tens of thousands of scandir/stat
+    calls on a large tree, so every caller reaches this through
+    ``asyncio.to_thread``. Running it inline in ``execute_grep`` was the
+    freeze reported as "the session hangs on concurrent tool calls": under
+    Textual's eager task factory the runner coroutine executes synchronously
+    up to its first true suspension AT TASK-CREATION TIME, so a batch of
+    greps put every tree walk back-to-back on the render loop before the
+    first frame of the batch could paint (sampled live: 100% of main-thread
+    samples inside os_lstat/os_scandir/os_stat under task_eager_start).
+    """
+    if target.is_file():
+        return [target], target.parent
+    return _walk_files(target), target
+
+
+def _count_oversized_files(target: Path) -> int:
+    """How many files in the grep set exceed ``GREP_FILE_LIMIT_BYTES``.
+
+    The ripgrep engine applies ``--max-filesize`` silently, and the footer
+    contract promises the skipped count either way — this recovers it. It
+    re-walks the tree, which is exactly the filesystem load described on
+    ``_grep_file_set``, so it is synchronous and thread-hosted for the same
+    reason.
+    """
+    files, _base = _grep_file_set(target)
+    skipped = 0
+    for file_path in files:
+        try:
+            if file_path.stat().st_size > GREP_FILE_LIMIT_BYTES:
+                skipped += 1
+        except OSError:
+            continue
+    return skipped
 
 
 class GlobParams(BaseModel):
@@ -3428,15 +3486,26 @@ async def execute_grep(
     files_skipped = 0
     engine_note = ""
 
-    if target.is_file():
-        base = target.parent
-        files: list[Path] = [target]
-    else:
-        base = target
-        files = _walk_files(target)
+    # Engine choice needs only a stat of an explicitly named file, never the
+    # tree walk: the walk is deferred into the worker threads below so the
+    # event loop — which is also the TUI's render loop, and under Textual's
+    # eager task factory executes every runner in a batch synchronously up to
+    # its first true suspension — never pays a directory tree's worth of
+    # scandir/stat calls. Walking here inline was the observed freeze on
+    # concurrent grep/glob batches (main thread pinned in os_lstat/os_scandir
+    # under task_eager_start, one runner at a time, no frame in between).
+    target_is_file = target.is_file()
+    base = target.parent if target_is_file else target
+    use_rg = _use_ripgrep()
+    if use_rg and target_is_file:
+        try:
+            if target.stat().st_size > GREP_FILE_LIMIT_BYTES:
+                use_rg = False
+        except OSError:
+            use_rg = False
 
     scan_result = None
-    if _use_ripgrep() and not (target.is_file() and target.stat().st_size > GREP_FILE_LIMIT_BYTES):
+    if use_rg:
         scan_result = await _ripgrep_scan(
             params.pattern,
             target,
@@ -3450,30 +3519,36 @@ async def execute_grep(
         records, _count = scan_result
         engine_note = " (ripgrep)"
         # rg applies --max-filesize silently; recover the count the footer
-        # contract promises from the already-walked file list so both
-        # engines tell the model the same thing.
-        for f in files:
-            try:
-                if f.stat().st_size > GREP_FILE_LIMIT_BYTES:
-                    files_skipped += 1
-            except OSError:
-                continue
-    else:
-        if signal and signal.aborted:
-            return _error(tool_call_id, "grep", "Search aborted.")
-        # The scan is FILESYSTEM + REGEX work on model-controlled input;
-        # running it on the event loop would pin the CPU on a backtracking
-        # pattern or a large tree and make Ctrl+C unprocessable. It runs in a
-        # worker thread raced against the abort signal, with a wall-clock cap
-        # bounding the pathological-regex case (regexes are not classified).
-        py_result, aborted = await _run_with_abort(
-            asyncio.to_thread(
-                _python_grep_scan, files, base, regex, params.include, params.context_lines
-            ),
+        # contract promises. The walk+stat pass is the same filesystem load
+        # as the scan itself, so it rides a thread raced against abort.
+        skipped_count, aborted = await _run_with_abort(
+            asyncio.to_thread(_count_oversized_files, target),
             signal,
             lambda: None,
         )
         if aborted:
+            return _error(tool_call_id, "grep", "Search aborted.")
+        files_skipped = skipped_count or 0
+    else:
+        if signal and signal.aborted:
+            return _error(tool_call_id, "grep", "Search aborted.")
+
+        # The walk and the scan are FILESYSTEM + REGEX work on
+        # model-controlled input; running either on the event loop would pin
+        # the CPU on a backtracking pattern or a large tree and make Ctrl+C
+        # unprocessable. Both run in one worker-thread hop raced against the
+        # abort signal, with a wall-clock cap bounding the
+        # pathological-regex case (regexes are not classified).
+        def _walk_and_scan() -> tuple[list[tuple[str, int, str, str]], int, int]:
+            files, scan_base = _grep_file_set(target)
+            return _python_grep_scan(files, scan_base, regex, params.include, params.context_lines)
+
+        py_result, aborted = await _run_with_abort(
+            asyncio.to_thread(_walk_and_scan),
+            signal,
+            lambda: None,
+        )
+        if aborted or py_result is None:
             return _error(tool_call_id, "grep", "Search aborted.")
         records, files_searched, files_skipped = py_result
 
