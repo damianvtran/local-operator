@@ -1167,29 +1167,18 @@ def _swept_band(state: _LadderState, *, alarm: bool) -> StatusLine:
     return status
 
 
-def _name_box(row: str, name: str, width: int) -> int:
-    """Cells the trailing name segment RESERVED, its unpainted tail included.
+def _name_ink(row: str, width: int) -> int:
+    """Cells the trailing name segment actually INKS on the row.
 
-    The box is what the layout is built on, and it is not the same number as the
-    ink in it: a word-boundary cut can leave `Bulk export the…` in an 18-cell box.
-
-    Located from the box's own left edge, which is where its UNUSED cells start
-    — not from the name's first character. The reserve's leftover is painted
-    just before the seam that introduces the title, so the title's first cell
-    moves with its length and measuring from it would return the ink instead of
-    the box. Everything from the end of the previous segment's ink to the band's
-    right edge is the reserve, seam included.
-
-    Measured to ``width`` rather than to ``len(row)`` for the same reason: the
-    row is laid out to exactly ``width``, so the edge is where the box ends, and
-    reading the string's length would quietly turn every caller into a test of
-    the ink instead of the layout's reserve.
+    The segment is unpadded — the name spends only the cells its truncated text
+    measures and the inter-group filler absorbs whatever a short title frees —
+    so the ink runs from the cell after the title's own seam to the band's
+    right edge. Measured to ``width`` rather than to ``len(row)`` because the
+    row is laid out to exactly ``width``: the title is the group's last segment
+    and its final cell is the band's edge, so the edge is where the ink ends.
     """
     seam = f" {_SEP_RIGHT} "
-    # The last seam is the title's. Walk left over the blanks in front of it to
-    # reach the box's first cell; the segment before them ends on real ink.
-    start = len(row[: row.rindex(seam)].rstrip())
-    return width - start - len(seam)
+    return width - row.rindex(seam) - len(seam)
 
 
 def test_naming_a_session_never_costs_a_segment_for_nothing(monkeypatch) -> None:
@@ -1227,60 +1216,67 @@ def test_naming_a_session_never_costs_a_segment_for_nothing(monkeypatch) -> None
                     where = f"{label} alarm={alarm} width={width}"
                     lost = set(status._dropped) - bare - {"name"}
                     if status.is_showing("name"):
-                        box = _name_box(row, name, width)
-                        assert (
-                            box >= NAME_CELLS_FLOOR
-                        ), f"{where}: {sorted(lost)} spent for a {box}-cell name"
+                        # The GRANT is what the concessions bought, and the ink
+                        # can legitimately run under it twice over: `Fix boot`
+                        # inks 8 cells inside an 18-cell grant because that is
+                        # the whole title, and a word-boundary cut spends up to
+                        # a third of the cap on reading well (`truncate_name`'s
+                        # bound). So a shown name is the complete title, or at
+                        # least two thirds of a floor's worth of it.
+                        ink = _name_ink(row, width)
+                        assert ink >= NAME_CELLS_FLOOR * 2 // 3 or row.endswith(
+                            name
+                        ), f"{where}: {sorted(lost)} spent for a {ink}-cell name"
                     else:
                         assert (
                             not lost
                         ), f"{where}: the name was dropped and {sorted(lost)} went with it"
 
 
-def test_the_alarms_column_does_not_move_when_the_title_changes(monkeypatch) -> None:
-    """One column per width, whatever the name says — the D2 contract.
+def test_the_layout_is_a_function_of_the_titles_ink_not_its_content(monkeypatch) -> None:
+    """Two titles of equal measure get byte-identical layout — only the text differs.
 
-    The alarm is one cell and it is the band's only standing word that no tool
-    will ask before it runs, so where it sits has to be learnable. Before the
-    name's box was reserved, its column was a function of the model's word count:
-    at a fixed 150 columns the glyph sat at 144, then 101, 102, 110 across four
-    consecutive frames as the excerpt, the title and a re-title landed — two of
-    those moves with no user input at all.
+    The name is inked unpadded now (see :data:`NAME_CELLS` on the reversal), so
+    the row's columns legitimately move with the title's LENGTH — the fixed
+    columns were the old reserved box's purchase, paid for with a permanent
+    blank run this change removes. What must survive the reversal is that the
+    length is all a title can move: the walk measures cells and never reads
+    the string, so a re-title to a same-measure name (the equality this test
+    constructs: same word boundaries, same cell count, so the same cut at
+    every cap) changes not one column, and any two titles differ in layout
+    only as far as their measures differ. A violation would mean the band's
+    layout depends on the title's CONTENT, which is the door back to a row
+    that reshuffles for reasons a reader cannot see.
 
-    Asserted over the whole row rather than just the glyph: everything up to the
-    name's own box has to be identical, or something else moved instead.
-
-    The row's painted LENGTH is deliberately not the assertion. ``_compose`` no
-    longer paints the name box's trailing blanks, so a brief title ends earlier
-    than a long one by design and comparing lengths would pin the ink instead of
-    the layout. What has to hold is that the box each title was given is the same
-    size — asserted below through ``_name_box``, which measures to the band's
-    right edge — and that is the property the length comparison stood in for.
+    The pair share word-boundary structure on purpose — `truncate_name` cuts
+    on words, so equal structure is what makes their ink equal at every cap.
     """
     monkeypatch.setenv("HOME", "/Users/tester")
+    pairs = (
+        ("Fix the login flow", "Add the audit sync"),
+        ("Bulk export the invoice columns", "Auto import the payment receipts"[:31]),
+        ("a", "z"),
+    )
     for label, state in _LADDER_STATES.items():
         status = _swept_band(state, alarm=True)
         for width in range(30, 181):
-            rows = []
-            for name in _NAMES:
-                status.update(conversation_name=name)
-                rows.append(status.render_text(width).plain)
-            first = rows[0]
-            assert len({row.index("!") for row in rows}) == 1, (
-                f"{label} width={width}: the alarm moved with the title "
-                f"({[row.index('!') for row in rows]})"
-            )
-            head = first[: first.index("!") + 1]
-            for row in rows[1:]:
-                assert row.startswith(head), f"{label} width={width}: the row reflowed"
-            # The reserve itself, which is what the old length comparison meant:
-            # every title at this width was handed a box of the same size, so a
-            # title arriving or being rewritten cannot resize the segment under
-            # the reader. Measurable only where the name survived the ladder.
-            boxes = {
-                _name_box(row, name, width) for row, name in zip(rows, _NAMES) if name[:4] in row
-            }
-            assert len(boxes) <= 1, f"{label} width={width}: the name's box changed size {boxes}"
+            for first, second in pairs:
+                status.update(conversation_name=first)
+                row_a = status.render_text(width).plain
+                shown_a = status.is_showing("name")
+                status.update(conversation_name=second)
+                row_b = status.render_text(width).plain
+                shown_b = status.is_showing("name")
+                where = f"{label} width={width} pair=({first!r}, {second!r})"
+                assert shown_a == shown_b, f"{where}: one title survived, the other did not"
+                if not shown_a:
+                    assert row_a == row_b, f"{where}: unnamed rows differ"
+                    continue
+                ink = _name_ink(row_a, width)
+                assert ink == _name_ink(row_b, width), f"{where}: the ink moved"
+                assert (
+                    row_a[: len(row_a) - ink] == row_b[: len(row_b) - ink]
+                ), f"{where}: the layout depends on the title's content"
 
 
 def test_the_name_takes_every_cell_the_row_can_spare(monkeypatch) -> None:
@@ -1294,82 +1290,50 @@ def test_the_name_takes_every_cell_the_row_can_spare(monkeypatch) -> None:
     the seam and the box grows with the terminal.
     """
     monkeypatch.setenv("HOME", "/Users/tester")
+    name = "Add todo guardrails to the operator loop"
     status = _swept_band(_LADDER_STATES["healthy-mcp/exact"], alarm=True)
-    status.update(conversation_name="Add todo guardrails to the operator loop")
-    boxes = []
+    status.update(conversation_name=name)
+    inks = []
     for width in range(100, 181):
         row = status.render_text(width).plain
-        box = len(row) - row.index("!") - len("! ‹ ")
-        boxes.append(box)
-        # Whatever is spare is IN the name's box, so the hole BETWEEN THE GROUPS
-        # is the seam's own width until the box is full.
-        #
-        # Measured up to the name's box rather than across the whole row. The
-        # title is right-aligned in its box, so a word-boundary cut leaves its
-        # unused cells immediately before the title — a run this regex sees and
-        # which is not a layout gap at all but the reserve doing its job. The
-        # property under test is that the LAYOUT does not idle while the name is
-        # still hungry, and the layout is everything left of that box.
-        head = row[: len(row) - box]
+        ink = _name_ink(row, width)
+        inks.append(ink)
+        # While the title is still hungry (cut short), the layout may not idle:
+        # every run wider than the group gap has to be cells the title could
+        # not have used. The name is unpadded and cut on a word boundary, so
+        # the one legitimate excess is the word-cut remainder — the cells
+        # between the cut title's ink and the cap the walk granted it, which
+        # `truncate_name` bounds at a third of the cap. Anything past that is a
+        # hole the old fixed-widths defect would have left.
+        head = row[: len(row) - ink]
         longest_gap = max((len(run) for run in re.findall(r" {2,}", head)), default=0)
         assert (
-            box >= NAME_CELLS or longest_gap <= _MIN_GROUP_GAP
-        ), f"width={width}: {longest_gap} cells idle beside a {box}-cell name"
-    assert min(boxes) >= NAME_CELLS_FLOOR
-    assert max(boxes) == NAME_CELLS
-    # More than the two widths the old constant pair allowed, and monotone in the
-    # terminal's width over the range where the row is otherwise unchanged.
-    assert len(set(boxes)) > 5, f"the name still has only {sorted(set(boxes))} widths"
+            row.endswith(name) or longest_gap <= _MIN_GROUP_GAP + NAME_CELLS // 3
+        ), f"width={width}: {longest_gap} cells idle beside a {ink}-cell name"
+    # The segment is elastic: the ink grows with the terminal, reaching the
+    # whole title (this one measures exactly NAME_CELLS) at the wide end and
+    # never dropping under the floor's word-cut worst case at the narrow end.
+    assert max(inks) == cell_len(name) == NAME_CELLS
+    assert min(inks) >= NAME_CELLS_FLOOR * 2 // 3
+    # More than the two widths the old constant pair allowed.
+    assert len(set(inks)) > 5, f"the name still has only {sorted(set(inks))} widths"
 
 
-def test_a_brief_title_leaves_no_dead_run_at_the_bands_right_edge(monkeypatch) -> None:
-    """The name's box is RESERVED, but its unused tail is not PAINTED.
+def test_the_row_is_flush_to_the_bands_right_edge_at_every_title_length(monkeypatch) -> None:
+    """The title's last inked cell IS the band's right edge — no dead tail.
 
-    The reserve is what holds every sibling's column still while a model rewrites
-    the title (D2), so it stays — but it used to be painted out to the band's
-    right edge as well, which left a brief title trailed by a long run of blank
-    cells that no segment would ever occupy.
-
-    The run's SIZE is not a constant. Two earlier versions of this docstring
-    implied otherwise, and the second was written to fix the first — which is
-    the more useful half of the story, because a correction carries more
-    authority than an original and nobody re-checks a sentence whose commit
-    message says it is the fix.
-
-    The first version said the run was "identical at every width". The second
-    retracted that and then quoted a second illustrative triple, which reproduces
-    only under a band shape it did not name: the width-100 figure moves with the
-    cwd's length and with whether the alarm is armed, so the same measurement
-    yields a different first entry on a shorter path or a disarmed gate. A
-    figure quoted without the conditions that produce it is the same unenforced
-    universal in a narrower costume.
-
-    So no illustrative numbers are quoted here at all. What identifies the
-    padding is the RELATIONSHIP, which needs none: the run is exactly the box
-    minus the ink, so it grows as the box grows and vanishes when the title
-    fills it — while a layout gap would not track the title's length. The box is
-    itself elastic and only reaches the full ``NAME_CELLS`` once the row can
-    spare it, which is why any single measurement of the run is a fact about one
-    band shape rather than about the defect.
-
-    That relationship is what this test pins, by asserting the row ends on the
-    title's last inked cell at every width rather than by asserting any
-    particular number of dead cells.
-
-    Those cells are ordinary styled cells, so everything that reads the row
-    rather than looking at it carried them — the app's own SVG export wrote 35
-    trailing spaces after `short` at a 160-column terminal.
-
-    The two halves are asserted together on purpose. Trimming the tail is only
-    correct while the reserve behind it is untouched, so this pins that the row
-    ends on the title's last inked character AND that the box measured to the
-    band's edge is unchanged by how long the title is.
+    The name is emitted unpadded (see :data:`NAME_CELLS` on the reversal from
+    the reserved box), so this holds by construction rather than by a slack
+    payout: the row's trailing segment is the title's own ink, cut to the cap
+    the walk granted it. Both halves are asserted because either alone passes
+    on a shape this exists to reject — `row == row.rstrip()` is satisfied by a
+    row that stops short of the edge, and `cell_len(row) == width` is satisfied
+    by a row whose last cells are padding blanks.
     """
     monkeypatch.setenv("HOME", "/Users/tester")
     for label, state in _LADDER_STATES.items():
         status = _swept_band(state, alarm=True)
         for width in (100, 120, 160):
-            boxes = set()
             for name in ("a", "short", "Bulk export the invoice columns"):
                 status.update(conversation_name=name)
                 row = status.render_text(width).plain
@@ -1379,36 +1343,38 @@ def test_a_brief_title_leaves_no_dead_run_at_the_bands_right_edge(monkeypatch) -
                 assert (
                     row == row.rstrip()
                 ), f"{where}: {len(row) - len(row.rstrip())} dead cells at the band's edge"
-                # THE property, and the one the assertion above cannot carry:
-                # the row must REACH the band's right edge, not merely end on a
-                # non-blank cell. A row whose trailing padding has been stripped
-                # satisfies `row == row.rstrip()` trivially while stopping up to
-                # 35 cells short — which is exactly what shipped, and why this
-                # test passed against the code it was written to pin (F2).
                 assert (
                     cell_len(row) == width
                 ), f"{where}: the row stops {width - cell_len(row)} cells short of the edge"
-                # The ink really is the title's, not a coincidence of truncation.
-                assert row.endswith(truncate_name(name, _name_box(row, name, width))), where
-                boxes.add(_name_box(row, name, width))
-            # ...and the reserve behind that trimmed tail did not move with the
-            # title's length, which is the property the padding used to provide.
-            assert len(boxes) <= 1, f"{label} width={width}: the box moved with the title {boxes}"
+                # The ink really is the title's, not a coincidence of
+                # truncation. `truncate_name` is not a fixed point — a title
+                # word-cut at a 20-cell cap inks 16 cells, and re-cutting the
+                # original at 16 lands on an earlier word — so the assertion is
+                # on the tail's shape: the whole title, or a prefix of it
+                # ending in the ellipsis.
+                tail = row[len(row) - _name_ink(row, width) :]
+                assert tail == name or (
+                    tail.endswith("…") and name.startswith(tail[:-1].rstrip())
+                ), where
 
 
 def test_the_titles_seam_stays_tight_against_the_title(monkeypatch) -> None:
     """The `‹` introduces the name and has to touch it (design review D1).
 
-    The reserve's unused cells have to be painted somewhere, and the two obvious
-    places are both wrong. After the title, the row ends early (the defect above
-    this one). Between the seam and the title, the row is flush but the chevron
-    is orphaned: every other seam on the band is tight against what it
-    introduces, so a lone `‹` trailed by a run of blanks reads as a segment that
-    failed to render rather than as spacing.
+    Under the unpadded design this holds by construction — the title is the
+    seam's immediate neighbour because nothing is painted between them — but it
+    is pinned anyway, because both historical arrangements of the old reserve
+    broke one half of it: `ljust` + `rstrip` kept the seam tight and ended the
+    row early, and `rjust` reached the edge while orphaning the chevron behind
+    a run of blanks that read as a segment that failed to render. Asserting
+    the pair pins the one arrangement that does both.
 
-    So the cells go BEFORE the seam, and this pins that — at every width and for
-    titles short enough to leave a large leftover, which is where an orphan
-    would be most visible.
+    The third assertion is the one that falsifies the RESERVED design itself
+    (review round 1, M1): paying the box's slack out on the seam's LEFT kept
+    the seam tight and the row flush — both checks above passed against the
+    very code this PR removes — while parking the dead run between the alarm
+    and the chevron. So the cells left of the title's seam must end on ink:
+    the seam's own leading space is the only blank allowed to touch them.
     """
     monkeypatch.setenv("HOME", "/Users/tester")
     for label, state in _LADDER_STATES.items():
@@ -1433,19 +1399,31 @@ def test_the_titles_seam_stays_tight_against_the_title(monkeypatch) -> None:
                 assert (
                     cell_len(row) == width
                 ), f"{where}: the seam is tight but the row stops short of the edge"
+                # The discriminating half (M1): everything left of the title's
+                # seam ends on ink. The old reserved box painted its unused
+                # cells exactly here — a blank run between the alarm and the
+                # `‹` — and both assertions above were satisfied by it. The
+                # inter-group filler lives further left and is bounded by the
+                # groups' own separators, so a trailing blank run here can only
+                # be a reintroduced name reserve.
+                head = row[: row.rindex(seam)]
+                assert head == head.rstrip(), (
+                    f"{where}: {len(head) - len(head.rstrip())} dead cells "
+                    f"between the right group and the title's seam"
+                )
 
 
 def test_a_double_width_title_never_overflows_the_band(monkeypatch) -> None:
     """The band is ONE row, in cells — including for CJK and Hangul titles.
 
-    The reserve is measured in cells and the row's gap is computed with
-    ``cell_len``, so any padding of the name has to be counted the same way.
-    Padding it with ``str.rjust`` counts CHARACTERS instead, and a title of
-    double-width glyphs then emits a row wider than the band: 592 rows over
-    their width across the ladder variants, worst case 11 cells. Rich drops the
-    over-wide segment rather than clipping it, so the effect was a CJK-named
-    conversation resuming with no name on the band at all — this feature's own
-    failure, reintroduced for non-Latin titles (review round 1, F1).
+    Every cut and every fit test on this row must count CELLS (``cell_len``),
+    never characters. Counting characters — as a ``str.rjust`` padding of the
+    name once did — emits a row wider than the band for a title of
+    double-width glyphs: 592 rows over their width across the ladder variants,
+    worst case 11 cells. Rich drops the over-wide segment rather than clipping
+    it, so the effect was a CJK-named conversation resuming with no name on
+    the band at all — this feature's own failure, reintroduced for non-Latin
+    titles (review round 1, F1).
     """
     monkeypatch.setenv("HOME", "/Users/tester")
     titles = (
@@ -1484,17 +1462,17 @@ def test_a_double_width_title_never_overflows_the_band(monkeypatch) -> None:
                     )
 
 
-def test_the_reserve_is_paid_even_when_the_name_is_the_only_segment(monkeypatch) -> None:
-    """The name is not always preceded by a sibling, and the slack must still land.
+def test_the_row_is_flush_even_when_the_name_is_the_only_segment(monkeypatch) -> None:
+    """The name is not always preceded by a sibling, and the row must still be flush.
 
     A freshly-opened session has no counters, no context reading, no cost and no
     duration — ``format_jobs(0)``, ``format_agents(0)`` and
     ``format_context_usage(0, …)`` all return "" and the duration is suppressed
     at zero — so the title is the WHOLE right group and lands at index 0 of the
-    join loop. Emitting the reserve's slack only alongside a seam skipped it in
-    exactly that shape, and the group then aligned by its INK: the row stopped
-    short of the band's edge and the title's first column walked with its own
-    length, on the very first band a user sees (review round 1, F1).
+    join loop. The inter-group filler in ``_compose`` is what carries the row
+    to the band's edge here (the unpadded title cannot), so this pins the
+    sparse shape where a filler bug would surface first — the very first band
+    a user sees (review round 1, F1).
 
     This is the sparse band on purpose. Every other band test populates the row.
     """
@@ -1521,10 +1499,10 @@ def test_the_bands_cut_lands_on_a_word_like_the_excerpt_it_was_handed() -> None:
     a quotation rather than as a string that ran out of buffer" — and the band
     used to re-cut the same string mid-word one call later, throwing that away.
 
-    The floor case is the exception the rule needs: at 18 cells a word cut would
-    leave `Add todo…` and nine blank cells, which distinguishes two tiled
-    sessions less well than the mid-word cut does. So the boundary is taken only
-    while it costs less than a third of the box.
+    The floor case is the exception the rule needs: at an 18-cell cap a word cut
+    would leave `Add todo…`, which distinguishes two tiled sessions less well
+    than the mid-word cut does. So the boundary is taken only while it costs
+    less than a third of the cap.
     """
     excerpt = "The /resume picker shows (unnamed session) for image openers"
     assert truncate_name(excerpt, 40) == "The /resume picker shows (unnamed…"
