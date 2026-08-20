@@ -17,8 +17,10 @@ Four sections, all self-verifying (non-zero exit on a failed check):
    and without the prune journal. This is the "fewer tokens per turn" half:
    without the journal a resume replays tool output the live session had
    already blanked, so resuming costs MORE than the session it resumed.
-3. **Retention** — generates more sessions than the ceiling allows and proves
-   the directory stays under budget with the live session intact.
+3. **Retention** — generates hundreds of sessions and proves every
+   transcript survives: transcripts are never deleted automatically, so the
+   only correct outcome is that every generated session is intact and only
+   empty directories are reaped.
 4. **Projection** — what a heavy user accumulates per week, before and after.
 
 Run:
@@ -50,11 +52,7 @@ from local_operator.compaction.tokens import (  # noqa: E402
 )
 from local_operator.harness.types import Message  # noqa: E402
 from local_operator.paths import config_dir  # noqa: E402
-from local_operator.session.retention import (  # noqa: E402
-    DEFAULT_MAX_BYTES,
-    DEFAULT_MAX_SESSIONS,
-    sweep_sessions,
-)
+from local_operator.session.retention import sweep_sessions  # noqa: E402
 from local_operator.session.transcript import (  # noqa: E402
     CUSTOM_KIND_MESSAGE,
     ENTRY_MESSAGE,
@@ -281,46 +279,39 @@ async def measure_replay(path: Path) -> ReplayReport:
 @dataclass
 class RetentionReport:
     generated: int
-    ceiling: int
     remaining: int
-    peak_bytes: int
-    live_intact: bool
+    transcripts_intact: bool
+    empties_reaped: int
 
 
-def measure_retention(generated: int, ceiling: int, session_bytes: int) -> RetentionReport:
-    """Exceed the ceiling on purpose and watch the directory stay bounded."""
+def measure_retention(generated: int, session_bytes: int) -> RetentionReport:
+    """Generate sessions, sweep after each, and prove no transcript is ever
+    deleted — because under the current policy nothing but an EMPTY directory
+    can be reaped, however many sessions arrive."""
     root = Path(tempfile.mkdtemp(prefix="lo-retention-"))
     try:
         sessions = root / "sessions"
         sessions.mkdir()
-        live = sessions / "live-session"
-        live.mkdir()
-        (live / "transcript.jsonl").write_text("live" * (session_bytes // 4))
+        (sessions / "hollow").mkdir()
+        empties_reaped = 0
 
-        peak = 0
         for i in range(generated):
             directory = sessions / f"s{i:04d}"
             directory.mkdir()
             (directory / "transcript.jsonl").write_text("x" * session_bytes)
-            result = sweep_sessions(
-                sessions,
-                live_dir=live,
-                max_sessions=ceiling,
-                max_bytes=0,
-                max_age_days=0,
-            )
-            peak = max(peak, result.bytes_remaining)
-            check(
-                len(list(sessions.iterdir())) <= ceiling + 1,
-                f"sessions/ held {len(list(sessions.iterdir()))} dirs over a ceiling of {ceiling}",
-            )
-        live_intact = live.exists() and (live / "transcript.jsonl").exists()
+            result = sweep_sessions(sessions)
+            empties_reaped += result.evicted
+
+        transcripts_intact = all(
+            (sessions / f"s{i:04d}" / "transcript.jsonl").read_text() == "x" * session_bytes
+            for i in range(generated)
+        )
+        check(transcripts_intact, "a sweep deleted a transcript")
         return RetentionReport(
             generated=generated,
-            ceiling=ceiling,
             remaining=len(list(sessions.iterdir())),
-            peak_bytes=peak,
-            live_intact=live_intact,
+            transcripts_intact=transcripts_intact,
+            empties_reaped=empties_reaped,
         )
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -358,7 +349,6 @@ def main() -> int:
     )
     parser.add_argument("--sessions-dir", type=Path, default=None)
     parser.add_argument("--retention-sessions", type=int, default=400)
-    parser.add_argument("--retention-ceiling", type=int, default=25)
     parser.add_argument("--retention-session-bytes", type=int, default=4096)
     args = parser.parse_args()
 
@@ -455,33 +445,28 @@ def main() -> int:
 
     print()
     print("=" * 78)
-    print("3. RETENTION — exceeding the ceiling on purpose")
+    print("3. RETENTION — transcripts are never deleted")
     print("=" * 78)
     try:
-        retention = measure_retention(
-            args.retention_sessions, args.retention_ceiling, args.retention_session_bytes
-        )
-        print(
-            f"\n  generated {retention.generated} sessions against a ceiling of "
-            f"{retention.ceiling}"
-        )
-        print(f"    directories left : {retention.remaining} (ceiling + the live session)")
-        print(f"    peak bytes held  : {kb(retention.peak_bytes)}")
-        print(f"    live session     : {'intact' if retention.live_intact else 'EVICTED'}")
-        check(retention.live_intact, "the live session was evicted")
+        retention = measure_retention(args.retention_sessions, args.retention_session_bytes)
+        print(f"\n  generated {retention.generated} sessions and swept after each")
+        print(f"    directories left : {retention.remaining} (every session kept)")
+        intact = "all intact" if retention.transcripts_intact else "DELETED"
+        print(f"    transcripts      : {intact}")
+        print(f"    empty dirs reaped: {retention.empties_reaped}")
+        check(retention.transcripts_intact, "a sweep deleted a transcript")
     except CheckFailed as exc:
         failures.append(str(exc))
 
-    # The spill store is the OTHER bounded store on disk (large tool outputs
-    # the tools package writes out of context). It self-evicts LRU under its
-    # own hard ceiling and protects the live session's entries inside a grace
-    # window, so the session sweeper deliberately does not touch it — a
-    # second sweeper could evict a handle whose footer is still in the live
-    # transcript. Reported here so the two ceilings add up to a stated total.
+    # The spill store is the OTHER store on disk (large tool outputs the
+    # tools package writes out of context). It self-evicts LRU under its own
+    # hard ceiling and protects the live session's entries inside a grace
+    # window. Session transcripts have NO ceiling — they are never deleted
+    # automatically — so the spill ceiling is the only bounded store left.
     print()
     print(f"  spill store          : {spill_dirname()} (swept by its own LRU, not by this)")
     print(f"    ceiling            : {mb(spill_limit())}")
-    print(f"    TOTAL disk ceiling : {mb(DEFAULT_MAX_BYTES + spill_limit())}")
+    print("    sessions/          : unbounded — transcripts are never deleted automatically")
 
     print()
     print("=" * 78)
@@ -498,13 +483,10 @@ def main() -> int:
     print(f"    written per week      : {mb(weekly_before)} -> {mb(weekly_after)}")
     print(f"    sessions per week     : {sessions_per_week}")
     print(f"    RETAINED, before      : unbounded — {mb(weekly_before)}/week, forever")
-    # The count ceiling binds first for a normal user; the byte ceiling is the
-    # backstop for a session that dumps far more than the measured average.
-    by_count = DEFAULT_MAX_SESSIONS * per_turn_after * HEAVY_TURNS_PER_SESSION
-    print(
-        f"    RETAINED, after       : min(30 days, {DEFAULT_MAX_SESSIONS} sessions, "
-        f"{mb(DEFAULT_MAX_BYTES)}) = {mb(min(by_count, DEFAULT_MAX_BYTES))} steady state"
-    )
+    # Sessions are never deleted automatically now, so the projection is a
+    # growth rate, not a steady state — with the attachment store shaving the
+    # media payload off every week of it.
+    print(f"    RETAINED, after       : unbounded — {mb(weekly_after)}/week, forever")
 
     print()
     if failures:

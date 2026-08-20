@@ -646,12 +646,12 @@ def config_list_command() -> int:
         "compaction": "Compaction engine settings (enabled, strategy, thresholds); "
         "replaces conversation_length/detail_length",
         "tui": "TUI settings (theme)",
-        "session_retention_max_sessions": "Maximum ephemeral session directories to keep "
-        "under sessions/ (0 disables the ceiling)",
-        "session_retention_max_bytes": "Maximum total bytes across sessions/ before the "
-        "oldest directories are evicted (0 disables the ceiling)",
-        "session_retention_max_age_days": "Age after which an ephemeral session directory "
-        "is evicted (0 disables the ceiling)",
+        "session_retention_max_sessions": "[RETIRED] Session transcripts are never deleted "
+        "automatically; this ceiling no longer does anything at any value",
+        "session_retention_max_bytes": "[RETIRED] Session transcripts are never deleted "
+        "automatically; this ceiling no longer does anything at any value",
+        "session_retention_max_age_days": "[RETIRED] Session transcripts are never deleted "
+        "automatically; this ceiling no longer does anything at any value",
     }
 
     print("\n\033[1;32m╭─ Configuration Options ───────────────────────\033[0m")

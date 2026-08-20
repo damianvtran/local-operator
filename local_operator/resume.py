@@ -28,7 +28,7 @@ RESUME_LATEST = "@latest"
 
 #: The file whose presence makes a directory a resumable session. Also what the
 #: recency ordering is read from: a directory's own mtime moves for reasons that
-#: are not turns (retention sweeps touch it), so it is not the clock to use.
+#: are not turns (an origin stamp, a sibling file), so it is not the clock to use.
 TRANSCRIPT_NAME = "transcript.jsonl"
 
 #: Marks a session directory as machine-started rather than user-started. A
@@ -166,21 +166,17 @@ def mark_session_origin(session_dir: Path, origin: str, **details: object) -> No
     conversation are the same shape on disk.
 
     Best-effort by contract. Marking is bookkeeping for a listing, and a child
-    that cannot write its marker (read-only volume, a race with a retention
-    sweep that just removed the directory) must still RUN — the cost of the
-    failure is one extra row in a picker, and taking a delegated task down for
-    it would be the more expensive bug.
+    that cannot write its marker (read-only volume) must still RUN — the cost
+    of the failure is one extra row in a picker, and taking a delegated task
+    down for it would be the more expensive bug.
 
-    **The directory's mtime is preserved**, and that is load-bearing rather
-    than tidy. Retention sorts and age-expires on the DIRECTORY's mtime
-    (``session/retention.py``), and creating a file inside a directory moves
-    it — so stamping a session silently reset its retention clock to now.
-    Measured on twin stores: marking existing directories kept 3 delegated
-    runs the picker will never show while deleting 3 of the user's own
-    conversations, and resurrected 59 children that were already past the age
-    ceiling. Writing a marker is bookkeeping ABOUT a session, never activity
-    IN it, so it must not answer the question "when was this session last
-    used". A directory this call creates has no prior mtime and is unaffected.
+    **The directory's mtime is preserved.** Recency for ``--resume`` and the
+    picker is read from the transcript's mtime, not the directory's, but
+    other readers still look at the directory (``os.listdir`` + ``stat``
+    listings, backup tools). Writing a marker is bookkeeping ABOUT a
+    session, never activity IN it, so it must not answer the question "when
+    was this session last used". A directory this call creates has no prior
+    mtime and is unaffected.
     """
     payload = {"origin": origin, **details}
     try:

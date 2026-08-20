@@ -1,65 +1,71 @@
-"""Bounded retention for ephemeral session directories.
+"""Session transcript retention: nothing is ever deleted.
 
-``sessions/<hex>/transcript.jsonl`` is written by every non-``--train`` run
-and read by nobody afterwards. Nothing deleted it, so the directory grew for
-the lifetime of the install — the same shape that let the harness this project
-is benchmarked against accumulate 5.9 GB of session transcripts and exhaust a
-developer's volume. Capping what enters the context does nothing about that
-half; this module is the other half.
+A session transcript is the only durable record of what a run did — the
+work it performed, the decisions it made, and the state a user may need to
+resume from hours or months later. Earlier this module enforced age, count,
+and byte ceilings over ``sessions/`` and evicted the oldest directories at
+startup. That policy destroyed real work in practice: ceilings that looked
+generous (200 directories, 128 MiB) were reached on heavy installs, and the
+eviction could take out the transcript of a session that was still running
+in another process, leaving that run to die on
+``FileNotFoundError: .../sessions/<id>/transcript.jsonl`` with no way to
+continue. A session in that state loses everything since its last save.
 
-Three independent ceilings, any of which may be disabled by setting it to 0:
+The rule now is absolute: **no sweep, automation, or startup hook deletes a
+session transcript, under any circumstance.** Session history is removed
+only when the user explicitly disposes of it. Disk pressure is a real
+concern — the harness this project is benchmarked against accumulated
+5.9 GB of transcripts — but the answer to disk pressure is a tool the user
+chooses to run, never a silent ceiling, because the cost asymmetry is
+extreme: gigabytes of recoverable disk versus hours of unrecoverable work.
 
-- **age** — a session directory older than N days;
-- **count** — at most N session directories;
-- **total bytes** — at most N bytes across all of them.
-
-They compose rather than override: eviction runs age, then count, then bytes,
-oldest first, until every ceiling holds. Age alone would let a burst of
-activity blow the disk budget inside the window; bytes alone would keep a
-single ancient directory forever. Whatever the ceilings say, the LIVE session
-is never a candidate — evicting the transcript of the run that is currently
-appending to it would take out resume and compaction replay together, which
-is a far worse outcome than the disk it reclaims.
+What this module still does, because it is definitionally safe, is reap
+EMPTY session directories. An empty directory holds no ``transcript.jsonl``
+and no other content — it is left behind by a run that created its session
+directory and exited before writing a single turn (23 of 147 directories on
+a real install were exactly this). Nothing can be lost by removing a
+directory that contains nothing, and an un-empty directory — one byte of
+transcript — is never touched, whatever its age, whatever the count of its
+neighbours, whatever the total size of the store.
 """
 
 from __future__ import annotations
 
 import logging
 import shutil
-import time
 from dataclasses import dataclass
 from pathlib import Path
-
-from local_operator.resume import ORIGIN_NAME
 
 logger = logging.getLogger(__name__)
 
 #: Directory under the config dir holding ephemeral per-run transcripts.
 SESSIONS_DIRNAME = "sessions"
 
-#: Config keys. Read through ``ConfigManager.get_config_value`` so the
-#: ceilings are editable with ``local-operator config edit`` like every other
-#: setting, rather than needing a second configuration mechanism.
+#: Config keys of the RETIRED eviction ceilings. They no longer do anything
+#: — deleting transcripts by policy is precisely the behaviour this module
+#: exists to prevent — but they are still read by :func:`sweep_from_config`
+#: so that a config file carrying them produces an honest log line once per
+#: startup instead of a silent no-op that looks like the ceilings still run.
 MAX_SESSIONS_KEY = "session_retention_max_sessions"
 MAX_BYTES_KEY = "session_retention_max_bytes"
 MAX_AGE_DAYS_KEY = "session_retention_max_age_days"
 
-#: Defaults. Measured against real runs: a working session costs ~1.3 KB per
-#: turn on disk after the slim encoding, and a heavy 60-turn day is ~80 KB.
-#: 200 sessions therefore lands around 16 MB in practice, and the 128 MiB
-#: byte ceiling is the backstop for the outlier — a session that dumps
-#: megabytes of tool output cannot push the total past it no matter how few
-#: directories there are. The worst case a heavy user can reach is exactly
-#: 128 MiB plus the live session, versus unbounded before.
-DEFAULT_MAX_SESSIONS = 200
-DEFAULT_MAX_BYTES = 128 * 1024 * 1024
-DEFAULT_MAX_AGE_DAYS = 30
+#: The ceilings are retired, so the only correct value for each is 0
+#: ("disabled"). Exported under the old names because the configuration
+#: reference and older call sites import them; they exist to say "no
+#: ceiling", never to be tuned.
+DEFAULT_MAX_SESSIONS = 0
+DEFAULT_MAX_BYTES = 0
+DEFAULT_MAX_AGE_DAYS = 0
 
 
 @dataclass(frozen=True)
 class SweepResult:
     """What one sweep did. Returned rather than logged so the benchmark and
-    the tests can assert on it instead of scraping log lines."""
+    the tests can assert on it instead of scraping log lines.
+
+    ``evicted`` counts only empty directories — a non-zero value never means
+    a transcript was removed, because transcripts are never removed."""
 
     scanned: int = 0
     evicted: int = 0
@@ -72,59 +78,27 @@ class SweepResult:
         return self.evicted > 0
 
 
-@dataclass(frozen=True)
-class _Candidate:
-    path: Path
-    mtime: float
-    size: int
-
-
 def _dir_size(directory: Path) -> int:
     """Bytes under ``directory``. Files that vanish mid-walk are skipped: a
     concurrent process disposing its own session is normal, not an error.
 
-    The origin marker is EXCLUDED from the total, which is what keeps the
-    "empty directories are always reaped" rule meaning what it says. A session
-    is stamped before its transcript exists, so a run that aborts in between
-    leaves a directory holding nothing but a 43-byte marker. Counting those
-    bytes turned a directory that carried nothing to lose into an ordinary
-    keep candidate occupying a retention slot — measured: with a count ceiling
-    of 3, two aborted children evicted two of the user's real transcripts to
-    keep two empty markers. The marker is bookkeeping ABOUT the session, never
-    session content, so it is not what the ceilings are budgeting.
+    Every file counts, including the origin marker. A directory holding
+    only ``origin.json`` is a session that has been claimed — typically a
+    child between ``mark_session_origin`` and its first append, or a run
+    that aborted in that window. Treating the marker as invisible made
+    those directories look empty and the sweep rmtree'd them, which is
+    exactly the ``FileNotFoundError: .../transcript.jsonl`` kill this
+    module exists to prevent. A 43-byte marker is cheaper than a lost
+    session; abandoned markers accumulate and the user can remove them.
     """
     total = 0
     for entry in directory.rglob("*"):
         try:
-            if entry.is_file() and entry.name != ORIGIN_NAME:
+            if entry.is_file():
                 total += entry.stat().st_size
         except OSError:
             continue
     return total
-
-
-def _candidates(sessions_dir: Path, live: Path | None) -> list[_Candidate]:
-    """Evictable session directories, oldest first.
-
-    ``mtime`` of the directory rather than of ``transcript.jsonl``: a session
-    may hold other files, and the directory's own mtime moves whenever any of
-    them is created. Directories are sorted oldest-first so every ceiling
-    evicts in the same, predictable order.
-    """
-    live_resolved = live.resolve() if live is not None else None
-    out: list[_Candidate] = []
-    for child in sessions_dir.iterdir():
-        try:
-            if not child.is_dir():
-                continue
-            if live_resolved is not None and child.resolve() == live_resolved:
-                continue
-            stat = child.stat()
-        except OSError:
-            continue
-        out.append(_Candidate(path=child, mtime=stat.st_mtime, size=_dir_size(child)))
-    out.sort(key=lambda candidate: candidate.mtime)
-    return out
 
 
 def sweep_sessions(
@@ -136,86 +110,76 @@ def sweep_sessions(
     max_age_days: int = DEFAULT_MAX_AGE_DAYS,
     now: float | None = None,
 ) -> SweepResult:
-    """Evict session directories until every enabled ceiling holds.
+    """Reap EMPTY session directories. Never delete anything else.
 
-    Idempotent and safe to call on every startup: a second call over a swept
-    directory evicts nothing. A missing ``sessions_dir`` is a no-op rather
-    than an error — the first run of a fresh install has not created it yet,
-    and a startup path that raises there would be a regression traded for
-    disk. ``live_dir`` is excluded from every pass.
+    The ceiling parameters are accepted for call-site compatibility and
+    are IGNORED: no configuration can make this function delete a
+    directory that holds content. ``live_dir`` is still honoured as a
+    belt: even a literally-empty live directory is skipped, because the
+    caller just created it and has not written a turn yet. A transcript
+    is removed only when the user explicitly disposes of the session —
+    there is no automated path, because the failure mode of an automated
+    path (a running session's transcript vanishing underneath it) costs
+    the user the whole session, and the benefit (bounded disk) is
+    recoverable by hand at any time.
 
-    Empty directories are always reaped regardless of the ceilings. They are
-    left behind by runs that built a session and exited before writing a
-    turn, they carry nothing to lose, and on a real install 23 of 147 session
-    directories were exactly this.
+    Idempotent and safe to call on every startup: a missing ``sessions_dir``
+    is a no-op rather than an error — the first run of a fresh install has
+    not created it yet, and a startup path that raises there would be a
+    regression traded for nothing.
     """
     if not sessions_dir.is_dir():
         return SweepResult()
 
-    horizon = (now if now is not None else time.time()) - max_age_days * 86400
+    scanned = 0
+    evicted = 0
+    errors = 0
+    bytes_remaining = 0
+    live_resolved = live_dir.resolve() if live_dir is not None else None
     try:
-        candidates = _candidates(sessions_dir, live_dir)
+        children = [child for child in sessions_dir.iterdir() if child.is_dir()]
     except OSError as exc:
         logger.warning("session retention: cannot scan %s: %s", sessions_dir, exc)
         return SweepResult(errors=1)
 
-    keep: list[_Candidate] = []
-    doomed: list[_Candidate] = []
-    for candidate in candidates:
-        if candidate.size == 0:
-            doomed.append(candidate)
-        elif max_age_days > 0 and candidate.mtime < horizon:
-            doomed.append(candidate)
-        else:
-            keep.append(candidate)
-
-    # Count then bytes, both oldest-first off the front of ``keep``. Bytes
-    # runs last because it is the ceiling that must hold unconditionally:
-    # trimming by count first often satisfies it for free.
-    if max_sessions > 0 and len(keep) > max_sessions:
-        cut = len(keep) - max_sessions
-        doomed.extend(keep[:cut])
-        keep = keep[cut:]
-
-    if max_bytes > 0:
-        total = sum(candidate.size for candidate in keep)
-        index = 0
-        while total > max_bytes and index < len(keep):
-            total -= keep[index].size
-            doomed.append(keep[index])
-            index += 1
-        keep = keep[index:]
-
-    evicted = 0
-    freed = 0
-    errors = 0
-    for candidate in doomed:
+    for child in children:
+        scanned += 1
         try:
-            shutil.rmtree(candidate.path)
+            if live_resolved is not None and child.resolve() == live_resolved:
+                # The caller just created this directory and has not written
+                # a turn. It is empty by construction and must still survive.
+                continue
+            size = _dir_size(child)
+        except OSError:
+            # A directory another process removed mid-scan. Nothing to do.
+            continue
+        if size > 0:
+            bytes_remaining += size
+            continue
+        # Literally empty: no files at all, not even a marker. Deleting
+        # it loses nothing, and it was never a real session.
+        try:
+            shutil.rmtree(child)
         except OSError as exc:
-            # A directory another process is writing, or one on a read-only
-            # mount. Skipping it keeps the sweep best-effort; refusing to
-            # start the session over a failed cleanup would be the wrong
-            # trade every time.
-            logger.debug("session retention: cannot remove %s: %s", candidate.path, exc)
+            # Best-effort by construction: reclaiming disk must never be the
+            # reason a session fails to start.
+            logger.debug("session retention: cannot remove %s: %s", child, exc)
             errors += 1
             continue
         evicted += 1
-        freed += candidate.size
 
     result = SweepResult(
-        scanned=len(candidates),
+        scanned=scanned,
         evicted=evicted,
-        bytes_freed=freed,
-        bytes_remaining=sum(candidate.size for candidate in keep),
+        bytes_freed=0,  # empty directories free nothing measurable
+        bytes_remaining=bytes_remaining,
         errors=errors,
     )
     if result.changed:
         logger.info(
-            "session retention: evicted %d of %d session directories, freed %.1f KB",
+            "session retention: reaped %d empty session directories (of %d)",
             result.evicted,
             result.scanned,
-            result.bytes_freed / 1024,
         )
     return result
 
@@ -223,29 +187,32 @@ def sweep_sessions(
 def sweep_from_config(
     config_manager: object, config_dir: Path, live_dir: Path | None
 ) -> SweepResult:
-    """Run :func:`sweep_sessions` with the ceilings from the app config.
+    """Run :func:`sweep_sessions` for the store under ``config_dir``.
 
-    ``config_manager`` is duck-typed on ``get_config_value`` so this module
-    stays importable without pulling the config graph onto the session import
-    path; anything that cannot be read as an int falls back to the default
-    rather than disabling the ceiling, because a typo'd config value must not
-    silently restore the unbounded behaviour.
+    ``config_manager`` is duck-typed on ``get_config_value``. The retired
+    ceiling keys are read once so that a config still carrying them gets a
+    single honest warning — transcripts are never deleted — rather than the
+    silence that would let a user believe a ceiling is still protecting (or
+    still endangering) anything.
     """
 
-    def _int(key: str, default: int) -> int:
-        getter = getattr(config_manager, "get_config_value", None)
-        if getter is None:
-            return default
-        try:
-            return int(getter(key, default))
-        except (TypeError, ValueError):
-            logger.warning("session retention: %s is not an integer; using %d", key, default)
-            return default
+    getter = getattr(config_manager, "get_config_value", None)
+    if getter is not None:
+        for key in (MAX_SESSIONS_KEY, MAX_BYTES_KEY, MAX_AGE_DAYS_KEY):
+            try:
+                value = getter(key, 0)
+            except (TypeError, ValueError):
+                continue
+            try:
+                configured = int(value)
+            except (TypeError, ValueError):
+                configured = 0
+            if configured:
+                logger.warning(
+                    "session retention: %s=%s is retired and ignored; "
+                    "session transcripts are never deleted automatically",
+                    key,
+                    value,
+                )
 
-    return sweep_sessions(
-        config_dir / SESSIONS_DIRNAME,
-        live_dir=live_dir,
-        max_sessions=_int(MAX_SESSIONS_KEY, DEFAULT_MAX_SESSIONS),
-        max_bytes=_int(MAX_BYTES_KEY, DEFAULT_MAX_BYTES),
-        max_age_days=_int(MAX_AGE_DAYS_KEY, DEFAULT_MAX_AGE_DAYS),
-    )
+    return sweep_sessions(config_dir / SESSIONS_DIRNAME, live_dir=live_dir)

@@ -50,6 +50,7 @@ from local_operator.harness.types import (
     Message,
     TextContent,
 )
+from local_operator.session.attachments import AttachmentStore
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,9 @@ class TranscriptEntry:
             return None
 
 
-def encode_message_payload(message: Message | CustomMessage) -> dict[str, Any]:
+def encode_message_payload(
+    message: Message | CustomMessage, attachments: AttachmentStore | None = None
+) -> dict[str, Any]:
     """Serialize a message for one transcript row, omitting what a reader can
     reconstruct.
 
@@ -135,6 +138,7 @@ def encode_message_payload(message: Message | CustomMessage) -> dict[str, Any]:
       kept verbatim because that is exactly where byte fidelity matters.
     """
     payload = message.model_dump(exclude_defaults=True, exclude={"id"})
+    _externalize_attachments(payload, attachments)
     for call in payload.get("tool_calls") or ():
         raw = call.get("raw_arguments")
         if raw is None:
@@ -146,6 +150,87 @@ def encode_message_payload(message: Message | CustomMessage) -> dict[str, Any]:
         if redundant:
             call.pop("raw_arguments")
     return payload
+
+
+#: Key a content block carries when its media lives in the attachment store
+#: instead of inline. Deliberately NOT a pydantic field of ``ImageContent``:
+#: the wire model never sees it, because :func:`_resolve_attachments` inlines
+#: the bytes back before replay, and an older build reading a row that
+#: carries it simply ignores the unknown key — the block still parses as an
+#: image with an empty ``data``, which degrades like any missing media.
+ATTACHMENT_KEY = "attachment"
+
+#: Placeholder ``data`` an unresolvable reference is rehydrated with. Empty
+#: string would parse identically; the marker exists so a host that inspects
+#: the replayed message can tell "no image" from "image we could not load".
+ATTACHMENT_MISSING = ""
+
+
+def _externalize_attachments(payload: dict[str, Any], attachments: AttachmentStore | None) -> None:
+    """Move inline base64 image payloads out of ``payload`` into the store.
+
+    In place, on the encoded payload dict. A block whose write fails keeps
+    its inline data — the fallback is larger on disk, never wrong to read.
+    Only blocks above a small floor are externalized: a 200-byte inline
+    image costs less than the reference plus the store round-trip, and
+    churning the store for favicon-sized images buys nothing.
+    """
+    if attachments is None:
+        return
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        # Identify image blocks by the ``data`` key, NOT by ``type``: the
+        # encoder dumps with ``exclude_defaults``, and ``type`` IS the
+        # pydantic default on both content models, so the discriminant is
+        # absent from the encoded row. A text block never carries ``data``.
+        data = block.get("data")
+        if not isinstance(data, str) or len(data) < _ATTACHMENT_FLOOR_BYTES:
+            continue
+        ref = attachments.put(data, str(block.get("mime_type", "image/png")))
+        if ref is None:
+            continue
+        block.pop("data", None)
+        block[ATTACHMENT_KEY] = ref.digest
+        block["mime_type"] = ref.mime_type
+
+
+def _resolve_attachments(payload: dict[str, Any], attachments: AttachmentStore) -> None:
+    """Inline the bytes an externalized block references, in place.
+
+    The mirror of :func:`_externalize_attachments` on the read path. A
+    reference that no longer resolves degrades to an empty image rather than
+    raising, for the same reason malformed transcript lines are dropped
+    individually: one missing attachment must not take down a resume.
+    """
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        digest = block.pop(ATTACHMENT_KEY, None)
+        if not isinstance(digest, str):
+            continue
+        resolved = attachments.get(digest)
+        if resolved is None:
+            logger.warning("transcript references missing attachment %s", digest)
+            block["data"] = ATTACHMENT_MISSING
+            continue
+        data, mime_type = resolved
+        block["data"] = data
+        block["mime_type"] = mime_type
+
+
+#: Below this many base64 characters an image stays inline. The reference
+#: itself is ~60 bytes of JSON plus a store round-trip on every replay, so
+#: the break-even is well under a kilobyte; 1 KiB is the conservative round
+#: number that keeps genuinely tiny images (thumbnails, 1px spacers) out of
+#: the store entirely.
+_ATTACHMENT_FLOOR_BYTES = 1024
 
 
 class Transcript:
@@ -161,6 +246,13 @@ class Transcript:
         self.path = self.directory / TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._entries: list[TranscriptEntry] = []
+        #: Shared content-addressed media store. Write path: image payloads
+        #: are externalized to it on append. Read path: references are
+        #: resolved back to inline base64 on replay, so anything downstream
+        #: of :meth:`build_llm_history` sees the same ``ImageContent`` it
+        #: always has. Owned by the transcript rather than passed per call
+        #: because both paths need the SAME store.
+        self._attachments = AttachmentStore()
         if self.path.exists():
             for line in self.path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
@@ -178,7 +270,10 @@ class Transcript:
         reference a custom entry that renders into LLM context.
         """
         kind = CUSTOM_KIND_MESSAGE if isinstance(message, Message) else CUSTOM_KIND_CUSTOM
-        payload: dict[str, Any] = {"kind": kind, **encode_message_payload(message)}
+        payload: dict[str, Any] = {
+            "kind": kind,
+            **encode_message_payload(message, self._attachments),
+        }
         return await self._append(ENTRY_MESSAGE, payload, message.id)
 
     async def append_compaction(
@@ -439,7 +534,7 @@ class Transcript:
         for entry in entries[start:]:
             if entry.type != ENTRY_MESSAGE:
                 continue
-            message = _entry_to_message(entry)
+            message = _entry_to_message(entry, self._attachments)
             if message is None:
                 continue
             notice = prunes.get(entry.id)
@@ -619,7 +714,9 @@ def _shrink_marked(entry: TranscriptEntry) -> TranscriptEntry:
     return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=payload)
 
 
-def _entry_to_message(entry: TranscriptEntry) -> AgentMessage | None:
+def _entry_to_message(
+    entry: TranscriptEntry, attachments: AttachmentStore | None = None
+) -> AgentMessage | None:
     """Rehydrate one message entry; malformed rows are dropped individually."""
     payload = dict(entry.payload)
     kind = payload.pop("kind", CUSTOM_KIND_MESSAGE)
@@ -629,6 +726,8 @@ def _entry_to_message(entry: TranscriptEntry) -> AgentMessage | None:
     # back with a converter-minted uuid and break the ``first_kept_entry_id``
     # reference the transcript exists to keep stable.
     payload["id"] = entry.id
+    if attachments is not None:
+        _resolve_attachments(payload, attachments)
     try:
         if kind == CUSTOM_KIND_CUSTOM:
             return CustomMessage.model_validate(payload)
