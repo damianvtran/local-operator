@@ -54,7 +54,7 @@ export function SubagentsPanel({ subagents }: { subagents: SubagentRow[] }) {
 							key={s.job_id}
 							type="button"
 							onClick={() => setSelected(s)}
-							className="flex min-h-11 w-full flex-col justify-center rounded-sm px-1 text-left active:bg-elevated"
+							className="flex min-h-8 w-full flex-col justify-center rounded-sm px-1 text-left active:bg-elevated"
 						>
 							<span className="flex w-full items-center gap-2">
 								<span

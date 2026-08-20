@@ -39,7 +39,7 @@ export function Disclosure({
 				aria-expanded={open}
 				onClick={() => setOpen(!open)}
 				className={cn(
-					"flex min-h-11 w-full items-center gap-1 text-left select-none",
+					"flex min-h-8 w-full items-center gap-1 text-left select-none",
 					headerClassName,
 				)}
 			>
