@@ -127,6 +127,9 @@ class TuiSessionHandle(SessionHandle):
             self._app._submit_prompt(text, [], None)
 
         await self._on_app(submit)
+        self._fold.note_user_message(text)
+        if self._on_projection is not None:
+            self._on_projection()
         return "prompt sent"
 
     async def steer(self, text: str) -> str:
@@ -134,6 +137,9 @@ class TuiSessionHandle(SessionHandle):
             self._session().steer(text)
 
         await self._on_app(do_steer)
+        self._fold.note_user_message(text, steer=True)
+        if self._on_projection is not None:
+            self._on_projection()
         return "steering queued"
 
     async def abort(self) -> str:

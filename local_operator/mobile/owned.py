@@ -182,12 +182,16 @@ class OwnedSessionHandle(SessionHandle):
         self._check_loop_thread()
         asyncio.ensure_future(self._session.prompt(text))
         self._projection.streaming = True
+        self._fold.note_user_message(text)
+        self._notify()
         return "prompt sent"
 
     async def steer(self, text: str) -> str:
         self._check_loop_thread()
         self._session.steer(text)
         self._projection.queued_count += 1
+        self._fold.note_user_message(text, steer=True)
+        self._notify()
         return "steering queued"
 
     async def abort(self) -> str:

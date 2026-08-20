@@ -193,7 +193,7 @@ class ProjectionFold:
                     )
         # A resumed fold starts clean: no streaming row, no half-run tools.
         self._open_message_id = None
-        self.projection.transcript = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
+        self.projection.transcript = self._cap_tail(entries)
         # Prune the correlation maps to the surviving tail: a long history
         # pairs every historical tool call, and keeping ids whose rows were
         # cut is dead weight per rebind (and a stale hit if a call id were
@@ -357,6 +357,25 @@ class ProjectionFold:
         self._derive_activity(event)
         self._bump()
 
+    # -- user turns --------------------------------------------------------------
+
+    def note_user_message(self, text: str, *, steer: bool = False) -> None:
+        """Append the user's own message to the transcript. Called by the
+        handle's prompt/steer path, because the harness only emits
+        MessageStartEvent for ASSISTANT messages — a live user prompt never
+        reaches the fold as an event, so without this the phone showed the
+        agent's reply with no sign of what the human asked (and, for a
+        phone-sent prompt, no echo of the tap at all)."""
+        self._append(
+            TranscriptEntry(
+                id=f"user-{time.time_ns()}",
+                kind="steer" if steer else "user",
+                text=text,
+                final=True,
+            )
+        )
+        self._bump()
+
     # -- working line (TUI WorkingBlock's phone counterpart) -------------------
 
     def _set_activity(self, label: str, *, restart_clock: bool = False) -> None:
@@ -485,11 +504,28 @@ class ProjectionFold:
 
     def _append(self, entry: TranscriptEntry) -> None:
         self.projection.transcript.append(entry)
-        # Cap by dropping from the front; the web client fetches history
-        # pages when the user scrolls past the tail.
-        overflow = len(self.projection.transcript) - PROJECTION_TRANSCRIPT_LIMIT
-        if overflow > 0:
-            del self.projection.transcript[:overflow]
+        self.projection.transcript = self._cap_tail(self.projection.transcript)
+
+    @staticmethod
+    def _cap_tail(entries: list[TranscriptEntry]) -> list[TranscriptEntry]:
+        """Trim to the render tail WITHOUT losing the opening user message.
+
+        A bare ``[-LIMIT:]`` drops the first user turn on any session longer
+        than the cap — and the opening prompt is the one row that names what
+        the whole conversation is about (and, per the field report, the row
+        that was always missing). Keep the transcript's first user message
+        pinned at the head, then fill the rest from the tail. The web client
+        still pages older history on scroll; this is about the projection
+        never omitting the conversation's own opening.
+        """
+        if len(entries) <= PROJECTION_TRANSCRIPT_LIMIT:
+            return entries
+        tail = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
+        first_user = next((e for e in entries if e.kind == "user"), None)
+        if first_user is not None and first_user not in tail:
+            # One pinned row + LIMIT-1 tail rows keeps the same bounded size.
+            return [first_user, *tail[:-1]]
+        return tail
 
     def _find(self, entry_id: str | None) -> TranscriptEntry | None:
         if not entry_id:
