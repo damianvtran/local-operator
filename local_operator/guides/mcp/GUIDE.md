@@ -37,6 +37,8 @@ local-operator mcp add linear --url https://mcp.linear.app/mcp --oauth
 local-operator mcp login linear
 ```
 
+Inside the TUI, `/mcp` lists servers and `/mcp login <name>` runs the same grant. To forget a stored credential or force a fresh consent (account switch, scope change): `/mcp logout <name>` / `local-operator mcp logout <name>`, and `/mcp reauth <name>` / `local-operator mcp reauth <name>` to log out and re-authorize in one step.
+
 Add `--scope project` to write `<cwd>/.local-operator/mcp.json`; the default global scope writes `~/.local-operator/mcp.json`. Use repeated `--env KEY=VALUE` only when the server must receive that variable. Do not put long-lived secrets in committed project configuration.
 
 Check and remove entries:

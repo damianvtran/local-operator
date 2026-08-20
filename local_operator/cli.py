@@ -494,6 +494,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
     mcp_login_parser.add_argument("name", type=str, help="Server name to authenticate")
+    mcp_logout_parser = mcp_subparsers.add_parser(
+        "logout",
+        help="Remove the stored OAuth credential for one MCP server",
+        parents=[parent_parser],
+    )
+    mcp_logout_parser.add_argument("name", type=str, help="Server name to log out")
+    mcp_reauth_parser = mcp_subparsers.add_parser(
+        "reauth",
+        help="Log out of one OAuth MCP server and run a fresh authorization",
+        parents=[parent_parser],
+    )
+    mcp_reauth_parser.add_argument("name", type=str, help="Server name to re-authenticate")
 
     # Built separately so provider transports stay off the CLI import path.
     from local_operator.web_search.cli import add_search_subparser
@@ -1061,8 +1073,30 @@ async def _mcp_login_server(name: str, cwd: Path) -> int:
         await manager.disconnect_all()
 
 
+async def _mcp_reauth_server(name: str, cwd: Path) -> int:
+    """Log out of one OAuth MCP server, then run a fresh interactive grant.
+
+    Plain ``mcp login`` reuses whatever the store still holds — the SDK only
+    runs a browser grant once the stored token can neither be used nor
+    refreshed, and a stored client registration short-circuits DCR. That is
+    wrong for the cases reauth exists for: an account switch, a scope change,
+    or a consent screen that needs to come back up. So reauth removes the row
+    first (same deletion as ``mcp logout``, erroring on an unknown or
+    non-OAuth name so a typo does not turn into an unexpected browser tab)
+    and then runs exactly the login connect path — one implementation of what
+    "authenticated" means.
+    """
+    from local_operator.mcp.auth import mcp_logout_server
+
+    error = mcp_logout_server(name, cwd)
+    if error is not None:
+        print(f"error: MCP reauth failed for {name!r}: {error}", file=sys.stderr)
+        return 1
+    return await _mcp_login_server(name, cwd)
+
+
 def mcp_command(args: argparse.Namespace) -> int:
-    """Dispatch ``mcp list|add|login|remove`` to MCP configuration and auth.
+    """Dispatch ``mcp list|add|login|logout|reauth|remove`` to MCP configuration and auth.
 
     Lazy import: the MCP package keeps its SDK imports lazy too, and this
     CLI must survive builds where it has not landed yet.
@@ -1105,6 +1139,19 @@ def mcp_command(args: argparse.Namespace) -> int:
         import asyncio
 
         return asyncio.run(_mcp_login_server(args.name, Path.cwd()))
+    if args.mcp_command == "logout":
+        from local_operator.mcp.auth import mcp_logout_server
+
+        error = mcp_logout_server(args.name, Path.cwd())
+        if error is not None:
+            print(f"error: MCP logout failed: {error}", file=sys.stderr)
+            return 1
+        print(f"Removed the stored OAuth credential for MCP server {args.name!r}.")
+        return 0
+    if args.mcp_command == "reauth":
+        import asyncio
+
+        return asyncio.run(_mcp_reauth_server(args.name, Path.cwd()))
     if args.mcp_command == "remove":
         return mcp_config.remove_server(args.name, scope=getattr(args, "scope", "global"))
 
