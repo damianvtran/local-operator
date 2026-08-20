@@ -60,11 +60,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.paths import config_dir
-from local_operator.providers.usage import (
-    UsageAmount,
-    UsageLimit,
-    UsageReport,
-)
+from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 
 logger = logging.getLogger("local_operator.providers.usage_cache")
 
