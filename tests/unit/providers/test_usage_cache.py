@@ -203,3 +203,28 @@ def test_retention_prunes_only_rows_past_the_last_good_window(cache) -> None:
     )
     assert cache.get(key, include_expired=True) is None
     assert cache.get("anthropic:other") is not None
+
+
+def test_a_write_leaves_no_open_transaction_behind(cache) -> None:
+    """`set()`'s pruning DELETEs must commit. sqlite3 opens an implicit
+    transaction on the first write and leaves it OPEN until something commits;
+    the bare cleanup DELETEs held the WAL write lock from one refresh to the
+    next, so every other session's cache call blocked for the full 5s busy
+    timeout and then failed — leases collapsed and writes were silently lost,
+    each stall freezing that session's whole TUI."""
+    cache.set("k", "p", [_report()], expires_at_ms=int(time.time() * 1000) + 60_000)
+    assert cache._connect() is not None
+    assert not cache._conn.in_transaction, "cleanup left the write lock held"
+
+    # And the practical consequence: a SECOND connection's lease and write are
+    # immediate, not a 5-second busy-timeout stall.
+    other = UsageCacheStore(cache._db_path)
+    try:
+        start = time.perf_counter()
+        assert other.try_lease("k2") is True
+        other.set("k3", "p", [_report()], expires_at_ms=int(time.time() * 1000) + 60_000)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, f"peer session blocked {elapsed:.1f}s on the cache"
+        assert other.get("k3") is not None, "peer write was silently lost"
+    finally:
+        other.close()

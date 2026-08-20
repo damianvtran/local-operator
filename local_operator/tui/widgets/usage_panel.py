@@ -519,6 +519,9 @@ class UsagePanel(Static):
         #: rather than "fetching…": the numbers the user came for are present,
         #: and the fetch only confirms or replaces them.
         self._refreshing = False
+        #: The last refresh over these reports came back empty-handed; a note
+        #: under the title says so (see :meth:`settle_refresh`).
+        self._refresh_failed = False
         self._error = ""
         self._target = ""
         self._fetched_ms: float | None = None
@@ -545,6 +548,7 @@ class UsagePanel(Static):
         self._request_generation += 1
         self._loading = True
         self._refreshing = False
+        self._refresh_failed = False
         self._error = ""
         self._target = target
         # Clear any previous reports so a cold open reads "fetching…" rather
@@ -556,20 +560,29 @@ class UsagePanel(Static):
         self._repaint()
         return self._request_generation
 
-    def show_cached(self, reports, *, now_ms: float) -> None:  # noqa: ANN001
+    def show_cached(
+        self, reports, *, now_ms: float, keep_offset: bool = False
+    ) -> None:  # noqa: ANN001
         """Paint cached reports immediately while the fetch runs behind them.
 
         The panel opened with a row already in the shared cache: showing
         "fetching…" would hide an answer that is on hand, so the reports render
         at once with their true age in the title and a ``refreshing…`` mark, and
         the fetch's result replaces them when it lands.
+
+        ``keep_offset`` is the ``r`` path's flag: a refresh re-shows the rows
+        the user is already READING, and snapping their scroll position to the
+        top would lose their place in a long report for no reason. A fresh open
+        starts at the top as before.
         """
         self._reports = list(reports)
         self._loading = False
         self._refreshing = True
+        self._refresh_failed = False
         self._error = ""
         self._fetched_ms = now_ms
-        self._offset = 0
+        if not keep_offset:
+            self._offset = 0
         self.display = True
         self._repaint()
 
@@ -578,6 +591,7 @@ class UsagePanel(Static):
         self._reports = list(reports)
         self._loading = False
         self._refreshing = False
+        self._refresh_failed = False
         self._error = ""
         self._fetched_ms = self._now() if now_ms is None else now_ms
         self._offset = 0
@@ -588,19 +602,23 @@ class UsagePanel(Static):
         """A failed fetch stays IN the panel, next to the key that retries it."""
         self._loading = False
         self._refreshing = False
+        self._refresh_failed = False
         self._error = message
         self.display = True
         self._repaint()
 
-    def settle_refresh(self) -> None:
+    def settle_refresh(self, *, failed: bool = False) -> None:
         """A background refresh ended with the cached reports still on screen.
 
         The fetch path serves stale data on failure rather than blanking the
-        panel, so the only visible change is the ``refreshing…`` mark going
-        away: the numbers stay, and their age in the title already says how
-        stale they are.
+        panel, so the numbers stay and their age in the title already says how
+        stale they are. ``failed`` additionally pins a one-row note under the
+        title: without it the only signal that an EXPLICIT ``r`` came back
+        empty-handed was the ``refreshing…`` mark silently disappearing —
+        honest, but illegible as an answer to a key the user just pressed.
         """
         self._refreshing = False
+        self._refresh_failed = failed
         self._repaint()
 
     def accepts_request(self, generation: int) -> bool:
@@ -652,6 +670,16 @@ class UsagePanel(Static):
     @property
     def view_offset(self) -> int:
         return self._offset
+
+    def set_view_offset(self, offset: int) -> None:
+        """Restore a scroll position (clamped by the next repaint).
+
+        Exists for the ``r`` path, which re-shows the standing reports after
+        ``start_fetch`` reset the offset: the reader's place in a long report
+        survives the refresh instead of snapping to the top.
+        """
+        self._offset = max(0, int(offset))
+        self._repaint()
 
     def set_clock(self, now_ms: float) -> None:
         """Pin the clock (tests; the panel otherwise reads the wall clock)."""
@@ -742,7 +770,12 @@ class UsagePanel(Static):
         """
         rows = self._rows_above_dock()
         gutter = PANEL_PADDING_ROWS if rows >= SQUEEZE_ROWS else 0
-        return rows, gutter, max(1, rows - PANEL_HEIGHT_MARGIN - CHROME_ROWS - gutter)
+        # The failed-refresh note is a CONDITIONAL chrome row (see
+        # `_compose_rows`): when it is pinned it must come out of the body
+        # budget like the title and rule do, or a full-height card grows one
+        # row past the dock exactly when the note appears.
+        note = 1 if (self._refresh_failed and self._reports) else 0
+        return rows, gutter, max(1, rows - PANEL_HEIGHT_MARGIN - CHROME_ROWS - gutter - note)
 
     def sync_layout(self, *, force: bool = False) -> None:
         """Repaint when the screen or live dock changed around an open card.
@@ -808,14 +841,25 @@ class UsagePanel(Static):
     def _title_row(self) -> Text:
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
+        faint = Style(color=theme_mod.semantic_color("faint"))
         row = Text()
         row.append("Usage", style=Style(color=theme_mod.semantic_color("fg")))
         if self._target:
             row.append(f"  {self._target}", style=muted)
         if self._fetched_ms is not None and not self._loading and not self._error:
+            # A `·` between the age and the refreshing mark so "2m ago" and
+            # "refreshing…" read as two facts rather than one running phrase.
             row.append(f"  {format_age(self._now() - self._fetched_ms)}", style=dim)
         if self._refreshing and not self._error:
-            row.append("  refreshing…", style=dim)
+            row.append("  · ", style=faint)
+            row.append("refreshing…", style=dim)
+        # Truncated like every other composed row. The title grew suffixes
+        # (target, age, refreshing) that can outrun a 32-cell card, and an
+        # untruncated Text WRAPS — an extra visual row `_repaint`'s pinned
+        # height never counted, which clipped the footer (and its `r refresh`
+        # receipt) off the bottom exactly in the stale/narrow state where the
+        # refresh key matters most.
+        row.truncate(max(1, self._content_width()), overflow="ellipsis")
         return row
 
     def _hint_row(self, scrolled: bool) -> Text:
@@ -886,7 +930,19 @@ class UsagePanel(Static):
         faint = Style(color=theme_mod.semantic_color("faint"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         rule = Text("─" * self._content_width(), style=faint)
-        rows = [self._title_row(), rule, *window]
+        rows = [self._title_row(), rule]
+        if self._refresh_failed and self._reports:
+            # One dim row, pinned with the chrome rather than scrolled with the
+            # body: it annotates the WHOLE report ("these numbers are what you
+            # already had"), and it must stay visible next to the age it
+            # qualifies while the user scrolls looking for fresher rows.
+            note = Text(
+                "refresh failed — showing last known numbers",
+                style=Style(color=theme_mod.semantic_color("warning")),
+            )
+            note.truncate(max(1, self._content_width()), overflow="ellipsis")
+            rows.append(note)
+        rows.extend(window)
         # Quiet ground between the report and the card's bottom meta, in BOTH
         # states. Without it the tally and the key hints sit flush against the
         # last meter and read as one more data row rather than as chrome.

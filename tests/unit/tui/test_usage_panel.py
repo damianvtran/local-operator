@@ -859,3 +859,42 @@ async def test_a_cold_open_still_says_fetching() -> None:
     async with _panel_app() as panel:
         panel.start_fetch("")
         assert "fetching…" in "\n".join(panel.render_lines_for_test())
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refresh_says_so_instead_of_just_dropping_the_mark() -> None:
+    """`r` came back empty-handed: the numbers stay, and a pinned note says the
+    refresh failed — the mark silently vanishing is not an answer to a key the
+    user just pressed."""
+    import time as _time
+
+    async with _panel_app() as panel:
+        panel.start_fetch("")
+        panel.show_cached(
+            [_report(_percent("a:5h", "5 hour", 5.0, shared=True))],
+            now_ms=_time.time() * 1000,
+        )
+        panel.settle_refresh(failed=True)
+        text = "\n".join(panel.render_lines_for_test())
+        assert "refresh failed — showing last known numbers" in text
+        assert "refreshing…" not in text
+        assert "5 hour" in text  # the numbers survived
+
+
+@pytest.mark.asyncio
+async def test_the_title_row_truncates_instead_of_wrapping() -> None:
+    """The title gained suffixes (target, age, refreshing…) that can outrun a
+    narrow card. An untruncated Text WRAPS — an extra visual row the pinned
+    height never counted, which clipped the footer (and its `r refresh`
+    receipt) off the card exactly in the stale/narrow state where the refresh
+    key matters most."""
+    import time as _time
+
+    async with _panel_app(size=(36, 24)) as panel:
+        panel.start_fetch("openrouter")
+        panel.show_cached(
+            [_report(_percent("a:5h", "5 hour", 5.0, shared=True), provider="openrouter")],
+            now_ms=_time.time() * 1000 - 12 * 3600_000,  # "12h ago"
+        )
+        title = panel._compose_rows()[0]
+        assert cell_len(title.plain) <= panel.panel_width(), title.plain

@@ -7407,7 +7407,7 @@ class OperatorApp(App[None]):
                 # the title already states how stale they are. Blanking them for
                 # a network blip would lose the very answer the cache holds.
                 if panel.has_reports:
-                    panel.settle_refresh()
+                    panel.settle_refresh(failed=True)
                 else:
                     panel.show_error(f"usage fetch failed: {error}")
             return
@@ -7417,9 +7417,10 @@ class OperatorApp(App[None]):
         if panel.accepts_request(generation):
             if not reports and panel.has_reports:
                 # An empty result with cached rows on screen means the refresh
-                # found nothing new (or failed and served stale): keep what is
-                # painted rather than wipe it for an empty fetch.
-                panel.settle_refresh()
+                # came back with nothing while the user is looking at numbers:
+                # keep what is painted, and say the refresh failed — the mark
+                # silently vanishing is not an answer to a key they pressed.
+                panel.settle_refresh(failed=True)
                 return
             # The age shown is the DATA's age, not the fetch's: a row served
             # from the shared cache may be minutes old, and "just now" would
@@ -7519,12 +7520,19 @@ class OperatorApp(App[None]):
         # than the cached open it sits next to.
         shown = panel.reports
         shown_ms = panel.fetched_ms
+        # BEFORE start_fetch: its repaint clamps the offset against the one-row
+        # loading body, so reading it afterwards always yields 0.
+        shown_offset = panel.view_offset
         generation = panel.start_fetch(target)
         if shown:
             panel.show_cached(
                 shown,
                 now_ms=shown_ms if shown_ms is not None else self._usage_data_fetched_ms(shown),
+                keep_offset=True,
             )
+            # `start_fetch` reset the offset; put the reader back where they
+            # were — a refresh must not lose their place in a long report.
+            panel.set_view_offset(shown_offset)
         self.run_worker(
             self._fetch_usage_worker(target or None, generation, force_refresh=True),
             thread=False,

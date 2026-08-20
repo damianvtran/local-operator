@@ -272,6 +272,23 @@ class AuthStore:
         else:
             self._config_overrides.pop(provider, None)
 
+    def override_keys(self, provider: str) -> list[str]:
+        """The override-tier secrets (runtime, then config) for ``provider``.
+
+        Public accessor for callers that need to know WHICH secrets the
+        cascade's tiers 1/2 would resolve without re-implementing the lookup —
+        the usage cache folds these into its account fingerprint so two
+        sessions on different override keys never share a cache row. Reading
+        the private maps from outside worked but pinned this module's field
+        names: a rename here would have silently reverted that fingerprint.
+        """
+        keys: list[str] = []
+        for tier in (self._runtime_overrides, self._config_overrides):
+            secret = tier.get(provider)
+            if secret:
+                keys.append(secret)
+        return keys
+
     def set_fallback_resolver(
         self, provider: str, resolver: Callable[[str], str | None] | None
     ) -> None:

@@ -730,3 +730,44 @@ class TestUsageCache:
         """`openai-device` logs in under `openai`; both spellings must read the
         same cache row rather than hold one permanently-stale copy each."""
         assert controller._usage_cache_key("openai") == controller._usage_cache_key("openai-device")
+
+    @pytest.mark.asyncio
+    async def test_old_enough_data_lets_an_empty_answer_be_believed(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """A provider that GENUINELY went quota-less must eventually settle.
+
+        The empty-over-data heuristic reads a blank answer over recent data as
+        an outage — but each write_failure kept the old row alive, so a lapsed
+        plan was re-fetched on every cool-down forever. Once the last real data
+        is older than EMPTY_OVER_DATA_ACCEPT_MS, the empty answer is accepted
+        and negative-cached at full TTL.
+        """
+        import time as _time
+
+        from local_operator.providers.controller import EMPTY_OVER_DATA_ACCEPT_MS
+
+        store.oauth_accounts["anthropic"] = [self._account("me@example.com", "acct-1")]
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            return None  # blank answer, endpoint reachable
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        # Plant a last-good row whose data is OLDER than the acceptance window,
+        # already expired so the refresh path runs.
+        key = controller._usage_cache_key("anthropic")
+        cache = controller._usage_cache_store()
+        assert cache is not None
+        now_ms = int(_time.time() * 1000)
+        old = UsageReport(provider="anthropic", limits=[])
+        old.fetched_at = now_ms - EMPTY_OVER_DATA_ACCEPT_MS - 60_000
+        old.identity = "me@example.com"
+        cache.set(key, "anthropic", [old], expires_at_ms=now_ms - 1000)
+
+        # The empty answer is BELIEVED: no stale serve, and the row is now a
+        # full-TTL negative entry (fresh, empty).
+        assert await controller.fetch_usage(["anthropic"]) == []
+        assert cache.get(key) == []

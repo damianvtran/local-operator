@@ -59,6 +59,17 @@ if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
 
 LoginCallbackFactory = Callable[[ProviderDefinition], "LoginCallbacks"]
 
+#: How long an empty refresh keeps deferring to old data before it is believed.
+#: The empty-over-data heuristic reads a blank answer over non-empty history as
+#: an outage — but a provider that GENUINELY went quota-less (plan lapsed,
+#: account emptied) would otherwise be re-fetched on every cool-down forever,
+#: because each ``write_failure`` keeps the old row alive. Once the last real
+#: data is this old, consecutive empty answers are accepted as the truth and
+#: negative-cached at full TTL. Half an hour: long enough to ride out any
+#: plausible rate-limit window, short enough that a lapsed plan stops burning
+#: a request per warm tick the same day.
+EMPTY_OVER_DATA_ACCEPT_MS = 30 * 60_000
+
 
 @dataclasses.dataclass(frozen=True)
 class CatalogueEntry:
@@ -473,14 +484,18 @@ class ProviderController:
         # the fetch — `get_api_key` resolves them ahead of every stored row —
         # so they belong in the fingerprint too, or two sessions running on
         # different override keys would share one cache row and read each
-        # other's numbers. Reached via getattr because the narrow store
-        # protocol does not require these maps; a store without them simply
-        # has no overrides to name.
-        for tier in ("_runtime_overrides", "_config_overrides"):
-            overrides = getattr(self.auth_store, tier, None)
-            secret = overrides.get(provider) if isinstance(overrides, dict) else None
-            if secret:
-                parts.append(fingerprint_secret(str(secret)))
+        # other's numbers. `override_keys` is AuthStore's public accessor for
+        # exactly this question; guarded because the narrow store protocol
+        # does not require it, and a store without it has no overrides to name.
+        override_keys = getattr(self.auth_store, "override_keys", None)
+        if callable(override_keys):
+            try:
+                secrets = override_keys(provider)
+            except Exception:  # noqa: BLE001 — overrides are optional context
+                secrets = ()
+            if isinstance(secrets, (list, tuple)):
+                for secret in secrets:
+                    parts.append(fingerprint_secret(str(secret)))
         try:
             rows = self.auth_store.list_credentials(storage)
         except Exception:  # noqa: BLE001 — an unreadable store fingerprints empty
@@ -567,6 +582,9 @@ class ProviderController:
         """
         stale: list[UsageReport] | None = None
         lease_held = False
+        #: The empty answer was BELIEVED (no history, or history too old), so
+        #: the stale row must not be served over it — see the acceptance branch.
+        accepted_empty = False
         if cache is not None and key:
             stale = cache.get(key, include_expired=True)
             # The lease only has something to protect when a stale value exists:
@@ -597,22 +615,37 @@ class ProviderController:
                 elif stale:
                     # Truthiness, not `is not None`: only a NON-EMPTY history
                     # marks this empty answer as a probable outage. Keep the
-                    # last good value servable through a short cool-down.
-                    cache.write_failure(key, provider)
+                    # last good value servable through a short cool-down —
+                    # unless the data is old enough that the "outage" reading
+                    # has expired (EMPTY_OVER_DATA_ACCEPT_MS), in which case
+                    # the empty answer is accepted and negative-cached so a
+                    # genuinely quota-less provider stops being re-fetched on
+                    # every cool-down forever.
+                    now_ms = int(time.time() * 1000)
+                    newest = max((int(r.fetched_at or 0) for r in stale), default=0)
+                    if newest and now_ms - newest > EMPTY_OVER_DATA_ACCEPT_MS:
+                        cache.set(key, provider, [], expires_at_ms=now_ms + self._jittered_ttl_ms())
+                        accepted_empty = True
+                    else:
+                        cache.write_failure(key, provider)
                 else:
                     # No history of data (or an empty one): negative-cache so
                     # the warmer stops re-hitting an endpoint that reports
                     # nothing. `r` (force_refresh) still bypasses this row.
                     now_ms = int(time.time() * 1000)
                     cache.set(key, provider, [], expires_at_ms=now_ms + self._jittered_ttl_ms())
+                    accepted_empty = True
         finally:
             if lease_held and cache is not None and key:
                 cache.release_lease(key)
         if reports:
             return reports
-        if stale is not None:
+        if stale is not None and not accepted_empty:
             # A forced refresh that failed still shows the last good numbers
-            # (their age is stated in the panel) rather than an empty card.
+            # (their age is stated in the panel) rather than an empty card. An
+            # ACCEPTED empty answer is not papered over with old data, though —
+            # the cache just recorded "this provider reports nothing" and the
+            # caller should say the same.
             return stale
         return []
 

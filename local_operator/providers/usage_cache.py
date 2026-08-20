@@ -378,13 +378,25 @@ class UsageCacheStore:
         return last_good
 
     def _cleanup(self, conn: sqlite3.Connection, now_ms: int) -> None:
-        """Drop rows whose retention has passed. Cheap: one indexed scan."""
+        """Drop rows whose retention has passed. Cheap: one indexed scan.
+
+        ``with conn:`` is load-bearing, not style. Python's sqlite3 opens an
+        implicit transaction on the first write and leaves it OPEN until
+        something commits — so bare DELETEs here held the WAL write lock from
+        one refresh to the next, and every OTHER session's cache call blocked
+        for the full 5 s busy timeout and then failed: leases collapsed to
+        "everyone fetches" and writes were silently lost, each stall freezing
+        that session's whole TUI (these calls are synchronous inside async
+        workers). The context manager commits on exit, releasing the lock the
+        moment the pruning is done.
+        """
         try:
-            conn.execute(
-                "DELETE FROM usage_reports WHERE expires_at_ms < ?",
-                (now_ms - USAGE_LAST_GOOD_RETENTION_MS,),
-            )
-            conn.execute("DELETE FROM usage_fetch_leases WHERE expires_at_ms < ?", (now_ms,))
+            with conn:
+                conn.execute(
+                    "DELETE FROM usage_reports WHERE expires_at_ms < ?",
+                    (now_ms - USAGE_LAST_GOOD_RETENTION_MS,),
+                )
+                conn.execute("DELETE FROM usage_fetch_leases WHERE expires_at_ms < ?", (now_ms,))
         except Exception:  # noqa: BLE001
             pass
 
