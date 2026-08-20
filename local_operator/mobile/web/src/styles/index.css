@@ -1,0 +1,275 @@
+@import "tailwindcss";
+@import "./themes.generated.css";
+
+/*
+ * The single token source for the phone web client.
+ *
+ * Colour comes in as `var(--lo-*)`, defined per theme in themes.generated.css
+ * and generated from the ThemePalette objects in src/themes/. Components name
+ * roles (`bg-surface`, `text-ink-muted`, `border-control`), never hues, so a
+ * theme swap is a variable swap and nothing in a component has to know it
+ * happened. Everything else — type, radii, motion — is palette-independent
+ * and lives here once.
+ *
+ * @see local-operator-ui/docs/branding.md for the reasoning behind each ramp.
+ */
+
+@theme {
+	/* ---- colour: role names, not hues ------------------------------------- */
+	--color-canvas: var(--lo-canvas);
+	--color-surface: var(--lo-surface);
+	--color-elevated: var(--lo-elevated);
+	--color-sunken: var(--lo-sunken);
+
+	--color-ink: var(--lo-ink);
+	--color-ink-muted: var(--lo-ink-muted);
+	--color-ink-dim: var(--lo-ink-dim);
+	--color-ink-disabled: var(--lo-ink-disabled);
+
+	--color-hairline: var(--lo-hairline);
+	--color-control: var(--lo-border-control);
+
+	--color-accent: var(--lo-accent);
+	--color-accent-hover: var(--lo-accent-hover);
+	--color-accent-active: var(--lo-accent-active);
+	--color-accent-wash: var(--lo-accent-wash);
+	--color-on-accent: var(--lo-on-accent);
+
+	--color-success: var(--lo-success);
+	--color-success-wash: var(--lo-success-wash);
+	--color-success-border: var(--lo-success-border);
+	--color-warning: var(--lo-warning);
+	--color-warning-wash: var(--lo-warning-wash);
+	--color-warning-border: var(--lo-warning-border);
+	--color-danger: var(--lo-danger);
+	--color-danger-wash: var(--lo-danger-wash);
+	--color-danger-border: var(--lo-danger-border);
+	--color-info: var(--lo-info);
+	--color-info-wash: var(--lo-info-wash);
+	--color-info-border: var(--lo-info-border);
+
+	/* The sheet scrim. Mapped as a colour so overlays can reach it as
+	   `bg-scrim` instead of hardcoding a black alpha that ignores the theme. */
+	--color-scrim: var(--lo-scrim);
+
+	/* ---- type ------------------------------------------------------------
+	 * Same ramp as the desktop app: a tool has no hero, so the largest
+	 * routine text is a page title, not a headline. Sizes are rem against a
+	 * 16px root.
+	 */
+	--text-display: 1.75rem;
+	--text-display--line-height: 1.2;
+	--text-display--letter-spacing: -0.02em;
+	--text-display--font-weight: 600;
+
+	--text-title: 1.25rem;
+	--text-title--line-height: 1.3;
+	--text-title--letter-spacing: -0.012em;
+	--text-title--font-weight: 600;
+
+	--text-heading: 1rem;
+	--text-heading--line-height: 1.4;
+	--text-heading--letter-spacing: -0.006em;
+	--text-heading--font-weight: 600;
+
+	--text-body: 0.875rem;
+	--text-body--line-height: 1.55;
+
+	--text-body-sm: 0.8125rem;
+	--text-body-sm--line-height: 1.5;
+
+	--text-meta: 0.75rem;
+	--text-meta--line-height: 1.45;
+
+	/* Machine voice: paths, code, counts, timestamps, tool names. The one
+	   place monospace is permitted. */
+	--text-mono: 0.8125rem;
+	--text-mono--line-height: 1.5;
+	--text-mono-sm: 0.75rem;
+	--text-mono-sm--line-height: 1.45;
+
+	/* Sans is the OS UI font; mono is whatever the platform has. No webfont
+	   is bundled — the daemon serves this bundle and there is no font
+	   pipeline, and the OS faces are what the desktop app renders too. */
+	--font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+	/* ---- radii: assigned by what the object is --------------------------- */
+	--radius-xs: 2px;
+	--radius-sm: 6px;
+	--radius-md: 10px;
+	--radius-lg: 14px;
+	--radius-frame: 16px;
+
+	/* ---- motion ----------------------------------------------------------
+	 * Declared under --transition-duration-* because Tailwind v4 generates
+	 * the `duration-*` utilities from that namespace; `--duration-*` alone
+	 * compiles to nothing, silently.
+	 */
+	--transition-duration-instant: 80ms;
+	--transition-duration-fast: 120ms;
+	--transition-duration-base: 180ms;
+	--transition-duration-slow: 240ms;
+
+	--ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+
+	/* ---- elevation -------------------------------------------------------
+	 * One shadow, only for objects that leave the flow (sheets, menus).
+	 * In-flow surfaces take the next ground, never a shadow.
+	 */
+	--shadow-overlay: var(--lo-overlay-shadow);
+}
+
+@layer base {
+	:where(:focus-visible) {
+		border-radius: inherit;
+	}
+
+	/* Disabled changes colour, never opacity — an opacity-faded control
+	   fades its own background too, landing on a different colour over
+	   `surface` than over `sunken`, and neither was designed. */
+	:where(:disabled, [aria-disabled="true"]) {
+		opacity: 1;
+		cursor: not-allowed;
+	}
+
+	html {
+		/* `100dvh` is the honest mobile viewport unit, but the base rule pins
+		   the fallback so older engines still fill the screen. */
+		height: 100%;
+	}
+
+	body {
+		background-color: var(--color-canvas);
+		color: var(--color-ink);
+		font-family: var(--font-sans);
+		font-size: var(--text-body);
+		line-height: 1.55;
+		min-height: 100%;
+		/* Touch ergonomics: kill the 300ms tap delay and the double-tap
+		   zoom gesture app-wide; controls that need zoom opt back in. */
+		touch-action: manipulation;
+		-webkit-font-smoothing: antialiased;
+		text-rendering: optimizeLegibility;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	/* The focus ring, deliberately unlayered-adjacent via :where() in the
+	   layered half and a plain rule below — the phone is a touch surface,
+	   but a keyboard (hardware, switch control) must still see one ring. */
+	/*
+	 * Reduced motion is a contract, not a courtesy. Everything animated here
+	 * is decorative (the streaming caret, sheet entrances), so all of it can
+	 * be capped near-zero without losing meaning. Cap rather than disable: a
+	 * cancelled animation can strand an element on its `from` keyframe.
+	 */
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		*::before,
+		*::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+			scroll-behavior: auto !important;
+		}
+	}
+}
+
+html :focus-visible {
+	outline-width: 2px;
+	outline-style: var(--tw-outline-style, solid);
+	outline-color: var(--color-accent);
+	outline-offset: 2px;
+}
+
+/*
+ * The streaming caret block. A solid accent square that blinks at the end of
+ * a streaming assistant row — the same affordance as the TUI's cursor.
+ */
+@keyframes lo-caret-blink {
+	0%,
+	49% {
+		opacity: 1;
+	}
+	50%,
+	100% {
+		opacity: 0;
+	}
+}
+.lo-caret {
+	display: inline-block;
+	width: 0.55em;
+	height: 1em;
+	margin-left: 2px;
+	vertical-align: text-bottom;
+	background-color: var(--color-accent);
+	animation: lo-caret-blink 1s steps(1) infinite;
+}
+
+/*
+ * The streaming shimmer on the session list. Subtle by design: a slow pulse
+ * of the name's ink toward the accent, not a spinner — the row itself is the
+ * indicator (branding §7: never a spinner and a state line for one thing).
+ */
+@keyframes lo-shimmer {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.55;
+	}
+}
+.lo-shimmer {
+	animation: lo-shimmer 1.8s ease-in-out infinite;
+}
+
+/* The running tool glyph's pulse — quieter than the shimmer, it shares the
+   row with real text. */
+@keyframes lo-pulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.4;
+	}
+}
+.lo-pulse {
+	animation: lo-pulse 1.2s ease-in-out infinite;
+}
+
+/*
+ * Sheet entrance: the only 240ms motion in the app, spent on something
+ * entering the screen. The sheet rises from the bottom edge; the scrim fades.
+ */
+@keyframes lo-sheet-up {
+	from {
+		transform: translateY(100%);
+	}
+	to {
+		transform: translateY(0);
+	}
+}
+.lo-sheet-panel {
+	animation: lo-sheet-up var(--transition-duration-slow, 240ms)
+		var(--ease-out-quart, ease-out);
+}
+@keyframes lo-scrim-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+.lo-scrim {
+	animation: lo-scrim-in var(--transition-duration-fast, 120ms) ease-out;
+}
+
+/* Thin scrollbars in the sunken wells (tool output, diffs) so a long output
+   doesn't push a fat gutter into the capped-height block. */
+.lo-scroll {
+	scrollbar-width: thin;
+	scrollbar-color: var(--color-control) transparent;
+}

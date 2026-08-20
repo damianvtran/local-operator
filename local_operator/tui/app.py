@@ -1175,6 +1175,11 @@ class OperatorApp(App[None]):
         #: cleared the moment the prompt is answered.
         self._last_login_prompt: Any = None
         self._approve_all: bool = False
+        #: The phone-facing bridge: registrant (discovery record + control
+        #: socket) and the handle adapting this app to it. None until the
+        #: first session is adopted; torn down in ``on_unmount``.
+        self._mobile_registrant: Any = None
+        self._mobile_handle: Any = None
         # What a NEW session opens in, read from config at mount and rewritten
         # by `/approvals default <mode>`. Held beside `_approve_all` rather than
         # re-read per use because the two are ONE state to a reader — "is the
@@ -1480,6 +1485,7 @@ class OperatorApp(App[None]):
         :meth:`_measure_preloaded_context` already puts its measurement in one.
         """
         self._session = session
+        self._mobile_adopted(session)
         # Before the band is painted below: the freshly built spec carries the
         # MODEL's default effort, and a `/reload` or `/new` that dropped the
         # user's chosen level would repaint the band with a level they did not
@@ -5003,7 +5009,52 @@ class OperatorApp(App[None]):
         if self._notify(kind):
             self._waiting_kind = kind
 
+    def _mobile_adopted(self, session: Any) -> None:
+        """Bring the mobile bridge up (once) or re-point it at a new session.
+
+        The registrant and its discovery record live for the PROCESS, because
+        the record is keyed by pid and the control socket outlives ``/new``
+        and ``/resume`` swaps; what changes on a swap is which session the
+        handle reads and mutates, so adoption re-seeds the handle's
+        projection rather than rebuilding the bridge.
+
+        Everything here is best-effort by contract: a phone bridge must never
+        be a startup gate for the terminal. The lazy import keeps the mobile
+        package off the CLI path for every run that never mounts the app.
+        """
+        if self._mobile_handle is None:
+            try:
+                from local_operator.mobile.registrant import Registrant
+                from local_operator.mobile.tui_handle import TuiSessionHandle
+
+                self._mobile_handle = TuiSessionHandle(self)
+                self._mobile_registrant = Registrant(self._mobile_handle, kind="tui")
+                self._mobile_registrant.start()
+            except Exception:
+                logger.debug("mobile registrant failed to start", exc_info=True)
+                self._mobile_handle = None
+                self._mobile_registrant = None
+            return
+        try:
+            self._mobile_handle.rebind()
+        except Exception:
+            logger.debug("mobile handle rebind failed", exc_info=True)
+
+    def _mobile_teardown(self) -> None:
+        if self._mobile_registrant is not None:
+            try:
+                self._mobile_registrant.close()
+            except Exception:
+                logger.debug("mobile registrant close failed", exc_info=True)
+            self._mobile_registrant = None
+            self._mobile_handle = None
+
     async def on_unmount(self) -> None:
+        # Unpublish the discovery record BEFORE anything can block: the mobile
+        # daemon reaps by pid liveness anyway, and this removes the record in
+        # the common case so the phone list drops the session immediately
+        # rather than at the next scan.
+        self._mobile_teardown()
         # Before disposing the session: dispose awaits teardown, and a turn
         # parked on an unanswered approval would never reach it.
         self._deny_queued_approvals()
