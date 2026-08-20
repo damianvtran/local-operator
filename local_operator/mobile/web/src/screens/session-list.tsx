@@ -14,7 +14,7 @@ import { Sheet } from "../components/ui/sheet";
 import { navigate } from "../router";
 import { retainSessionListStream, useSessions } from "../store";
 import { applyTheme, getTheme, THEMES } from "../theme";
-import { basename, shortenHome } from "../lib/format";
+import { shortenHome } from "../lib/format";
 import type { SessionSummary } from "../types";
 import { cn } from "../lib/cn";
 
