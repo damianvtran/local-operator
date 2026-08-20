@@ -2504,3 +2504,22 @@ def test_empty_assistant_with_image_content_is_kept() -> None:
         content=[ImageContent(data="Zm9v", mime_type="image/png")],
     )
     assert not _is_empty_assistant(message)
+
+
+def test_tool_call_turns_do_not_ship_whitespace_only_text() -> None:
+    """F1 (PR #189 review round 1): the predicate treats whitespace as empty,
+    so a tool-call turn must not ship a whitespace-only `content` either —
+    the two paths have to agree about what counts as content."""
+    from local_operator.providers.clients import _messages_to_openai_responses
+
+    message = Message(
+        role="assistant",
+        content=[TextContent(text="  \n")],
+        tool_calls=[ToolCall(id="t9", name="x", arguments={})],
+    )
+    chat = _message_to_openai(message)
+    assert "content" not in chat
+    assert chat["tool_calls"]
+
+    items = _messages_to_openai_responses([message])
+    assert [i.get("type") for i in items] == ["function_call"]

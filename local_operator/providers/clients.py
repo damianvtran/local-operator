@@ -528,7 +528,10 @@ def _is_empty_assistant(message: Message) -> bool:
 def _message_to_openai(message: Message) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
-        text = message.text
+        # Same whitespace rule as `_is_empty_assistant`: a whitespace-only
+        # text next to tool calls is noise, not content, and shipping it
+        # would make the two paths disagree about what counts as empty.
+        text = message.text if message.text.strip() else ""
         entry: dict[str, Any] = {"role": "assistant"}
         if text:
             entry["content"] = text
@@ -603,7 +606,9 @@ def _messages_to_openai_responses(messages: Sequence[Message]) -> list[dict[str,
         if _is_empty_assistant(message):
             continue
         if message.role == "assistant" and message.tool_calls:
-            if message.text:
+            # Whitespace-only text is dropped for the same reason
+            # `_is_empty_assistant` treats it as empty — see that predicate.
+            if message.text.strip():
                 items.append({"role": "assistant", "content": message.text})
             for call in message.tool_calls:
                 items.append(
