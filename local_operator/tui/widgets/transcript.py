@@ -823,6 +823,39 @@ class NoticeBlock(TranscriptBlock):
         if isinstance(parent, TranscriptView):
             parent.refresh_gap_around(self)
 
+    def set_class(self, add: bool, *class_names: str, update: bool = True) -> "NoticeBlock":
+        """Add/remove a class, re-centring when the boot column comes or goes.
+
+        ``_build`` reads ``BOOT_COLUMN_CLASS`` to decide between the spine and
+        the centred card axis, so a class flip is a content change, not only a
+        style one. Rebuilding here keeps the drawn text in step with the class
+        whatever the caller (the app's reconciliation pass, a test, a resize
+        crossing the card threshold), instead of trusting each to re-render.
+        """
+        had = self.has_class(BOOT_COLUMN_CLASS)
+        super().set_class(add, *class_names, update=update)
+        if self.has_class(BOOT_COLUMN_CLASS) != had:
+            self._rebuild()
+        return self
+
+    def _rebuild(self) -> None:
+        """Re-run :meth:`_build` through the finalize discipline.
+
+        The same three steps ``on_resize`` takes for a re-wrap — unfreeze,
+        rebuild, refreeze — factored out so a class change (``set_class``) can
+        share them. The gap is re-asked afterwards because a re-centre can move
+        the row count exactly as a re-wrap can.
+        """
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build())
+        finally:
+            self._finalized = was_finalized
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.refresh_gap_around(self)
+
     #: The kind field: the spine indent plus the glyph and its space. Every row
     #: reserves exactly this — :meth:`_build` writes ``indent + glyph + " "`` on
     #: the first and ``hanging`` (the same width, blank) on the rest, which is

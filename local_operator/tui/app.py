@@ -3042,31 +3042,41 @@ class OperatorApp(App[None]):
         for want of a media query is the same move ``Toast._refit`` already makes.
         """
         # The content box, not the terminal: `Screen`'s inset is outside the
-        # percentage the sheet resolves.
+        # percentage the sheet resolves. The width test alone is not enough: the
+        # card only exists while the boot layout does, so a resize after the
+        # conversation started must not re-add the class the splash's retirement
+        # removed — a wide terminal with a populated transcript is a bar, not a
+        # card. Riding the same "the transcript is empty" condition keeps the
+        # class honest on every re-resolution, not only on the boot path.
         box = max(0, terminal_width - SCREEN_INSET)
         card = boot_card_width(box)
-        self.screen.set_class(box - card >= BOOT_CARD_MIN_INSET, BOOT_CARD_CLASS)
+        card_up = self.screen.has_class(BOOT_LAYOUT_CLASS) and box - card >= BOOT_CARD_MIN_INSET
+        self.screen.set_class(card_up, BOOT_CARD_CLASS)
         self._sync_boot_column_width(box)
 
     def _sync_boot_column_width(self, box: int) -> None:
-        """Give a boot-column block the card's EXACT width, in cells.
+        """Reconcile every boot notice against the card it shares an axis with.
 
         A notice under the splash (an MCP server that failed to connect) is part
-        of the centred boot composition, not the full-width spine: left at
-        ``1fr`` it drew flush against the terminal's left edge while the splash
-        and card sat centred. It has to be the SAME width as the card and share
-        its axis, and neither is a percentage the stylesheet can ask for — the
-        card's own clamp is resolved in Python for the same reason (see
-        :meth:`_sync_boot_card`). So the width the card resolved to is written
-        onto the block here, one place for both, and the sheet only centres it
-        (``Screen.boot .boot-column``). Below the card threshold the block keeps
-        the spine's full width, matching the bar the card degrades to.
+        of the centred boot composition only WHILE the card is up: left at
+        ``1fr`` it drew flush against the terminal's left edge beside a centred
+        card. The class that marks it cannot be fixed at creation time, because
+        the card threshold it encodes is dynamic — a resize can cross it either
+        way, and the splash retiring (the conversation starting) removes the
+        card for good. So this pass, run on every boot-layout sync, makes class
+        membership FOLLOW the card rather than the moment the notice was
+        written: a notice gains the class and the card's exact width while the
+        card is up, and sheds both — back to the full-width spine — when it is
+        not. ``set_class`` only fires the block's re-centre (``on_class_change``)
+        on a real change, so an unchanged sync costs nothing.
         """
         transcript = self._transcript_view()
         card = boot_card_width(box)
-        width = card if box - card >= BOOT_CARD_MIN_INSET else box
-        for block in transcript.query("." + BOOT_COLUMN_CLASS):
-            block.styles.width = width
+        card_up = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
+        for block in transcript.query(".notice-block"):
+            block.set_class(card_up, BOOT_COLUMN_CLASS)
+            if card_up:
+                block.styles.width = card
 
     def _sync_boot_composition(self, size: Size) -> None:
         """Centre the boot composition — splash, separator, card — in the screen.
@@ -4903,6 +4913,13 @@ class OperatorApp(App[None]):
         if self._welcome is not None:
             self._welcome.set_visible(visible)
         self.screen.set_class(visible, BOOT_LAYOUT_CLASS)
+        if not visible:
+            # The card is gone for good once the conversation starts, so every
+            # boot notice sheds the column back to the spine NOW rather than on
+            # the next resize — `_sync_boot_card`, the other reconciliation
+            # point, does not run on this transition.
+            self.screen.remove_class(BOOT_CARD_CLASS)
+            self._sync_boot_column_width(max(0, self.size.width - SCREEN_INSET))
         self._sync_boot_layout()
 
     def _start_terminal_title(self) -> None:
@@ -6340,15 +6357,13 @@ class OperatorApp(App[None]):
         server, which is how the centred prompt became unreachable.
         """
         block = NoticeBlock(body, kind)
-        # Only while the boot CARD is up is the notice part of a centred
-        # composition; below the card threshold the input is a full-width bar and
-        # the spine is the axis everything shares, so the notice keeps it too.
-        # The class marks it for the column (width + centring) the app resolves
-        # in `_sync_boot_column_width`; the width set here covers the first
-        # frame, and the sync keeps it right across resizes.
-        if self.screen.has_class(BOOT_CARD_CLASS):
-            block.add_class(BOOT_COLUMN_CLASS)
-            block.styles.width = boot_card_width(max(0, self.size.width - SCREEN_INSET))
+        # While the boot CARD is up the notice is part of a centred composition;
+        # below the card threshold the input is a full-width bar and the spine is
+        # the axis everything shares. `_append_block` recomputes the boot layout
+        # for a block that lands under the splash, and its reconciliation pass
+        # (`_sync_boot_column_width`) sets the class and width from the LIVE card
+        # state — so the notice is right on the first frame and stays right as
+        # the terminal resizes across the threshold and when the splash retires.
         self._append_block(block, ends_empty_state=False)
 
     def _echo_user_command(self, text: str) -> None:

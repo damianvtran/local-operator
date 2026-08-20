@@ -1808,7 +1808,7 @@ def test_the_roster_text_tells_the_two_ids_apart(tmp_path):
     text = block.text
 
     # The transcript id is shown with the command that actually takes it.
-    assert "local-operator --resume 9f2c1a0b7e44" in text
+    assert "lop --resume 9f2c1a0b7e44" in text
     # And the resume instruction says which id it wants, so the transcript id
     # sitting above it is not read as the argument.
     assert "JOB id" in text
