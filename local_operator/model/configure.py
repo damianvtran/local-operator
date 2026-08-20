@@ -1511,7 +1511,17 @@ class SessionStreamFn:
         self._session_id = session_id
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
-        self._route_state = FailoverRouteState(on_change=self._on_route_change)
+        # The session's route bridge: called with the pinned fallback target
+        # (or None on recovery) so the host can keep its model display and its
+        # persisted session state truthful about which model is actually
+        # serving requests. Installed by the owning Session, exactly like the
+        # notice handler above — the stream owns routing, the session owns
+        # ordered event delivery.
+        self._route_handler: Callable[[Any, str], Awaitable[None] | None] | None = None
+        self._route_state = FailoverRouteState(
+            on_change=self._on_route_change,
+            on_settle=self._on_route_settle,
+        )
         self._message_boundary_pending = True
         # Frozen for one user-message tool loop: choosing a new effort between
         # tool calls would bust the provider cache and make one task reason at
@@ -1548,6 +1558,53 @@ class SessionStreamFn:
     ) -> None:
         """Install the owning session's event bridge."""
         self._notice_handler = handler
+
+    def set_route_handler(
+        self, handler: Callable[[Any, str], Awaitable[None] | None] | None
+    ) -> None:
+        """Install the owning session's fallback-route bridge.
+
+        Called with the active ``FallbackTarget`` when a fallback pins, and with
+        ``None`` when the route returns to the primary — both edges, because a
+        model display that only ever learns "fell back" keeps naming the
+        fallback after the primary has recovered.
+        """
+        self._route_handler = handler
+
+    def restore_fallback(self, selector: str, effort: str | None, primary_selector: str) -> None:
+        """Re-pin a fallback route persisted by a previous run of this session.
+
+        A resumed session whose transcript says "requests were being served by
+        the fallback" should keep being served by it rather than re-sending the
+        first prompt to the provider that was failing when the session closed.
+        Pinned WITHOUT a cooldown: the next message boundary's preflight is
+        free to probe the primary immediately, so a recovered provider is
+        picked back up on the first turn rather than after an arbitrary wait.
+
+        ``primary_selector`` is the SELECTED model this pin belongs to, seeded
+        into the preflight's selector memo because that memo starts ``None``:
+        without it the first ``preflight_usage`` call reads the primary as "a
+        different model than last time" and clears the pin it was just handed,
+        making every restore a no-op.
+
+        Set directly rather than through ``activate`` so NEITHER handler fires:
+        the transcript replay already shows the original fallback notice
+        (re-announcing it on every resume reads as a fresh failure that did not
+        happen), and the restoring session sets its own display/persistence
+        state from the same entry it restored this pin from — a settle edge
+        here would only write that entry back to the transcript it came from.
+        """
+        from local_operator.providers.failover import FallbackTarget
+
+        self._route_state.active = FallbackTarget(selector, effort)
+        # The same minimum grace the live driver gives a fresh pin (60s):
+        # without it the TUI's boot-time quota preflight — which runs seconds
+        # after this and probes only that the primary HAS AUTH, not that it
+        # recovered — would clear the pin before the first request proved
+        # anything, turning every restore into an immediate un-restore. After
+        # the grace, the ordinary boundary probe reclaims a recovered primary.
+        self._route_state.primary_retry_at_ms = int(time.time() * 1000) + 60_000
+        self._primary_selector = primary_selector
 
     def begin_message(self) -> None:
         """Mark the next model call as a user-message boundary."""
@@ -1656,6 +1713,20 @@ class SessionStreamFn:
         effort = f" ({target.effort} effort)" if target.effort else ""
         await self._notice(f"{reason} — falling back to {target.selector}{effort}")
 
+    async def _on_route_settle(self, target: Any, reason: str) -> None:
+        """Forward the effective-route edge (fallback pinned / primary back)."""
+        if target is None:
+            # The recovery deserves the same narration the failure got: the
+            # fallback edge printed "falling back to X", and without this line
+            # the model display silently snapping back reads as a glitch, not
+            # a recovery. Info, not warning — it is good news.
+            await self._notice(f"{reason} — back on {self._primary_selector}", "info")
+        if self._route_handler is None:
+            return
+        result = self._route_handler(target, reason)
+        if inspect.isawaitable(result):
+            await result
+
     def _fallback_targets(self, model: ModelSpec) -> list[Any]:
         from local_operator.providers.failover import (
             RetrySettings,
@@ -1759,7 +1830,11 @@ class SessionStreamFn:
             return
         if not retry.usage_aware_fallback:
             if self._route_state.active is not None and await self._primary_has_auth(model):
-                self._route_state.clear()
+                # A real recovery edge, not bookkeeping: a fallback was pinned
+                # and requests are about to return to the primary, so the
+                # host's model display has to hear about it (settled, not
+                # silent — same reasoning as the stream driver's clear).
+                await self._route_state.clear_settled("primary model recovered")
             return
 
         attempted_ids: set[int] = set()
@@ -1802,7 +1877,9 @@ class SessionStreamFn:
                 reserve_percent=retry.usage_reserve_percent,
             )
             if health.state == "healthy":
-                self._route_state.clear()
+                # Settled for the same reason as the auth-only path above: this
+                # clear is the moment a pinned fallback stops serving requests.
+                await self._route_state.clear_settled("primary model recovered")
                 return
             if health.state == "unknown":
                 return

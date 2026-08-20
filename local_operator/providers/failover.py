@@ -1045,6 +1045,14 @@ class RetrySettings:
 
 RouteChangeHandler = Callable[[FallbackTarget, str], Awaitable[None] | None]
 
+#: Fired whenever the EFFECTIVE route settles on a different target — with the
+#: fallback target when one is pinned, with ``None`` when requests return to
+#: the primary. Distinct from ``on_change`` (which only narrates activations)
+#: because a front end keeping its model display truthful needs BOTH edges:
+#: without the clear edge the band keeps naming the fallback after the primary
+#: recovered, which is the same lie in the other direction.
+RouteSettleHandler = Callable[[FallbackTarget | None, str], Awaitable[None] | None]
+
 
 @dataclasses.dataclass
 class FailoverRouteState:
@@ -1060,6 +1068,7 @@ class FailoverRouteState:
     active: FallbackTarget | None = None
     on_change: RouteChangeHandler | None = None
     primary_retry_at_ms: int = 0
+    on_settle: RouteSettleHandler | None = None
 
     async def activate(
         self,
@@ -1086,19 +1095,46 @@ class FailoverRouteState:
                 int(time.time() * 1000) + cooldown_ms,
             )
         self.active = target
-        if self.on_change is None:
-            return
-        result = self.on_change(target, reason)
-        if inspect.isawaitable(result):
-            await result
+        if self.on_change is not None:
+            result = self.on_change(target, reason)
+            if inspect.isawaitable(result):
+                await result
+        await self._settle(target, reason)
 
     def primary_retry_due(self, now_ms: int | None = None) -> bool:
         now = int(time.time() * 1000) if now_ms is None else now_ms
         return now >= self.primary_retry_at_ms
 
     def clear(self) -> None:
+        """Return the route to the primary WITHOUT announcing it.
+
+        Kept for the callers that reset routing state as bookkeeping — a
+        ``/model`` switch, a preflight that re-verified auth — where "back on
+        the primary" is not news anyone needs. A recovery worth telling the
+        front end about (the primary actually served a request again) goes
+        through :meth:`clear_settled` instead.
+        """
         self.active = None
         self.primary_retry_at_ms = 0
+
+    async def clear_settled(self, reason: str) -> None:
+        """Return the route to the primary and NOTIFY ``on_settle``.
+
+        Fires only on the transition (a fallback was actually pinned), so the
+        ordinary case — the primary succeeding while it was already the route —
+        stays silent rather than spamming the settle hook once per request.
+        """
+        was_fallback = self.active is not None
+        self.clear()
+        if was_fallback:
+            await self._settle(None, reason)
+
+    async def _settle(self, target: FallbackTarget | None, reason: str) -> None:
+        if self.on_settle is None:
+            return
+        result = self.on_settle(target, reason)
+        if inspect.isawaitable(result):
+            await result
 
 
 def parse_selector(selector: str) -> tuple[str, str]:
@@ -1580,7 +1616,11 @@ async def stream_with_failover(
                     forwarded_any = True
                     yield event
                 if route_state is not None and target == primary_target:
-                    route_state.clear()
+                    # Settled, not silent: while a fallback was pinned the front
+                    # end has been displaying THAT model, so the primary serving
+                    # again is exactly the edge its display needs. A no-op when
+                    # nothing was pinned (see `clear_settled`).
+                    await route_state.clear_settled("primary model recovered")
                 # This credential just served a request, so whatever provider
                 # fault demoted it has passed. Without this the mark outlived
                 # the outage for the life of the process, contradicting the
