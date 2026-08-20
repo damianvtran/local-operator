@@ -10,9 +10,13 @@ callback; this module never touches disk.
 Key semantics carried over from the reference scheduler:
 
 - ``parse_wake_duration`` REJECTS bare numbers (``60`` reads as both seconds
-  and milliseconds; guessing wrong is a runaway loop).
+  and milliseconds; guessing wrong is a runaway loop) but ACCEPTS compounds
+  (``8h30m``): summing unit-suffixed terms has no such ambiguity.
 - Missed occurrences are SKIPPED, not replayed: a laptop asleep six hours owes
-  one hourly check, not six.
+  one hourly check, not six. The skip is not silent, though — on a resume that
+  adopts overdue schedules, :meth:`WakeScheduler.take_missed` reports how many
+  occurrences each schedule skipped so the delivery can say "this wake fired
+  late, N occurrences were missed" instead of impersonating a punctual one.
 - ``build_wake_schedule`` returns the error as a STRING rather than raising, so
   the tool's failure path is a sentence the model can act on.
 - ``MAX_ARM_MS`` caps the armed timer at one minute; long-dated wakes re-check
@@ -58,7 +62,12 @@ _DURATION_UNITS_MS = {
     "d": 86_400_000,
     "w": 604_800_000,
 }
-_DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhdwSMHDW])\s*$")
+# Compound durations are allowed ("8h30m", "1h 30m", "1h30m15s"), so the
+# pattern matches the FULL string and findall() walks it term by term. A
+# single ^(\d+)([unit])$ shape used to be the only accepted form, which made
+# "8h30m" a hard error even though it is the most natural way to say it.
+_DURATION_RE = re.compile(r"^\s*(?:\d+\s*[smhdwSMHDW]\s*)+$")
+_DURATION_TERM_RE = re.compile(r"(\d+)\s*([smhdwSMHDW])")
 _CLOCK_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 
 
@@ -95,6 +104,20 @@ class DueWake(BaseModel):
     occurrence: int  # 1-based = fired_count + 1 at fire time
     planned_total: int | None = None
     final: bool = False
+
+
+class MissedWakeOccurrence(TypedDict):
+    """One schedule's skipped occurrences between shutdown and resume.
+
+    ``occurrences`` counts only the strictly-past, never-delivered due times —
+    not the imminent fire the resume is about to deliver itself — and it is
+    clamped to the remaining ``limit`` budget, the same budget the live
+    scheduler fires against, so a ``limit 3`` wake resumed a week late never
+    claims more misses than it could ever have delivered.
+    """
+
+    schedule: WakeSchedule
+    occurrences: int
 
 
 #: Why a schedule stopped repeating. Only these three are ever produced:
@@ -145,19 +168,25 @@ WakeAdvanceResult = WakeAdvanced | WakeRetired
 
 
 def parse_wake_duration(text: str) -> int | None:
-    """Parse ``45s``/``30m``/``2h``/``7d``/``1w`` into milliseconds.
+    """Parse ``45s``/``30m``/``2h``/``7d``/``1w`` into milliseconds, including
+    compound forms like ``8h30m`` or ``1h 30m 15s`` (terms are summed).
 
     A bare number is REJECTED on purpose (returns ``None``): ``60`` reads as
-    both seconds and milliseconds, and guessing wrong is a runaway loop.
+    both seconds and milliseconds, and guessing wrong is a runaway loop. So is
+    a compound that sums to zero (``0s``) — a zero-interval recurring wake is
+    the same failure one frame later.
     """
     if not isinstance(text, str):
         return None
     match = _DURATION_RE.match(text)
     if not match:
         return None
-    value = int(match.group(1))
-    unit = match.group(2).lower()
-    return value * _DURATION_UNITS_MS[unit]
+    total_ms = 0
+    for value, unit in _DURATION_TERM_RE.findall(text):
+        total_ms += int(value) * _DURATION_UNITS_MS[unit.lower()]
+    if total_ms <= 0:
+        return None
+    return total_ms
 
 
 def parse_wake_at(text: str, now_ms: int) -> int | None:
@@ -206,11 +235,32 @@ def parse_wake_at(text: str, now_ms: int) -> int | None:
 
 
 def format_duration(ms: int) -> str:
-    """Render a duration as the shortest exact unit (``1h``, ``45s``, …)."""
-    for unit in ("w", "d", "h", "m", "s"):
+    """Render a duration compactly (``1h``, ``45s``, ``1h30m`` …).
+
+    Since parse accepts compound durations, format must round-trip them: a
+    wake created with ``every 1h30m`` would otherwise render as ``90m``, which
+    is legal to parse again but reads nothing like what was asked for.
+    Largest-unit-first decomposition, up to two terms — past that the string
+    is longer than the value it carries.
+    """
+    units = ("w", "d", "h", "m", "s")
+    # Exact single unit first, but only at the LARGEST unit the value reaches:
+    # 8h30m is also exactly "510m", and rendering it that way round-trips
+    # through parse while reading nothing like what was asked for.
+    for i, unit in enumerate(units):
         step = _DURATION_UNITS_MS[unit]
+        if ms < step:
+            continue
         if ms % step == 0:
             return f"{ms // step}{unit}"
+        # Two-term compound: split at this unit, then render the remainder
+        # against the first smaller unit that divides it exactly.
+        head, rem = divmod(ms, step)
+        for smaller in units[i + 1 :]:
+            sub_step = _DURATION_UNITS_MS[smaller]
+            if rem % sub_step == 0:
+                return f"{head}{unit}{rem // sub_step}{smaller}"
+        break
     return f"{ms}ms"
 
 
@@ -343,6 +393,26 @@ def advance_wake_schedule(schedule: WakeSchedule, now_ms: int) -> WakeAdvanceRes
     return {"next": next_schedule}
 
 
+def missed_occurrences(schedule: WakeSchedule, now_ms: int) -> int:
+    """How many of ``schedule``'s occurrences were strictly due before
+    ``now_ms`` and will never be delivered (the resume fires only the latest).
+
+    Recurrence advance SKIPS missed occurrences rather than replaying them, so
+    this count is the only place the skip is visible to the agent. Occurrences
+    past ``until_at`` do not count — the schedule was already retired then.
+    """
+    if schedule.every_ms is None:
+        return 1 if schedule.next_due_at < now_ms else 0
+    if schedule.next_due_at >= now_ms:
+        return 0
+    missed = (now_ms - schedule.next_due_at) // schedule.every_ms
+    if schedule.until_at is not None and schedule.next_due_at <= schedule.until_at:
+        missed = min(missed, (schedule.until_at - schedule.next_due_at) // schedule.every_ms + 1)
+    if schedule.limit is not None:
+        missed = min(missed, max(schedule.limit - schedule.fired_count, 0))
+    return max(missed, 0)
+
+
 # ---------------------------------------------------------------------------
 # Delivery formatting (pure; used by the session to build the self-prompt)
 # ---------------------------------------------------------------------------
@@ -423,6 +493,11 @@ class WakeScheduler:
         # init re-arms by calling ``pump()`` once.
         self.needs_rearm = False
         self._disposed = False
+        # Schedules adopted overdue by load(), with their skipped-occurrence
+        # counts. Held (not delivered) so the caller decides when to speak —
+        # the session aggregates them into ONE catch-up delivery instead of
+        # letting each overdue wake fire its own turn seconds apart.
+        self._missed: list[MissedWakeOccurrence] = []
 
     @property
     def schedules(self) -> tuple[WakeSchedule, ...]:
@@ -435,9 +510,12 @@ class WakeScheduler:
     def load(self, schedules: list[WakeSchedule] | tuple[WakeSchedule, ...]) -> None:
         """Adopt persisted schedules. NO persist (would duplicate per resume).
         Overdue schedules are pushed to ``now + LOAD_GRACE_MS`` so they fire
-        shortly after load rather than inside it."""
+        shortly after load rather than inside it, and recorded via
+        :meth:`take_missed` so the caller can aggregate them into a single
+        catch-up delivery that names the skipped occurrences."""
         now = self._now()
         adopted: list[WakeSchedule] = []
+        missed: list[MissedWakeOccurrence] = []
         for schedule in schedules:
             # Persisted rows are untrusted input: a hand-edited or truncated
             # transcript can carry values the field constraints reject, and
@@ -449,11 +527,22 @@ class WakeScheduler:
                 continue
             copy = validated.model_copy(deep=True)
             if copy.next_due_at <= now:
+                skipped = missed_occurrences(copy, now)
+                if skipped:
+                    missed.append({"schedule": copy.model_copy(deep=True), "occurrences": skipped})
                 copy = copy.model_copy(update={"next_due_at": now + LOAD_GRACE_MS})
             adopted.append(copy)
         adopted.sort(key=lambda s: s.created_at)
         self._schedules = adopted
+        self._missed = missed
         self._arm()
+
+    def take_missed(self) -> list[MissedWakeOccurrence]:
+        """Return (and clear) the overdue schedules adopted by the last
+        :meth:`load`. One-shot consumers: the session drains this once at
+        resume to build the catch-up delivery."""
+        missed, self._missed = self._missed, []
+        return missed
 
     async def update(self, schedules: list[WakeSchedule] | tuple[WakeSchedule, ...]) -> None:
         """Caller-driven change: persist the full list then re-arm."""

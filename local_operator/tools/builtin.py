@@ -3864,13 +3864,17 @@ class WakeParams(BaseModel):
     field_in: str | None = Field(
         default=None,
         alias="in",
-        description="Delay before first fire: '45s'|'30m'|'2h'|'7d'|'1w'.",
+        description="Delay before first fire: '45s'|'30m'|'2h'|'8h30m'|'7d'|'1w' "
+        "(compound terms like '1h30m' sum).",
     )
     at: str | None = Field(
         default=None,
         description="First fire time: 'HH:MM', '+<duration>', or ISO datetime.",
     )
-    every: str | None = Field(default=None, description="Repeat interval duration, e.g. '1h'.")
+    every: str | None = Field(
+        default=None,
+        description="Repeat interval duration, e.g. '1h' or compound '1h30m'.",
+    )
     until: str | None = Field(default=None, description="Retire after this time (ISO datetime).")
     limit: int | None = Field(default=None, ge=1, description="Max number of fires.")
     id: str | None = Field(default=None, description="Schedule id (cancel; from wake list).")
@@ -3951,7 +3955,7 @@ def build_wake_tool(context: ToolContext) -> AgentTool | None:
         name="wake",
         label="Wake",
         describe_approval=_describe_wake_approval,
-        description="Schedule a future wake (create/list/cancel), e.g. 'in 30m'.",
+        description="Schedule a future wake (create/list/cancel), e.g. 'in 30m' or 'in 8h30m'.",
         parameters=WakeParams.model_json_schema(),
         # write tier: wake create persists schedules and arms unattended
         # future agent turns — the only tool that creates autonomous

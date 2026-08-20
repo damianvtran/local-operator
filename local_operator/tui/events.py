@@ -61,6 +61,7 @@ from local_operator.harness.types import (
     TurnEndEvent,
     TurnStartEvent,
     Usage,
+    WakeDeliveredEvent,
 )
 from local_operator.tui.widgets.transcript import NoticeKind
 
@@ -182,6 +183,15 @@ class ToolUpdated(Message):
     def __init__(self, event: ToolExecutionUpdateEvent) -> None:
         super().__init__()
         self.event = event
+
+
+class WakeDelivered(Message):
+    """A scheduled wake's prompt was delivered — render the expandable receipt."""
+
+    def __init__(self, text: str, catchup: bool) -> None:
+        super().__init__()
+        self.text = text
+        self.catchup = catchup
 
 
 class NoticePosted(Message):
@@ -544,6 +554,12 @@ class EventController:
     def _handle_notice(self, event: NoticeEvent) -> None:
         self._post(NoticePosted(event.text, event.kind))
 
+    def _handle_wake_delivered(self, event: WakeDeliveredEvent) -> None:
+        # No generation guard: a wake receipt is a state fact about the
+        # session (this prompt was delivered), not a turn-scoped boundary, so
+        # a superseded turn cannot invalidate it.
+        self._post(WakeDelivered(event.text, event.catchup))
+
     def _handle_steering_delivered(self, event: SteeringDeliveredEvent) -> None:
         # No generation guard, deliberately: the drain belongs to whichever turn
         # is running, and the app settles a row it is holding a direct reference
@@ -616,6 +632,7 @@ class EventController:
         "tool_execution_update": _handle_tool_update,
         "tool_execution_end": _handle_tool_end,
         "notice": _handle_notice,
+        "wake_delivered": _handle_wake_delivered,
         "steering_delivered": _handle_steering_delivered,
         "compaction_start": _handle_compaction_start,
         "compaction_end": _handle_compaction_end,

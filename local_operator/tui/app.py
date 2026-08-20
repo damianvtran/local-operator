@@ -73,6 +73,7 @@ from local_operator.harness.types import (
     ImageContent,
     Message,
 )
+from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.logger import current_log_file
 
 # A leaf table (`re` and `dataclasses` only), so importing it here costs the
@@ -109,6 +110,7 @@ from local_operator.tui.events import (
     TurnBoundaryStart,
     TurnEnded,
     TurnStarted,
+    WakeDelivered,
 )
 from local_operator.tui.glyphs import display_name
 from local_operator.tui.markdown_theme import (
@@ -174,6 +176,7 @@ from local_operator.tui.widgets.transcript import (
     RichBlock,
     TranscriptView,
     UserBlock,
+    WakeBlock,
     WorkingBlock,
 )
 from local_operator.tui.widgets.usage_panel import (
@@ -181,6 +184,7 @@ from local_operator.tui.widgets.usage_panel import (
     UsagePanel,
     UsageRefreshRequested,
 )
+from local_operator.tui.widgets.wake_panel import WakePanel
 from local_operator.tui.widgets.welcome import (
     MODEL_PENDING,
     WelcomeView,
@@ -1129,6 +1133,7 @@ class OperatorApp(App[None]):
         # opens through the same handle's on_open callback, which pushes the
         # child's retained event list as a modal.
         self._subagent_panel: SubagentPanel | None = None
+        self._wake_panel: WakePanel | None = None
         self._todo_panel: TodoPanel | None = None
         # Serializes interactive login flows so two /login commands can never
         # race the one suspended terminal.
@@ -1286,6 +1291,7 @@ class OperatorApp(App[None]):
         # neither has content. Holding a ref lets the 1 Hz poll and the
         # Subagent*/tool-end handlers repaint it without a relookup per tick.
         self._subagent_panel = SubagentPanel(on_open=self._open_subagent_view)
+        self._wake_panel = WakePanel()
         self._todo_panel = TodoPanel()
         # Two containers for one panel: the dock is the docked POSITIONER, and
         # the shell is the panel the user sees — the fill, the padding, and the
@@ -1325,6 +1331,7 @@ class OperatorApp(App[None]):
             # shell; it collapses to zero when both panels are hidden.
             with Container(id="band"):
                 yield self._subagent_panel
+                yield self._wake_panel
                 yield self._todo_panel
             with Container(id="input-shell"):
                 yield Band(id="status-band")
@@ -1833,6 +1840,20 @@ class OperatorApp(App[None]):
         # only looked at once — see `TranscriptView.batch_append`.
         with transcript.batch_append():
             for message in history:
+                # A wake delivery is a CustomMessage, so it has no ``role``
+                # and would fall through every branch below — which is exactly
+                # why a resumed session showed the agent answering a wake with
+                # no sign the wake ever fired. Replaying it as its own block
+                # keeps the receipt on screen. The catch-up prompt is
+                # user-attributed, so replaying it too would put a raw
+                # '(alarm) The session resumed…' line in the transcript as if
+                # the user had typed it.
+                if getattr(message, "custom_type", None) == WAKE_PROMPT_MESSAGE_TYPE:
+                    details = getattr(message, "details", None) or {}
+                    if not details.get("wake_catchup"):
+                        self._append_block(WakeBlock(str(details.get("text", "")), catchup=False))
+                        appended = True
+                    continue
                 role = getattr(message, "role", None)
                 if role == "tool":
                     continue  # already rendered beside the call that asked for it
@@ -5546,7 +5567,7 @@ class OperatorApp(App[None]):
             return
         docked = any(
             panel is not None and panel.display
-            for panel in (self._subagent_panel, self._todo_panel)
+            for panel in (self._subagent_panel, self._wake_panel, self._todo_panel)
         )
         # DOCKED IS THE WHOLE CONDITION, and getting here took two wrong turns
         # worth recording, because both look like the careful choice.
@@ -5685,6 +5706,8 @@ class OperatorApp(App[None]):
         for _ in range(_BAND_SETTLE_PASSES):
             if self._subagent_panel is not None:
                 self._subagent_panel.sync(session)
+            if self._wake_panel is not None:
+                self._wake_panel.sync(session)
             if self._todo_panel is not None:
                 self._todo_panel.sync(session)
             self._sync_band_inset()
@@ -9864,6 +9887,16 @@ class OperatorApp(App[None]):
 
     def on_notice_posted(self, message: NoticePosted) -> None:
         self._append_block(NoticeBlock(message.text, message.kind))
+
+    def on_wake_delivered(self, message: WakeDelivered) -> None:
+        """Paint the expandable wake receipt for the prompt just delivered.
+
+        The event carries the full formatted text, so the collapsed line can
+        name the wake and the expansion can show exactly what the model was
+        handed. A catch-up folds several missed wakes into one line; a live
+        fire gets its own.
+        """
+        self._append_block(WakeBlock(message.text, catchup=message.catchup))
 
     def _settle_queued_steer_notices_unsent(self) -> None:
         """Retire queued-steer rows the turn that just ended did not deliver.

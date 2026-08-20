@@ -45,6 +45,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
@@ -84,13 +85,18 @@ from local_operator.harness.types import (
     TextContent,
     ToolContext,
     Usage,
+    WakeDeliveredEvent,
 )
 from local_operator.harness.wake import (
+    LOAD_GRACE_MS,
+    MAX_ARM_MS,
     WAKE_PROMPT_MESSAGE_TYPE,
     WAKE_SCHEDULES_CUSTOM_TYPE,
     DueWake,
+    MissedWakeOccurrence,
     WakeSchedule,
     WakeScheduler,
+    format_duration,
     format_wake_delivery_text,
 )
 from local_operator.imaging import rebound_oversize_image
@@ -956,10 +962,24 @@ class Session:
         )
         self._wake = WakeScheduler(
             now=lambda: int(time.time() * 1000),
-            deliver=self._deliver_wake,
+            # Deliveries route through the indirection hook: at resume the
+            # session swaps in a catch-up shim that folds N overdue per-schedule
+            # fires into one aggregated prompt (see _handle_missed_wakes).
+            deliver=lambda due: self._wake_deliver_via_hook(due),
             persist=self._persist_wake_schedules,
         )
+        self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
+        # Catch-up state for the wake deliveries the process was DOWN for:
+        # (occurrences skipped while down, grace re-arm from the just-run
+        # load(), text of the aggregated catch-up prompt, and whether that
+        # prompt already went out). All four move together through
+        # _handle_missed_wakes, which owns the lifecycle.
+        self._missed_wake_occurrences: dict[str, int] = {}
+        self._resume_grace_ends_ms: float = float("inf")
+        self._resume_catchup_text: str | None = None
+        self._resume_catchup_sent = False
         self._load_wake_schedules()
+        self._prepare_missed_wake_catchup()
         # The conversation's title is restored from the SAME transcript the
         # history came from, and for the same reason: a resumed session is the
         # same conversation, so the band and the terminal tab must name it the
@@ -1225,8 +1245,11 @@ class Session:
         Opens the session-scoped task group and re-arms the wake scheduler:
         a scheduler armed during sync ``__init__`` (no running loop yet)
         could not create its timer — one ``pump()`` here fires overdue wakes
-        and arms properly (see ``WakeScheduler.needs_rearm``). Safe to call
-        more than once; sessions that skip it degrade to ``ensure_future``
+        and arms properly (see ``WakeScheduler.needs_rearm``). Overdue wakes
+        adopted from a previous session are first folded into a single
+        catch-up prompt (``_handle_missed_wakes``) so a resume costs one
+        wake turn, not one per overdue schedule. Safe to call more than
+        once; sessions that skip it degrade to ``ensure_future``
         for background work.
         """
         if self._tg_stack is None and not self._disposed:
@@ -1238,6 +1261,7 @@ class Session:
                 await stack.aclose()
                 raise
             self._tg_stack = stack
+        self._handle_missed_wakes()
         await self._wake.pump()
 
     # -- identity / state (SessionProtocol) ----------------------------------
@@ -2181,6 +2205,18 @@ class Session:
             except Exception:
                 logger.warning("event handler failed for %s", event.type, exc_info=True)
 
+    def _emit_nowait(self, event: AgentEvent) -> None:
+        """Fire-and-forget ``_emit`` for a caller that cannot await.
+
+        The resume catch-up send (``_handle_missed_wakes``) is synchronous —
+        it runs at the head of the boot pump — but a front end still needs the
+        delivery receipt to paint its wake line. Handlers here are the event
+        controller's ``_post`` (a sync queue push), so routing the coroutine
+        through the background-task machinery delivers it on the next loop
+        pass, ahead of the turn the same method spawns.
+        """
+        self._spawn_background(self._emit(event))
+
     # -- turn machinery --------------------------------------------------------
 
     async def _prompt_messages(self, initial: list[AgentMessage]) -> None:
@@ -2240,6 +2276,7 @@ class Session:
         if self._wake.needs_rearm:
             # HC-20: the scheduler could not arm without a running loop at
             # construction; the first turn (with a loop) re-arms via pump().
+            self._handle_missed_wakes()
             await self._wake.pump()
         self._is_streaming = True
         self._generation += 1  # monotonic; stamped on start AND end events
@@ -3628,6 +3665,111 @@ class Session:
                 logger.warning("dropping malformed persisted wake schedule: %r", raw)
         self._wake.load(schedules)
 
+    async def _wake_deliver_via_hook(self, due: DueWake) -> None:
+        """Scheduler-facing deliver trampoline: reads the CURRENT hook at fire
+        time, so swapping the hook (resume catch-up shim) takes effect without
+        rebuilding the scheduler."""
+        await self._wake_deliver_hook(due)
+
+    def _prepare_missed_wake_catchup(self) -> None:
+        """Snapshot the overdue schedules load() just adopted and compose the
+        single aggregated catch-up prompt for them. Runs in ``__init__`` so the
+        state exists even when no host ever calls async_init — a session that
+        only runs one prompt() still owes its catch-up."""
+        missed = self._wake.take_missed()
+        if not missed:
+            return
+        now = int(time.time() * 1000)
+        # An overdue schedule has just been re-armed to now + LOAD_GRACE_MS,
+        # so any overdue wake is still in grace until that deadline. Wall time
+        # is good enough here: grace comparisons happen against the same clock
+        # the scheduler reads (``now=lambda: int(time.time() * 1000)``).
+        self._resume_grace_ends_ms = float(now + LOAD_GRACE_MS)
+        self._missed_wake_occurrences = {m["schedule"].id: m["occurrences"] for m in missed}
+        self._resume_catchup_text = self._format_missed_wake_catchup(missed, now)
+
+    def _handle_missed_wakes(self) -> None:
+        """Route the overdue wakes adopted at load into ONE catch-up prompt.
+
+        Called at the head of both wake pumps (async_init, first turn). Sends
+        the aggregated prompt the moment grace has expired — the grace exists
+        so a fresh session shows its wake LIVE in the conversation rather than
+        inside the boot path — and suppresses the scheduler's own per-schedule
+        fires for it while the catch-up is pending, so a resume with three
+        overdue wakes costs one turn, not three."""
+        self._wake_deliver_hook = self._deliver_wake_catchup
+        if self._resume_catchup_sent or self._resume_catchup_text is None:
+            return
+        if int(time.time() * 1000) < self._resume_grace_ends_ms:
+            return
+        text, self._resume_catchup_text = self._resume_catchup_text, None
+        self._resume_catchup_sent = True
+        catchup = CustomMessage(
+            custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+            attribution="user",
+            details={"wake_catchup": True, "text": text},
+        )
+        # The receipt is a CATCH-UP marker: the front end renders one
+        # expandable line for the whole folded set, and the replay loop skips
+        # re-adding it as a user row (``wake_catchup``), so this event is the
+        # only place the missed wakes are ever surfaced.
+        self._emit_nowait(WakeDeliveredEvent(text=text, catchup=True))
+        if self._is_streaming:
+            self._steering_queue.put_nowait(catchup)
+            return
+        self._spawn_background(self._prompt_messages([catchup]))
+
+    async def _deliver_wake_catchup(self, due: DueWake) -> None:
+        """Deliver hook while the resume catch-up is pending: swallow the
+        scheduler's per-schedule fire (the aggregated prompt covers it, and
+        the schedule is still advanced + persisted by pump), and fall back to
+        a normal annotated delivery for any wake that becomes due AFTER the
+        catch-up went out — grace already expired for it, so a direct fire
+        with the missed-occurrence note is correct, not a duplicate."""
+        if self._resume_catchup_sent:
+            await self._deliver_wake(due)
+        # Pending: swallow — the aggregated prompt covers this fire. pump()
+        # still advances and persists the schedule, so nothing re-fires.
+
+    @staticmethod
+    def _format_missed_wake_catchup(missed: list[MissedWakeOccurrence], now_ms: int) -> str:
+        """One wake_prompt text aggregating every schedule that came due while
+        the process was down. Dedup is structural, not textual: the scheduler
+        collapses a recurring wake's skipped occurrences to a count (the 5
+        identical "check the build" prompts from a 5-hour sleep arrive as
+        ONE entry reading "5 occurrences were missed"), and each remaining
+        schedule contributes its verbatim message exactly once."""
+
+        def _due_label(schedule: WakeSchedule) -> str:
+            due = datetime.fromtimestamp(schedule.next_due_at / 1000).astimezone()
+            return due.strftime("%Y-%m-%d %H:%M")
+
+        lines = []
+        for entry in missed:
+            schedule = entry["schedule"]
+            occurrences = entry["occurrences"]
+            if occurrences > 1:
+                # occurrences > 1 implies a repeating schedule, so every_ms is
+                # set; the assert turns that reasoning into a type narrowing.
+                assert schedule.every_ms is not None
+                header = (
+                    f"- {schedule.id} (every {format_duration(schedule.every_ms)}, "
+                    f"first missed at {_due_label(schedule)}): "
+                    f"{occurrences} occurrences were missed while the session was down."
+                )
+            else:
+                header = (
+                    f"- {schedule.id} (due {_due_label(schedule)}): "
+                    "missed while the session was down."
+                )
+            lines.append(f"{header}\n  Message: {schedule.message}")
+        return (
+            "(alarm) The session resumed after being closed; the following scheduled wake(s) "
+            "came due while it was down. Each fires once now — handle them as missed wakes, "
+            "checking the CURRENT state rather than replaying each past occurrence.\n\n"
+            + "\n".join(lines)
+        )
+
     async def _persist_wake_schedules(self, schedules: list[WakeSchedule]) -> None:
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
@@ -3717,18 +3859,67 @@ class Session:
 
     async def _deliver_wake(self, due: DueWake) -> None:
         """Deliver one fired wake through the prompt path as a user-attributed
-        ``wake_prompt`` custom message."""
+        ``wake_prompt`` custom message. A wake resumed PAST its due time is
+        annotated as missed — the agent must not read it as punctual, and a
+        recurring one names the skipped occurrences (deduplicated to a count;
+        the identical message is NOT repeated per miss)."""
         text = format_wake_delivery_text(due)
+        missed_note = self._missed_delivery_note(due)
+        if missed_note:
+            text = f"{missed_note}\n\n{text}"
         wake_message = CustomMessage(
             custom_type=WAKE_PROMPT_MESSAGE_TYPE,
             attribution="user",
             details={"wake_id": due.schedule.id, "occurrence": due.occurrence, "text": text},
+        )
+        # The receipt event rides BEFORE the turn spawn so a front end can
+        # paint the expandable wake line ahead of the work it triggered —
+        # without it the transcript showed the agent starting to work with no
+        # record that a wake was the cause.
+        await self._emit(
+            WakeDeliveredEvent(
+                text=text,
+                catchup=False,
+            )
         )
         if self._is_streaming:
             # Busy: ride the next steering boundary instead of racing the turn.
             self._steering_queue.put_nowait(wake_message)
             return
         self._spawn_background(self._prompt_messages([wake_message]))
+
+    def _missed_delivery_note(self, due: DueWake) -> str | None:
+        """The 'this wake fired late' prefix, or None for a punctual fire.
+
+        Misses past the resume grace window are covered by the aggregated
+        catch-up prompt instead — double-annotating them would tell the agent
+        the same skip twice."""
+        now_ms = int(time.time() * 1000)
+        schedule = due.schedule
+        occurrences = self._missed_wake_occurrences.get(schedule.id, 0)
+        if occurrences and now_ms >= self._resume_grace_ends_ms:
+            occurrences = 0  # already aggregated into the catch-up prompt
+        if not occurrences:
+            # Live-skip detection needs the PRE-fire due time; post-fire it
+            # has advanced, so only the resume-time snapshot can say a
+            # recurring wake skipped occurrences. A one-shot overdue by more
+            # than the timer's resolution is still attributable directly.
+            if schedule.every_ms is None and now_ms - schedule.next_due_at > MAX_ARM_MS:
+                return (
+                    "(This wake was scheduled to fire earlier but is being delivered after "
+                    "the session resumed, so it was missed at its scheduled time.)"
+                )
+            return None
+        if occurrences == 1:
+            return (
+                "(This wake came due while the session was closed and is being delivered "
+                "after the resume — 1 occurrence was missed.)"
+            )
+        return (
+            f"(This recurring wake came due while the session was closed and is being "
+            f"delivered after the resume — {occurrences} occurrences were missed and have "
+            f"been deduplicated into this single delivery.)"
+        )
 
     # -- lifecycle ----------------------------------------------------------------
 

@@ -20,7 +20,9 @@ from local_operator.harness.wake import (
     WakeScheduler,
     advance_wake_schedule,
     build_wake_schedule,
+    format_duration,
     format_wake_delivery_text,
+    missed_occurrences,
     parse_wake_at,
     parse_wake_duration,
 )
@@ -42,21 +44,50 @@ class TestParseDuration:
     def test_units(self, text, expected):
         assert parse_wake_duration(text) == expected
 
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("8h30m", 8 * 3_600_000 + 30 * 60_000),
+            ("1h30m15s", 3_600_000 + 30 * 60_000 + 15_000),
+            ("1h 30m", 3_600_000 + 30 * 60_000),
+            ("1w2d", 604_800_000 + 2 * 86_400_000),
+            ("2h15m", 2 * 3_600_000 + 15 * 60_000),
+            ("8H30M", 8 * 3_600_000 + 30 * 60_000),  # case-insensitive
+            ("90m45s", 90 * 60_000 + 45_000),  # terms need not be unit-ordered
+            (" 8h30m ", 8 * 3_600_000 + 30 * 60_000),  # surrounding whitespace
+        ],
+    )
+    def test_compound_units_sum(self, text, expected):
+        """Compound durations ("8h30m") are the natural way to say "8 and a
+        half hours"; rejecting them made the most common phrasing an error."""
+        assert parse_wake_duration(text) == expected
+
     def test_bare_number_rejected(self):
         """60 reads as both seconds and ms; guessing wrong is a runaway loop."""
         assert parse_wake_duration("60") is None
         assert parse_wake_duration("1000") is None
+
+    def test_zero_sum_rejected(self):
+        """A compound summing to zero ("0s") is the same runaway-loop risk as
+        a bare number, one frame later."""
+        assert parse_wake_duration("0s") is None
+        assert parse_wake_duration("0h0m") is None
 
     def test_garbage_rejected(self):
         assert parse_wake_duration("") is None
         assert parse_wake_duration("soon") is None
         assert parse_wake_duration("-5m") is None
         assert parse_wake_duration("5x") is None
+        assert parse_wake_duration("8h30") is None  # trailing bare number
+        assert parse_wake_duration("h30m") is None  # leading bare unit
 
 
 class TestParseAt:
     def test_plus_duration(self):
         assert parse_wake_at("+30m", NOW) == NOW + 30 * 60_000
+
+    def test_plus_compound_duration(self):
+        assert parse_wake_at("+8h30m", NOW) == NOW + 8 * 3_600_000 + 30 * 60_000
 
     def test_plus_bare_number_rejected(self):
         assert parse_wake_at("+60", NOW) is None
@@ -210,6 +241,59 @@ class TestAdvance:
         assert result == {"retired": "until"}
 
 
+class TestFormatDuration:
+    def test_shortest_exact_unit(self):
+        assert format_duration(45_000) == "45s"
+        assert format_duration(30 * 60_000) == "30m"
+        assert format_duration(8 * 3_600_000) == "8h"
+
+    def test_compound_rendered_as_compound(self):
+        """Parse accepts compounds, so format must round-trip them: a wake
+        created with 'every 1h30m' rendering as '90m' would read nothing like
+        what was asked for."""
+        assert format_duration(8 * 3_600_000 + 30 * 60_000) == "8h30m"
+        assert format_duration(90 * 60_000) == "1h30m"
+        assert format_duration(3_600_000 + 15_000) == "1h15s"
+        assert format_duration(604_800_000 + 86_400_000) == "1w1d"
+
+    def test_unrepresentable_falls_back_to_ms(self):
+        assert format_duration(61_001) == "61001ms"
+
+
+class TestMissedOccurrences:
+    def recurring(self, **kw) -> WakeSchedule:
+        defaults: dict[str, Any] = dict(
+            id="w1", message="m", next_due_at=NOW, every_ms=3_600_000, created_at=NOW - 1000
+        )
+        defaults.update(kw)
+        return WakeSchedule(**defaults)
+
+    def test_not_due_yet(self):
+        assert missed_occurrences(self.recurring(next_due_at=NOW + 1000), NOW) == 0
+
+    def test_counts_past_occurrences(self):
+        # Strictly-past due times at NOW+2h30m are NOW and NOW+1h; NOW+2h is
+        # the current occurrence the resume is about to deliver, not a miss.
+        assert missed_occurrences(self.recurring(), NOW + 2 * 3_600_000 + 30 * 60_000) == 2
+
+    def test_one_shot_is_zero_or_one(self):
+        one_shot = self.recurring(every_ms=None)
+        assert missed_occurrences(one_shot, NOW + 3_600_000) == 1
+        assert missed_occurrences(one_shot, NOW) == 0
+
+    def test_clamped_to_remaining_limit(self):
+        """A limit-3 wake resumed a week late never claims more misses than it
+        could ever have delivered."""
+        limited = self.recurring(limit=3, fired_count=1)
+        assert missed_occurrences(limited, NOW + 50 * 3_600_000) == 2
+
+    def test_clamped_to_until(self):
+        """Occurrences past until_at do not count — the schedule was already
+        retired by then."""
+        bounded = self.recurring(until_at=NOW + 3_600_000)
+        assert missed_occurrences(bounded, NOW + 50 * 3_600_000) == 2
+
+
 class TestDeliveryText:
     def test_envelope_with_handle_and_cancel_hint(self):
         schedule = WakeSchedule(
@@ -344,6 +428,39 @@ async def test_scheduler_load_grace_for_overdue():
     assert await harness.scheduler.pump() == 0
     harness.now_ms = NOW + LOAD_GRACE_MS + 1
     assert await harness.scheduler.pump() == 1
+    harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_load_reports_missed_wakes():
+    """Overdue schedules adopted at load are recorded with their skipped
+    counts so the caller can aggregate ONE catch-up delivery instead of
+    letting each overdue wake fire its own turn."""
+    harness = SchedulerHarness()
+    overdue_one_shot = harness.schedule(id="w1", next_due_at=NOW - 5_000)
+    overdue_recurring = harness.schedule(
+        id="w2", every_ms=3_600_000, next_due_at=NOW - 10 * 3_600_000, created_at=NOW + 1
+    )
+    future = harness.schedule(id="w3", next_due_at=NOW + 60_000, created_at=NOW + 2)
+    harness.scheduler.load([overdue_one_shot, overdue_recurring, future])
+
+    missed = harness.scheduler.take_missed()
+    by_id = {m["schedule"].id: m["occurrences"] for m in missed}
+    assert by_id == {"w1": 1, "w2": 10}  # future wake is not a miss
+    # The entry carries the ORIGINAL due time (needed for the "first missed
+    # at" label), not the grace-shifted re-arm.
+    w2 = next(m for m in missed if m["schedule"].id == "w2")
+    assert w2["schedule"].next_due_at == NOW - 10 * 3_600_000
+    # One-shot consumer: the second take is empty.
+    assert harness.scheduler.take_missed() == []
+    harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_load_with_no_overdue_records_no_missed():
+    harness = SchedulerHarness()
+    harness.scheduler.load([harness.schedule(next_due_at=NOW + 60_000)])
+    assert harness.scheduler.take_missed() == []
     harness.scheduler.dispose()
 
 
