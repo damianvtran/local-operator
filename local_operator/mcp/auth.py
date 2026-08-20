@@ -995,6 +995,7 @@ async def _discover_oauth_endpoints_uncached(
 
 def _lock_exclusive(fd: int) -> None:
     if os.name == "nt":  # pragma: no cover - platform specific
+        import errno as _errno
         import msvcrt
         import time as _time
 
@@ -1004,13 +1005,17 @@ def _lock_exclusive(fd: int) -> None:
         # Retry in a loop to match the POSIX flock's indefinite-block
         # semantics; the loop is bounded generously rather than forever so a
         # leaked lock (killed process) cannot park a connect eternally.
+        # Contention surfaces as EDEADLOCK/EACCES; anything else (EBADF,
+        # EINVAL) is a real fault that retrying cannot fix — raising it
+        # immediately beats hot-spinning the worker thread for the bound.
         deadline = _time.monotonic() + 60.0
         while True:
             try:
                 msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
                 return
-            except OSError:
-                if _time.monotonic() >= deadline:
+            except OSError as lock_err:
+                contended = lock_err.errno in (_errno.EDEADLOCK, _errno.EACCES)
+                if not contended or _time.monotonic() >= deadline:
                     raise
     else:
         import fcntl

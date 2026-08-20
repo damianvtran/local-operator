@@ -949,6 +949,17 @@ class McpManager:
         # The live connection must carry the pristine config too — tool calls
         # read their timeout from conn.config, not from _configs.
         conn.config = cfg
+        # The widened budget also became the SESSION's default read timeout
+        # (ClientSession(read_timeout_seconds=...) baked in at connect), which
+        # requests WITHOUT an explicit per-call timeout — tools/list refreshes
+        # — would inherit for the session's whole life. Reset it to the
+        # pristine config's budget. Private attribute, set under suppress: the
+        # SDK offers no setter, and a rename would merely leave the widened
+        # default in place (the pre-fix behavior), never break the login.
+        with suppress(Exception):
+            conn.live_session._session_read_timeout_seconds = (  # type: ignore[attr-defined]
+                resolve_mcp_timeout_s(cfg)
+            )
         # An explicit login is the documented recovery from an auth-suspended
         # breaker (see _reconnect's McpAuthRequiredError arm): clear the breaker
         # state so the server's NEXT disconnect auto-reconnects again instead of
@@ -1273,12 +1284,22 @@ class McpManager:
             # cancelling, which is exactly what lets the two be told apart.
             current = asyncio.current_task()
             externally_cancelled = (
-                isinstance(exc, asyncio.CancelledError)
-                and current is not None
+                current is not None
                 and current.cancelling() > 0
+                and (
+                    isinstance(exc, asyncio.CancelledError)
+                    # The cancel can also land DURING ``stack.aclose()`` — then
+                    # it rides ``close_exc`` while ``exc`` carries the original
+                    # failure, and converting would swallow the pending
+                    # cancellation (F12).
+                    or isinstance(close_exc, asyncio.CancelledError)
+                )
             )
             if externally_cancelled:
-                raise
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                assert isinstance(close_exc, asyncio.CancelledError)
+                raise close_exc
             # An OAuth grant requirement is not a transport failure: surface it
             # as the clean type so callers (startup toast, reconnect breaker,
             # /mcp login) can recognise it. It can ride EITHER the original
