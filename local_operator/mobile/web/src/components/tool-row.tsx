@@ -20,15 +20,34 @@ const GLYPH: Record<TranscriptEntry["tool_state"], string> = {
 	interrupted: "–",
 };
 
-function DiffBlock({ diff }: { diff: string }) {
+/** Normalize a details field to display lines. The fold emits args as a dict
+    and diff as a list of lines (the shapes the tools produce), while output
+    and partial are plain strings. Rendering must handle ALL of them: calling
+    .split() on a non-string throws a TypeError, React unmounts the tree, and
+    the user reads it as "tap → whole screen goes blank". */
+function toLines(value: unknown): string[] {
+	if (value == null) return [];
+	if (typeof value === "string") return value.split("\n");
+	if (Array.isArray(value)) return value.map((v) => String(v));
+	if (typeof value === "object") {
+		/* args dict — one "key: value" line per entry. */
+		return Object.entries(value as Record<string, unknown>).map(
+			([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`,
+		);
+	}
+	return [String(value)];
+}
+
+function DiffBlock({ diff }: { diff: string | string[] }) {
 	/* span rows, never <div> inside <pre>: <div> is not phrasing content, so
 	   the HTML parser hoists it out of the <pre> and the expansion repaints
 	   as a broken, layout-filling block — read on the phone as "the whole
 	   page went solid". whitespace-pre-wrap on the container plus block
-	   spans gives the same monospace, per-line-tinted result legally. */
+	   spans gives the same monospace, per-line-tinted result legally.
+	   toLines accepts the fold's list-of-lines form AND a pre-joined string. */
 	return (
 		<div className="lo-scroll max-h-64 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre-wrap">
-			{diff.split("\n").map((line, i) => (
+			{toLines(diff).map((line, i) => (
 				<span
 					key={i}
 					className={cn(
@@ -141,7 +160,7 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 						   the sunken ground — the "solid background" the tap
 						   produced. */
 						<div className="lo-scroll max-h-40 overflow-y-auto rounded-sm bg-sunken p-2">
-							{entry.details.args.split("\n").map((line, i) => {
+							{toLines(entry.details.args).map((line, i) => {
 								const sep = line.indexOf(":");
 								return (
 									<div
@@ -172,7 +191,7 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 					) : null}
 					{entry.details.output ? (
 						<pre className="lo-scroll max-h-48 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm whitespace-pre-wrap text-ink-muted">
-							{entry.details.output}
+							{toLines(entry.details.output).join("\n")}
 						</pre>
 					) : null}
 				</div>

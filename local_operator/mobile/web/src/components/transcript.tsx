@@ -11,6 +11,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Markdown } from "./markdown"
 import { ToolRow } from "./tool-row"
+import { RowBoundary } from "./row-boundary";
 import { cn } from "../lib/cn";
 import type { TranscriptEntry } from "../types";
 
@@ -116,7 +117,11 @@ export function Transcript({ entries }: { entries: TranscriptEntry[] }) {
 				</button>
 			) : null}
 			{visible.map((e) => (
-				<Entry key={e.id} entry={e} />
+				/* A boundary per row: one malformed entry must not unmount the
+				   whole app (the "tap → blank screen" failure). */
+				<RowBoundary key={e.id}>
+					<Entry entry={e} />
+				</RowBoundary>
 			))}
 		</div>
 	);

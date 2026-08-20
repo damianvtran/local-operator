@@ -32,9 +32,14 @@ export type SubagentStatus =
 	| "parked";
 
 export interface TranscriptEntryDetails {
-	args?: string;
+	/* The fold serializes these in the shape the tool produced, NOT always
+	   strings: args rides through as a dict ({path, old_text, …}), diff as
+	   a list of unified-diff lines. Callers must normalize (see toLines in
+	   tool-row.tsx) — treating them as strings and calling .split() throws,
+	   which unmounts the whole tree and reads as "tap → blank screen". */
+	args?: string | Record<string, unknown>;
 	output?: string;
-	diff?: string;
+	diff?: string | string[];
 	partial?: string;
 }
 
