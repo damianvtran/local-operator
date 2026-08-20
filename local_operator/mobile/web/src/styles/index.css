@@ -207,21 +207,41 @@ html :focus-visible {
 }
 
 /*
- * The streaming shimmer on the session list. Subtle by design: a slow pulse
- * of the name's ink toward the accent, not a spinner — the row itself is the
- * indicator (branding §7: never a spinner and a state line for one thing).
+ * The streaming shimmer — a strobe that sweeps ACROSS the text, the same
+ * motion the TUI's WorkingBlock paints. A gradient whose highlight travels
+ * left-to-right over the glyphs (background-clip: text), rather than a whole
+ * -row opacity fade: the sweep reads as work flowing through the words, the
+ * fade read as the text breathing. Used on the working line's label and the
+ * session list's streaming name. Falls back to a plain dim when the engine
+ * can't clip text to a background.
  */
 @keyframes lo-shimmer {
-	0%,
-	100% {
-		opacity: 1;
+	0% {
+		background-position: 200% 0;
 	}
-	50% {
-		opacity: 0.55;
+	100% {
+		background-position: -200% 0;
 	}
 }
 .lo-shimmer {
-	animation: lo-shimmer 1.8s ease-in-out infinite;
+	color: var(--color-ink-dim);
+	background-image: linear-gradient(
+		100deg,
+		var(--color-ink-dim) 40%,
+		var(--color-accent) 50%,
+		var(--color-ink-dim) 60%
+	);
+	background-size: 200% 100%;
+	-webkit-background-clip: text;
+	background-clip: text;
+	-webkit-text-fill-color: transparent;
+	animation: lo-shimmer 1.6s linear infinite;
+}
+@supports not ((background-clip: text) or (-webkit-background-clip: text)) {
+	.lo-shimmer {
+		-webkit-text-fill-color: currentcolor;
+		animation: none;
+	}
 }
 
 /* The running tool glyph's pulse — quieter than the shimmer, it shares the

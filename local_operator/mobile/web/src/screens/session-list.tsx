@@ -15,6 +15,7 @@ import { navigate } from "../router";
 import { retainSessionListStream, useSessions } from "../store";
 import { applyTheme, getTheme, THEMES } from "../theme";
 import { shortenHome } from "../lib/format";
+import { MARK_DATA_URI } from "../lib/mark";
 import type { SessionSummary } from "../types";
 import { cn } from "../lib/cn";
 
@@ -143,7 +144,7 @@ export function SessionListScreen() {
 		<div className="relative mx-auto flex h-dvh w-full max-w-md flex-col">
 			<header className="flex items-center gap-2 px-3 pt-[max(env(safe-area-inset-top),0.75rem)] pb-2">
 				<img
-					src="/mark.png"
+					src={MARK_DATA_URI}
 					alt=""
 					width={20}
 					height={20}

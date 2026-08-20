@@ -75,6 +75,19 @@ _DIST_DIR = _WEB_DIR / "dist"
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _mark_data_uri() -> str:
+    """The mark as a data URI — the login page and the SPA header inline it
+    rather than fetch ``/mark.png``, because over an identity-proxied tunnel
+    (Cloudflare Access) that fetch is itself gated: the pre-auth login page's
+    <img> got a 302-to-IdP HTML body and rendered the broken-image glyph.
+    An inline URI needs no request, so it renders behind Access and on the
+    unauthenticated login screen alike. 7 KB; one copy in each surface.
+    """
+    import base64
+
+    return "data:image/png;base64," + base64.b64encode((_STATIC_DIR / "mark.png").read_bytes()).decode()
+
+
 # ---------------------------------------------------------------------------
 # Session table
 # ---------------------------------------------------------------------------
@@ -488,13 +501,18 @@ def build_app(daemon: MobileDaemon):
     async def login_page(request: Request) -> Response:
         if authed(request):
             return RedirectResponse("/", status_code=303)
-        return HTMLResponse(_LOGIN_HTML)
+        return HTMLResponse(_LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()))
 
     async def login_submit(request: Request) -> Response:
         form = await request.form()
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
-            return HTMLResponse(_LOGIN_HTML.replace("<!--ERROR-->", _LOGIN_ERROR), status_code=401)
+            return HTMLResponse(
+                _LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()).replace(
+                    "<!--ERROR-->", _LOGIN_ERROR
+                ),
+                status_code=401,
+            )
         response = RedirectResponse("/", status_code=303)
         secure = request.url.scheme == "https"
         response.set_cookie(
@@ -945,7 +963,7 @@ _LOGIN_HTML = """<!doctype html>
 <body>
 <form method="post" action="/login">
   <div class="lockup">
-    <img class="mark" src="/mark.png" width="72" height="72" alt="">
+    <img class="mark" src="__MARK_DATA_URI__" width="72" height="72" alt="">
     <h1>local operator</h1>
   </div>
   <!--ERROR-->

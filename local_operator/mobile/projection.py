@@ -141,6 +141,8 @@ class ProjectionFold:
         # (SubagentProgressEvent is never per-delta by contract).
         self._subagents: dict[str, SubagentRow] = {}
         self._subagent_started_at: dict[str, float] = {}
+        # The working line's clock origin and the label's current source.
+        self._activity_started_at: float | None = None
 
     # -- history -----------------------------------------------------------
 
@@ -352,7 +354,50 @@ class ProjectionFold:
         # and ``extra="allow"`` on AgentEvent means matching must stay
         # structural, not exhaustive-by-name.
         self._sync_subagents()
+        self._derive_activity(event)
         self._bump()
+
+    # -- working line (TUI WorkingBlock's phone counterpart) -------------------
+
+    def _set_activity(self, label: str, *, restart_clock: bool = False) -> None:
+        """Update the working line's label, resetting its clock only when the
+        KIND of work changed. A tool finishing restarts the wait for the next
+        model call, so the clock belongs to the phase, not the turn."""
+        p = self.projection
+        if restart_clock or self._activity_started_at is None or p.activity != label:
+            self._activity_started_at = time.monotonic()
+        p.activity = label
+        p.activity_started_s = round(time.monotonic() - self._activity_started_at, 1)
+
+    def _derive_activity(self, event: AgentEvent) -> None:
+        """The label the TUI's WorkingBlock would show for this event, from the
+        SAME rule: a running tool's intent, else the stream phase, else
+        "thinking". Empty once the turn settles."""
+        p = self.projection
+        if isinstance(event, AgentStartEvent):
+            self._activity_started_at = time.monotonic()
+            self._set_activity("thinking")
+            return
+        if isinstance(event, (AgentEndEvent, TurnEndEvent)):
+            p.activity = ""
+            p.activity_started_s = 0.0
+            self._activity_started_at = None
+            return
+        if not p.streaming:
+            return
+        if isinstance(event, ToolCallComposeEvent):
+            self._set_activity(event.intent or f"dictating {event.tool_name}")
+        elif isinstance(event, ToolExecutionStartEvent):
+            self._set_activity(event.intent or f"running {event.tool_name}")
+        elif isinstance(event, ToolExecutionEndEvent):
+            # Back to waiting on the model: restart the clock for the gap.
+            self._set_activity("thinking", restart_clock=True)
+        elif isinstance(event, MessageStartEvent):
+            if isinstance(event.message, Message) and event.message.role == "assistant":
+                self._set_activity("responding")
+        elif isinstance(event, MessageUpdateEvent):
+            if p.activity in ("thinking", ""):
+                self._set_activity("responding")
 
     # -- todos / pending / state -------------------------------------------
 

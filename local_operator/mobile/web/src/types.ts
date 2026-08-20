@@ -101,6 +101,11 @@ export interface SessionProjection {
 	effort: string;
 	effort_ladder: string[];
 	streaming: boolean;
+	/** What the turn is doing right now, TUI-working-line style: "thinking",
+	    "responding", or a running tool's intent. Empty when idle. */
+	activity: string;
+	/** Seconds since the activity began (server-computed). */
+	activity_started_s: number;
 	/** Why streaming last stopped — "completed" | "aborted" | "" before the
 	    first turn ends. The resume affordance reads this, never an inference
 	    from the streaming flag flipping. */

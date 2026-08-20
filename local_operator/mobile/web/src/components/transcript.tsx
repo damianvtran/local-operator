@@ -19,9 +19,15 @@ const PAGE = 120;
 function Entry({ entry }: { entry: TranscriptEntry }) {
 	switch (entry.kind) {
 		case "user":
+			/* The user's own words. Right-aligned like the desktop app's bubble,
+			   but the marker of identity is the accent edge on the leading
+			   side: a user turn is the one thing in the transcript the human
+			   said, and the accent is reserved for exactly that kind of "this
+			   is what the turn is on" signal (branding §7). Surface ground +
+			   hairline keeps it quiet next to the answer that follows. */
 			return (
 				<div className="flex justify-end">
-					<div className="max-w-[85%] rounded-md border border-hairline bg-surface px-3 py-1.5 text-body leading-normal whitespace-pre-wrap">
+					<div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5 text-body leading-normal whitespace-pre-wrap">
 						{entry.text}
 					</div>
 				</div>
@@ -35,12 +41,14 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
 				</div>
 			);
 		case "assistant":
+			/* No per-row caret: the aggregate WorkingLine at the foot of the
+			   transcript is the turn's ONE in-progress indicator (branding §7 —
+			   never two animations for the same thing). The streaming row just
+			   grows; the working line says it's alive, what it's doing, and for
+			   how long. */
 			return (
 				<div className="text-body leading-normal">
 					<Markdown text={entry.text} />
-					{!entry.final ? (
-						<span className="lo-caret" aria-hidden />
-					) : null}
 				</div>
 			);
 		case "tool":
