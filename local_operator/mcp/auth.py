@@ -124,6 +124,13 @@ def mcp_oauth_credential_id(server_url: str) -> str:
     return f"{MCP_OAUTH_CREDENTIAL_PREFIX}{server_url}"
 
 
+#: The callback port every local-operator shipped with before 33441. Stored
+#: client registrations pinned to it are dropped once on sight (see
+#: :meth:`McpTokenStorage.get_client_info`) so they re-register / re-seed
+#: against the new default instead of dead-ending at the provider with
+#: ``redirect_uri_mismatch``.
+LEGACY_CALLBACK_PORT = 3000
+
 #: How long to wait for the browser launcher before assuming the page opened.
 #: The stdlib's ``GenericBrowser`` WAITS on a foreground browser, so a launcher
 #: still running after this is the normal case for one, not a failure.
@@ -400,10 +407,34 @@ class McpTokenStorage:
         return float(obtained_at) + float(expires_in)
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
-        """Stored client registration (DCR result or pinned config), or ``None``."""
+        """Stored client registration (DCR result or pinned config), or ``None``.
+
+        A stored registration whose redirect URIs still point at the legacy
+        :data:`LEGACY_CALLBACK_PORT` is stale by definition — the runtime now
+        advertises a different loopback port, so that registration can never
+        complete a grant (the provider rejects the authorization redirect with
+        ``redirect_uri_mismatch``, and because ``client_info`` is present the
+        SDK never re-runs DCR — a dead-end with no in-app recovery). Dropping
+        it here, before the SDK reads it, lets the flow re-register (DCR
+        servers) or re-seed (pinned ``client_id`` servers, which
+        :meth:`seed_client_info` rewrites on the next login) against the new
+        redirect URI.
+        """
         creds = self._read()
         info = creds.get("client_info") if creds is not None else None
         if not isinstance(info, dict):
+            return None
+        if self._redirect_uris_use_legacy_port(info):
+            logger.info(
+                "Discarding MCP client registration for %s: its redirect URIs "
+                "still target the legacy :%d callback, which can no longer "
+                "complete a grant; it will re-register on this login.",
+                self.credential_id,
+                LEGACY_CALLBACK_PORT,
+            )
+            if creds is not None:
+                creds.pop("client_info", None)
+                self._write(creds)
             return None
         try:
             from mcp.shared.auth import OAuthClientInformationFull
@@ -416,6 +447,23 @@ class McpTokenStorage:
                 exc_info=True,
             )
             return None
+
+    @staticmethod
+    def _redirect_uris_use_legacy_port(info: dict[str, Any]) -> bool:
+        """True when any stored redirect URI targets the legacy callback port."""
+        uris = info.get("redirect_uris") or []
+        if not isinstance(uris, list):
+            return False
+        for uri in uris:
+            if not isinstance(uri, str):
+                continue
+            try:
+                port = urlparse(uri).port
+            except ValueError:
+                continue
+            if port == LEGACY_CALLBACK_PORT:
+                return True
+        return False
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         """Persist a dynamic-client registration (RFC 7591)."""
@@ -1231,8 +1279,9 @@ def wire_oauth_auth(
 
     - ``server_url``: the MCP server URL (resource indicator base);
     - ``client_metadata``: PKCE authorization-code client, redirect URI
-      ``http://127.0.0.1:{callback_port or DEFAULT_CALLBACK_PORT}`` plus the
-      callback path (PKCE itself is automatic inside the SDK);
+      ``http://127.0.0.1:{callback_port or DEFAULT_CALLBACK_PORT}``
+      ``{callback_path or /callback}`` (PKCE itself is automatic inside the
+      SDK);
     - ``storage``: a :class:`McpTokenStorage` bound to ``store``; a config
       ``client_id`` pre-seeds the client registration so DCR is skipped
       (MCP-11);
