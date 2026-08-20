@@ -51,7 +51,13 @@ from local_operator.tui.app import (
     OperatorApp,
 )
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.transcript import GAP_CLASS, NoticeBlock, TranscriptView
+from local_operator.tui.widgets.transcript import (
+    BOOT_COLUMN_CLASS,
+    GAP_CLASS,
+    NoticeBlock,
+    TranscriptView,
+    UserBlock,
+)
 from local_operator.tui.widgets.welcome import (
     LOGO_MARK,
     TIPS,
@@ -613,6 +619,40 @@ async def test_a_notice_under_the_splash_sits_on_the_card_not_the_spine() -> Non
         left = len(span) - len(span.lstrip())
         right = len(span) - len(span.rstrip())
         assert abs(left - right) <= 1, (left, right, span)
+
+
+@pytest.mark.asyncio
+async def test_the_boot_column_follows_the_card_not_the_moment_it_was_written() -> None:
+    """The centring class is reconciled against the LIVE card, not fixed at creation.
+
+    The card threshold is dynamic, so a class set once at append goes stale twice:
+    a notice created with the card up stays centred after a resize drops the card
+    (centred text in a full-width block, not the spine), and the splash retiring
+    removes the card for good with no resize to reconcile it. The fix makes the
+    class follow the card on every boot-layout sync. Asserted on the class and
+    the drawn row, the two halves of the staleness.
+    """
+    app = _make_app()
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app._system_notice("MCP cloudflare failed: needs authorization", "error")
+        await _settle(pilot)
+        notice_block = app.query_one(NoticeBlock)
+        assert notice_block.has_class(BOOT_COLUMN_CLASS)
+
+        # The conversation starting retires the splash and the card with it.
+        app._append_block(UserBlock("hello"))
+        await _settle(pilot)
+        assert not app.screen.has_class(BOOT_LAYOUT_CLASS)
+        assert not app.screen.has_class(BOOT_CARD_CLASS)
+        assert not notice_block.has_class(BOOT_COLUMN_CLASS)
+        # And a resize while the transcript is populated does not bring the card
+        # — or the centring — back: a wide terminal with content is a bar.
+        await pilot.resize_terminal(140, 40)
+        await _settle(pilot)
+        assert not app.screen.has_class(BOOT_CARD_CLASS)
+        assert not notice_block.has_class(BOOT_COLUMN_CLASS)
 
 
 @pytest.mark.asyncio
