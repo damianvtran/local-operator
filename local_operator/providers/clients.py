@@ -664,8 +664,32 @@ _FINISH_TO_STOP_REASON = {
     "length": "length",
     "tool_calls": "toolUse",
     "function_call": "toolUse",
-    "content_filter": "stop",
+    # A filtered completion is a REFUSAL, not a clean stop. Mapping it to
+    # "stop" ended the turn with an empty frame and no explanation — the user
+    # saw nothing and could not tell a refusal from a no-op, which matters
+    # because the remedy (rephrase, or switch models) is theirs to choose.
+    "content_filter": "refusal",
 }
+
+
+def _refusal_error(marker: str, refusal_text: str) -> str:
+    """The one visible line a refusal produces, always naming the wire marker.
+
+    ``marker`` is the provider's own terminal signal (``finish_reason=
+    content_filter``, ``stop_reason=refusal``, ``finishReason=SAFETY``…) and is
+    kept in the message even when refusal prose exists: the prose says what the
+    model would not do, the marker says which provider mechanism fired, and
+    deciding whether to rephrase or switch models needs both. Providers
+    frequently send NO prose at all — that silent case is the whole reason this
+    line exists, so it must read as a diagnosis rather than an empty string.
+
+    Parentheses, not square brackets: this string reaches ``console.print`` in
+    the headless renderer, where ``[marker]`` parses as rich markup and the
+    diagnosis silently vanishes from its own error line.
+    """
+    if refusal_text:
+        return f"model refused: {_capped(refusal_text)} ({marker})"
+    return f"model refused and sent no message ({marker})"
 
 
 # ---------------------------------------------------------------------------
@@ -980,6 +1004,11 @@ class OpenAICompatClient:
         finish_reason: str | None = None
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
+        # Refusal prose arrives in its own delta slot (``delta.refusal``), not
+        # ``delta.content``. It is collected rather than yielded as text: it is
+        # not an answer, and forwarding it as prose would leave the transcript
+        # reading as if the model replied normally.
+        refusal_parts: list[str] = []
 
         async with self._http.stream(
             "POST",
@@ -1026,6 +1055,9 @@ class OpenAICompatClient:
                 text = delta.get("content")
                 if text:
                     yield StreamTextDelta(delta=text)
+                refusal = delta.get("refusal")
+                if refusal:
+                    refusal_parts.append(str(refusal))
                 for tool_delta in delta.get("tool_calls") or []:
                     index = int(tool_delta.get("index", 0))
                     function = tool_delta.get("function") or {}
@@ -1046,10 +1078,23 @@ class OpenAICompatClient:
                         "system_fingerprint": chunk.get("system_fingerprint"),
                     }
 
+        stop_reason = _FINISH_TO_STOP_REASON.get(finish_reason or "", finish_reason or "stop")
+        # A refusal delta with a non-filter finish (OpenAI sends
+        # ``finish_reason=stop`` for its own refusals; only third-party filters
+        # send ``content_filter``) is still a refusal: the prose slot is the
+        # authoritative signal that no answer was produced.
+        if refusal_parts and stop_reason == "stop":
+            stop_reason = "refusal"
+        error: str | None = None
+        if stop_reason == "refusal":
+            error = _refusal_error(
+                f"finish_reason={finish_reason or 'stop'}", "".join(refusal_parts)
+            )
         yield StreamEndEvent(
-            stop_reason=_FINISH_TO_STOP_REASON.get(finish_reason or "", finish_reason or "stop"),
+            stop_reason=stop_reason,
             usage=usage,
             provider_payload=provider_payload,
+            error=error,
         )
 
     async def _stream_responses(
@@ -1071,6 +1116,11 @@ class OpenAICompatClient:
         provider_payload: dict[str, Any] | None = None
         tool_call_count = 0
         terminal_stop: str | None = None
+        terminal_error: str | None = None
+        # Refusal prose streams in its own event type (``response.refusal.delta``)
+        # and is collected, not yielded as text: it is not an answer, and the
+        # transcript must not read as if the model replied normally.
+        refusal_parts: list[str] = []
         # Output item/call ids -> normalized tool-call index.
         call_indexes: dict[str, int] = {}
 
@@ -1116,6 +1166,10 @@ class OpenAICompatClient:
                     delta = payload.get("delta")
                     if delta:
                         yield StreamTextDelta(delta=delta)
+                elif event_type == "response.refusal.delta":
+                    delta = payload.get("delta")
+                    if delta:
+                        refusal_parts.append(str(delta))
                 elif event_type in ("response.completed", "response.incomplete"):
                     response_obj = payload.get("response") or {}
                     if response_obj.get("id"):
@@ -1135,7 +1189,18 @@ class OpenAICompatClient:
                         )
                         yield StreamUsageEvent(usage=usage)
                     if event_type == "response.completed":
-                        terminal_stop = "toolUse" if tool_call_count else "stop"
+                        if refusal_parts:
+                            # A completed response whose only output was a
+                            # refusal item: the wire says "completed", the
+                            # content says "no". The content wins — reporting
+                            # "stop" here is the silent-empty-turn bug.
+                            terminal_stop = "refusal"
+                            terminal_error = _refusal_error(
+                                "response.completed with a refusal item",
+                                "".join(refusal_parts),
+                            )
+                        else:
+                            terminal_stop = "toolUse" if tool_call_count else "stop"
                     else:
                         incomplete = response_obj.get("incomplete_details") or {}
                         reason = str(
@@ -1147,6 +1212,16 @@ class OpenAICompatClient:
                             # Length means the loop pairs placeholders and NEVER
                             # executes a partial function call.
                             terminal_stop = "length"
+                        elif reason == "content_filter":
+                            # A filtered response is a refusal, not a transport
+                            # fault: raising ProviderError here sent it into
+                            # failover's retry machinery for a request the
+                            # provider had already declined on content grounds.
+                            terminal_stop = "refusal"
+                            terminal_error = _refusal_error(
+                                "incomplete_details.reason=content_filter",
+                                "".join(refusal_parts),
+                            )
                         else:
                             raise ProviderError(
                                 400,
@@ -1166,6 +1241,7 @@ class OpenAICompatClient:
             stop_reason=terminal_stop,
             usage=usage,
             provider_payload=provider_payload,
+            error=terminal_error,
         )
 
 
@@ -1571,9 +1647,20 @@ class AnthropicClient:
             "max_tokens": "length",
             "tool_use": "toolUse",
             "stop_sequence": "stop",
+            # Anthropic's documented refusal terminal (classifier-stopped
+            # output). It passed through this map UNMAPPED, and downstream —
+            # which only branches on error/aborted/length — treated the unknown
+            # value as a clean stop: an empty turn with no explanation.
+            "refusal": "refusal",
         }.get(stop_reason, stop_reason)
+        error: str | None = None
+        if mapped == "refusal":
+            # Anthropic sends no refusal prose alongside this stop_reason; any
+            # text it did stream has already been forwarded, so the terminal
+            # line only needs to name the mechanism.
+            error = _refusal_error("stop_reason=refusal", "")
         yield StreamUsageEvent(usage=usage)
-        yield StreamEndEvent(stop_reason=mapped, usage=usage)
+        yield StreamEndEvent(stop_reason=mapped, usage=usage, error=error)
 
 
 # ---------------------------------------------------------------------------
@@ -1707,6 +1794,13 @@ class GoogleClient:
             headers["x-goog-api-key"] = api_key
         usage: Usage | None = None
         stop_reason = "stop"
+        # Gemini's non-STOP finish reasons (SAFETY, RECITATION,
+        # PROHIBITED_CONTENT, SPII, BLOCKLIST, IMAGE_SAFETY, OTHER…) are all
+        # refusals of one kind or another. They used to collapse into the
+        # "stop" fallback of the finishReason map below, which is the silent
+        # empty turn this field exists to prevent. The marker is kept verbatim
+        # so the visible line names WHICH classifier fired.
+        refusal_marker: str | None = None
         # Gemini returns one complete functionCall per part with no ids and
         # no part indexes, so the harness must mint both. They must be UNIQUE
         # per response: the loop dedups tool calls by id (first-wins), and a
@@ -1744,9 +1838,17 @@ class GoogleClient:
                             call_index += 1
                     if candidate.get("finishReason"):
                         reason = str(candidate["finishReason"])
-                        stop_reason = {"MAX_TOKENS": "length", "TOOL_USE": "toolUse"}.get(
-                            reason, "stop"
-                        )
+                        normal = {"STOP": "stop", "MAX_TOKENS": "length", "TOOL_USE": "toolUse"}
+                        stop_reason = normal.get(reason, "refusal")
+                        if stop_reason == "refusal":
+                            refusal_marker = f"finishReason={reason}"
+                # A prompt blocked outright never produces a candidate, only
+                # ``promptFeedback.blockReason`` — without this the stream ends
+                # on the "stop" default with nothing on screen.
+                feedback = chunk.get("promptFeedback")
+                if isinstance(feedback, Mapping) and feedback.get("blockReason"):
+                    stop_reason = "refusal"
+                    refusal_marker = f"promptFeedback.blockReason={feedback['blockReason']}"
                 raw_usage = chunk.get("usageMetadata")
                 if raw_usage:
                     usage = Usage(
@@ -1758,7 +1860,12 @@ class GoogleClient:
 
         if usage is not None:
             yield StreamUsageEvent(usage=usage)
-        yield StreamEndEvent(stop_reason=stop_reason, usage=usage)
+        error: str | None = None
+        if stop_reason == "refusal":
+            # Gemini sends no refusal prose; any text it did stream has been
+            # forwarded already, so the line names the classifier that fired.
+            error = _refusal_error(refusal_marker or "finishReason=OTHER", "")
+        yield StreamEndEvent(stop_reason=stop_reason, usage=usage, error=error)
 
 
 # ---------------------------------------------------------------------------
@@ -1771,7 +1878,10 @@ class MockClient:
 
     Emits two text deltas + usage + end; when the last user message contains
     ``[tool]`` it emits one tool call (``echo`` with ``{"text": "hi"}``) and
-    stops with ``toolUse`` instead.
+    stops with ``toolUse`` instead. ``[refuse]`` ends the stream as a refusal
+    with a canned provider message — the only way to exercise the whole
+    refusal path (loop → event → TUI notice → transcript replay) against a
+    real running app without needing a provider to actually decline.
     """
 
     async def stream(
@@ -1780,6 +1890,14 @@ class MockClient:
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
+        if any("[refuse]" in message.text for message in request.messages):
+            yield StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=0))
+            yield StreamEndEvent(
+                stop_reason="refusal",
+                usage=Usage(input_tokens=10, output_tokens=0),
+                error=_refusal_error("mock refusal", "I can't help with that request."),
+            )
+            return
         wants_tool = any("[tool]" in message.text for message in request.messages)
         if wants_tool:
             yield StreamToolCallDelta(index=0, id="call_mock_1", name="echo")

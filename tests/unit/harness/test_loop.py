@@ -1820,3 +1820,108 @@ def test_the_flush_suppression_counts_rather_than_matching():
     assert _consume_claim(claimed, "dup") is False
     # An id nobody claimed is never suppressed.
     assert _consume_claim(Counter(), "other") is False
+
+
+# ---------------------------------------------------------------------------
+# Refusal terminal: the model said no, and the run must end saying WHY
+# ---------------------------------------------------------------------------
+
+
+class TestRefusalEndsTheRunVisibly:
+    """``stop_reason="refusal"`` used to fall through to the clean-stop path:
+    the loop treated it as a finished answer and the frame showed an empty
+    turn. It must end the run the way an error does — dangling calls paired,
+    no further model calls — while carrying the provider's refusal message
+    on the ``agent_end`` so a UI can show it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_refusal_ends_the_run_with_the_providers_message(self) -> None:
+        stream = ScriptedStream(
+            [
+                [
+                    StreamEndEvent(
+                        stop_reason="refusal",
+                        error="model refused: I can't help with that. [finish_reason=stop]",
+                    )
+                ],
+                # A second scripted turn that must NEVER run: a refusal is
+                # terminal, and reaching this script means the loop fed the
+                # refusal back for another call.
+                [StreamTextDelta(delta="unreachable"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+        context = LoopContext()
+        loop = AgentLoop()
+
+        events = []
+        async for event in loop.run([Message.user("go")], context, make_config(stream), None):
+            events.append(event)
+
+        assert len(stream.requests) == 1
+        end = events[-1]
+        assert isinstance(end, AgentEndEvent)
+        assert end.aborted is False
+        assert end.error is not None and "I can't help with that." in end.error
+
+    @pytest.mark.asyncio
+    async def test_refusal_pairs_dangling_calls_without_executing(self) -> None:
+        """A stream can be cut by a filter mid-tool-call; the composed call must
+        be paired (the wire stays legal) and must not execute."""
+        executed: list[str] = []
+        stream = ScriptedStream(
+            [
+                [
+                    tool_call_delta(0, id="c1", name="echo", args='{"text":"a"}'),
+                    StreamEndEvent(stop_reason="refusal", error="model refused [marker]"),
+                ]
+            ]
+        )
+        context = LoopContext(tools=[echo_tool(executed)])
+        loop = AgentLoop()
+
+        events = []
+        async for event in loop.run([Message.user("go")], context, make_config(stream), None):
+            events.append(event)
+
+        assert executed == []
+        tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+        assert [m.tool_call_id for m in tool_messages] == ["c1"]
+        assert all(m.is_error for m in tool_messages)
+
+    @pytest.mark.asyncio
+    async def test_refusal_message_survives_onto_the_assistant_message(self) -> None:
+        """The agent_end dies with the run; a resumed session replays the
+        transcript's messages, so the refusal text must be stored on the
+        assistant message it explains (under ``provider_payload``, the
+        established home for harness bookkeeping that wire clients never
+        replay)."""
+        stream = ScriptedStream(
+            [[StreamEndEvent(stop_reason="refusal", error="model refused: no. [m]")]]
+        )
+        context = LoopContext()
+        loop = AgentLoop()
+        async for _ in loop.run([Message.user("go")], context, make_config(stream), None):
+            pass
+
+        assistant = next(
+            m for m in context.messages if isinstance(m, Message) and m.role == "assistant"
+        )
+        assert assistant.stop_reason == "refusal"
+        assert (assistant.provider_payload or {}).get("refusal") == "model refused: no. [m]"
+
+    @pytest.mark.asyncio
+    async def test_a_bare_refusal_end_still_says_something(self) -> None:
+        """A wire client that emits ``refusal`` with no message must not
+        reintroduce the silent failure this stop_reason exists to fix."""
+        stream = ScriptedStream([[StreamEndEvent(stop_reason="refusal")]])
+        context = LoopContext()
+        loop = AgentLoop()
+
+        events = []
+        async for event in loop.run([Message.user("go")], context, make_config(stream), None):
+            events.append(event)
+
+        end = events[-1]
+        assert isinstance(end, AgentEndEvent)
+        assert end.error is not None and "refused" in end.error

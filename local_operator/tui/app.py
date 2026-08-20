@@ -1770,14 +1770,27 @@ class OperatorApp(App[None]):
                 for call in tool_calls:
                     self._replay_tool_call(call, results)
                     appended = True
-                if not text and not tool_calls:
+                stop = getattr(message, "stop_reason", None)
+                if stop == "refusal":
+                    # A refused turn replays its refusal even when the model DID
+                    # stream some prose first (Gemini safety stops often cut a
+                    # partial answer): the prose alone reads as a complete,
+                    # oddly short reply, and the user re-reading the session
+                    # needs to know the provider cut it off and why. The message
+                    # itself was stashed on the assistant message by the loop
+                    # precisely so this replay could show it.
+                    payload = getattr(message, "provider_payload", None) or {}
+                    refusal = str(payload.get("refusal") or "") or "model refused the request"
+                    self._append_block(NoticeBlock(refusal, "error"))
+                    appended = True
+                elif not text and not tool_calls:
                     # An assistant message with neither prose nor a call is a
                     # turn that FAILED. Skipping it is what left a resumed
                     # session showing a prompt and nothing after it, with no
                     # hint that the answer had errored rather than never been
                     # asked for.
-                    if getattr(message, "stop_reason", None) in ("error", "aborted"):
-                        reason = "turn failed" if message.stop_reason == "error" else "interrupted"
+                    if stop in ("error", "aborted"):
+                        reason = "turn failed" if stop == "error" else "interrupted"
                         self._append_block(NoticeBlock(reason, "error"))
                         appended = True
         if appended:
