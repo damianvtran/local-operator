@@ -443,6 +443,27 @@ class ArgumentQueryOpened(Message):
         self.command = command
 
 
+class RefreshArgumentChoices(Message):
+    """Posted when the rows an open argument list should offer have changed
+    UNDER the same command word — which :class:`ArgumentQueryOpened` can never
+    see, because it fires on the command-word transition only.
+
+    Exists for two-level arguments: ``/mcp`` offers its subcommands in the
+    first argument slot and the servers that subcommand can act on in the
+    second, so the choice set changes when the subcommand is completed while
+    the command word stands still. The editor tracks the SUBCOMMAND slot and
+    posts this when it changes; the app refills the picker exactly like an
+    opening. Keeping this per-command and explicit (rather than refilling
+    every list per keystroke) preserves the cost argument
+    :class:`ArgumentQueryOpened` documents — a credential-store read per
+    character typed.
+    """
+
+    def __init__(self, command: str) -> None:
+        super().__init__()
+        self.command = command
+
+
 class ArgumentHighlightChanged(Message):
     """Posted when the row the user's eye is on in an ARGUMENT list changes.
 
@@ -528,6 +549,9 @@ class Editor(TextArea):
         # the same reason as the pickers — _sync_picker() reads it during
         # super().__init__().
         self._argument_command: str | None = None
+        #: The first argument SLOT of a two-level command (``/mcp login``)
+        #: whose choice set depends on it; ``None`` for one-level commands.
+        self._argument_subcommand: str | None = None
         # Command words (primaries AND aliases) whose argument opens the value
         # list, and the subset of those the bare command cannot stand without.
         # DERIVED from the registry in :meth:`set_commands` rather than listed
@@ -1954,17 +1978,30 @@ class Editor(TextArea):
         list_argument = slash_argument(self.text, self._argument_commands)
         if list_argument is None:
             self._argument_command = None
+            self._argument_subcommand = None
             self._picker.sync(self.text)
         else:
             command = self._command_word()
             if command != self._argument_command:
                 self._argument_command = command
+                self._argument_subcommand = None
                 # Drop the previous command's rows before asking for this one's.
                 # `/login` offers every provider and `/logout` only the ones with a
                 # credential, so carrying them across would briefly offer a logout
                 # from an account the user never had.
                 self._picker.set_choices([])
                 self.post_message(ArgumentQueryOpened(command or ""))
+            elif command == "mcp":
+                # `/mcp` is two-level: verbs in the first argument slot,
+                # servers in the second. ArgumentQueryOpened fires on the
+                # command WORD, so without this the verb rows would stay up
+                # after `login` was completed and the server slot would have
+                # nothing to offer. Tracked rather than refreshed per
+                # keystroke: the row set only changes when the verb does.
+                subcommand = list_argument.partition(" ")[0].lower() if list_argument else ""
+                if subcommand != self._argument_subcommand:
+                    self._argument_subcommand = subcommand
+                    self.post_message(RefreshArgumentChoices(command))
             self._picker.sync_argument(list_argument)
         argument = slash_argument(self.text, self.MODEL_COMMANDS)
         if argument is None:

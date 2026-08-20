@@ -94,6 +94,23 @@ variant prints the authorization URL and accepts the **full redirect URL** (or
 a `code state` pair) on stdin; `state` (and `iss` when present) are parsed
 back out so the SDK's state validation passes.
 
+Plain `login` reuses whatever the store still holds — a refreshable token or a
+stored client registration short-circuits the grant. When that is wrong (an
+account switch, a scope change, a consent screen that must come back up), use
+the two companions:
+
+```
+/mcp logout <name>   # forget the stored credential and disconnect
+/mcp reauth <name>   # forget, then run a fresh interactive grant
+local-operator mcp logout <name>
+local-operator mcp reauth <name>
+```
+
+`logout` removes the whole credential row (token *and* client registration),
+so the next login re-registers via DCR or re-seeds a pinned `client_id` from
+config. `reauth` refuses to start the browser flow if the old row could not
+be removed, because a login on top of a surviving row would not be a re-auth.
+
 ## Per-tool filters
 
 A server can expose hundreds of tools while a session needs only a handful.

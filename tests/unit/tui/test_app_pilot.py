@@ -1954,6 +1954,12 @@ class FakeMcpManager:
         self._connected = list(connected)
         self._callback: Any = None
         self.inner_calls: list[list[Any]] = []
+        # Set by tests that exercise the login/logout/reauth paths: the
+        # config lookup the app does before dispatching a subcommand, and the
+        # record of what the workers were asked to do.
+        self._configs: dict[str, Any] = {}
+        self.disconnects: list[str] = []
+        self.connects: list[tuple[str, Any]] = []
 
     def get_all_server_names(self) -> list[str]:
         return sorted(self._configured)
@@ -1963,6 +1969,22 @@ class FakeMcpManager:
 
     def get_connection_status(self, name: str) -> str:
         return "connected" if name in self._connected else "disconnected"
+
+    def get_server_config(self, name: str) -> Any:
+        return self._configs.get(name)
+
+    async def disconnect_server(self, name: str) -> None:
+        self.disconnects.append(name)
+        if name in self._connected:
+            self._connected.remove(name)
+
+    async def connect_configured_server(self, name: str, *, timeout_ms: Any = None) -> Any:
+        # No browser in tests: the fake answers as an already-valid grant
+        # would, so the login worker's success path is what gets exercised.
+        self.connects.append((name, timeout_ms))
+        if name not in self._connected:
+            self._connected.append(name)
+        return SimpleNamespace(tools=["tool-a", "tool-b"])
 
     def set_on_tools_changed(self, callback: Any) -> None:
         self._callback = callback
@@ -2182,6 +2204,261 @@ async def test_mcp_command_puts_the_status_in_a_column() -> None:
         # The detail after the status column lines up too, or the padding only
         # moved the ragged edge one field to the right.
         assert rows[0].index("npx") == rows[1].index("command not found"), rows
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_removes_the_credential_and_disconnects() -> None:
+    """``/mcp logout <name>`` forgets the stored OAuth row AND tears the live
+    connection down — deleting the row alone would leave the session's tools
+    authenticated with a grant the user just revoked."""
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["linear"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch("local_operator.mcp.auth.mcp_logout_server", return_value=None) as logout,
+        ):
+            await _type_command(pilot, app, "mcp logout linear")
+            for _ in range(6):
+                await pilot.pause()
+        assert logout.call_count == 1
+        assert manager.disconnects == ["linear"]
+        text = _transcript_text(app)
+        assert "logged out of MCP server 'linear'" in text
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_of_a_server_with_no_credential_refuses() -> None:
+    """The destructive row must not report success when nothing was removed:
+    'logged out' after a no-op deletion would claim a grant was revoked that
+    never existed."""
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["linear"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logout_server",
+                return_value="no stored credential for MCP server 'linear' — nothing to log out of",
+            ),
+        ):
+            await _type_command(pilot, app, "mcp logout linear")
+            for _ in range(6):
+                await pilot.pause()
+        assert manager.disconnects == [], "a failed removal must not disconnect anyway"
+        # The notice wraps across transcript rows at this width, so match the
+        # phrase that cannot split.
+        assert "no stored credential" in _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_removes_then_runs_a_fresh_grant() -> None:
+    """Reauth is logout + login as ONE step: plain login reuses a stored
+    client registration or refreshable token, which is exactly what an account
+    switch cannot afford. The login only starts once the old row is gone."""
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["linear"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch("local_operator.mcp.auth.mcp_logout_server", return_value=None) as logout,
+        ):
+            await _type_command(pilot, app, "mcp reauth linear")
+            for _ in range(20):
+                await pilot.pause()
+                if manager.disconnects and manager.connects:
+                    break
+        assert logout.call_count == 1
+        assert manager.disconnects == ["linear"]
+        assert manager.connects == [("linear", 600_000)]
+        assert "authenticated MCP server 'linear'" in _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_never_logs_in_on_top_of_a_surviving_row() -> None:
+    """A login over a row that failed to delete is NOT a re-auth — the stored
+    registration would short-circuit the grant — so a failed removal stops the
+    chain instead of popping a misleading browser tab."""
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["linear"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logout_server",
+                return_value="no stored credential for MCP server 'linear' — nothing to log out of",
+            ),
+        ):
+            await _type_command(pilot, app, "mcp reauth linear")
+            for _ in range(8):
+                await pilot.pause()
+        assert manager.connects == [], "the grant must not start when removal failed"
+        assert "MCP reauth failed" in _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_mcp_unknown_subcommand_names_the_three_verbs() -> None:
+    """Before logout/reauth existed, mistyping `/mcp relogin` was told only
+    about login — the one discoverability surface the verbs have besides the
+    argument list."""
+    manager = FakeMcpManager(["linear"], ["linear"])
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        await _type_command(pilot, app, "mcp relogin linear")
+        for _ in range(4):
+            await pilot.pause()
+        text = _transcript_text(app)
+        assert "unknown mcp subcommand" in text
+        assert "login|logout|reauth" in text
+
+
+@pytest.mark.asyncio
+async def test_mcp_argument_list_offers_subcommands_then_servers() -> None:
+    """The suggestion UX: typing `/mcp ` offers the three verbs; once a verb
+    is chosen the SAME list turns into the OAuth servers that verb can act
+    on, as ready-to-run `login notion`-style rows."""
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        ),
+        "stdio": MCPHttpServerConfig(url="https://stdio.example/mcp"),
+    }
+    manager = FakeMcpManager(["linear", "stdio"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with patch(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            return_value=(configs, {}),
+        ):
+            editor.load_text("/mcp ")
+            for _ in range(6):
+                await pilot.pause()
+            verb_rows = [name for name, _ in editor.picker.suggestions()]
+            assert verb_rows == ["login", "logout", "reauth"], verb_rows
+
+            editor.load_text("/mcp login ")
+            for _ in range(6):
+                await pilot.pause()
+            server_rows = [name for name, _ in editor.picker.suggestions()]
+            assert server_rows == ["login linear"], server_rows
+
+            # Narrowing still matches against the WHOLE argument: `login lin`
+            # must keep offering the compound row, or the row the user is
+            # looking at would vanish the moment they filtered to it.
+            editor.load_text("/mcp login lin")
+            for _ in range(6):
+                await pilot.pause()
+            assert [name for name, _ in editor.picker.suggestions()] == ["login linear"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_list_offers_only_servers_holding_a_credential() -> None:
+    """The `/logout` rule applied to MCP: a logout row for a server with no
+    stored grant promises a removal that can only end in a warning, so the
+    list is pre-filtered by the credential store (keyed by URL)."""
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        ),
+        "notion": MCPHttpServerConfig(
+            url="https://mcp.notion.com/mcp", auth=MCPAuthConfig(type="oauth")
+        ),
+    }
+    manager = FakeMcpManager(["linear", "notion"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={"https://mcp.linear.app/mcp"},
+            ),
+        ):
+            editor.load_text("/mcp logout ")
+            for _ in range(6):
+                await pilot.pause()
+            assert [name for name, _ in editor.picker.suggestions()] == ["logout linear"]
 
 
 @pytest.mark.asyncio
