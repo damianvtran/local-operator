@@ -6865,13 +6865,14 @@ class OperatorApp(App[None]):
             if restore != theme_mod.current_theme():
                 self._apply_theme(restore)
             elif painted:
-                # The browse ended ON the real theme (arrowed away and back
-                # home). No switch to make, but the previews left offscreen
-                # blocks in a candidate ramp's ink (`preview=True` skips
-                # them), so the settle sweep still runs. `theme_epoch` is
-                # unchanged along this path, which is exactly why the sweep
-                # must be explicit rather than left to epoch-keyed caches. A
-                # list that never painted (opened, closed) skips it entirely.
+                # The browse ended ON the real theme, reached by arrowing
+                # back home — which re-applied it via the preview path, so
+                # `current_theme` is already right but offscreen blocks were
+                # skipped by every one of those bounded sweeps. The explicit
+                # full sweep here is what corrects them; epoch-keyed caches
+                # alone cannot, because a cache is only consulted when its
+                # block repaints, and nothing else repaints an offscreen
+                # block. A list that never painted (opened, closed) skips it.
                 self._repaint_themed_widgets()
 
     def action_cycle_effort(self) -> None:

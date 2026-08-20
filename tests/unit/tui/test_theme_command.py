@@ -265,13 +265,22 @@ async def test_preview_defers_offscreen_reink_to_the_settle(config_dir: Path) ->
             previewed_warning in color for color in _colors(blocks[-1])
         ), "onscreen block should carry the previewed ramp"
 
-        # Settle (Esc restores dark): the skipped block is swept back too.
-        await pilot.press("escape")
+        # Settle by COMMITTING a third theme rather than Esc-ing back to dark
+        # (review round 2, F7): the probe block wears dark's ink throughout
+        # the preview, so a restore-to-dark settle would pass even with the
+        # settle sweep deleted. Committing to a ramp the probe has never worn
+        # is the assertion that actually binds — the offscreen block can only
+        # carry that ink if the full sweep ran.
+        editor.text = "/theme monokai"
+        await pilot.pause()
+        await pilot.press("enter")
         await pilot.pause()
         await pilot.pause()
-        assert theme_mod.current_theme() == "dark"
+        assert theme_mod.current_theme() == "monokai"
+        monokai_warning = theme_mod.semantic_color("warning")
+        assert monokai_warning not in (dark_warning, previewed_warning)
         assert any(
-            dark_warning in color for color in _colors(offscreen)
+            monokai_warning in color for color in _colors(offscreen)
         ), "the settle sweep must cover what the preview skipped"
 
 
