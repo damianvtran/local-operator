@@ -40,9 +40,12 @@ from rich.cells import cell_len
 from rich.console import Console, RenderableType
 from rich.markdown import Markdown
 from rich.text import Text
+from textual.content import Content
+from textual.selection import Selection
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.markdown_theme import brand_markdown_theme
+from local_operator.tui.widgets import _copy_markdown
 from local_operator.tui.widgets.transcript import TranscriptBlock
 
 #: Reference-link definition line: ``[label]: target`` (TUI-010 refusal).
@@ -583,3 +586,46 @@ class AssistantBlock(TranscriptBlock):
     def text(self) -> str:
         """The accumulated message text (for tests and export)."""
         return self._full_text
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        """The selected text as MARKDOWN, so it pastes cleanly anywhere.
+
+        The base :meth:`TranscriptBlock.get_selection` copies the rendered
+        frame, which is the right rule for the transcript's plain-text blocks
+        but wrong for a markdown message: the frame turns a blockquote into a
+        ``▌`` bar, a bullet into ``•``, a table into box-drawing and a heading
+        into bare bold text. Pasted into a messenger or an email that is
+        furniture, not content — the ``▌`` welded to every quoted line is the
+        report this method answers. The block already holds the message's
+        source, so the clipboard carries that instead, mapped to the rows the
+        reader actually highlighted.
+
+        The selection and the frame stay the same computation: the highlighted
+        rows come from ``Selection.get_span`` exactly as the base method reads
+        them, and those row indices are aligned back to source lines by
+        :func:`_copy_markdown.align`. A partial selection is sliced out of the
+        source and re-fenced / re-quoted so it is valid markdown on its own.
+        When the source cannot be aligned (an empty message, or a frame the
+        walker cannot place), the method falls back to the base frame copy so a
+        copy never comes back empty-handed.
+        """
+        visual = self._render()
+        if not isinstance(visual, Content):
+            return None
+        if not self._full_text.strip():
+            return super().get_selection(selection)
+        rows = visual.plain.split("\n")
+        first_row: int | None = None
+        last_row: int | None = None
+        for index in range(len(rows)):
+            if selection.get_span(index) is not None:
+                if first_row is None:
+                    first_row = index
+                last_row = index
+        if first_row is None or last_row is None:
+            return None
+        mapping = _copy_markdown.align(self._full_text, rows)
+        copied = _copy_markdown.slice_markdown(self._full_text, mapping, first_row, last_row)
+        if not copied:
+            return super().get_selection(selection)
+        return copied, "\n"
