@@ -486,9 +486,12 @@ JOB_POLL_INTERVAL_S = 1.0
 USAGE_WARM_INTERVAL_S = 60.0
 
 #: Refresh threshold for the warmer: a row younger than this is left alone.
-#: One TTL interval below the cache TTL, so the warmer fires roughly once per
-#: TTL window rather than racing the expiry.
-USAGE_WARM_STALE_AFTER_S = 240.0
+#: Must sit BELOW the cache TTL's jitter floor (5 min ±25% ⇒ 225 s minimum)
+#: minus one warm interval, or a short-drawn row expires in the gap between
+#: "the warmer judged it fresh" and the next tick — making the next `/usage`
+#: pay the live fetch the warmer exists to prevent. 150 s keeps a full tick of
+#: headroom under the worst draw while still refreshing only ~twice per TTL.
+USAGE_WARM_STALE_AFTER_S = 150.0
 
 #: Minimum seconds between two re-title CHECKS on one conversation. The check
 #: is a provider call (the model, not a keyword rule, judges whether the
@@ -7357,7 +7360,7 @@ class OperatorApp(App[None]):
             except Exception:  # noqa: BLE001 — a cache read failure is a cold open
                 cached = []
             if cached:
-                panel.show_cached(cached, now_ms=self._usage_data_age_ms(cached))
+                panel.show_cached(cached, now_ms=self._usage_data_fetched_ms(cached))
         # A second command replaces the first request. Without exclusivity a slow
         # response can overwrite the newer provider's report.
         self.run_worker(
@@ -7422,10 +7425,10 @@ class OperatorApp(App[None]):
             # from the shared cache may be minutes old, and "just now" would
             # overstate a number the user is deciding on. `r` forces a live
             # fetch when fresher numbers are wanted.
-            panel.show_reports(reports, now_ms=self._usage_data_age_ms(reports))
+            panel.show_reports(reports, now_ms=self._usage_data_fetched_ms(reports))
 
     @staticmethod
-    def _usage_data_age_ms(reports: list[Any]) -> float:
+    def _usage_data_fetched_ms(reports: list[Any]) -> float:
         """The oldest report's ``fetched_at`` as an epoch-ms clock reading.
 
         The panel's title renders ``now - fetched_ms`` as the age, so handing
@@ -7436,8 +7439,6 @@ class OperatorApp(App[None]):
         stamps = [int(getattr(report, "fetched_at", 0) or 0) for report in reports]
         stamps = [stamp for stamp in stamps if stamp > 0]
         if not stamps:
-            import time
-
             return time.time() * 1000
         return float(min(stamps))
 
@@ -7512,7 +7513,18 @@ class OperatorApp(App[None]):
         if panel is None:
             return
         target = panel.target
+        # Keep the numbers ON SCREEN while the forced fetch runs: `start_fetch`
+        # clears them for the cold open, but a refresh has live rows the user
+        # is reading, and blanking them to "fetching…" would make `r` worse
+        # than the cached open it sits next to.
+        shown = panel.reports
+        shown_ms = panel.fetched_ms
         generation = panel.start_fetch(target)
+        if shown:
+            panel.show_cached(
+                shown,
+                now_ms=shown_ms if shown_ms is not None else self._usage_data_fetched_ms(shown),
+            )
         self.run_worker(
             self._fetch_usage_worker(target or None, generation, force_refresh=True),
             thread=False,

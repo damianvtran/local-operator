@@ -639,6 +639,17 @@ class UsagePanel(Static):
         return bool(self._reports)
 
     @property
+    def fetched_ms(self) -> float | None:
+        """The epoch-ms clock reading the title's age is measured from.
+
+        Exposed so the app's ``r`` handler can re-show the standing reports
+        with their ORIGINAL age while the forced fetch runs — re-deriving it
+        from the reports would silently reset the age of rows that carry no
+        ``fetched_at`` of their own.
+        """
+        return self._fetched_ms
+
+    @property
     def view_offset(self) -> int:
         return self._offset
 

@@ -60,18 +60,6 @@ if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
 LoginCallbackFactory = Callable[[ProviderDefinition], "LoginCallbacks"]
 
 
-class _UsageFetchError(Exception):
-    """Every fetch attempt for a provider failed.
-
-    Distinct from a legitimately EMPTY result: a provider whose endpoint
-    answered "no quota" (an empty plan, a key with no balance endpoint) must be
-    negative-cached so the warmer does not re-hit it every tick, while a
-    provider whose endpoint is DOWN must keep serving its last good value and
-    retry on the next cool-down. Raising is how the two are told apart at the
-    cache-settling layer.
-    """
-
-
 @dataclasses.dataclass(frozen=True)
 class CatalogueEntry:
     """One offerable model, provider-qualified, with the provider's auth state.
@@ -481,6 +469,18 @@ class ProviderController:
         """
         storage = self._storage_id(provider)
         parts: list[str] = []
+        # Cascade tiers 1/2 (runtime `--api-key`, models.yml pointer) can WIN
+        # the fetch — `get_api_key` resolves them ahead of every stored row —
+        # so they belong in the fingerprint too, or two sessions running on
+        # different override keys would share one cache row and read each
+        # other's numbers. Reached via getattr because the narrow store
+        # protocol does not require these maps; a store without them simply
+        # has no overrides to name.
+        for tier in ("_runtime_overrides", "_config_overrides"):
+            overrides = getattr(self.auth_store, tier, None)
+            secret = overrides.get(provider) if isinstance(overrides, dict) else None
+            if secret:
+                parts.append(fingerprint_secret(str(secret)))
         try:
             rows = self.auth_store.list_credentials(storage)
         except Exception:  # noqa: BLE001 — an unreadable store fingerprints empty
@@ -550,6 +550,20 @@ class ProviderController:
         rate-limit the usage endpoint per source IP). On failure the last good
         value is served with a short cool-down, so a blip never blanks the
         report.
+
+        **An empty result never overwrites non-empty last-good data.** The
+        fetchers signal transport/HTTP failure by returning ``None`` —
+        ``_get_json`` swallows ``httpx.HTTPError``, non-200s (including 429)
+        and bad JSON — so by the time a result reaches this function, "the
+        endpoint is down" and "the account has no quota to report" are the
+        same empty list. The one disambiguating fact on hand is history: a
+        provider that HAD data a moment ago and reports none now is far more
+        likely rate-limited than suddenly quota-less, so the empty answer is
+        treated as a failure (last-good kept servable under a short cool-down,
+        retried on the next poll). A provider with no history of data — or
+        whose last answer was also empty — negative-caches the empty list at
+        the full TTL, which is what stops the warmer from re-hitting endpoints
+        that legitimately report nothing.
         """
         stale: list[UsageReport] | None = None
         lease_held = False
@@ -558,30 +572,39 @@ class ProviderController:
             # The lease only has something to protect when a stale value exists:
             # the loser serves it while the winner refreshes. With nothing on
             # hand every session must fetch anyway (the pre-cache behaviour).
-            if not force_refresh and stale is not None and not cache.try_lease(key):
-                # A peer session owns this refresh; its result lands in the same
-                # shared row. Serve what we have instead of doubling the fan-out.
-                return stale
-            lease_held = stale is not None
+            if not force_refresh and stale is not None:
+                if not cache.try_lease(key):
+                    # A peer session owns this refresh; its result lands in the
+                    # same shared row. Serve what we have instead of doubling
+                    # the fan-out.
+                    return stale
+                # Held ONLY when try_lease actually granted it: the force path
+                # never takes the lease, and releasing one it does not hold
+                # would free a concurrent warmer's lease (holder identity is
+                # per-process, not per-coroutine).
+                lease_held = True
         try:
             try:
                 reports = await self._fetch_provider(client, provider)
-            except _UsageFetchError:
-                # Every attempt failed: keep the last good value servable through
-                # a short cool-down rather than blanking the report.
+            except Exception:  # noqa: BLE001 — isolate a broken provider
                 reports = []
-                if cache is not None and key and stale is not None:
-                    cache.write_failure(key, provider)
-            else:
-                if cache is not None and key:
+            if cache is not None and key:
+                if reports:
                     now_ms = int(time.time() * 1000)
-                    # Cache the answer whether or not it has rows: a provider that
-                    # legitimately reports no quota (an empty plan) is negative-
-                    # cached so the warmer does not re-hit its endpoint every
-                    # tick. The empty list round-trips through the same row.
                     cache.set(
                         key, provider, reports, expires_at_ms=now_ms + self._jittered_ttl_ms()
                     )
+                elif stale:
+                    # Truthiness, not `is not None`: only a NON-EMPTY history
+                    # marks this empty answer as a probable outage. Keep the
+                    # last good value servable through a short cool-down.
+                    cache.write_failure(key, provider)
+                else:
+                    # No history of data (or an empty one): negative-cache so
+                    # the warmer stops re-hitting an endpoint that reports
+                    # nothing. `r` (force_refresh) still bypasses this row.
+                    now_ms = int(time.time() * 1000)
+                    cache.set(key, provider, [], expires_at_ms=now_ms + self._jittered_ttl_ms())
         finally:
             if lease_held and cache is not None and key:
                 cache.release_lease(key)
@@ -610,45 +633,20 @@ class ProviderController:
         if not usage_supported(provider):
             return []
         reports: list[UsageReport] = []
-        # Whether ANY fetch attempt ran against a real credential and completed
-        # without raising. That is the line between a legitimately EMPTY answer
-        # (negative-cache it) and a DOWN endpoint (keep the last good value and
-        # retry): a provider whose endpoint answered "no quota" must not be
-        # re-hit every warmer tick, while one whose every attempt raised must.
-        any_completed = False
         for access in await self.auth_store.list_oauth_accesses(provider):
             try:
                 report = await self._fetch_one(client, provider, access=access)
             except Exception:  # noqa: BLE001 — one bad account, not the provider
                 continue
-            any_completed = True
             if report is not None:
                 reports.append(report)
         if reports:
             return reports
-        # The API-key route only counts as "completed" when there WAS a key to
-        # try: `_fetch_one` returns None for "no credential at all", which is
-        # nothing fetched, not an empty answer. Without this guard a provider
-        # whose OAuth accounts all failed to fetch would be negative-cached as
-        # "no quota" instead of served its last good value.
         try:
-            api_key = await self.auth_store.get_api_key(provider)
+            report = await self._fetch_one(client, provider, access=None)
         except Exception:  # noqa: BLE001
-            api_key = None
-        if api_key:
-            try:
-                report = await self._fetch_one(client, provider, access=None)
-            except Exception:  # noqa: BLE001
-                report = None
-            else:
-                any_completed = True
-            if report is not None:
-                return [report]
-        if not any_completed:
-            # Every attempt raised (or there was nothing to attempt): a failure,
-            # not an empty answer.
-            raise _UsageFetchError(provider)
-        return []
+            return []
+        return [report] if report is not None else []
 
     def _dedupe_targets(self, targets: list[str]) -> list[str]:
         """Keep one id per storage row so alias providers don't double-fetch."""

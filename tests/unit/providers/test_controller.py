@@ -657,6 +657,14 @@ class TestUsageCache:
     async def test_a_failed_refresh_serves_the_last_good_value(
         self, controller, store, monkeypatch
     ) -> None:
+        """A DOWN endpoint must not blank (or negative-cache over) real data.
+
+        HONEST failure mode: the real fetchers never raise — `_get_json`
+        swallows transport errors, non-200s and bad JSON and returns None — so
+        an outage reaches the cache layer as an EMPTY result. The disambiguator
+        is history: a provider that had data a moment ago and reports none now
+        keeps its last good value under a short cool-down.
+        """
         store.oauth_accounts["anthropic"] = [self._account("me@example.com", "acct-1")]
         fail = False
 
@@ -664,7 +672,7 @@ class TestUsageCache:
             client, provider, *, api_key, access_token, account_id, oauth_creds=None
         ):
             if fail:
-                raise RuntimeError("quota endpoint exploded")
+                return None  # what a 429/outage actually looks like to callers
             return UsageReport(provider=provider, limits=[])
 
         monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
@@ -687,6 +695,33 @@ class TestUsageCache:
         fail = True
         recovered = await controller.fetch_usage(["anthropic"])
         assert len(recovered) == 1, "a blip must not blank the report"
+        # And the shared row still holds the data for every OTHER session.
+        assert cache.get(key, include_expired=True), "last-good row was overwritten"
+
+    @pytest.mark.asyncio
+    async def test_a_provider_with_no_data_history_is_negative_cached(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """A provider that reports nothing (and never has) is cached as empty,
+        so the warmer stops re-hitting an endpoint with nothing to say."""
+        store.oauth_accounts["xai"] = [self._account("me@example.com", "acct-1")]
+        calls = 0
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            nonlocal calls
+            calls += 1
+            return None  # endpoint answers, but there is no quota to report
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        assert await controller.fetch_usage(["xai"]) == []
+        assert await controller.fetch_usage(["xai"]) == []
+        # The empty answer was cached: exactly one network round total.
+        assert calls == 1
+        # And the row is visible to the warmer's age probe.
+        assert controller.usage_cache_age_ms("xai") is not None
 
     @pytest.mark.asyncio
     async def test_alias_providers_share_one_cache_row(

@@ -406,23 +406,27 @@ class UsageCacheStore:
         now = self._now_ms()
         expires = now + ttl_ms
         try:
-            with conn:  # a transaction so check-and-take is atomic
-                row = conn.execute(
-                    "SELECT expires_at_ms FROM usage_fetch_leases WHERE key = ?", (key,)
-                ).fetchone()
-                if row is not None and int(row[0]) > now:
-                    return False
-                conn.execute(
+            # ONE atomic statement, judged by rowcount. A SELECT-then-INSERT
+            # pair is not atomic here even inside `with conn:` — Python's
+            # sqlite3 defers BEGIN until the first write, so two processes can
+            # both read "no live lease" and both take it, precisely at the
+            # synchronized-expiry moment the lease guards. The conditional
+            # upsert moves the check into the same write: the UPDATE arm only
+            # fires when the standing lease has expired, so exactly one
+            # process's statement reports a changed row.
+            with conn:
+                cursor = conn.execute(
                     """
                     INSERT INTO usage_fetch_leases (key, holder, expires_at_ms)
                     VALUES (?, ?, ?)
                     ON CONFLICT(key) DO UPDATE SET
                       holder = excluded.holder,
                       expires_at_ms = excluded.expires_at_ms
+                    WHERE usage_fetch_leases.expires_at_ms <= ?
                     """,
-                    (key, self._holder, expires),
+                    (key, self._holder, expires, now),
                 )
-            return True
+            return cursor.rowcount > 0
         except Exception:  # noqa: BLE001 — coordination failure = go fetch
             logger.debug("usage cache: lease failed", exc_info=True)
             return True
