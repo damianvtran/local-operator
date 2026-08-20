@@ -77,7 +77,13 @@ MCP_OAUTH_CREDENTIAL_PREFIX = "mcp_oauth:"
 # Provider column value in the shared auth_credentials table.
 MCP_OAUTH_PROVIDER = "mcp-oauth"
 
-DEFAULT_CALLBACK_PORT = 3000
+#: Loopback port for OAuth callbacks when a server does not pin its own.
+#: 33441 is deliberately rare (sibling of Codex's 33418): :3000 collides with
+#: local dev servers often enough that the listener bind routinely failed and
+#: the grant fell back to the manual paste flow. Servers that registered a
+#: redirect URI against the old default must pin ``callback_port: 3000`` in
+#: their config oauth block to keep working.
+DEFAULT_CALLBACK_PORT = 33441
 DEFAULT_CALLBACK_PATH = "/callback"
 
 #: Payload key holding the wall-clock time (epoch seconds) the stored access
@@ -711,7 +717,7 @@ class LoopbackAuthFlow:
             self._server = await asyncio.start_server(self._serve, self._host, self._port)
         except OSError as exc:
             # Almost always "address already in use": another local-operator, or
-            # a dev server squatting :3000. Not fatal — the paste path still
+            # a dev server squatting the port. Not fatal — the paste path still
             # completes the grant — but the user has to be told, because from
             # the browser's side this looks like the login simply not working.
             self._result = None
@@ -1225,8 +1231,8 @@ def wire_oauth_auth(
 
     - ``server_url``: the MCP server URL (resource indicator base);
     - ``client_metadata``: PKCE authorization-code client, redirect URI
-      ``http://127.0.0.1:{callback_port or 3000}{callback_path or /callback}``
-      (PKCE itself is automatic inside the SDK);
+      ``http://127.0.0.1:{callback_port or DEFAULT_CALLBACK_PORT}`` plus the
+      callback path (PKCE itself is automatic inside the SDK);
     - ``storage``: a :class:`McpTokenStorage` bound to ``store``; a config
       ``client_id`` pre-seeds the client registration so DCR is skipped
       (MCP-11);
