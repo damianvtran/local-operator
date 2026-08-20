@@ -116,24 +116,25 @@ ICON_MCP = "⊙"
 #: warning glyph so it reads the same as a warning notice in the transcript.
 ICON_APPROVALS = "!"
 
-#: The name's cell BUDGET: the widest box the trailing segment may take, and
-#: the narrowest it is worth showing at. Everything between is available — the
-#: segment is elastic, and which width it gets is decided by :meth:`_walk` from
-#: the row's geometry ALONE, never from the length of the string in it.
+#: The name's cell BUDGET: the most the trailing segment may take, and the
+#: narrowest it is worth showing at when the row is too tight for all of it.
+#: The budget is a CAP, not a reservation: the segment spends only the cells
+#: its truncated text actually inks, so the rest of the right group sits flush
+#: against the title instead of across a run of reserved blanks.
 #:
-#: That last clause is the whole design of this segment, and it is worth stating
-#: plainly because the obvious implementation gets it wrong. The name is
-#: model-authored and it CHANGES UNDER THE READER: an opener excerpt lands on
+#: That is a deliberate reversal of this segment's earlier design, and the
+#: trade is worth stating plainly because both sides of it are real. The name
+#: is model-authored and CHANGES UNDER THE READER: an opener excerpt lands on
 #: submit, the generated title replaces it ~1.5 s later, and a re-title can
-#: land at any time after that (see ``local_operator.session.naming``). Size the
-#: box to the string and every one of those arrivals re-flows the row —
-#: measured at a fixed 150 columns, the alarm glyph sat at column 144, then 101,
-#: 102, 110 across four consecutive frames, two of those moves with no user
-#: input at all, and a ONE-cell difference in title length flipped the whole
-#: 13-cell `◍ 2 agents` segment in and out. Size the box to the geometry and the
-#: name is the only thing on the band that a title can change: the box is
-#: reserved, the name is left-aligned in it, and the leftover cells sit at the
-#: band's own edge where nothing else lives.
+#: land at any time after that (see ``local_operator.session.naming``). Sizing
+#: to the string means each of those arrivals re-flows the right group — the
+#: alarm and the figures shift left or right with the title's length. The
+#: previous design reserved the full box against exactly that drift, and what
+#: it bought column stability with was a HOLE: every title shorter than the
+#: box left a run of blanks between the alarm and the `‹` seam (up to 39 cells
+#: for a one-word title), which read as a rendering fault on every frame,
+#: all session long. A reflow happens twice in a session's first two seconds
+#: and then rarely; the hole was permanent. The operator chose the reflow.
 #:
 #: 40 for the cap: it fits every title the naming caps allow (``MAX_TITLE_CHARS``
 #: is 80, but a 3-7 word answer lands well inside 40) and leaves the identity
@@ -172,10 +173,10 @@ _MIN_GROUP_GAP = 4
 #:
 #: The ladder DROPS, SHORTENS, and — for the name only — FLEXES. The name is
 #: still on it twice, but the first entry is no longer a step from one fixed
-#: width to another: ``flex-name`` is where the segment stops being a rigid box
-#: of :data:`NAME_CELLS` and becomes elastic down to its floor, taking back
-#: whatever the row needs and giving back whatever it does not. What remains
-#: below is its DROP — the point where even the floor has stopped fitting.
+#: width to another: ``flex-name`` is where the segment's cap drops from
+#: :data:`NAME_CELLS` to its floor and becomes elastic, taking back whatever
+#: the row needs and giving back whatever it does not. What remains below is
+#: its DROP — the point where even the floor has stopped fitting.
 #:
 #: The ordering principle: shed what the user already knows or can re-derive,
 #: and protect what predicts their next decision. In order —
@@ -221,19 +222,18 @@ _DROP_LADDER: tuple[str, ...] = (
     # visible in the transcript as a tool card, while a subagent is not.
     "jobs",
     "subagents",
-    # The name stops being a rigid box here and becomes elastic: from this rung
-    # down it is measured at its FLOOR and handed back whatever the fitting row
-    # left over, so its width runs continuously from 18 cells to 40 instead of
-    # jumping between two values. This rung replaced a `shorten-name` that halved
-    # it outright, and the halving is what made the segment idle: across 30-180
-    # columns the name rendered at only 0, 18 or 40 cells, so a 130-column
-    # terminal showed an 18-cell stub beside an 18-cell hole with 32 cells
-    # available, and the excerpt-to-title moment this feature exists for read as
+    # The name's cap drops from :data:`NAME_CELLS` to its floor here, and the
+    # fitting row hands back whatever it can spare, so the visible width runs
+    # continuously from 18 cells to 40 instead of jumping between two values.
+    # This rung replaced a `shorten-name` that halved it outright, and the
+    # halving is what made the segment idle: across 30-180 columns the name
+    # rendered at only 0, 18 or 40 cells, so a 130-column terminal showed an
+    # 18-cell stub beside an 18-cell hole with 32 cells available, and the
+    # excerpt-to-title moment this feature exists for read as
     # `The /resume picke…` → `Fix unnamed sessi…` at every width under 138.
     #
-    # The flex is measured from the geometry, never from the string: a title is
-    # model-authored and lands while the user is reading, so a box sized to it
-    # would re-flow the row on its own. See :data:`NAME_CELLS`.
+    # The cap bounds the segment; the segment's painted width is its INK. See
+    # :data:`NAME_CELLS` for the trade that decision carries.
     "flex-name",
     # Shorten before dropping: a basename still answers "where am I" and a bare
     # model id still answers "who is replying".
@@ -889,12 +889,6 @@ class StatusLine:
         #: attaches one, which keeps the band usable by the lightweight test
         #: hosts that have no terminal to write to.
         self._title: TerminalTitle | None = None
-        #: Cells of the trailing name's reserved box that the current title does
-        #: not fill. Paid out immediately before the seam that introduces the
-        #: title (see :meth:`_right_text`), which is what keeps the row flush to
-        #: the band's right edge without orphaning the chevron or letting the
-        #: title's length move any column to its left.
-        self._name_slack: int = 0
 
     def set_terminal_title(self, title: TerminalTitle | None) -> None:
         """Attach (or detach) the window-title writer and paint it once.
@@ -1307,9 +1301,9 @@ class StatusLine:
         entirely, and the wider-surviving of the two rows wins.
 
         The comparison is by segments SURVIVING rather than by cells painted,
-        because the padded name box makes "cells" the wrong measure — a row can
-        paint more cells and say less. The restart wins nearly always (a walk with
-        21 fewer cells to place fits no later than one with them), and it is
+        because a wider row is not a more informative one — a row can paint
+        more cells and say less. The restart wins nearly always (a walk with
+        fewer cells to place fits no later than one with them), and it is
         compared rather than assumed so the rule stays true if a future rung
         changes what a concession costs.
         """
@@ -1348,17 +1342,15 @@ class StatusLine:
         measuring segments independently and getting the separator arithmetic
         subtly wrong.
 
-        The name is measured at its RESERVE — the full :data:`NAME_CELLS` until
-        the ``flex-name`` rung fires, its floor after — and then grown into
-        whatever the fitting rung left over, capped. Three properties come out of
-        that, and all three are the point:
-
-        * The reserve is a function of the row's geometry and never of the name's
-          text, so a title arriving or being rewritten cannot move a sibling.
-        * A long title never sheds a neighbour that a short one would have kept,
-          because the fit test measured the box either way.
-        * The leftover goes to the one segment that can use it rather than into
-          the hole between the groups.
+        The name is offered a CAP — the full :data:`NAME_CELLS` until the
+        ``flex-name`` rung fires, its floor after — and then the cap is grown
+        into whatever the fitting rung left over, bounded by the full cap. The
+        row spends only the cells the truncated title actually inks: the fit
+        test below measures the built text, so a short title fits rungs a
+        reserved box would have failed, and its siblings sit flush against the
+        seam instead of across a run of reserved blanks. The trade — a title
+        arriving or being rewritten now re-flows the right group — is priced in
+        :data:`NAME_CELLS`'s own comment.
         """
         dropped: set[str] = {"name"} if forgo_name else set()
         short: set[str] = set()
@@ -1369,13 +1361,13 @@ class StatusLine:
             elif step is not None:
                 target = step.partition("shorten-")[2]
                 (short if target else dropped).add(target or step)
-            reserve = (
+            cap = (
                 0
                 if "name" in dropped or not self._conversation_name
                 else NAME_CELLS_FLOOR if flexed else NAME_CELLS
             )
             left = self._left_text(dropped, short, dim, muted, seam, accent)
-            right = self._right_text(dropped, short, reserve, dim, seam)
+            right = self._right_text(dropped, short, cap, dim, seam)
             # The fit test reserves the group gap rather than asking whether the
             # composed row happens to fit. `_compose` pads with `max(1, …)`, so a
             # row could "fit" with the two groups ONE cell apart — tighter than
@@ -1392,10 +1384,20 @@ class StatusLine:
             slack = width - cell_len(left.plain) - cell_len(right.plain) - gap
             if slack < 0:
                 continue
-            if reserve and slack and reserve < NAME_CELLS:
-                right = self._right_text(
-                    dropped, short, min(NAME_CELLS, reserve + slack), dim, seam
-                )
+            if cap and slack and cap < NAME_CELLS:
+                # Regrow the cap into the leftover so the flexed name takes
+                # every cell the row can spare, up to the full cap. Grown from
+                # the title's measured INK, never from the cap itself: a
+                # word-boundary cut can ink well under the cap, and crediting
+                # the cap hands those saved cells out twice — measured on an
+                # 80-cell row, a 29-cell title inked 14 at an 18-cell cap, and
+                # `cap + slack` regrew to the full 29, four cells past the
+                # band's edge. From the ink, the rebuilt title adds at most
+                # `slack` cells to the measured row, so it fits by
+                # construction.
+                ink = cell_len(truncate_name(self._conversation_name, cap))
+                cap = min(NAME_CELLS, ink + slack)
+                right = self._right_text(dropped, short, cap, dim, seam)
             return frozenset(dropped), left, right
         return None
 
@@ -1505,15 +1507,13 @@ class StatusLine:
     ) -> Text:
         """agents ‹ jobs ‹ context ‹ cost ‹ duration ‹ [!] ‹ name.
 
-        ``name_cells`` is the box :meth:`_walk` reserved for the trailing name —
-        zero when the ladder dropped it. The row always SPENDS that whole box,
-        whatever the title's own width, which is what pins every other segment's
-        column; see :data:`NAME_CELLS`. The title itself is emitted UNPADDED and
-        the remainder (:attr:`_name_slack`) is paid out as blanks just before
-        the seam that introduces it, so the box is filled without the title
-        having to be the thing that fills it — which is what lets the row reach
-        the band's right edge at every title length while the columns to the
-        left of the name stay put.
+        ``name_cells`` is the CAP :meth:`_walk` granted the trailing name —
+        zero when the ladder dropped it. The title is emitted unpadded and cut
+        to that cap, and the row spends only the cells it inks: no reserve is
+        painted, so the seam and every sibling sit flush against the title's
+        actual width and the group's last inked cell is the band's right edge.
+        The columns to the left therefore move when the title's length changes
+        — the trade :data:`NAME_CELLS`'s comment prices.
 
         Colour groups by KIND rather than giving every field its own hue, which
         would be a rainbow: counters share `label`, the two numbers an operator
@@ -1521,9 +1521,6 @@ class StatusLine:
         caution), and the least volatile fields stay neutral. Green is not used
         at all — it belongs to the running indicator.
         """
-        # Reset per render: the reserve's unused cells are a property of THIS
-        # row, and a stale value would pay slack the current title does not have.
-        self._name_slack = 0
         parts: list[tuple[str, str, Style]] = []
         if self._subagent is not None and self._subagent.label:
             # Never dropped: it is what says whose numbers follow it, and a
@@ -1592,10 +1589,12 @@ class StatusLine:
             # is now spoken for: the session NAME is what an operator reads this
             # corner for, and 20 cells of prose about a mode that has not changed
             # since boot was crowding out the one field that says which
-            # conversation this is. The argument is answered rather than ignored —
-            # the name's box is RESERVED (:data:`NAME_CELLS`), so this glyph has
-            # one column per terminal width and a title landing under it cannot
-            # move it.
+            # conversation this is. The glyph's column now moves with the
+            # title's length — the name is inked unpadded rather than boxed
+            # (see :data:`NAME_CELLS`) — but a re-title is a twice-a-session
+            # event where the old reserved box was a permanent blank run, and
+            # one cell of red is findable at the end of the figures run at any
+            # column.
             #
             # What survives is the alarm itself, because nothing else in the UI
             # carries it for longer than a scroll: `/approvals` answers on
@@ -1664,39 +1663,18 @@ class StatusLine:
             # of the user's opener, so it has no natural bound, and the band is a
             # fixed two-row box.
             #
-            # The box's UNUSED cells are emitted as their own segment, BEFORE
-            # the seam, rather than as padding on either side of the title.
-            #
-            # The reserve itself is unchanged and is still the point: the fit
-            # was decided against the full box, so those cells are spoken for
-            # and cannot be handed back to the layout without moving every
-            # column left of the name. What varies is only where they are
-            # painted, and both obvious answers put them somewhere a reader
-            # notices:
-            #
-            # * `ljust` trailed them after the title. `_compose` stripped them,
-            #   so the painted row ended early — flush at the band's edge for a
-            #   long title and up to 35 cells short for a brief one, which reads
-            #   as a rendering fault. (They are ordinary styled cells, so
-            #   anything READING the row carried them too: the SVG export wrote
-            #   all 35.)
-            # * `rjust` moved them between the seam and the title, which fixed
-            #   the edge and orphaned the `‹`: every other seam on the row is
-            #   tight against what it introduces, so a lone chevron with 36
-            #   blanks after it reads as a missing segment (design review D1).
-            #
-            # Emitting them ahead of the seam keeps the seam glued to the title
-            # it introduces AND puts the title's last cell on the band's right
-            # edge, while the columns left of the name still cannot see the
-            # title's length. A blank segment renders as blanks either way; the
-            # only thing being chosen here is which side of the chevron the
-            # slack falls on.
-            # Carried on the SEAM's left so no extra separator is emitted: the
-            # blanks ride in front of the ` ‹ ` that introduces the title, which
-            # is one segment, not two.
-            self._name_slack = name_cells - cell_len(
-                truncate_name(self._conversation_name, name_cells)
-            )
+            # UNPADDED, on purpose. This segment used to reserve its full cap
+            # and pay the unused cells out as blanks before its seam, so that a
+            # title's length could never move a sibling's column — and every
+            # title shorter than the cap bought that stability with a permanent
+            # run of up to 39 blank cells between the alarm and the `‹`, which
+            # read as a rendering fault (the hole is what the user reported).
+            # The title changes twice in a session's first seconds and rarely
+            # after; the hole was on every frame. So the segment now inks only
+            # what the title measures and the right group re-flows on a
+            # re-title — the reversal is priced in :data:`NAME_CELLS`'s
+            # comment, and the seam stays tight against the title from both
+            # sides by construction.
             parts.append(
                 (
                     "",
@@ -1706,23 +1684,7 @@ class StatusLine:
             )
 
         right = Text()
-        last = len(parts) - 1
         for index, (icon, text, style) in enumerate(parts):
-            # The name's unused reserve is paid out HERE, immediately before the
-            # seam that introduces the title, so the chevron stays tight against
-            # the text it points at (design review D1) while the cells still sit
-            # inside the right group and cannot move any column to their left.
-            #
-            # OUTSIDE the `if index:` seam guard, because the name is not always
-            # preceded by a sibling: a freshly-opened session has no counters, no
-            # context reading, no cost and no duration, so the title is the whole
-            # right group and lands at index 0. Emitting the slack only alongside
-            # a seam silently skipped it there, and the group then aligned by its
-            # INK — the alternative this design explicitly rejects. Measured at
-            # 100 cells, the title's first column walked 95 -> 78 -> 73 -> 63 as
-            # the title grew, on the very first band a user sees (review F1).
-            if index == last and self._name_slack:
-                right.append(" " * self._name_slack, style=dim)
             if index:
                 right.append(f" {_SEP_RIGHT} ", style=seam)
             if icon:
@@ -1738,29 +1700,14 @@ class StatusLine:
         that exactly fitted its frame `_MIN_GROUP_GAP` cells past it, on trailing
         blanks that aligned nothing.
 
-        The right group is aligned by its BOX, not by its ink: the group always
-        spends the cells :meth:`_walk` reserved for the name
-        (:data:`NAME_CELLS`), so this arithmetic is the same at every title
-        length and a short title cannot shunt the group right.
-
-        The box's unused cells are spent inside the right group by
-        :meth:`_right_text`, as a run of blanks immediately BEFORE the seam that
-        introduces the title — so the row's last inked cell is the band's right
-        edge at every title length and there is nothing here to trim.
-
-        This method used to `rstrip` a left-aligned name's trailing padding,
-        which produced a row that ended early — flush for a long title and up to
-        35 cells short for a brief one. Moving those cells ahead of the title
-        fixes that at the source: they still exist, so the fit arithmetic and
-        every column left of the name are untouched, but they are no longer at
-        the edge where their absence was visible. Putting them between the seam
-        and the title instead reaches the edge too and orphans the chevron by up
-        to 39 cells, which reads as a segment that failed to render.
-
-        Aligning the group by its INK rather than its box is the other way to
-        reach the edge, and the one this must not do: measured across four
-        titles it walks the `!` alarm from column 74 to 91/111/151 at 100/120/160
-        cells, which is exactly the drift the reserve was introduced to stop.
+        The right group is aligned by its INK: it spends exactly the cells its
+        segments paint, the trailing name included, so the group's last inked
+        cell is the band's right edge and no blank run ever sits inside it.
+        The filler between the two groups absorbs whatever a short title frees
+        — which is where spare cells belong, in the one gap that separates the
+        groups rather than in a hole between two right-group siblings. The
+        cost is that the group's columns move when the title's length changes;
+        :data:`NAME_CELLS`'s comment prices that trade.
         """
         if not right.plain:
             return left
