@@ -89,7 +89,23 @@ class SessionProtocol(Protocol):
 
     @property
     def model(self) -> ModelSpec:
-        """The active spec (provider/model_id/base_url/context_window)."""
+        """The SELECTED spec (provider/model_id/base_url/context_window)."""
+        ...
+
+    @property
+    def effective_model(self) -> ModelSpec:
+        """The spec ACTUALLY serving requests.
+
+        Equals ``model`` except while a provider fallback is pinned, when it is
+        the fallback's own spec. Front ends paint their model display from THIS
+        — a display reading ``model`` during a fallback names a model that is
+        not answering.
+        """
+        ...
+
+    @property
+    def effective_model_label(self) -> str:
+        """``provider/model`` of the spec actually serving requests."""
         ...
 
     def set_model(self, model: ModelSpec) -> None:

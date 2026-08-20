@@ -990,6 +990,36 @@ class RetryStartEvent(AgentEvent[Literal["retry_start"]]):
     fallback_model: str | None = None
 
 
+class ModelChangeEvent(AgentEvent[Literal["model_change"]]):
+    """The model ACTUALLY SERVING requests changed mid-session.
+
+    Emitted when a provider fallback pins a different model (``is_fallback``
+    True), when the primary route recovers and requests return to the selected
+    model (``is_fallback`` False), and when the user switches models. The
+    fallback notice ("provider failure — falling back to …") narrates the
+    moment; this event is what lets a front end keep its MODEL DISPLAY truthful
+    for the rest of the fallback's lifetime — without it the status band keeps
+    asserting the selected model while every request goes elsewhere.
+
+    ``provider``/``model_id`` name the model now in force (the fallback while
+    one is pinned, the selected model otherwise); ``effort`` is the reasoning
+    level that model is actually running at, which matters because a fallback
+    target may clamp the user's chosen level to its own ladder.
+    """
+
+    type: Literal["model_change"] = "model_change"
+    provider: str
+    model_id: str
+    effort: str | None = None
+    reason: str = ""
+    is_fallback: bool = False
+    # The model-in-force's own window, carried so consumers that hold only the
+    # event (a parent relaying a child's stream) can keep their usage
+    # denominators truthful without re-resolving the model themselves. Zero
+    # means the emitter did not know, and readers keep their previous value.
+    context_window: int = 0
+
+
 class RetryEndEvent(AgentEvent[Literal["retry_end"]]):
     type: Literal["retry_end"] = "retry_end"
     success: bool

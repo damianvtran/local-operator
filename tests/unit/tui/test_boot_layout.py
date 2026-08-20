@@ -101,6 +101,15 @@ class FakeSession:
     def model(self) -> Any:
         return None
 
+    @property
+    def effective_model(self) -> Any:
+        # The fake never falls back, so selection and effective agree.
+        return self.model
+
+    @property
+    def effective_model_label(self) -> str:
+        return self.model_label
+
     def set_model(self, model: Any) -> None:
         pass
 

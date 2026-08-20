@@ -73,6 +73,7 @@ from local_operator.harness.types import (
     ImageContent,
     LoopConfig,
     Message,
+    ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
     StaleAside,
@@ -115,6 +116,16 @@ if TYPE_CHECKING:
     from local_operator.mcp.manager import McpManager
 
 logger = logging.getLogger(__name__)
+
+#: Transcript custom-entry type recording which model is ACTUALLY serving
+#: requests when a provider fallback pins a route away from the selected
+#: model. Written on every route edge (fallback pinned / primary recovered)
+#: and read back at construction, so a resumed session keeps running — and
+#: displaying — the model that was really answering when it closed, instead
+#: of silently re-routing the first prompt to the provider that was failing.
+#: An entry with ``active: None`` records the recovery, which is what lets
+#: ``latest_custom``'s backward scan land on "no fallback pinned" after one.
+ACTIVE_ROUTE_CUSTOM_TYPE = "active_model_route"
 
 #: How many times the title writer will chase a name that moved under its own
 #: append before giving up and leaving the rest to the dispose flush. A cap
@@ -790,6 +801,13 @@ class Session:
             # delivery. Binding the two here lets every front end receive quota
             # and fallback notices without teaching the harness loop providers.
             notice_bridge(self._stream_notice)
+        route_bridge = getattr(self._stream_fn, "set_route_handler", None)
+        if callable(route_bridge):
+            # Same division of labour as the notice bridge, for the ROUTE
+            # itself rather than its narration: the stream reports which model
+            # is actually serving requests, the session persists that fact and
+            # emits the event a front end repaints its model display from.
+            route_bridge(self._on_route_settled)
         self._tools = list(tools)
         self._transcript = transcript
         self._session_id = session_id or transcript.directory.name
@@ -950,6 +968,24 @@ class Session:
         # session would otherwise need its own copy of this, and the one that
         # forgot would boot nameless.
         self._load_conversation_name()
+        # Which model is ACTUALLY serving requests, when that is not the
+        # selected one: the spec of the pinned fallback route, or None while
+        # the primary serves. Owned by the session (not read off the stream
+        # fn) because every reader — the TUI's model display, cost attribution,
+        # persistence — needs it between events, and the stream fn is an
+        # optional capability some hosts construct sessions without.
+        self._active_fallback: ModelSpec | None = None
+        # The pin itself — (selector, the chain entry's own effort or None) —
+        # kept beside the derived spec above because the spec is a SNAPSHOT:
+        # an `/effort` change while a fallback serves has to re-derive the
+        # display spec from the pin, and the derivation's input is the target,
+        # not the previous derivation.
+        self._active_route: tuple[str, str | None] | None = None
+        # AFTER the wake/name restores, same transcript, same reason: a
+        # resumed session must come back on the model that was really
+        # answering when it closed, not silently re-route the first prompt to
+        # the provider that was failing.
+        self._restore_active_route()
         # Owned here, not by the browser tool, for the same reason the wake
         # scheduler is: _build_tool_context runs at the start of EVERY turn, so
         # a handle the tool stored on the ToolContext lived exactly one turn.
@@ -1239,6 +1275,27 @@ class Session:
         """The spec every provider call is built from."""
         return self._model
 
+    @property
+    def active_fallback(self) -> ModelSpec | None:
+        """The pinned fallback's spec while one is serving requests, else None."""
+        return self._active_fallback
+
+    @property
+    def effective_model(self) -> ModelSpec:
+        """The spec ACTUALLY serving requests.
+
+        ``model`` is what the user selected; while a provider fallback is
+        pinned the requests go elsewhere, and a display reading ``model``
+        asserts a model that is not answering. Front ends paint from THIS.
+        """
+        return self._active_fallback if self._active_fallback is not None else self._model
+
+    @property
+    def effective_model_label(self) -> str:
+        """``provider/model`` of the spec actually serving requests."""
+        spec = self.effective_model
+        return f"{spec.provider}/{spec.model_id}"
+
     def history(self) -> list[AgentMessage]:
         """The conversation as replayed into LLM context, in order.
 
@@ -1291,7 +1348,11 @@ class Session:
             "messages": estimate_messages_tokens(
                 self._render_history(list(self._context.messages))
             ),
-            "context_window": int(self._model.context_window),
+            # The EFFECTIVE model's window: the breakdown predicts whether the
+            # NEXT request fits, and while a fallback serves that request goes
+            # to the fallback — measuring it against the selected model's
+            # window misstates the one number the panel exists to report.
+            "context_window": int(self.effective_model.context_window),
             "cache_read": int(
                 self._last_usage.cache_read_tokens if self._last_usage is not None else 0
             ),
@@ -1351,7 +1412,43 @@ class Session:
             # itself selector-keyed (`SessionStreamFn._primary_selector`), so a
             # third component here would invalidate more often than the thing
             # being invalidated can actually change.
+            #
+            # One exception rides this path: while a fallback serves, the
+            # DERIVED display spec carried the previous effort onto the target
+            # (see `spec_for_target` — a chain entry naming no effort inherits
+            # the chosen level), so an `/effort` change has to re-derive it or
+            # the band keeps naming the level the user just moved away from.
+            # Quietly — no event, no persistence: the route did not move, and
+            # the `/effort` receipt plus the host's own repaint already cover
+            # the level change.
+            if self._active_route is not None:
+                refreshed = self._spec_for_route(*self._active_route)
+                if refreshed is not None:
+                    self._active_fallback = refreshed
             return
+        # An explicit switch withdraws the fallback pin's premise: the pin
+        # rescued the PREVIOUS selection, and the stream fn's preflight will
+        # clear its own route state the moment it sees the new selector. The
+        # display state has to move in the same step — a band still naming the
+        # old fallback after `/model` is the same stale frame this state
+        # exists to prevent. Persisted (with the new primary) so a resume does
+        # not restore a pin the user already switched away from.
+        if self._active_fallback is not None:
+            self._active_fallback = None
+            self._active_route = None
+            self._spawn_background(self._persist_active_route(model))
+            self._spawn_background(
+                self._emit(
+                    ModelChangeEvent(
+                        provider=model.provider,
+                        model_id=model.model_id,
+                        effort=model.reasoning_effort,
+                        reason="model switched",
+                        is_fallback=False,
+                        context_window=int(model.context_window),
+                    )
+                )
+            )
         notify = getattr(self._stream_fn, "on_model_changed", None)
         if callable(notify):
             notify(model)
@@ -2008,6 +2105,72 @@ class Session:
     ) -> None:
         """Bridge provider-routing diagnostics onto the session event stream."""
         await self._emit(NoticeEvent(text=text, kind=kind))
+
+    async def _on_route_settled(self, target: Any, reason: str) -> None:
+        """The stream fn's effective route moved; record it and tell the host.
+
+        ``target`` is the pinned ``FallbackTarget`` (selector + optional
+        effort) or ``None`` when requests returned to the selected model. Three
+        jobs, in order: derive the fallback's own spec (metadata belongs to the
+        TARGET model — a display that keeps the primary's context window under
+        a fallback's name misreports both), persist the edge so a resume comes
+        back on the right model, and emit the event the front end repaints its
+        model display from.
+        """
+        if target is None:
+            self._active_fallback = None
+            self._active_route = None
+            await self._persist_active_route(self._model)
+            await self._emit(
+                ModelChangeEvent(
+                    provider=self._model.provider,
+                    model_id=self._model.model_id,
+                    effort=self._model.reasoning_effort,
+                    reason=reason,
+                    is_fallback=False,
+                    context_window=int(self._model.context_window),
+                )
+            )
+            return
+        selector = str(target.selector)
+        target_effort = getattr(target, "effort", None)
+        spec = self._spec_for_route(selector, target_effort)
+        if spec is None:
+            # An unresolvable selector must not take the session down mid-turn;
+            # the fallback still serves, the display just cannot follow it.
+            logger.warning("could not resolve fallback spec for %r", target.selector)
+            return
+        self._active_fallback = spec
+        self._active_route = (selector, target_effort)
+        await self._persist_active_route(self._model)
+        await self._emit(
+            ModelChangeEvent(
+                provider=spec.provider,
+                model_id=spec.model_id,
+                effort=spec.reasoning_effort,
+                reason=reason,
+                is_fallback=True,
+                context_window=int(spec.context_window),
+            )
+        )
+
+    def _spec_for_route(self, selector: str, effort: str | None) -> ModelSpec | None:
+        """The fallback target's own ``ModelSpec``, or None when unresolvable.
+
+        Through :func:`~local_operator.providers.failover.spec_for_target`
+        because that is the SAME derivation the failover driver uses to build
+        the request — deriving the display spec any other way is how the band
+        and the wire end up disagreeing about effort or context window.
+        """
+        try:
+            from local_operator.providers.failover import (
+                FallbackTarget,
+                spec_for_target,
+            )
+
+            return spec_for_target(self._model, FallbackTarget(selector, effort))
+        except Exception:  # noqa: BLE001 — display state is never worth a broken turn
+            return None
 
     async def _emit(self, event: AgentEvent) -> None:
         for handler in list(self._handlers):
@@ -2692,7 +2855,7 @@ class Session:
             from local_operator.compaction import api as compaction_api
 
             if not compaction_api.should_compact(
-                provider_reported, self._model.context_window, settings
+                provider_reported, self.effective_model.context_window, settings
             ):
                 return None
         # Persist what the run has produced SO FAR before planning a cut.
@@ -2758,7 +2921,7 @@ class Session:
         if getattr(planned.settings, "auto_continue", False):
             compaction_api = planned.compaction_api
             threshold = compaction_api.resolve_threshold_tokens(
-                self._model.context_window, planned.settings
+                self.effective_model.context_window, planned.settings
             )
             if outcome.tokens_after <= compaction_api.RECOVERY_BAND * threshold:
                 self._continuation_queue.append(Message.user(_CONTINUATION_PROMPT))
@@ -2943,7 +3106,7 @@ class Session:
             bound = compaction_api.messages_tokens_upper_bound(llm_history)
             if not compaction_api.should_compact(
                 compaction_api.compaction_context_tokens(provider_reported, bound),
-                self._model.context_window,
+                self.effective_model.context_window,
                 settings,
             ):
                 return CompactionOutcome(ran=False, reason="below_threshold")
@@ -2962,7 +3125,7 @@ class Session:
         )
         context_tokens = compaction_api.compaction_context_tokens(provider_reported, local_estimate)
         if respect_threshold and not compaction_api.should_compact(
-            context_tokens, self._model.context_window, settings
+            context_tokens, self.effective_model.context_window, settings
         ):
             return CompactionOutcome(ran=False, reason="below_threshold")
 
@@ -3182,16 +3345,20 @@ class Session:
             try:
                 from local_operator.compaction import snapcompact
 
+                # The EFFECTIVE model throughout: the archive is being sized
+                # and tokenized for the model that will actually receive the
+                # replay, which during a fallback is the fallback.
+                effective = self.effective_model
                 archive = await asyncio.to_thread(
                     snapcompact.compact_to_archive,
                     to_summarize,
-                    self._model.provider,
-                    self._model.model_id,
+                    effective.provider,
+                    effective.model_id,
                     self._previous_archive_text(),
-                    context_window=self._model.context_window,
+                    context_window=effective.context_window,
                 )
                 summary = snapcompact.archive_summary(
-                    archive, self._model.provider, self._model.model_id
+                    archive, effective.provider, effective.model_id
                 )
                 return summary or " ", {"snapcompact": _archive_to_json(archive)}
             except Exception:
@@ -3466,6 +3633,83 @@ class Session:
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},
         )
+
+    # -- active model route (fallback persistence) ---------------------------
+
+    async def _persist_active_route(self, primary: ModelSpec) -> None:
+        """Record which model is actually serving requests, for resume.
+
+        Written on EVERY edge, including recovery (``active: None``), because
+        ``latest_custom`` reads backwards and stops at the first hit: without
+        the recovery row a session that fell back and recovered would resume
+        pinned to a fallback nothing is wrong with. ``primary`` rides along so
+        the restore can tell a pin that belongs to the CURRENT selected model
+        from one stranded by a later ``/model`` switch.
+        """
+        # The PIN is what persists — the target selector and the chain entry's
+        # own effort (None when the entry named none) — not the derived display
+        # spec: a restore re-derives against whatever the primary's effort is
+        # THEN, exactly as the live failover driver would.
+        route = self._active_route
+        await self._transcript.append_custom(
+            ACTIVE_ROUTE_CUSTOM_TYPE,
+            {
+                "primary": f"{primary.provider}/{primary.model_id}",
+                "active": (None if route is None else {"selector": route[0], "effort": route[1]}),
+            },
+        )
+
+    def _restore_active_route(self) -> None:
+        """Re-adopt the fallback that was serving when this session last ran.
+
+        Guarded three ways, each a real situation rather than paranoia:
+
+        - no entry / ``active: None`` → the session closed on its selected
+          model (or recovered before closing); nothing to restore.
+        - persisted ``primary`` differs from the CURRENT selection → the pin
+          belongs to a model the user has since switched away from (a
+          ``/model default`` change, an agent profile edit, a ``--hosting``
+          flag). The new selection owes the user a fresh start on the model
+          they actually chose, not a detour recorded against the old one.
+        - the fallback selector equals the current selection → the user
+          adopted the fallback as their model; a pin would be a no-op that
+          still repainted the band with a spurious fallback marker.
+
+        Restores quietly (no event, no notice): construction runs before any
+        front end subscribes, so hosts read ``effective_model`` when they build
+        their chrome — the same way they read ``model_label`` — and the replayed
+        transcript already narrates the original failure.
+        """
+        details = self._transcript.latest_custom(ACTIVE_ROUTE_CUSTOM_TYPE)
+        if not details:
+            return
+        active = details.get("active")
+        if not isinstance(active, dict):
+            return
+        selector = str(active.get("selector") or "")
+        if "/" not in selector:
+            return
+        current = f"{self._model.provider}/{self._model.model_id}"
+        persisted_primary = str(details.get("primary") or "")
+        if persisted_primary and persisted_primary != current:
+            return
+        if selector == current:
+            return
+        raw_effort = active.get("effort")
+        effort = str(raw_effort) if isinstance(raw_effort, str) and raw_effort else None
+        spec = self._spec_for_route(selector, effort)
+        if spec is None:
+            logger.warning("dropping unresolvable persisted fallback route: %r", selector)
+            return
+        self._active_fallback = spec
+        self._active_route = (selector, effort)
+        # Re-pin the stream fn's route too, or the restore is display-only and
+        # the first prompt goes back to the provider that was failing. Optional
+        # capability like the notice bridge: hosts that construct sessions with
+        # bare stream functions simply resume on the primary.
+        restore = getattr(self._stream_fn, "restore_fallback", None)
+        if callable(restore):
+            restore(selector, effort, current)
 
     async def set_wake_schedules(self, schedules: list[WakeSchedule]) -> None:
         """Full-list update from the wake tool: persists then re-arms."""

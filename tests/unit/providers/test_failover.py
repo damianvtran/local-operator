@@ -3045,3 +3045,69 @@ class TestTheLoopBackSweep:
         assert excinfo.value.kind == "quota"
         assert excinfo.value.retryable
         assert "not usable right now" in excinfo.value.message
+
+
+@pytest.mark.asyncio
+async def test_route_edges_reach_the_settle_handler_in_both_directions() -> None:
+    """The settle hook hears the fallback pin AND the recovery.
+
+    The recovery direction is the one a display cannot live without: the
+    driver's success path used to `clear()` silently, so a band that learned
+    "now serving from the fallback" had no edge to learn "back on the
+    primary" from — the same stale frame in the opposite direction.
+    """
+    primary_healthy = False
+
+    async def client_for(spec: ModelSpec) -> Any:
+        if spec.provider == "openai" and not primary_healthy:
+            return ScriptedClient(ProviderError(400, "model unavailable"))
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    settings = {"retry": {"fallbackChains": {"default": ["anthropic/claude-opus-5"]}}}
+    edges: list[Any] = []
+    state = FailoverRouteState(on_settle=lambda target, reason: edges.append(target))
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+
+    _ = [
+        event
+        async for event in stream_with_failover(
+            _request(), auth, settings, client_for, route_state=state
+        )
+    ]
+    assert edges == [FallbackTarget("anthropic/claude-opus-5")]
+
+    # The primary recovers; a probe reaching it must settle the route back.
+    primary_healthy = True
+    state.primary_retry_at_ms = 0  # the cooldown has elapsed
+    state.active = None  # preflight's probe path re-opens the primary
+    _ = [
+        event
+        async for event in stream_with_failover(
+            _request(), auth, settings, client_for, route_state=state
+        )
+    ]
+    # No new edge: nothing was pinned when the primary served, so the clear
+    # is a no-op rather than a spurious "back on" for a route never left.
+    assert edges == [FallbackTarget("anthropic/claude-opus-5")]
+
+
+@pytest.mark.asyncio
+async def test_primary_success_with_a_pinned_route_settles_the_recovery() -> None:
+    """`clear_settled` fires exactly on the pinned→primary transition."""
+    edges: list[Any] = []
+    state = FailoverRouteState(on_settle=lambda target, reason: edges.append(target))
+    state.active = FallbackTarget("anthropic/claude-opus-5")
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    # The pinned target is not in this request's chain (no chains configured),
+    # so the walk starts at the primary — the "primary probe succeeds" shape.
+    _ = [
+        event
+        async for event in stream_with_failover(
+            _request(), FakeAuth({"openai": ["k1"]}), None, client_for, route_state=state
+        )
+    ]
+    assert edges == [None]
+    assert state.active is None

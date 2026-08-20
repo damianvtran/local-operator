@@ -105,6 +105,7 @@ from local_operator.harness.types import (
     Message,
     MessageEndEvent,
     MessageStartEvent,
+    ModelChangeEvent,
     ModelSpec,
     SubagentEndEvent,
     SubagentProgressEvent,
@@ -289,12 +290,24 @@ def _make_runner(
             if job is not None:
                 # Off the CHILD, not the parent: ``model_spec`` may have put
                 # this child on a different model, which is precisely the fact
-                # a reader of the job row needs.
-                job.model_label = child.model_label
+                # a reader of the job row needs. The EFFECTIVE label (with a
+                # getattr degrade for reduced hosts) because a resumed child
+                # may boot straight onto a restored provider fallback, and the
+                # job row exists to say which model is actually doing the work.
+                job.model_label = str(
+                    getattr(child, "effective_model_label", "") or child.model_label
+                )
                 # From the spec the child was ALREADY built with, so this
                 # costs nothing: no registry resolve, no provider discovery,
                 # and none of it on anyone's render path.
-                job.context_window = child.model.context_window
+                job.context_window = int(
+                    getattr(
+                        getattr(child, "effective_model", None) or child.model,
+                        "context_window",
+                        0,
+                    )
+                    or child.model.context_window
+                )
             if comms is not None:
                 # Before the prompt runs: the parent may already have a
                 # question queued for this child, and attach is what flushes
@@ -544,6 +557,15 @@ def _make_relay(
                 final["text"] = message.text
                 _accumulate_usage(job, message.usage)
                 progress = ACTIVITY_THINKING
+        elif isinstance(event, ModelChangeEvent):
+            # Keep the job row's label truthful about which model is doing the
+            # child's work — the band and the jobs list read it live, and a
+            # child that fell over to another provider mid-run is exactly what
+            # a reader of those surfaces needs to know.
+            if job is not None:
+                job.model_label = f"{event.provider}/{event.model_id}"
+                if event.context_window > 0:
+                    job.context_window = event.context_window
         elif isinstance(event, AgentEndEvent):
             if event.error:
                 final["error"] = event.error

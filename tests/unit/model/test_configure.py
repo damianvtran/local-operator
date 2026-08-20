@@ -1252,3 +1252,118 @@ class TestAnIsolatedRequestTouchesNoneOfTheSessionsSharedState:
         assert result["message_effort"] is not None
         assert result["preflights"], "no preflight ran on an ordinary request"
         assert result["body"]["prompt_cache_key"] == "session-isolation"
+
+
+class TestRouteSettleBridge:
+    """The stream fn's route bridge: what the session's model display hangs off.
+
+    ``set_route_handler`` receives BOTH edges — the pinned target on a
+    fallback, ``None`` on recovery — because a display that only ever hears
+    "fell back" keeps naming the fallback after the primary recovered.
+    """
+
+    def _stream(self, store, settings=None):
+        return create_stream_fn(
+            store,
+            settings
+            or {
+                "retry": {
+                    "usageAwareFallback": True,
+                    "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+                }
+            },
+            session_id="session-route",
+        )
+
+    @pytest.mark.asyncio
+    async def test_fallback_activation_reaches_the_route_handler(self, tmp_path) -> None:
+        store = AuthStore(tmp_path / "auth.db")
+        stream = self._stream(store)
+        edges: list[tuple[Any, str]] = []
+        stream.set_route_handler(lambda target, reason: edges.append((target, reason)))
+        try:
+            await stream._route_state.activate(
+                FallbackTarget("openai/gpt-5.3-codex"), "provider failure"
+            )
+            assert len(edges) == 1
+            target, reason = edges[0]
+            assert target == FallbackTarget("openai/gpt-5.3-codex")
+            assert reason == "provider failure"
+        finally:
+            await stream.close()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_preflight_recovery_settles_and_narrates(self, tmp_path) -> None:
+        """The auth-only preflight path clears a pinned route as a SETTLED
+        edge (handler told, notice printed), not as silent bookkeeping —
+        otherwise the display keeps naming a fallback that stopped serving."""
+        store = AuthStore(tmp_path / "auth.db")
+        store.upsert_credential("anthropic", {"key": "sk-ant", "source": "login"})
+        stream = create_stream_fn(
+            store,
+            {"retry": {"usageAwareFallback": False}},
+            session_id="session-route",
+        )
+        edges: list[Any] = []
+        notices: list[str] = []
+        stream.set_route_handler(lambda target, reason: edges.append(target))
+        stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
+        model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+        stream._primary_selector = "anthropic/claude-opus-5"
+        stream._route_state.active = FallbackTarget("openai/gpt-5.3-codex")
+        try:
+            await stream.preflight_usage(model)
+            assert edges == [None]
+            assert any("back to anthropic/claude-opus-5" in notice for notice in notices)
+            assert any(notice.startswith("info:") for notice in notices)
+        finally:
+            await stream.close()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_restore_fallback_pins_without_announcing(self, tmp_path) -> None:
+        """A resume's re-pin fires NEITHER handler — the transcript replay
+        already narrates the original failure, and the restoring session set
+        its own state from the same entry — but must seed the primary memo and
+        a probe grace, or the next preflight clears the pin it was handed."""
+        store = AuthStore(tmp_path / "auth.db")
+        stream = self._stream(store)
+        edges: list[Any] = []
+        notices: list[str] = []
+        stream.set_route_handler(lambda target, reason: edges.append(target))
+        stream.set_notice_handler(lambda text, kind: notices.append(text))
+        try:
+            stream.restore_fallback("openai/gpt-5.3-codex", None, "anthropic/claude-opus-5")
+            assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+            assert stream._primary_selector == "anthropic/claude-opus-5"
+            assert not stream._route_state.primary_retry_due()
+            assert edges == []
+            assert notices == []
+        finally:
+            await stream.close()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_restored_pin_survives_the_boot_preflight(self, tmp_path) -> None:
+        """The TUI runs a quota preflight seconds after boot; a restored pin
+        must survive it. The auth-only clear path would otherwise probe only
+        "does the primary HAVE auth" — true throughout an outage — and unpin
+        a fallback the provider is still failing behind."""
+        store = AuthStore(tmp_path / "auth.db")
+        store.upsert_credential("anthropic", {"key": "sk-ant", "source": "login"})
+        stream = create_stream_fn(
+            store,
+            {"retry": {"usageAwareFallback": False}},
+            session_id="session-route",
+        )
+        edges: list[Any] = []
+        stream.set_route_handler(lambda target, reason: edges.append(target))
+        try:
+            stream.restore_fallback("openai/gpt-5.3-codex", None, "anthropic/claude-opus-5")
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+            assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+            assert edges == []
+        finally:
+            await stream.close()
+            store.close()

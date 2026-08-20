@@ -79,6 +79,15 @@ class FakeSession:
     def model(self) -> ModelSpec:
         return ModelSpec(provider="fake", model_id="fake-model")
 
+    @property
+    def effective_model(self) -> ModelSpec:
+        # The fake never falls back, so selection and effective agree.
+        return self.model
+
+    @property
+    def effective_model_label(self) -> str:
+        return self.model_label
+
     def set_model(self, model: ModelSpec) -> None:
         pass
 
