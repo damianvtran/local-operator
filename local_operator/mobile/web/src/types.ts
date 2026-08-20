@@ -182,7 +182,7 @@ export interface PromptImage {
 
 export type CommandOp =
 	| { op: "prompt"; text: string; images?: PromptImage[] }
-	| { op: "steer"; text: string }
+	| { op: "steer"; text: string; images?: PromptImage[] }
 	| { op: "abort" }
 	| { op: "set_model"; provider: string; model_id: string }
 	| { op: "set_effort"; effort: string }

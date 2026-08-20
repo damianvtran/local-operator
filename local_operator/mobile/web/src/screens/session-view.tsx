@@ -122,7 +122,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 		>
 			<Header projection={projection} />
 
-			<Transcript entries={projection.transcript} />
+			<Transcript pid={pid} entries={projection.transcript} />
 
 			{/* The aggregate working line — pinned at the foot of the transcript
 			    like the TUI's WorkingBlock, above the panels and composer. */}

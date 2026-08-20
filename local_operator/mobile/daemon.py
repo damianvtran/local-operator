@@ -301,7 +301,16 @@ def _pin_opening_user_message(projection: SessionProjection, record: SessionReco
         import json as _json
 
         with path.open() as fh:
-            for line in fh:
+            # Scan a bounded head, not the whole file: the opening user turn
+            # is normally within the first few entries, but if it was pruned
+            # or compacted away the first surviving user message can sit
+            # arbitrarily deep, and this runs on every projection reload.
+            # Give up after MAX_SCAN lines — a session whose opening prompt
+            # no longer exists simply has nothing to pin.
+            MAX_SCAN = 400
+            for i, line in enumerate(fh):
+                if i >= MAX_SCAN:
+                    return
                 try:
                     entry = _json.loads(line)
                 except ValueError:
@@ -325,7 +334,9 @@ def _pin_opening_user_message(projection: SessionProjection, record: SessionReco
 
                 projection.transcript = [
                     TranscriptEntry(
-                        id=entry.get("id") or f"user-{record.pid}",
+                        # The transcript persists message.id as the entry id,
+                        # so it is always present — use it, no pid fallback.
+                        id=entry["id"],
                         kind="user",
                         text=text,
                         final=True,
@@ -335,6 +346,44 @@ def _pin_opening_user_message(projection: SessionProjection, record: SessionReco
                 return
     except Exception:  # noqa: BLE001 — a missing/odd transcript must never break a repaint
         return
+
+
+def _transcript_entry_json(entry: Any) -> dict[str, Any]:
+    """Serialize one mobile TranscriptEntry for the history payload."""
+    return entry.to_json()
+
+
+def _history_page(record: SessionRecord, before: str | None, limit: int) -> tuple[list[Any], bool]:
+    """Fold the session's full on-disk transcript and return the page of
+    entries immediately OLDER than ``before`` (chronological within the page)
+    plus whether more history exists beyond it.
+
+    Runs off the event loop (``asyncio.to_thread`` at the call site): folding
+    a long transcript rehydrates every message and is not loop-safe work.
+    """
+    from local_operator.mobile.projection import fold_messages_to_entries
+    from local_operator.paths import config_dir
+    from local_operator.session.transcript import Transcript
+
+    directory = config_dir() / "sessions" / record.session_id
+    if not (directory / "transcript.jsonl").exists():
+        return [], False
+    try:
+        transcript = Transcript(directory)
+        history = transcript.build_llm_history()
+        entries = fold_messages_to_entries(history)
+    except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
+        logger.exception("history fold failed for session %s", record.session_id)
+        return [], False
+
+    if before:
+        cut = next((i for i, e in enumerate(entries) if e.id == before), len(entries))
+    else:
+        cut = len(entries)
+    older = entries[:cut]
+    page = older[-limit:] if len(older) > limit else older
+    has_more = len(older) > len(page)
+    return page, has_more
 
 
 def _fan_out(entry: SessionEntry) -> None:
@@ -693,6 +742,37 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
+    async def api_session_history(request: Request) -> Response:
+        """Older transcript entries for lazy loading.
+
+        The live projection (SSE) is a tail WINDOW — the fold caps it, so a
+        long session's older messages never reach the phone. This endpoint
+        folds the session's FULL on-disk transcript with the same render
+        semantics and serves the pages the cap dropped, so scrolling up
+        back-fills history. ``before`` is the id of the oldest entry the
+        phone already has; the response is the page of entries immediately
+        OLDER than it (chronological within the page).
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        pid = int(request.path_params["pid"])
+        entry = daemon.table.entries.get(pid)
+        if entry is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        before = request.query_params.get("before")
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", "80")), 200))
+        except ValueError:
+            limit = 80
+        page, has_more = await asyncio.to_thread(_history_page, entry.record, before, limit)
+        return JSONResponse(
+            {
+                "entries": [_transcript_entry_json(e) for e in page],
+                "has_more": has_more,
+            }
+        )
+
     async def api_command(request: Request) -> Response:
         """The one mutation endpoint: {op, ...} → control frame. Keeping
         mutations on one route mirrors the registrant's dispatch and keeps
@@ -799,6 +879,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/directories", api_directories),
         Route("/api/sessions/past", api_past_sessions),
         Route("/api/sessions/{pid:int}/events", api_session_events),
+        Route("/api/sessions/{pid:int}/history", api_session_history),
         Route("/api/sessions/{pid:int}/command", api_command, methods=["POST"]),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),

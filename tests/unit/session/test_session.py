@@ -25,6 +25,7 @@ from local_operator.harness.types import (
     CustomMessage,
     ImageContent,
     Message,
+    MessageStartEvent,
     ModelSpec,
     NoticeEvent,
     StreamEndEvent,
@@ -142,7 +143,12 @@ async def test_prompt_full_turn_events_and_persistence(tmp_path):
     await session.prompt("hello")
 
     assert executed == ["echo"]
-    assert events[0].type == "agent_start"
+    # The user turn is announced FIRST (MessageStartEvent for role=user) so
+    # every front end sees it, then the turn boundary opens.
+    assert events[0].type == "message_start"
+    assert isinstance(events[0], MessageStartEvent)
+    assert events[0].message.role == "user"
+    assert events[1].type == "agent_start"
     assert events[-1].type == "agent_end"
     assert isinstance(events[-1], AgentEndEvent)
     assert events[-1].aborted is False
@@ -202,7 +208,10 @@ async def test_subscribe_sync_async_and_exception_isolation(tmp_path):
 
     assert len(broken_calls) == len(seen_sync)  # broken ran for every event...
     assert seen_sync == seen_async  # ...without breaking the others' ordering
-    assert seen_sync[0] == "agent_start" and seen_sync[-1] == "agent_end"
+    # The user message_start leads (announced so all front ends see the turn),
+    # then agent_start; agent_end closes.
+    assert seen_sync[0] == "message_start" and seen_sync[1] == "agent_start"
+    assert seen_sync[-1] == "agent_end"
 
     seen_sync.clear()
     seen_async.clear()

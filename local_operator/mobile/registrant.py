@@ -35,7 +35,10 @@ import logging
 import os
 import secrets
 import threading
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
+
+if TYPE_CHECKING:
+    from local_operator.harness.types import ImageContent
 
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registry import RecordPublisher
@@ -47,6 +50,33 @@ from local_operator.mobile.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
+    """Decode the wire's [{data_b64, mime_type}] into ImageContent blocks.
+
+    Bad entries are dropped, not fatal: a paste that half-decoded should cost
+    that one image, not the whole prompt. Empty input yields an empty list,
+    which ``_submit_prompt`` treats exactly like no images. This is part of
+    the mobile contract — both handles use it.
+    """
+    if not images:
+        return []
+    from local_operator.harness.types import ImageContent
+
+    out: list[ImageContent] = []
+    for item in images:
+        if not isinstance(item, dict):
+            logger.debug("mobile image dropped: not a dict (%r)", type(item).__name__)
+            continue
+        data = item.get("data_b64") or item.get("data") or ""
+        mime = item.get("mime_type") or "image/png"
+        if not data:
+            logger.debug("mobile image dropped: no data_b64/data")
+            continue
+        out.append(ImageContent(data=data, mime_type=mime))
+    return out
+
 
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
@@ -76,7 +106,7 @@ class SessionHandle(Protocol):
         ...
 
     async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str: ...
-    async def steer(self, text: str) -> str: ...
+    async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str: ...
     async def abort(self) -> str: ...
     async def set_model(self, provider: str, model_id: str) -> str: ...
     async def set_effort(self, effort: str) -> str: ...
@@ -331,7 +361,11 @@ class Registrant:
                 images=images if isinstance(images, list) else None,
             )
         if op == "steer":
-            return await h.steer(str(frame.get("text", "")))
+            images = frame.get("images")
+            return await h.steer(
+                str(frame.get("text", "")),
+                images=images if isinstance(images, list) else None,
+            )
         if op == "abort":
             return await h.abort()
         if op == "set_model":

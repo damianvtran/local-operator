@@ -30,36 +30,18 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.mobile.projection import ProjectionFold
-from local_operator.mobile.registrant import SessionHandle
+from local_operator.mobile.registrant import SessionHandle, image_blocks
 from local_operator.mobile.types import PendingRequest, SessionProjection
 
 if TYPE_CHECKING:
-    from local_operator.harness.types import ImageContent
     from local_operator.tui.app import OperatorApp
 
 logger = logging.getLogger(__name__)
 
 
-def _image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
-    """Decode the wire's [{data_b64, mime_type}] into ImageContent blocks.
-
-    Bad entries are dropped, not fatal: a paste that half-decoded should cost
-    that one image, not the whole prompt. Empty input yields an empty list,
-    which ``_submit_prompt`` treats exactly like no images.
-    """
-    if not images:
-        return []
-    from local_operator.harness.types import ImageContent
-
-    out: list[ImageContent] = []
-    for item in images:
-        if not isinstance(item, dict):
-            continue
-        data = item.get("data_b64") or item.get("data") or ""
-        mime = item.get("mime_type") or "image/png"
-        if data:
-            out.append(ImageContent(data=data, mime_type=mime))
-    return out
+# Decode wire images via the shared mobile-contract helper (registrant.py);
+# kept as a module alias so existing call sites stay short.
+_image_blocks = image_blocks
 
 
 class TuiSessionHandle(SessionHandle):
@@ -157,9 +139,11 @@ class TuiSessionHandle(SessionHandle):
             self._on_projection()
         return "prompt sent"
 
-    async def steer(self, text: str) -> str:
+    async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+        image_blocks = _image_blocks(images)
+
         def do_steer() -> None:
-            self._session().steer(text)
+            self._session().steer(text, image_blocks)
 
         await self._on_app(do_steer)
         self._fold.note_user_message(text, steer=True)

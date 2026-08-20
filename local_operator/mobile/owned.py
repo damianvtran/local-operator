@@ -28,7 +28,7 @@ from typing import Any, Callable
 from local_operator.harness.types import AgentEvent
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle
-from local_operator.mobile.tui_handle import _image_blocks
+from local_operator.mobile.registrant import image_blocks as _image_blocks
 from local_operator.mobile.types import PendingRequest, SessionProjection
 
 logger = logging.getLogger(__name__)
@@ -182,15 +182,41 @@ class OwnedSessionHandle(SessionHandle):
     async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         self._check_loop_thread()
         image_blocks = _image_blocks(images)
-        asyncio.ensure_future(self._session.prompt(text, image_blocks))
+        # Await the rejection, not fire-and-forget: Session.prompt raises
+        # RuntimeError when the session is compacting (or a stale "not
+        # streaming" projection raced a live turn), and an un-awaited future
+        # would swallow that — the phone would echo the user's message as
+        # sent while the agent never received it. Check the guard up front,
+        # run the turn as a background task, and report rejections so the
+        # composer can show them.
+        if self._session.is_streaming or getattr(self._session, "_compacting", False):
+            return "not sent: session is busy — steer instead, or retry in a moment"
         self._projection.streaming = True
         self._fold.note_user_message(text)
         self._notify()
+        self._run_turn_task(text, image_blocks)
         return "prompt sent"
 
-    async def steer(self, text: str) -> str:
+    def _run_turn_task(self, text: str, image_blocks: list) -> None:
+        """Run the turn as a background task and undo the premature echo if
+        the prompt is rejected after all (a turn could have started in the
+        gap between the guard above and the lock)."""
+
+        async def run() -> None:
+            try:
+                await self._session.prompt(text, image_blocks)
+            except RuntimeError as exc:
+                self._projection.streaming = self._session.is_streaming
+                self._notify()
+                logger.warning("mobile prompt rejected: %s", exc)
+
+        asyncio.ensure_future(run())
+
+    async def steer(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         self._check_loop_thread()
-        self._session.steer(text)
+        # Images ride the steer too — a screenshot sent mid-turn IS the
+        # correction, and session.steer already carries them.
+        self._session.steer(text, _image_blocks(images))
         self._projection.queued_count += 1
         self._fold.note_user_message(text, steer=True)
         self._notify()

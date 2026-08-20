@@ -121,6 +121,73 @@ def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
         return 0, 0
 
 
+def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntry]:
+    """Fold a full message history into transcript entries, UNCAPPED.
+
+    The session-side ``ProjectionFold.fold_history`` caps to the live tail
+    (the phone's realtime view is a window, not the whole log). The daemon's
+    history endpoint needs the SAME render semantics over the FULL history so
+    it can serve the older pages the cap dropped — this is the lazy-load
+    source. Pure (no ProjectionFold state), so the daemon can call it per
+    request without touching the live fold.
+
+    Tool-result diffs ride in ``provider_payload["details"]`` (where the
+    harness stores them); rehydrated messages carry that payload, so the
+    write/edit rows expand to their diff exactly like the live ones.
+    """
+    entries: list[TranscriptEntry] = []
+    # tool_call_id -> its row, local to this fold (a fresh fold re-pairs).
+    tool_rows: dict[str, TranscriptEntry] = {}
+    tool_args: dict[str, dict[str, Any]] = {}
+    for message in history:
+        if isinstance(message, CustomMessage):
+            text = _message_text(message)
+            if text:
+                entries.append(
+                    TranscriptEntry(id=message.id, kind="notice", text=_compact(text, 400))
+                )
+            continue
+        if message.role == "user":
+            entries.append(TranscriptEntry(id=message.id, kind="user", text=message.text))
+        elif message.role == "assistant":
+            if message.text:
+                entries.append(TranscriptEntry(id=message.id, kind="assistant", text=message.text))
+            for call in message.tool_calls:
+                entry = TranscriptEntry(
+                    id=f"{message.id}:{call.id}",
+                    kind="tool",
+                    tool_call_id=call.id,
+                    tool_name=call.name,
+                    tool_state="done",
+                    summary=_summarize_args(call.name, call.arguments or {}),
+                )
+                entries.append(entry)
+                tool_rows[call.id] = entry
+                tool_args[call.id] = call.arguments or {}
+        elif message.role == "tool":
+            entry = tool_rows.get(message.tool_call_id or "")
+            if entry is not None:
+                entry.tool_state = "failed" if message.is_error else "done"
+                if message.is_error:
+                    entry.error = _compact(message.text, 200)
+                result_details = (message.provider_payload or {}).get("details")
+                entry.diff_added, entry.diff_removed = _diff_counts(result_details)
+                details: dict[str, Any] = {}
+                args = tool_args.get(message.tool_call_id or "", {})
+                if args:
+                    details["args"] = {
+                        k: _compact(str(v), TOOL_ARGS_CHARS) for k, v in args.items()
+                    }
+                if message.text:
+                    details["output"] = message.text[-TOOL_OUTPUT_TAIL_CHARS:]
+                if isinstance(result_details, dict):
+                    for key in ("diff", "added", "removed", "lines_added", "lines_removed"):
+                        if key in result_details:
+                            details[key] = result_details[key]
+                entry.details = details
+    return entries
+
+
 class ProjectionFold:
     """Incremental fold of one session's events into a SessionProjection."""
 
@@ -243,9 +310,7 @@ class ProjectionFold:
                 self._append(entry)
                 self._open_message_id = event.message.id
             elif isinstance(event.message, Message) and event.message.role == "user":
-                self._append(
-                    TranscriptEntry(id=event.message.id, kind="user", text=event.message.text)
-                )
+                self.absorb_user_event(event.message)
         elif isinstance(event, MessageUpdateEvent):
             if self._open_message_id and event.message.id == self._open_message_id:
                 row = self._find(self._open_message_id)
@@ -375,6 +440,23 @@ class ProjectionFold:
             )
         )
         self._bump()
+
+    def absorb_user_event(self, message: Message) -> bool:
+        """Fold a live user ``MessageStartEvent``. The session emits these for
+        user turns now, so a prompt from ANY front end reaches the fold — the
+        TUI→phone direction that was missing. Returns True when it added the
+        row; False when the row was already there (the handle's optimistic
+        ``note_user_message`` echo for a phone-sent prompt), so the same
+        message never appears twice on the phone."""
+        if not isinstance(message, Message) or message.role != "user":
+            return False
+        text = message.text
+        # De-dupe the optimistic echo: same text already sitting at the tail.
+        for entry in reversed(self.projection.transcript[-3:]):
+            if entry.kind in ("user", "steer") and entry.text == text:
+                return False
+        self._append(TranscriptEntry(id=message.id, kind="user", text=text, final=True))
+        return True
 
     # -- working line (TUI WorkingBlock's phone counterpart) -------------------
 

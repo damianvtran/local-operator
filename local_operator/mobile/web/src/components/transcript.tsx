@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { Markdown } from "./markdown"
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
+import { getHistory } from "../api";
 import { cn } from "../lib/cn";
 import type { TranscriptEntry } from "../types";
 
@@ -66,10 +67,32 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
 	}
 }
 
-export function Transcript({ entries }: { entries: TranscriptEntry[] }) {
+export function Transcript({
+	pid,
+	entries,
+}: {
+	pid: number;
+	entries: TranscriptEntry[];
+}) {
 	const [windowSize, setWindowSize] = useState(PAGE);
+	/* Older entries the daemon served, PREPENDED above the live window. The
+	   live projection is a tail the fold caps, so a long session's history
+	   never arrives over SSE — it is paged in from the transcript on disk as
+	   the user scrolls up. */
+	const [older, setOlder] = useState<TranscriptEntry[]>([]);
+	const [hasMore, setHasMore] = useState(true);
+	const [loadingOlder, setLoadingOlder] = useState(false);
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const pinnedRef = useRef(true);
+	/* Auto-load trigger guard: one in-flight page at a time. */
+	const loadingRef = useRef(false);
+	/* Reset the back-filled history when the session changes. */
+	useEffect(() => {
+		setOlder([]);
+		setHasMore(true);
+		setWindowSize(PAGE);
+	}, [pid]);
+
 	/* The auto-scroll trigger. It must fire ONLY when the transcript actually
 	   grew or the tail streamed more text — never on a same-content re-render.
 	   The projection SSE sends a fresh `entries` array identity on every
@@ -79,9 +102,18 @@ export function Transcript({ entries }: { entries: TranscriptEntry[] }) {
 	const tail = entries[entries.length - 1];
 	const growthSignal = `${entries.length}:${tail?.id ?? ""}:${tail?.text?.length ?? 0}:${tail?.final ?? ""}`;
 
+	/* De-dupe: an older page can overlap the live window's head when the fold
+	   re-caps between the fetch and the render. Key on id, older first. */
+	const merged = (() => {
+		const seen = new Set(older.map((e) => e.id));
+		const live = entries.filter((e) => !seen.has(e.id));
+		return [...older, ...live];
+	})();
+
 	const visible =
-		entries.length > windowSize ? entries.slice(-windowSize) : entries;
-	const hiddenCount = entries.length - visible.length;
+		merged.length > windowSize ? merged.slice(-windowSize) : merged;
+	const hiddenCount = merged.length - visible.length;
+	const oldestId = visible.length > 0 ? visible[0].id : null;
 
 	/* Follow the tail on new content, but only when already at the bottom. */
 	useEffect(() => {
@@ -92,11 +124,49 @@ export function Transcript({ entries }: { entries: TranscriptEntry[] }) {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [growthSignal]);
 
+	/* Prepending older rows must NOT move the viewport: capture the scroll
+	   offset relative to the top of the OLD content, then restore it after the
+	   prepend so the row the user was reading stays put. */
+	const prependPage = (page: TranscriptEntry[]) => {
+		const el = scrollRef.current;
+		const prevHeight = el?.scrollHeight ?? 0;
+		const prevTop = el?.scrollTop ?? 0;
+		setOlder((cur) => [...page, ...cur]);
+		/* Restore after React commits the taller content. */
+		requestAnimationFrame(() => {
+			const el2 = scrollRef.current;
+			if (el2) {
+				el2.scrollTop = prevTop + (el2.scrollHeight - prevHeight);
+			}
+		});
+	};
+
+	const loadOlder = async () => {
+		if (loadingRef.current || !hasMore || !oldestId) return;
+		loadingRef.current = true;
+		setLoadingOlder(true);
+		try {
+			const { entries: page, has_more } = await getHistory(pid, oldestId, PAGE);
+			if (page.length > 0) prependPage(page);
+			setHasMore(has_more);
+		} catch {
+			/* A failed page is not fatal — leave hasMore so a retry can load it. */
+		} finally {
+			loadingRef.current = false;
+			setLoadingOlder(false);
+		}
+	};
+
 	const onScroll = () => {
 		const el = scrollRef.current;
 		if (!el) return;
 		pinnedRef.current =
 			el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+		/* Near the top with more history to fetch: auto-load so scrolling up
+		   just keeps going, no button needed. */
+		if (el.scrollTop < 120 && hasMore && !loadingRef.current) {
+			void loadOlder();
+		}
 	};
 
 	return (
@@ -107,13 +177,23 @@ export function Transcript({ entries }: { entries: TranscriptEntry[] }) {
 				"lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2",
 			)}
 		>
+			{hasMore || loadingOlder ? (
+				<button
+					type="button"
+					onClick={() => void loadOlder()}
+					disabled={loadingOlder}
+					className="mx-auto rounded-sm border border-control bg-surface px-3 py-1.5 text-meta text-ink-muted active:bg-elevated disabled:opacity-60"
+				>
+					{loadingOlder ? "loading…" : "load earlier"}
+				</button>
+			) : null}
 			{hiddenCount > 0 ? (
 				<button
 					type="button"
 					onClick={() => setWindowSize((n) => n + PAGE)}
 					className="mx-auto rounded-sm border border-control bg-surface px-3 py-1.5 text-meta text-ink-muted active:bg-elevated"
 				>
-					load earlier ({hiddenCount} more)
+					show more ({hiddenCount} loaded)
 				</button>
 			) : null}
 			{visible.map((e) => (
