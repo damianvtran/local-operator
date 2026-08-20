@@ -366,9 +366,10 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             # answered from this point on is part of what happened.
             fell = bool(event.get("is_fallback"))
             selector = f"{event.get('provider', '')}/{event.get('model_id', '')}"
+            # Same verb pairing as the parent's notices (design D2).
             note(
                 index,
-                (f"now serving from {selector}" if fell else f"back on {selector}"),
+                (f"fell back to {selector}" if fell else f"back to {selector}"),
                 "warning" if fell else "info",
             )
         elif etype == "agent_end":

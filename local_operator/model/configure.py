@@ -1719,8 +1719,10 @@ class SessionStreamFn:
             # The recovery deserves the same narration the failure got: the
             # fallback edge printed "falling back to X", and without this line
             # the model display silently snapping back reads as a glitch, not
-            # a recovery. Info, not warning — it is good news.
-            await self._notice(f"{reason} — back on {self._primary_selector}", "info")
+            # a recovery. Info, not warning — it is good news. One clause,
+            # "back to" — the failure edge's "falling back to" and this pair
+            # off the same preposition (design D1).
+            await self._notice(f"back to {self._primary_selector}", "info")
         if self._route_handler is None:
             return
         result = self._route_handler(target, reason)

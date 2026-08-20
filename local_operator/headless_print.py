@@ -242,10 +242,11 @@ class PrintRenderer:
             # The route edge in one line, both directions — the exec-mode
             # counterpart of the TUI band repaint: a reader of a long headless
             # run needs to know which model produced the output from here on.
+            # The verbs pair with the failure notice's "falling back to"
+            # (design D2): "serving from" reads as a location, not a route.
             selector = f"{event.provider}/{event.model_id}"
             self.console.print(
-                f"[dim]{'now serving from' if event.is_fallback else 'back on'} "
-                f"{selector}[/dim]",
+                f"[dim]{'fell back to' if event.is_fallback else 'back to'} " f"{selector}[/dim]",
                 highlight=False,
             )
         elif isinstance(event, CompactionStartEvent):

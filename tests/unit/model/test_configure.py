@@ -1149,7 +1149,7 @@ class TestRouteSettleBridge:
         try:
             await stream.preflight_usage(model)
             assert edges == [None]
-            assert any("back on anthropic/claude-opus-5" in notice for notice in notices)
+            assert any("back to anthropic/claude-opus-5" in notice for notice in notices)
             assert any(notice.startswith("info:") for notice in notices)
         finally:
             await stream.close()
