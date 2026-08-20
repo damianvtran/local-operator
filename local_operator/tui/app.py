@@ -3073,10 +3073,26 @@ class OperatorApp(App[None]):
         transcript = self._transcript_view()
         card = boot_card_width(box)
         card_up = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
+        # The card sits inside the transcript's content box with equal ground on
+        # both sides, so a notice given the card's width and offset by the same
+        # half-difference lands on the card's exact column. The transcript's own
+        # one-cell left gutter is inside that box, so the centre of the CONTENT
+        # is what the offset aims at. The block cannot be centred BY the
+        # stylesheet: `align-horizontal` aligns a container's children, never the
+        # node carrying it, so the offset is computed here alongside the width
+        # the same clamp resolves. When the card is gone the width is RESET to
+        # `1fr` — left at the boot value it narrowed the notice for the rest of
+        # the session, dead space to its right at any width.
+        content_box = box - transcript.styles.gutter.width
+        offset = max(0, (content_box - card) // 2)
         for block in transcript.query(".notice-block"):
             block.set_class(card_up, BOOT_COLUMN_CLASS)
             if card_up:
                 block.styles.width = card
+                block.styles.offset = (offset, 0)
+            else:
+                block.styles.width = "1fr"
+                block.styles.offset = (0, 0)
 
     def _sync_boot_composition(self, size: Size) -> None:
         """Centre the boot composition — splash, separator, card — in the screen.
