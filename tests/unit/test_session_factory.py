@@ -1811,6 +1811,50 @@ async def test_an_unreadable_profile_says_so_in_the_log(
     ), [record.getMessage() for record in caplog.records]
 
 
+def test_only_ephemeral_session_dirs_are_claimed_for_retention(tmp_path: Path) -> None:
+    """The claim marker must never be written into an agent directory.
+
+    Retention only scans ``sessions/``, so a marker under ``agents/<id>/`` buys
+    nothing \u2014 and it does not merely waste a file: ``export_agent`` zips every
+    file in the agent directory, so it would ship to the Agent Hub and be
+    imported into other users' agent directories.
+
+    Asserts on the marker actually landing (or not), through BOTH sides. An
+    earlier version compared the two directory shapes instead, which was a test
+    of ``pathlib``: it stayed green when the gate was deleted, and it missed a
+    release path that wrote the marker into agent directories on every clean
+    dispose.
+    """
+    from local_operator.session.retention import (
+        LIVE_MARKER_NAME,
+        claim_session,
+        release_session,
+    )
+
+    registry = FakeRegistry(tmp_path)
+    agent = cast("AgentData", SimpleNamespace(id="a1"))
+
+    ephemeral, _ = _transcript_dir_and_agent_id(
+        agent, _args(train=False), cast("AgentRegistry", registry)
+    )
+    trained, _ = _transcript_dir_and_agent_id(
+        agent, _args(train=True), cast("AgentRegistry", registry)
+    )
+    trained.mkdir(parents=True, exist_ok=True)
+
+    claim_session(ephemeral)
+    claim_session(trained)
+    assert (ephemeral / LIVE_MARKER_NAME).exists(), "a session directory must be claimed"
+    assert not (trained / LIVE_MARKER_NAME).exists(), "an agent directory must never be"
+
+    # Release is gated too: it used to WRITE the marker, so an ungated release
+    # put the file into the agent directory that the claim had just refused.
+    release_session(ephemeral)
+    release_session(trained)
+    assert not (ephemeral / LIVE_MARKER_NAME).exists()
+    assert not (trained / LIVE_MARKER_NAME).exists(), "release leaked a marker into agents/"
+
+
 def test_a_marker_truncated_mid_character_does_not_take_the_picker_down(tmp_path: Path) -> None:
     """`mark_session_origin` writes non-atomically, so a child killed mid-write
     leaves the file cut INSIDE a multi-byte character.

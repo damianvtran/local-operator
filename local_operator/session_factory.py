@@ -944,6 +944,9 @@ async def _prepare(
     yolo = bool(getattr(args, "yolo", False))
 
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
+    # ``claim_session`` below creates this directory for a session under
+    # ``sessions/``; the explicit mkdir is what covers an agent directory,
+    # which is deliberately never claimed.
     transcript_dir.mkdir(parents=True, exist_ok=True)
 
     # Bound the ephemeral session store before this run adds to it. Startup
@@ -951,7 +954,19 @@ async def _prepare(
     # what makes "never evict the session that is running" enforceable rather
     # than a race. Best-effort by construction (see retention.sweep_sessions):
     # reclaiming disk must never be the reason a session fails to start.
-    from local_operator.session.retention import sweep_from_config
+    from local_operator.session.retention import claim_session, sweep_from_config
+
+    # CLAIM BEFORE SWEEPING, and in that order. The claim is what tells every
+    # OTHER session's sweep that this directory belongs to a live run; written
+    # afterwards, this session would be an anonymous empty directory for the
+    # width of its own sweep, which is exactly the window a concurrent startup
+    # used to delete it in.
+    #
+    # Agent directories are refused by ``claim_session`` itself, not here: the
+    # gate belongs with the marker so the claim and release sides cannot drift
+    # apart (they did once, and the ungated release wrote the marker into
+    # ``agents/<id>/`` on every clean dispose).
+    claim_session(transcript_dir)
 
     sweep_from_config(config_manager, Path(agent_registry.config_dir), transcript_dir)
 

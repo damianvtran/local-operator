@@ -249,10 +249,61 @@ class Transcript:
             # ``Session._offloaded`` is where the loop-responsiveness win
             # actually comes from (1360 ms -> 56 ms); this write is a few
             # hundred microseconds and is not worth a correctness hazard.
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(entry.to_json() + "\n")
-                handle.flush()
+            self._write_line(entry.to_json() + "\n")
         return entry
+
+    def _write_line(self, line: str) -> None:
+        """Append one already-encoded line, recreating the store if it is gone.
+
+        The DIRECTORY is not guaranteed to survive the session: retention
+        sweeps the ephemeral store, an operator clears ``sessions/``, a
+        temporary directory is reaped. Before this, a vanished directory made
+        the append raise ``FileNotFoundError`` — and raise it again on every
+        following turn, so the session did not merely lose its history, it lost
+        the ability to take another turn. That is how one deleted directory
+        turned into a permanently dead session, with no recovery short of
+        restarting and no hint of what happened.
+
+        Scope, precisely: this recovers from the directory going away, which is
+        what ``open("a")`` cannot do for itself. It does NOT cover the file
+        alone being deleted — there ``open("a")`` succeeds and the store
+        silently restarts from this line, which is pre-existing behaviour and
+        not something this path can detect without stat-ing on every append.
+
+        Recreating costs one ``mkdir`` on a path that is almost always present,
+        since the happy path is the plain append and this runs only after it
+        has already failed. The whole in-memory history is rewritten rather
+        than just this line: a file that begins part way through a conversation
+        replays as one, and a resume off it would silently drop everything said
+        before the directory went. The rewrite goes through a temp file and
+        ``os.replace`` for the same reason :meth:`compact_file` does — an
+        interrupted recovery must not leave a half-written transcript where a
+        complete one is expected.
+
+        Only this instance's history can be restored. A SECOND ``Transcript``
+        on the same directory (two resumes of one session id) holds its own
+        ``_entries``, so whichever recovers last wins — the same hazard
+        ``harness.comms`` already refuses to create for subagents, recorded
+        here because the recovery path makes it reachable one more way.
+        """
+        try:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+            return
+        except FileNotFoundError:
+            pass
+        self.directory.mkdir(parents=True, exist_ok=True)
+        logger.warning(
+            "transcript directory %s disappeared mid-session; recreated it and "
+            "rewrote %d entries",
+            self.directory,
+            len(self._entries),
+        )
+        payload = "".join(item.to_json() + "\n" for item in self._entries)
+        tmp = self.path.with_suffix(self.path.suffix + ".recover")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, self.path)
 
     # -- replay -------------------------------------------------------------
 

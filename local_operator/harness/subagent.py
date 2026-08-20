@@ -709,6 +709,7 @@ async def _build_child_session(
     from local_operator.config import ConfigManager
     from local_operator.harness.types import ToolContext
     from local_operator.prompts_api import build_system_blocks
+    from local_operator.session.retention import claim_session
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
     from local_operator.session_factory import _env_details, load_user_instructions
@@ -722,6 +723,20 @@ async def _build_child_session(
     session_dir = (
         resume_dir if resume_dir is not None else config_dir() / "sessions" / uuid.uuid4().hex[:12]
     )
+    # CLAIM FIRST, before the directory holds anything at all. A child writes
+    # its own session directory under the same ``sessions/`` store the
+    # retention sweep reclaims, so it needs the same claim its parent has:
+    # subagents routinely outlive the sweep that another session's startup
+    # runs, and an unclaimed child directory is an eviction candidate while the
+    # child is still writing to it. The pid is the parent process's, which is
+    # exactly right — that is the process whose death makes the directory dead.
+    #
+    # Ordered ahead of the stamp and the transcript rather than after them
+    # because an empty directory is reaped on sight: everything between
+    # creating this directory and claiming it is a window in which a concurrent
+    # session's startup sweep can take it. ``claim_session`` creates the
+    # directory itself, so claiming first leaves no window at all.
+    claim_session(session_dir)
     # Stamp the directory as the machine's BEFORE the transcript exists, so a
     # picker painted while this child is mid-run already knows what it is. A
     # child's directory is shape-identical to a user conversation, which is how
