@@ -103,10 +103,14 @@ class OwnedSessionHandle(SessionHandle):
                 self._notify()
 
         async def ask_gate(questions: list[Any]) -> dict[str, list[str]] | None:
+            if not questions:
+                # Nothing to ask: answer NOTHING (the harness's "user escaped"
+                # signal) rather than parking a card with no question on it.
+                return None
             request_id = secrets.token_hex(8)
             future: asyncio.Future[dict[str, list[str]] | None] = self._loop.create_future()
             self._pending_futures[request_id] = future
-            first = questions[0] if questions else None
+            first = questions[0]
             # The answer map is keyed by the QUESTION'S id, not our request id
             # — AskUserFn's contract answers ``question.id -> choices``, and
             # the harness validates the keys it gets back. Stash the mapping

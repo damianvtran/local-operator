@@ -132,3 +132,15 @@ def test_f6_history_fold_prunes_dead_tool_bookkeeping() -> None:
     surviving_rows = {e.id for e in fold.projection.transcript}
     assert set(fold._tool_rows.values()) <= surviving_rows
     assert set(fold._tool_args) <= set(fold._tool_rows)
+
+
+def test_login_page_tracks_tui_brand_tokens() -> None:
+    """Round-2 follow-up: the login page is server-rendered (zero client-side
+    auth surface), so it carries the brand values inline — this pins them to
+    the TUI's BRAND_TOKENS.dark so the two cannot silently drift again."""
+    from local_operator.mobile.daemon import _LOGIN_HTML
+    from local_operator.tui.theme import BRAND_TOKENS
+
+    tokens = BRAND_TOKENS["dark"]
+    for role in ("bg", "fg", "surface", "edge", "accent", "danger"):
+        assert tokens[role] in _LOGIN_HTML, f"login page missing brand {role}={tokens[role]}"
