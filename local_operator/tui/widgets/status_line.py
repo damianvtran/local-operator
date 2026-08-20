@@ -128,7 +128,11 @@ ICON_APPROVALS = "!"
 #: submit, the generated title replaces it ~1.5 s later, and a re-title can
 #: land at any time after that (see ``local_operator.session.naming``). Sizing
 #: to the string means each of those arrivals re-flows the right group — the
-#: alarm and the figures shift left or right with the title's length. The
+#: alarm and the figures shift left or right with the title's length, and
+#: because the title's ink participates in the fit test, a re-title can also
+#: change which segments SURVIVE the ladder band-wide (a one-char title at
+#: 100 cells keeps the duration and the full cwd path; a 21-cell title drops
+#: the duration and shortens the cwd to its basename). The
 #: previous design reserved the full box against exactly that drift, and what
 #: it bought column stability with was a HOLE: every title shorter than the
 #: box left a run of blanks between the alarm and the `‹` seam (up to 39 cells
@@ -1512,8 +1516,9 @@ class StatusLine:
         to that cap, and the row spends only the cells it inks: no reserve is
         painted, so the seam and every sibling sit flush against the title's
         actual width and the group's last inked cell is the band's right edge.
-        The columns to the left therefore move when the title's length changes
-        — the trade :data:`NAME_CELLS`'s comment prices.
+        The columns to the left therefore move when the title's length
+        changes, and the fit itself can shed or restore siblings with it —
+        the trade :data:`NAME_CELLS`'s comment prices.
 
         Colour groups by KIND rather than giving every field its own hue, which
         would be a rainbow: counters share `label`, the two numbers an operator
