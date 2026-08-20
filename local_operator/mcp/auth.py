@@ -46,6 +46,7 @@ import logging
 import os
 import sys
 import time
+import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlparse
@@ -117,6 +118,39 @@ class McpAuthRequiredError(RuntimeError):
     def __init__(self, server_url: str) -> None:
         super().__init__(f"MCP OAuth authorization required for {server_url}")
         self.server_url = server_url
+
+
+class McpLoginCancelledError(RuntimeError):
+    """An interactive MCP OAuth grant ended with no authorization arriving.
+
+    Two routes land here: the human route (the browser tab was closed or the
+    consent screen abandoned, surfaced once the idle guard fires) and the
+    structural one (the login task was cancelled — an exclusive re-login, the
+    TUI's stop-ladder, or a Ctrl+C at the CLI). The point of the dedicated
+    type is the MESSAGE: the login flows catch the SDK's ``OAuthFlowError``
+    and report ``str(exc)``, so the explanation has to live on the innermost
+    raise or it is lost. A bare ``CancelledError`` would surface either as an
+    empty ``MCP login failed for 'x':`` line or — worse inside the TUI — as
+    silence, because a Textual worker cancelled by its exclusive group never
+    runs the worker's exception handler at all.
+    """
+
+
+class AbandonedGrantError(Exception):
+    """The browser round trip ended with no authorization — the human walked away.
+
+    Distinct from :class:`McpLoginCancelledError` on purpose: THAT one is the
+    user-facing receipt the login surfaces report; this one is the flow's
+    internal record of WHY the grant died. The separation matters because of
+    how the two endings have to travel. An abandoned grant is raised out of
+    ``callback_handler`` as a raw ``asyncio.CancelledError``: the streamable-HTTP
+    transport's SDK ``post_writer`` swallows any ordinary exception an auth
+    handler raises (it logs and moves on), while a cancellation unwinds the
+    transport's task group exactly the way a grant REQUIREMENT does — that is
+    the channel the message cannot be eaten on. The flow records itself in
+    :data:`ABANDONED_GRANTS` first, and the manager converts the arriving
+    cancellation back into :class:`McpLoginCancelledError`.
+    """
 
 
 def mcp_oauth_credential_id(server_url: str) -> str:
@@ -646,6 +680,16 @@ def parse_oauth_callback_input(raw: str) -> tuple[str, str | None, str | None]:
 #: forever.
 PASTE_INPUT_TIMEOUT_S = 300.0
 
+#: Idle bound on an INTERACTIVE grant: the longest a login waits for a browser
+#: round trip that will never complete. The usual reason nothing arrives is
+#: that the tab was closed or the consent screen abandoned — indistinguishable
+#: from a slow human at the protocol level, so the flow has to give up on a
+#: clock and say so. Sized to match the 10-minute budget both login callers
+#: already allow the whole connect (``/mcp login`` and ``local-operator mcp
+#: login``), so the grant now ends with an explicit "cancelled" receipt inside
+#: that window instead of outliving it as a silent "logging in…" line.
+INTERACTIVE_GRANT_TIMEOUT_S = 600.0
+
 #: Hosts a redirect URI can name that THIS process is able to answer.
 #:
 #: A redirect URI may legitimately point anywhere; only a loopback address is
@@ -669,6 +713,53 @@ _REQUEST_READ_TIMEOUT_S = 10.0
 #: The authorization code is already in hand at that point; a lingering socket
 #: is not worth stalling the connect for.
 _SERVER_CLOSE_TIMEOUT_S = 1.0
+
+
+#: Flows whose grant the human abandoned (idle guard fired), keyed by the
+#: flow object with the abandonment time as value. This is the side channel
+#: that survives the transport: ``callback_handler`` raises a raw
+#: ``CancelledError`` for an abandoned grant because the SDK's ``post_writer``
+#: eats ordinary exceptions, and the manager consults this registry to tell
+#: "the grant died of neglect" apart from "the login task was cancelled".
+#: Entries are pruned on every write; a flow object whose grant never
+#: abandoned never appears here, and one that did is dropped from the map
+#: when its entry is consumed or when it ages past the prune horizon.
+#: How long an abandonment record may sit unread. The manager consumes it
+#: within seconds of the raise; the horizon only bounds a leak for flows
+#: whose connect never got as far as consulting the registry.
+_ABANDONED_GRANT_TTL_S = 120.0
+
+
+class AbandonedGrantLedger:
+    """Flows whose grant the human abandoned (idle guard fired).
+
+    This is the side channel that survives the transport: ``callback_handler``
+    raises a raw ``CancelledError`` for an abandoned grant because the SDK's
+    ``post_writer`` eats ordinary exceptions, and the manager consults the
+    ledger to tell "the grant died of neglect" apart from "the login task
+    was cancelled". Records are consumed by the manager (``pop``) or age out
+    on the next write; keys are weak so a flow nobody consults cannot be kept
+    alive by its own record.
+    """
+
+    def __init__(self) -> None:
+        self._records: weakref.WeakKeyDictionary[LoopbackAuthFlow, float] = (
+            weakref.WeakKeyDictionary()
+        )
+
+    def record(self, flow: LoopbackAuthFlow) -> None:
+        now = time.monotonic()
+        for old, at in list(self._records.items()):
+            if now - at > _ABANDONED_GRANT_TTL_S:
+                self._records.pop(old, None)
+        self._records[flow] = now
+
+    def pop(self, flow: LoopbackAuthFlow) -> bool:
+        """Consume one flow's abandonment record; ``True`` when one was there."""
+        return self._records.pop(flow, None) is not None
+
+
+ABANDONED_GRANTS = AbandonedGrantLedger()
 
 
 class LoopbackAuthFlow:
@@ -777,11 +868,25 @@ class LoopbackAuthFlow:
         self._notify(*lines)
 
     async def callback_handler(self) -> AuthorizationCodeResult:
-        """Wait for the provider's redirect (or a pasted URL) and return the code."""
+        """Wait for the provider's redirect (or a pasted URL) and return the code.
+
+        The transport cannot be trusted to deliver an exception raised here:
+        the SDK's ``post_writer`` swallows ordinary auth-flow exceptions, so
+        an ABANDONED grant (idle guard fired — the browser went away) is
+        recorded in :data:`ABANDONED_GRANTS` and then raised as a RAW
+        ``CancelledError``, the one exception shape that unwinds the
+        transport's anyio task group intact. The manager recognises the
+        pairing and re-voices it as :class:`McpLoginCancelledError`; raising
+        the named error here directly would leave it stranded in a log line
+        while the connect surfaced an unlabelled cancellation.
+        """
         from mcp.shared.auth import AuthorizationCodeResult
 
         try:
             code, state, iss = await self._await_authorization()
+        except AbandonedGrantError:
+            ABANDONED_GRANTS.record(self)
+            raise asyncio.CancelledError() from None
         finally:
             await self._stop_server()
         return AuthorizationCodeResult(code=code, state=state, iss=iss)
@@ -792,13 +897,54 @@ class LoopbackAuthFlow:
             # safe precisely because nothing else is going to.
             return await self._await_pasted()
         try:
-            return await asyncio.wait_for(self._result, timeout=PASTE_INPUT_TIMEOUT_S)
+            # The inner clock is the 300 s redirect bound with its
+            # port-forwarding advice for the genuinely slow case; the outer
+            # coroutine adds the interactive idle guard AROUND it. They stay
+            # separate because ``wait_for`` makes a timeout indistinguishable
+            # from an outer one once nested — each clock must convert its own
+            # expiry before the next layer can see it.
+            # Captured once: a closure read of ``self._result`` types as
+            # optional (``_stop_server`` resets it), and it cannot change
+            # underneath the wait anyway — only ``_stop_server`` clears it,
+            # and that runs after the wait resolves.
+            result = self._result
+
+            async def _within_idle_guard() -> tuple[str, str | None, str | None]:
+                try:
+                    return await asyncio.wait_for(result, timeout=PASTE_INPUT_TIMEOUT_S)
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError(
+                        f"Timed out after {PASTE_INPUT_TIMEOUT_S:.0f}s waiting for the "
+                        f"OAuth redirect to {self.redirect_uri}. If you authorized in a "
+                        "browser on another machine it cannot reach this port — "
+                        f"forward it (ssh -L {self._port}:127.0.0.1:{self._port} …) "
+                        "and try again."
+                    ) from exc
+
+            return await asyncio.wait_for(_within_idle_guard(), timeout=INTERACTIVE_GRANT_TIMEOUT_S)
+        except asyncio.CancelledError:
+            # The login task itself was cancelled (an exclusive re-login, the
+            # TUI's stop-ladder, Ctrl+C at the CLI). The underlying result
+            # future is cancelled by the wait_for on the way out, and
+            # ``callback_handler``'s ``finally`` stops the listener — but only
+            # if we CO-OPERATE: shielding the teardown lets one stop-ladder
+            # escalation turn a cancelled login into a wedged listener holding
+            # the redirect port into the next grant.
+            # The interrupt that arrives while we are still WAITING for the
+            # redirect is unambiguous: the browser never answered, so this is
+            # the task being cancelled, never the abandonment channel (that
+            # one only fires from the idle-guard arm). Report it directly.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._stop_server())
+            raise McpLoginCancelledError("interrupted before the browser completed it") from None
         except asyncio.TimeoutError as exc:
-            raise RuntimeError(
-                f"Timed out after {PASTE_INPUT_TIMEOUT_S:.0f}s waiting for the OAuth "
-                f"redirect to {self.redirect_uri}. If you authorized in a browser on "
-                "another machine it cannot reach this port — forward it "
-                f"(ssh -L {self._port}:127.0.0.1:{self._port} …) and try again."
+            # The idle guard, not the redirect clock: nothing arrived for the
+            # whole interactive budget, which in practice means the browser
+            # went away — tab closed, consent abandoned.
+            raise AbandonedGrantError(
+                f"no redirect arrived within {INTERACTIVE_GRANT_TIMEOUT_S / 60:.0f} "
+                "minutes — the login was probably cancelled (browser tab closed, "
+                "or the authorization left unfinished)"
             ) from exc
 
     async def _await_pasted(self) -> tuple[str, str | None, str | None]:
@@ -825,6 +971,12 @@ class LoopbackAuthFlow:
                 asyncio.to_thread(lambda: input(prompt).strip()),
                 timeout=PASTE_INPUT_TIMEOUT_S,
             )
+        except asyncio.CancelledError:
+            # Same receipt as the listener path: an interrupted CLI login must
+            # not surface as a bare "MCP login failed for 'x':" with no reason.
+            # The to_thread reader itself cannot be cancelled (that is why
+            # paste is never raced), so no teardown is owed here.
+            raise McpLoginCancelledError("interrupted before the redirect URL was pasted") from None
         except asyncio.TimeoutError as exc:
             # TRANSLATE IT. Since 3.11 `asyncio.TimeoutError` IS `TimeoutError`
             # and `str(TimeoutError())` is the empty string, so letting it
@@ -1385,12 +1537,31 @@ async def ensure_mcp_oauth_fresh(
     return endpoints
 
 
+def _resolve_redirect_uri(cfg: MCPServerConfig) -> str:
+    """The loopback redirect URI a config's ``oauth`` block resolves to.
+
+    Shared by :func:`wire_oauth_auth` (which advertises it in the client
+    metadata) and :func:`build_oauth_provider` (which binds the flow's
+    listener to it): the two MUST agree, or the provider redirects the
+    browser to an address nothing is serving.
+    """
+    oauth = cfg.oauth
+    callback_port = (oauth.callback_port if oauth is not None else None) or DEFAULT_CALLBACK_PORT
+    callback_path = (oauth.callback_path if oauth is not None else None) or DEFAULT_CALLBACK_PATH
+    if not callback_path.startswith("/"):
+        callback_path = f"/{callback_path}"
+    return (oauth.redirect_uri if oauth is not None else None) or (
+        f"http://127.0.0.1:{callback_port}{callback_path}"
+    )
+
+
 def wire_oauth_auth(
     server_url: str,
     cfg: MCPServerConfig,
     store: StructuralAuthStore | None = None,
     *,
     interactive: bool = True,
+    flow: LoopbackAuthFlow | None = None,
 ) -> dict[str, Any]:
     """Build ``OAuthClientProvider`` kwargs for one server.
 
@@ -1408,7 +1579,11 @@ def wire_oauth_auth(
       (MCP-11);
     - ``redirect_handler`` / ``callback_handler``: the two halves of one
       :class:`LoopbackAuthFlow`, which listens on that redirect URI for the
-      duration of the grant (see the module docstring).
+      duration of the grant (see the module docstring). Callers that need
+      the flow itself — :func:`build_oauth_provider` does, for the manager's
+      abandoned-grant check — pass their own via ``flow``; the dict returned
+      here stays exactly the SDK's kwargs so it can be splatted straight
+      into ``OAuthClientProvider``.
 
     ``interactive`` controls whether the flow may open a browser. Ordinary
     session startup and auto-reconnects pass ``False`` so an unrefreshable
@@ -1423,13 +1598,7 @@ def wire_oauth_auth(
     auth = cfg.auth
     oauth = cfg.oauth
 
-    callback_port = (oauth.callback_port if oauth is not None else None) or DEFAULT_CALLBACK_PORT
-    callback_path = (oauth.callback_path if oauth is not None else None) or DEFAULT_CALLBACK_PATH
-    if not callback_path.startswith("/"):
-        callback_path = f"/{callback_path}"
-    redirect_uri = (oauth.redirect_uri if oauth is not None else None) or (
-        f"http://127.0.0.1:{callback_port}{callback_path}"
-    )
+    redirect_uri = _resolve_redirect_uri(cfg)
 
     # Scopes: explicit `scope` on the auth block — an extra-allowed field, so
     # it lives in ``model_extra`` rather than being declared — else none (the
@@ -1461,7 +1630,8 @@ def wire_oauth_auth(
     if client_id:
         storage.seed_client_info(client_id, client_secret)
 
-    flow = LoopbackAuthFlow(redirect_uri, server_url=server_url, interactive=interactive)
+    if flow is None:
+        flow = LoopbackAuthFlow(redirect_uri, server_url=server_url, interactive=interactive)
     return {
         "server_url": server_url,
         "client_metadata": client_metadata,
@@ -1503,8 +1673,18 @@ def build_oauth_provider(
     """
     from mcp.client.auth import OAuthClientProvider
 
-    kwargs = wire_oauth_auth(server_url, cfg, store=store, interactive=interactive)
+    # The flow is created HERE (not inside wire_oauth_auth) so it can be
+    # attached to the provider: an abandoned grant arrives at the connect as
+    # a raw CancelledError (see ``LoopbackAuthFlow.callback_handler``), and
+    # the ABANDONED_GRANTS ledger keyed by this object is what identifies it.
+    # Its redirect URI must match the one wire_oauth_auth computes, which a
+    # config override can change — one helper keeps the two from drifting.
+    flow = LoopbackAuthFlow(
+        _resolve_redirect_uri(cfg), server_url=server_url, interactive=interactive
+    )
+    kwargs = wire_oauth_auth(server_url, cfg, store=store, interactive=interactive, flow=flow)
     provider = OAuthClientProvider(**kwargs)
+    provider._loopback_flow = flow  # type: ignore[attr-defined]
     if endpoints is not None:
         provider.context.oauth_metadata = endpoints.oauth_metadata
         provider.context.protected_resource_metadata = endpoints.protected_resource_metadata

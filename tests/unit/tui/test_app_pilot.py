@@ -2320,6 +2320,103 @@ async def test_mcp_reauth_removes_then_runs_a_fresh_grant() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_login_abandoned_in_the_browser_gets_a_cancel_receipt() -> None:
+    """The "logging in…" line must always get an ending.
+
+    The reported defect: close the browser tab (or walk away from the consent
+    screen) and the transcript kept a "logging in to MCP server linear…" line
+    that nothing ever answered — the flow sat on its idle clock in silence.
+    The flow now settles that as McpLoginCancelledError and the worker reports
+    it as a cancellation, not as a red failure: the user is the one who left.
+    """
+    from local_operator.mcp.auth import McpLoginCancelledError
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["linear"], ["linear"])
+    manager._configs = configs
+
+    async def abandoned_grant(name: str, *, timeout_ms: Any = None) -> Any:
+        raise McpLoginCancelledError(
+            "no redirect arrived within 10 minutes — the login was probably "
+            "cancelled (browser tab closed, or the authorization left unfinished)."
+        )
+
+    manager.connect_configured_server = abandoned_grant  # type: ignore[method-assign]
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        with patch(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            return_value=(configs, {}),
+        ):
+            await _type_command(pilot, app, "mcp login linear")
+            for _ in range(8):
+                await pilot.pause()
+        text = _transcript_text(app)
+        assert "logging in to MCP server linear" in text
+        assert "MCP login for 'linear' cancelled" in text
+        assert "tab closed" in text
+        assert "MCP login failed" not in text
+
+
+@pytest.mark.asyncio
+async def test_mcp_login_worker_cancellation_is_acknowledged() -> None:
+    """A worker cancelled by its exclusive group must still close the receipt.
+
+    Textual never delivers the CancelledError to a worker cancelled this way —
+    the coroutine simply stops — so without the handler the second login left
+    the first one's "logging in…" line permanently unanswered.
+    """
+    import asyncio as _asyncio
+
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "linear": MCPHttpServerConfig(
+            url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["linear"], ["linear"])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app.query_one(Toast).dismiss_toast()
+        # The grant must still be in flight when the cancel lands, or the test
+        # cancels a finished worker and proves nothing — so the fake connect
+        # parks the way a real browser round trip does.
+        entered = _asyncio.Event()
+
+        async def hanging_grant(name: str, *, timeout_ms: Any = None) -> Any:
+            entered.set()
+            await _asyncio.Event().wait()  # the browser never answers
+            raise AssertionError("unreachable")
+
+        manager.connect_configured_server = hanging_grant  # type: ignore[method-assign]
+        # Drive the worker directly: the group-exclusivity cancellation that
+        # strands the receipt in the real UI is a worker.cancel(), which is
+        # what this reproduces without racing two typed commands.
+        worker = app._mcp_login_worker(manager, "linear")
+        task = _asyncio.ensure_future(worker)
+        await _asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(_asyncio.CancelledError):
+            await task
+        await pilot.pause()
+        assert "MCP login for 'linear' cancelled" in _transcript_text(app)
+
+
+@pytest.mark.asyncio
 async def test_mcp_reauth_never_logs_in_on_top_of_a_surviving_row() -> None:
     """A login over a row that failed to delete is NOT a re-auth — the stored
     registration would short-circuit the grant — so a failed removal stops the
