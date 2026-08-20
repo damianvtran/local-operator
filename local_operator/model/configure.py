@@ -1719,7 +1719,7 @@ class SessionStreamFn:
         when a sibling or configured fallback is ready, so preflight can never
         turn usable reserve capacity into a dead end.
         """
-        from local_operator.providers.failover import RetrySettings, parse_selector
+        from local_operator.providers.failover import RetrySettings
 
         selector = f"{model.provider}/{model.model_id}"
 
@@ -1772,6 +1772,26 @@ class SessionStreamFn:
                 storage = self._storage_provider(model.provider)
                 rows = self._auth_store.list_credentials(storage)
                 if rows and all(self._auth_store.is_blocked(row.id, storage) for row in rows):
+                    # Every account is under a block, but "blocked" is only a
+                    # verdict from an earlier probe — quota resets while the
+                    # backoff is still on the clock, and a tier-scoped cap can
+                    # block an account that still serves other models. Fail over
+                    # to another provider only after re-checking the blocks
+                    # themselves: exhaust every login first.
+                    recovered = await self._recover_blocked_accounts(model, storage, rows, retry)
+                    if recovered is not None:
+                        health, shared_remaining, tier_binding, access = recovered
+                        if health.state != "healthy" and await self._apply_account_health(
+                            model,
+                            access,
+                            storage,
+                            health,
+                            shared_remaining,
+                            tier_binding,
+                            retry,
+                        ):
+                            continue
+                        return
                     fallback = await self._first_available_fallback(
                         model,
                         different_provider=True,
@@ -1786,7 +1806,11 @@ class SessionStreamFn:
                 return
             attempted_ids.add(access.credential_id)
 
-            from local_operator.providers.usage import fetch_usage, usage_health
+            from local_operator.providers.usage import (
+                fetch_usage,
+                shared_tier_saturation,
+                usage_health,
+            )
 
             report = await fetch_usage(
                 self._http,
@@ -1807,6 +1831,11 @@ class SessionStreamFn:
             if health.state == "unknown":
                 return
 
+            shared_remaining, tier_binding = shared_tier_saturation(
+                report,
+                model.model_id,
+                reserve_percent=retry.usage_reserve_percent,
+            )
             remaining = (
                 ""
                 if health.remaining_fraction is None
@@ -1828,81 +1857,222 @@ class SessionStreamFn:
                 return
 
             storage = self._storage_provider(model.provider)
-            row = self._auth_store.get_credential(access.credential_id)
-            siblings = [
-                candidate
-                for candidate in self._auth_store.list_credentials(storage)
-                if candidate.id != access.credential_id
-                and (row is None or candidate.credential_type == row.credential_type)
-                and not self._auth_store.is_blocked(candidate.id, storage)
-            ]
-            fallback = await self._first_available_fallback(
+            if await self._apply_account_health(
                 model,
-                # A different effort cannot revive a fully exhausted provider,
-                # but it can preserve reserve quota by reducing token spend.
-                different_provider=health.state == "depleted",
+                access,
+                storage,
+                health,
+                shared_remaining,
+                tier_binding,
+                retry,
+            ):
+                continue
+            return
+
+    async def _apply_account_health(
+        self,
+        model: ModelSpec,
+        access: Any,
+        storage: str,
+        health: Any,
+        shared_remaining: float,
+        tier_binding: bool,
+        retry: Any,
+    ) -> bool:
+        """Act on a low/depleted account-scope verdict.
+
+        Returns True when the caller should re-resolve credentials (a sibling
+        account took over), False when the routing decision is final.
+
+        The binding windows that produced ``health`` can be scoped to a model
+        tier while the shared windows still hold quota (Anthropic's
+        ``7 day (Fable)`` at 100% beside an 11%-free 5-hour window, when the
+        model being routed never draws on Fable). Taking that account out of
+        rotation — and, once every account reports the same shape, failing
+        over to another provider — strands real shared headroom. Rotation is
+        reserved for accounts whose SHARED windows are genuinely binding; a
+        tier-only cap keeps the account in service, and the last account with
+        any shared headroom is always allowed to spend it down to zero before
+        a provider fallback is even considered.
+        """
+        from local_operator.providers.failover import parse_selector
+
+        threshold = min(100.0, max(0.0, float(retry.usage_reserve_percent))) / 100.0
+        shared_above_reserve = shared_remaining > threshold
+        remaining = (
+            ""
+            if health.remaining_fraction is None
+            else f" ({health.remaining_fraction * 100:.0f}% remaining)"
+        )
+        condition = "quota exhausted" if health.state == "depleted" else "quota low"
+
+        row = self._auth_store.get_credential(access.credential_id)
+        siblings = [
+            candidate
+            for candidate in self._auth_store.list_credentials(storage)
+            if candidate.id != access.credential_id
+            and (row is None or candidate.credential_type == row.credential_type)
+            and not self._auth_store.is_blocked(candidate.id, storage)
+        ]
+        fallback = await self._first_available_fallback(
+            model,
+            # A different effort cannot revive a fully exhausted provider,
+            # but it can preserve reserve quota by reducing token spend.
+            different_provider=health.state == "depleted",
+        )
+        if not siblings and fallback is None:
+            await self._notice(
+                f"{model.provider} {condition}{remaining}; no configured fallback is available"
             )
-            if not siblings and fallback is None:
-                await self._notice(
-                    f"{model.provider} {condition}{remaining}; no configured fallback is available"
+            return False
+
+        if tier_binding and shared_above_reserve:
+            # The tight window is a scoped tier cap, not the shared pool, and
+            # the shared windows still hold reserve. The current model does not
+            # draw on that tier, so the account keeps serving: spend the shared
+            # headroom down to zero instead of rotating or failing over on a
+            # cap that does not gate this request.
+            binding = "/".join(health.binding_labels) or "a model-tier window"
+            await self._notice(
+                f"{model.provider} {binding} spent; shared quota remains{remaining} "
+                "— continuing until shared windows are exhausted",
+                "info",
+            )
+            self._route_state.clear()
+            return False
+
+        # How the account is taken out of the running depends on WHAT the
+        # verdict was, and conflating the two is the incident this split
+        # comes from. "Depleted" is a fact about the provider: it will 429
+        # every request until the spent window resets, so a cross-process
+        # SQLite block until that reset merely records reality. "Reserve"
+        # is the opposite of unusable — the account still HAS quota, held
+        # back so it is there when nothing better remains. Writing a block
+        # for it (as this code once did) stood the reserve on its head:
+        # accounts at 90% of a seven-day window were blocked for DAYS, one
+        # by one, until the last live account genuinely depleted and every
+        # session died reporting "all credentials unusable" while three
+        # accounts still held quota.
+        #
+        # So a reserve account is DEPRIORITIZED instead: an in-process,
+        # self-expiring routing preference (see
+        # ``AuthStore.deprioritize_credential``) that steers this walk and
+        # the session's next resolve toward healthier siblings, while the
+        # cascade's ignore-demotions second pass still serves the account
+        # the moment it is the only thing left. The mark is short-lived on
+        # purpose; the preflight re-checks and re-applies it while the
+        # preference still holds.
+        if health.state == "depleted":
+
+            def take_out_of_rotation(credential_id: int) -> None:
+                self._auth_store.block_credential(
+                    credential_id,
+                    storage,
+                    block_ms=max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
                 )
-                return
 
-            # How the account is taken out of the running depends on WHAT the
-            # verdict was, and conflating the two is the incident this split
-            # comes from. "Depleted" is a fact about the provider: it will 429
-            # every request until the spent window resets, so a cross-process
-            # SQLite block until that reset merely records reality. "Reserve"
-            # is the opposite of unusable — the account still HAS quota, held
-            # back so it is there when nothing better remains. Writing a block
-            # for it (as this code once did) stood the reserve on its head:
-            # accounts at 90% of a seven-day window were blocked for DAYS, one
-            # by one, until the last live account genuinely depleted and every
-            # session died reporting "all credentials unusable" while three
-            # accounts still held quota.
-            #
-            # So a reserve account is DEPRIORITIZED instead: an in-process,
-            # self-expiring routing preference (see
-            # ``AuthStore.deprioritize_credential``) that steers this walk and
-            # the session's next resolve toward healthier siblings, while the
-            # cascade's ignore-demotions second pass still serves the account
-            # the moment it is the only thing left. The mark is short-lived on
-            # purpose; the preflight re-checks and re-applies it while the
-            # preference still holds.
-            if health.state == "depleted":
+        else:
 
-                def take_out_of_rotation(credential_id: int) -> None:
-                    self._auth_store.block_credential(
-                        credential_id,
-                        storage,
-                        block_ms=max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
-                    )
+            def take_out_of_rotation(credential_id: int) -> None:
+                # Keyed by ``model.provider``, not ``storage``: demotions
+                # are consulted by ``_resolve`` under the provider name the
+                # request resolves with.
+                self._auth_store.deprioritize_credential(model.provider, credential_id)
 
-            else:
+        if siblings:
+            take_out_of_rotation(access.credential_id)
+            await self._notice(
+                f"{model.provider} {condition}{remaining} — trying another "
+                f"{model.provider} account before provider fallback"
+            )
+            return True
 
-                def take_out_of_rotation(credential_id: int) -> None:
-                    # Keyed by ``model.provider``, not ``storage``: demotions
-                    # are consulted by ``_resolve`` under the provider name the
-                    # request resolves with.
-                    self._auth_store.deprioritize_credential(model.provider, credential_id)
+        assert fallback is not None
+        fallback_provider, _model_id = parse_selector(fallback.selector)
+        if fallback_provider != model.provider:
+            take_out_of_rotation(access.credential_id)
+        await self._route_state.activate(
+            fallback,
+            f"{model.provider} {condition}{remaining}",
+        )
+        return False
 
-            if siblings:
-                take_out_of_rotation(access.credential_id)
-                await self._notice(
-                    f"{model.provider} {condition}{remaining} — trying another "
-                    f"{model.provider} account before provider fallback"
+    async def _recover_blocked_accounts(
+        self,
+        model: ModelSpec,
+        storage: str,
+        rows: list[Any],
+        retry: Any,
+    ) -> tuple[Any, float, bool, Any] | None:
+        """Re-check every blocked account before a provider failover.
+
+        ``get_oauth_access`` returns None the moment all credentials are
+        blocked, but a block is a stale verdict the moment a window resets —
+        and preflight takes accounts out of rotation on nothing more than
+        crossing a reserve threshold, so a pool that still has spendable quota
+        can look exactly like a dead one. Each blocked account is probed in
+        turn: its block is lifted, its usage re-fetched, and the first account
+        with a definite answer (healthy, or low in a way that still routes)
+        wins. Unknown/unreachable reports re-impose a short block and move on.
+        ``None`` means every account is genuinely out — only then is a
+        provider fallback honest.
+        """
+        from local_operator.providers.usage import (
+            fetch_usage,
+            shared_tier_saturation,
+            usage_health,
+        )
+
+        for row in rows:
+            self._auth_store.clear_block(row.id, storage)
+            try:
+                access = await self._auth_store.get_oauth_access(model.provider, self._session_id)
+            except Exception:
+                access = None
+            if access is None or access.kind != "oauth":
+                # Not recoverable as an OAuth account (refresh failure, or the
+                # cascade fell through to an API key); stand the backoff back up
+                # and keep looking.
+                self._auth_store.block_credential(
+                    row.id, storage, block_ms=self.DEFAULT_USAGE_BLOCK_MS
                 )
                 continue
-
-            assert fallback is not None
-            fallback_provider, _model_id = parse_selector(fallback.selector)
-            if fallback_provider != model.provider:
-                take_out_of_rotation(access.credential_id)
-            await self._route_state.activate(
-                fallback,
-                f"{model.provider} {condition}{remaining}",
+            report = await fetch_usage(
+                self._http,
+                model.provider,
+                access_token=access.access_token,
+                account_id=access.account_id,
             )
-            return
+            if report is None:
+                self._auth_store.block_credential(
+                    row.id, storage, block_ms=self.DEFAULT_USAGE_BLOCK_MS
+                )
+                continue
+            health = usage_health(
+                report,
+                model.model_id,
+                reserve_percent=retry.usage_reserve_percent,
+            )
+            if health.state == "unknown":
+                self._auth_store.block_credential(
+                    row.id, storage, block_ms=self.DEFAULT_USAGE_BLOCK_MS
+                )
+                continue
+            shared_remaining, tier_binding = shared_tier_saturation(
+                report,
+                model.model_id,
+                reserve_percent=retry.usage_reserve_percent,
+            )
+            if health.state == "healthy":
+                await self._notice(
+                    f"{model.provider} account quota recovered — resuming {model.provider}",
+                    "info",
+                )
+                self._route_state.clear()
+            # Low/depleted but answerable: hand it to the shared policy, which
+            # decides between spending shared headroom, rotating, and blocking.
+            return health, shared_remaining, tier_binding, access
+        return None
 
     async def __call__(
         self, request: ChatRequest, signal: AbortSignal | None

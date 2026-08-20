@@ -341,6 +341,36 @@ def _anthropic_usage(used_percent: float) -> UsageReport:
     )
 
 
+def _anthropic_tier_capped_usage(five_hour_used: float, fable_used: float) -> UsageReport:
+    """Shared 5h headroom beside a fully-spent scoped tier cap.
+
+    This is the shape behind the false "credentials temporarily unavailable":
+    the Fable weekly is at 100% but the shared 5-hour window still serves,
+    and the model being routed (``claude-opus-5``) never draws on Fable."""
+    return UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit(
+                id="anthropic:5h",
+                label="5 hour",
+                amount=UsageAmount(used=five_hour_used, limit=100.0, unit="percent"),
+                window="5h",
+                shared=True,
+                resets_at_ms=10**15,
+            ),
+            UsageLimit(
+                id="anthropic:7d:fable",
+                label="7 day (Fable)",
+                amount=UsageAmount(used=fable_used, limit=100.0, unit="percent"),
+                window="7d",
+                shared=False,
+                tier="fable",
+                resets_at_ms=10**15,
+            ),
+        ],
+    )
+
+
 @pytest.mark.asyncio
 async def test_usage_preflight_rotates_accounts_before_providers(tmp_path) -> None:
     store = AuthStore(tmp_path / "auth.db")
@@ -375,6 +405,88 @@ async def test_usage_preflight_rotates_accounts_before_providers(tmp_path) -> No
         assert selected is not None and selected.credential_id == second.id
         assert stream._route_state.active is None
         assert any("trying another anthropic account" in notice for notice in notices)
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_tier_scoped_cap_with_shared_headroom_keeps_the_account_serving(tmp_path) -> None:
+    """A spent tier cap is not an exhausted account when shared quota remains.
+
+    The reported incident: every Anthropic account showed a full Fable weekly
+    while the shared 5-hour window still had headroom, and preflight treated
+    the tier cap as account exhaustion — rotating, then failing over to z.ai
+    while usable Anthropic quota sat idle. A tier-scoped binding window that
+    the routed model never draws on must leave the account in service until
+    the SHARED windows are the ones that run out."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("zai", {"key": "sk-zai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["zai/glm-5.3"]},
+            }
+        },
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_tier_capped_usage(89.0, 100.0),
+        ):
+            await stream.preflight_usage(model)
+
+        # The account is neither blocked nor deprioritized, and no failover fires.
+        assert not store.is_blocked(account.id, "anthropic")
+        assert stream._route_state.active is None
+        selected = await store.get_oauth_access("anthropic", "session-a")
+        assert selected is not None and selected.credential_id == account.id
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_shared_window_exhaustion_still_rotates_even_with_a_tier_cap(tmp_path) -> None:
+    """The tier guard must not mask a genuinely spent shared window.
+
+    When the shared 5-hour window is itself at 100%, the account IS out for
+    this model regardless of what the tier caps say, so the sibling rotation
+    still happens."""
+    store = AuthStore(tmp_path / "auth.db")
+    first = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    second = store.upsert_credential("anthropic", _oauth("oauth-b", "account-b"))
+    session = _session_hashing_to_first_row(2)
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "usageReservePercent": 10}},
+        session_id=session,
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        # First account: shared window spent. Second: plenty of shared headroom.
+        if access_token == "oauth-a":
+            return _anthropic_tier_capped_usage(100.0, 100.0)
+        return _anthropic_tier_capped_usage(20.0, 100.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            await stream.preflight_usage(model)
+
+        assert store.is_blocked(first.id, "anthropic")
+        assert not store.is_blocked(second.id, "anthropic")
+        selected = await store.get_oauth_access("anthropic", session)
+        assert selected is not None and selected.credential_id == second.id
     finally:
         await stream.close()
         store.close()
@@ -634,7 +746,16 @@ async def test_transport_fallback_cooldown_skips_quota_probe(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_startup_preflight_warns_when_primary_credentials_are_blocked(tmp_path) -> None:
+async def test_startup_preflight_recovers_a_blocked_account_that_still_has_quota(
+    tmp_path,
+) -> None:
+    """A block is a stale verdict, not ground truth — re-probe before failover.
+
+    The all-blocked branch used to fail over to another provider without ever
+    asking whether the blocked accounts had come back to life. A window reset
+    (or a block written for a tier cap the current model does not draw on)
+    leaves live quota stranded behind the backoff. The blocked account is
+    re-probed, found healthy, unblocked, and kept in service — no failover."""
     store = AuthStore(tmp_path / "auth.db")
     account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
     store.block_credential(account.id, "anthropic", block_ms=60_000)
@@ -653,13 +774,58 @@ async def test_startup_preflight_warns_when_primary_credentials_are_blocked(tmp_
     stream.set_notice_handler(lambda text, kind: notices.append(text))
 
     try:
-        with patch("local_operator.providers.usage.fetch_usage") as fetch:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(25.0),
+        ) as fetch:
             await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
-        fetch.assert_not_called()
+        fetch.assert_called()
+        # The recovered account serves again; no provider failover.
+        assert not store.is_blocked(account.id, "anthropic")
+        assert stream._route_state.active is None
+        assert any("recovered" in notice for notice in notices)
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_preflight_fails_over_only_when_every_account_is_exhausted(
+    tmp_path,
+) -> None:
+    """The re-probe confirms exhaustion before the provider fallback fires.
+
+    With every account still genuinely at 100%, recovery finds no usable
+    login, the block is stood back up, and only then does the session move to
+    the configured cross-provider fallback."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.block_credential(account.id, "anthropic", block_ms=60_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+        ) as fetch:
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+        fetch.assert_called()
+        assert store.is_blocked(account.id, "anthropic")
         assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
         assert notices == [
-            "anthropic credentials temporarily unavailable — "
-            "falling back to openai/gpt-5.3-codex"
+            "anthropic quota exhausted (0% remaining) — falling back to openai/gpt-5.3-codex"
         ]
     finally:
         await stream.close()

@@ -303,6 +303,11 @@ class QuotaHealth:
     remaining_fraction: float | None = None
     reset_after_ms: int | None = None
     scope: Literal["account", "model", "unknown"] = "unknown"
+    #: Labels of the windows at or under the reserve threshold (the ones that
+    #: set ``remaining_fraction`` and ``reset_after_ms``). The preflight uses
+    #: these to tell "everything is spent" from "one secondary window is spent"
+    #: without re-deriving the binding set from the raw report.
+    binding_labels: tuple[str, ...] = ()
 
 
 def usage_health(
@@ -377,7 +382,44 @@ def usage_health(
         remaining_fraction=remaining,
         reset_after_ms=reset_after,
         scope=scope,
+        binding_labels=tuple(limit.label for limit in binding),
     )
+
+
+def shared_tier_saturation(
+    report: UsageReport,
+    model_id: str,
+    *,
+    reserve_percent: float = 10.0,
+) -> tuple[float, bool]:
+    """How full the shared windows are, and whether they are the binding limit.
+
+    ``usage_health`` reduces a report to the single tightest window, so a
+    scoped cap that belongs to a model tier the user never runs (Anthropic's
+    ``7 day (Fable)`` against a ``claude-opus`` request) can dominate the
+    verdict and hide real headroom in the shared 5-hour / 7-day windows. This
+    re-reads the report the other way: the min remaining fraction across the
+    SHARED windows alone, and whether at least one scoped (per-tier) window is
+    at or under the reserve threshold. "Account exhausted" is only honest when
+    the shared windows are binding too; a report whose tight window is scoped
+    while the shared windows still hold quota is a tier cap, not an empty
+    account, and rotating or failing over on it strands usable reserve.
+    """
+    threshold = min(100.0, max(0.0, float(reserve_percent))) / 100.0
+    shared: list[float] = []
+    tier_binding = False
+    for limit in report.limits:
+        if limit.id.endswith(":extra"):
+            continue
+        fraction = limit.amount.fraction()
+        if fraction is None:
+            continue
+        remaining = max(0.0, min(1.0, 1.0 - fraction))
+        if limit.shared or not limit.tier:
+            shared.append(remaining)
+        elif remaining <= threshold:
+            tier_binding = True
+    return (min(shared) if shared else 1.0), tier_binding
 
 
 # ---------------------------------------------------------------------------
