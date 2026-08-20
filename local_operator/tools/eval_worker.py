@@ -54,6 +54,8 @@ import contextlib
 import io
 import json
 import reprlib
+import shlex
+import subprocess
 import sys
 import traceback
 from collections.abc import Callable
@@ -72,6 +74,177 @@ TRUNCATED_MARKER = "\n[…worker output truncated before protocol serialization]
 #: the same moment — writing to ``sys.stdout`` there would land in the capture
 #: buffer and never be seen.
 _PROTOCOL_OUT = sys.stdout
+
+# ---------------------------------------------------------------------------
+# Disclosure-gated redaction of subprocess argv in error rendering
+# ---------------------------------------------------------------------------
+# A cell that spawns a subprocess routinely puts a credential in argv
+# (``curl -H "Authorization: Bearer …"``, ``psql <dsn>``, ``mongosh <uri>``).
+# Python re-renders that argv when the spawn fails and nobody told it which
+# argument is a secret: ``CalledProcessError.__str__`` and
+# ``TimeoutExpired.__str__`` interpolate ``self.cmd``, and ``format_exception``
+# writes the whole ``Command '[...]'`` into the traceback. That traceback is the
+# model-visible tool result, so the credential lands in the transcript even
+# though the model asked for none of it. A timing-out child is the worst case:
+# there is no output, so the argv is the entire content of the error.
+#
+# The guard is PRIOR-DISCLOSURE gating, not secret detection — guessing which
+# argv elements "look like" secrets fails in both directions. An argument is
+# re-rendered only when its exact bytes already appear in code the model itself
+# wrote in this kernel; those bytes are already in the transcript, so echoing
+# them discloses nothing new. Anything else — a value read from the
+# environment, a file, or a session credential — is replaced by its length
+# alone, ``<redacted:71c>``, which keeps the argument count and the failure
+# shape without carrying a single byte of the value (not even a digest, which
+# would be a small partial oracle).
+#
+# Consequences, all deliberate:
+#  - argv[0] is always rendered: an executable path is the most useful part of
+#    a spawn failure and is not a credential.
+#  - Nothing else about the failure changes — exception type, exit code,
+#    timeout and captured stdout/stderr are untouched. Only the invocation is
+#    filtered, and only in the UNCAUGHT rendering; a cell that catches the
+#    error and prints ``e.cmd`` is making an explicit choice and still sees it.
+#  - An all-disclosed command line comes back byte-identical, so the guard is
+#    invisible for ordinary failures like ``['git', 'status']``.
+#  - A value assembled at runtime reads as undisclosed even when its halves
+#    are in the source. That over-redacts a computed path; safe direction.
+#
+# The ledger is fed cell source AS EXECUTED, so a literal written in cell 1 can
+# reach argv in cell 5 and still count as disclosed. Retention is bounded; an
+# evicted entry only costs fidelity (over-redaction), never safety. Mirrors the
+# TypeScript policy in ``omp`` (utils/argv-disclosure.ts); the
+# ``<redacted:<N>c>`` shape must stay in sync with it.
+
+#: Cell sources retained for disclosure checks, newest last.
+_LEDGER_MAX_ENTRIES = 64
+#: Total bytes of retained cell source. Bounds a long-lived kernel's ledger.
+_LEDGER_MAX_BYTES = 256 * 1024
+
+
+class _ArgvDisclosureLedger:
+    """Bounded record of the code a model has run in one kernel.
+
+    Decides whether re-rendering a string discloses anything new. Retention is
+    bounded because a long session's cell history is otherwise unbounded.
+    """
+
+    def __init__(self) -> None:
+        self._entries: list[str] = []
+        self._bytes = 0
+
+    def record(self, source: str) -> None:
+        """Record cell source as disclosed to the transcript."""
+        if not source:
+            return
+        self._entries.append(source)
+        self._bytes += len(source)
+        while len(self._entries) > _LEDGER_MAX_ENTRIES or (
+            self._bytes > _LEDGER_MAX_BYTES and len(self._entries) > 1
+        ):
+            self._bytes -= len(self._entries.pop(0))
+
+    def discloses(self, text: str) -> bool:
+        """True when ``text``'s exact bytes already appear in recorded source.
+
+        Substring containment is the right test and not a weakening: a match
+        means those bytes are literally present in code the model wrote.
+        """
+        if not text:
+            return True
+        return any(text in entry for entry in self._entries)
+
+
+#: One ledger per kernel process; the worker is single-threaded over stdin.
+_ARGV_LEDGER = _ArgvDisclosureLedger()
+
+
+def _redacted_arg(value: str) -> str:
+    """Length-only placeholder for an undisclosed argument.
+
+    Space-free so it reads as one token inside a rendered command line, and
+    length-only so it carries no bytes of the value — not even a digest.
+    """
+    return f"<redacted:{len(value)}c>"
+
+
+def _redact_cmd_arg(arg: Any, seen_first: list[bool]) -> str:
+    """Render one ``cmd`` element, redacting it when the ledger has not seen it.
+
+    ``seen_first`` is a one-element cell so argv[0] is preserved verbatim (see
+    the module comment) without exposing the index here.
+    """
+    text = arg if isinstance(arg, str) else str(arg)
+    if not seen_first[0]:
+        seen_first[0] = True
+        return text
+    return text if _ARGV_LEDGER.discloses(text) else _redacted_arg(text)
+
+
+def _redact_cmd(cmd: Any) -> Any:
+    """Return ``cmd`` (list or string) with undisclosed arguments redacted.
+
+    A list is rebuilt element-wise; a string is split with ``shlex`` so a
+    quoted argument stays one piece (quote awareness is fidelity, not safety:
+    without it ``sh -c 'exit 3'`` half-redacts an innocent line). Unparseable
+    input is returned unchanged — over-redaction of a string we cannot safely
+    split would mangle legitimate diagnostics.
+    """
+    seen = [False]
+    if isinstance(cmd, (list, tuple)):
+        return [_redact_cmd_arg(a, seen) for a in cmd]
+    if isinstance(cmd, str):
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            return cmd
+        return " ".join(_redact_cmd_arg(a, seen) for a in parts)
+    return cmd
+
+
+def _redact_process_error_message(text: str) -> str:
+    """Redact an embedded ``Command '...'`` invocation in a rendered message.
+
+    The command line is rendered by the runtime inside the message, so we
+    recover it with the same ``shlex`` split and apply the disclosure gate
+    token by token. Only the first (argv[0]) token is preserved.
+    """
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        return text
+    if not tokens:
+        return text
+    redacted = [_redact_cmd_arg(t, [False]) for t in tokens]
+    if redacted == tokens:
+        return text
+    # Replace longest-first so a redacted long token cannot be partially
+    # re-matched inside a shorter one it contains.
+    out = text
+    for original, masked in sorted(zip(tokens, redacted), key=lambda p: -len(p[0])):
+        if original != masked:
+            out = out.replace(original, masked)
+    return out
+
+
+def _redact_process_exception(exc: BaseException) -> None:
+    """Redact a process-invocation exception's argv in place before formatting.
+
+    Gating matters: this must never touch an ordinary error. It fires only for
+    the two stdlib types that embed argv — ``CalledProcessError`` and
+    ``TimeoutExpired`` — whose ``.cmd`` attribute carries the invocation.
+    """
+    if not isinstance(exc, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
+        return
+    cmd = getattr(exc, "cmd", None)
+    if cmd is None:
+        return
+    redacted = _redact_cmd(cmd)
+    if redacted is cmd or redacted == cmd:
+        return
+    with contextlib.suppress(Exception):
+        exc.cmd = redacted  # type: ignore[attr-defined]
+
 
 _REPR = reprlib.Repr()
 _REPR.maxstring = 4096
@@ -212,7 +385,18 @@ def _format_error(exc: BaseException) -> str:
     """
     if isinstance(exc, SyntaxError):
         return "".join(traceback.format_exception_only(type(exc), exc)).strip()
-    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+    # Redact embedded subprocess argv BEFORE the traceback is rendered: the
+    # exception's ``__str__`` interpolates ``cmd`` at format time, so this is
+    # the single choke point. ``CalledProcessError.__str__`` reads ``self.cmd``
+    # fresh, and ``TimeoutExpired.__str__`` likewise, so rewriting the
+    # attribute is what the formatted output reflects.
+    _redact_process_exception(exc)
+    rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+    # A chain (``raise ... from``) or a wrapper that rendered the command into
+    # its own message can still carry argv the attribute rewrite missed; the
+    # message-level pass is the backstop. It is gated on the same ledger, so it
+    # never touches a command the model actually wrote.
+    return _redact_process_error_message(rendered)
 
 
 def _execute(namespace: dict[str, Any], code: str) -> str | None:
@@ -269,6 +453,9 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
     namespace["display"] = _make_display(display_sink)
 
     request_id = request.get("id", "")
+    # Record the source BEFORE running it: a failure in this very cell can
+    # reference literals written here, and those are disclosed by definition.
+    _ARGV_LEDGER.record(str(request.get("code", "")))
     if request.get("stream"):
 
         def _emit(channel: str, text: str) -> None:
