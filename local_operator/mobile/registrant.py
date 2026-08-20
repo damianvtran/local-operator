@@ -75,7 +75,7 @@ class SessionHandle(Protocol):
         Returns an unsubscribe callable."""
         ...
 
-    async def prompt(self, text: str) -> str: ...
+    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str: ...
     async def steer(self, text: str) -> str: ...
     async def abort(self) -> str: ...
     async def set_model(self, provider: str, model_id: str) -> str: ...
@@ -325,7 +325,11 @@ class Registrant:
             await self._push()
             return "snapshot sent"
         if op == "prompt":
-            return await h.prompt(str(frame.get("text", "")))
+            images = frame.get("images")
+            return await h.prompt(
+                str(frame.get("text", "")),
+                images=images if isinstance(images, list) else None,
+            )
         if op == "steer":
             return await h.steer(str(frame.get("text", "")))
         if op == "abort":

@@ -102,7 +102,7 @@ class SessionRecord:
 # Requests the daemon may send. Kept as Literal aliases rather than enums so
 # frames stay plain dicts — json.loads output needs no decoding step.
 ControlOp = Literal[
-    "prompt",  # {text} — a full user turn (or queue while streaming)
+    "prompt",  # {text, images?} — a full user turn (or queue while streaming)
     "steer",  # {text} — inject mid-turn
     "abort",  # {} — the stop button; never kills the session
     "set_model",  # {provider, model_id} — the model sheet's choice

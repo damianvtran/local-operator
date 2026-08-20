@@ -34,9 +34,32 @@ from local_operator.mobile.registrant import SessionHandle
 from local_operator.mobile.types import PendingRequest, SessionProjection
 
 if TYPE_CHECKING:
+    from local_operator.harness.types import ImageContent
     from local_operator.tui.app import OperatorApp
 
 logger = logging.getLogger(__name__)
+
+
+def _image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
+    """Decode the wire's [{data_b64, mime_type}] into ImageContent blocks.
+
+    Bad entries are dropped, not fatal: a paste that half-decoded should cost
+    that one image, not the whole prompt. Empty input yields an empty list,
+    which ``_submit_prompt`` treats exactly like no images.
+    """
+    if not images:
+        return []
+    from local_operator.harness.types import ImageContent
+
+    out: list[ImageContent] = []
+    for item in images:
+        if not isinstance(item, dict):
+            continue
+        data = item.get("data_b64") or item.get("data") or ""
+        mime = item.get("mime_type") or "image/png"
+        if data:
+            out.append(ImageContent(data=data, mime_type=mime))
+    return out
 
 
 class TuiSessionHandle(SessionHandle):
@@ -122,9 +145,11 @@ class TuiSessionHandle(SessionHandle):
 
     # -- mutations: every one hops to the Textual thread ---------------------------
 
-    async def prompt(self, text: str) -> str:
+    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+        image_blocks = _image_blocks(images)
+
         def submit() -> None:
-            self._app._submit_prompt(text, [], None)
+            self._app._submit_prompt(text, image_blocks, None)
 
         await self._on_app(submit)
         self._fold.note_user_message(text)

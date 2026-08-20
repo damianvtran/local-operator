@@ -28,6 +28,7 @@ from typing import Any, Callable
 from local_operator.harness.types import AgentEvent
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.registrant import SessionHandle
+from local_operator.mobile.tui_handle import _image_blocks
 from local_operator.mobile.types import PendingRequest, SessionProjection
 
 logger = logging.getLogger(__name__)
@@ -178,9 +179,10 @@ class OwnedSessionHandle(SessionHandle):
             logger.debug("owned session history fold failed", exc_info=True)
         return unsubscribe
 
-    async def prompt(self, text: str) -> str:
+    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         self._check_loop_thread()
-        asyncio.ensure_future(self._session.prompt(text))
+        image_blocks = _image_blocks(images)
+        asyncio.ensure_future(self._session.prompt(text, image_blocks))
         self._projection.streaming = True
         self._fold.note_user_message(text)
         self._notify()

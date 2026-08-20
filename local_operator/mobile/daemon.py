@@ -85,7 +85,8 @@ def _mark_data_uri() -> str:
     """
     import base64
 
-    return "data:image/png;base64," + base64.b64encode((_STATIC_DIR / "mark.png").read_bytes()).decode()
+    data = base64.b64encode((_STATIC_DIR / "mark.png").read_bytes()).decode()
+    return "data:image/png;base64," + data
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +292,6 @@ def _pin_opening_user_message(projection: SessionProjection, record: SessionReco
         return
     try:
         from local_operator.paths import config_dir
-        from local_operator.session.transcript import Transcript
 
         path = config_dir() / "sessions" / record.session_id / "transcript.jsonl"
         if not path.exists():

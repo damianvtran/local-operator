@@ -169,8 +169,14 @@ export interface Directories {
 
 /* ---- command ops (POST /api/sessions/{pid}/command) ---------------------- */
 
+/** A pasted / dropped image, base64 — the wire form the handles decode. */
+export interface PromptImage {
+	data_b64: string;
+	mime_type: string;
+}
+
 export type CommandOp =
-	| { op: "prompt"; text: string }
+	| { op: "prompt"; text: string; images?: PromptImage[] }
 	| { op: "steer"; text: string }
 	| { op: "abort" }
 	| { op: "set_model"; provider: string; model_id: string }
