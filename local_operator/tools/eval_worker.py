@@ -245,6 +245,12 @@ def _redact_process_exception_chain(exc: BaseException) -> None:
         # __context__ is the implicit chain (an exception raised while handling
         # another); it is what a bare ``raise`` inside ``except`` produces.
         stack.append(current.__context__)
+        # format_exception renders ExceptionGroup LEAVES, so a CalledProcessError
+        # raised inside an asyncio.TaskGroup task is rendered too — and leaks
+        # argv if the walk stops at the group. Descend into .exceptions under
+        # the same visited set. BaseExceptionGroup carries the attribute; a
+        # plain exception simply does not, hence the getattr default.
+        stack.extend(getattr(current, "exceptions", ()))
 
 
 _REPR = reprlib.Repr()

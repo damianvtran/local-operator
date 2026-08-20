@@ -561,6 +561,28 @@ def test_a_context_chain_also_redacts_the_inner_process_error(_fresh_argv_ledger
     assert "ValueError" in payload["error"] and "CalledProcessError" in payload["error"]
 
 
+def test_an_exception_group_leaf_also_redacts_argv(_fresh_argv_ledger, tmp_path) -> None:
+    """format_exception renders ExceptionGroup leaves: a CalledProcessError
+    raised inside an asyncio.TaskGroup task is part of the model-visible
+    traceback, so the walk must descend into .exceptions, not stop at the
+    group."""
+    secret = "taskgroup-secret"
+    sf = tmp_path / "s.txt"
+    sf.write_text(secret)
+    payload = _run_cell(
+        "import subprocess, asyncio\n"
+        f"tok = open({str(sf)!r}).read()\n"
+        "async def job():\n"
+        "    subprocess.run(['false', 'h', tok], check=True)\n"
+        "async def main():\n"
+        "    async with asyncio.TaskGroup() as tg:\n"
+        "        tg.create_task(job())\n"
+        "asyncio.run(main())\n"
+    )
+    assert "ExceptionGroup" in payload["error"]
+    assert secret not in payload["error"]
+
+
 def test_raise_from_redacts_the_cause_chain(_fresh_argv_ledger, tmp_path) -> None:
     """``raise ... from e`` names the cause explicitly; its argv is redacted."""
     secret = "raise-from-secret"
