@@ -1047,6 +1047,12 @@ class FakeProviderController:
         self.usage_error: Exception | None = None
         self.logins: list[str] = []
         self.logouts: list[str] = []
+        #: Staged cache rows for the instant-open path. Empty by default so
+        #: existing tests exercise the cold (fetching…) open.
+        self.cached_reports: list[Any] = []
+        #: Age in ms of the staged cache row, or None when there is none.
+        #: The warmer reads this to decide whether to fetch.
+        self.usage_cache_age: int | None = None
 
     def login_providers(self) -> list[Any]:
         return [
