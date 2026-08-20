@@ -3891,9 +3891,23 @@ class Session:
     def _missed_delivery_note(self, due: DueWake) -> str | None:
         """The 'this wake fired late' prefix, or None for a punctual fire.
 
-        Misses past the resume grace window are covered by the aggregated
-        catch-up prompt instead — double-annotating them would tell the agent
-        the same skip twice."""
+        The two annotate-or-not gates are deliberately DIFFERENT, because they
+        answer different questions:
+
+        - Before the resume grace expires, an overdue wake is annotated from
+          ``_missed_wake_occurrences`` (the load-time snapshot), because its
+          catch-up has not gone out yet and the note is the only place the
+          skip is visible.
+        - After it, that map is zeroed — the aggregated catch-up prompt now
+          carries the count, so re-annotating would tell the agent the same
+          skip twice. A LATE one-shot (overdue beyond ``MAX_ARM_MS``, i.e.
+          missed while the process was down, not a timer tick late) still
+          self-annotates from its own due time, which needs no snapshot.
+
+        The boundary case the asymmetry produces — a one-shot only seconds
+        overdue gets a note pre-catch-up and none after — is intentional:
+        seconds-overdue is timer jitter, not a "missed while down", and the
+        catch-up it would double-report against has by then been delivered."""
         now_ms = int(time.time() * 1000)
         schedule = due.schedule
         occurrences = self._missed_wake_occurrences.get(schedule.id, 0)

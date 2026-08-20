@@ -112,9 +112,13 @@ class WakePanel(Container):
 
         room = max(1, self._body_rows() - 1)
         cap = min(room, MAX_WAKE_ROWS)
-        marker = len(rows) > cap and room > 1
+        marker = len(rows) > cap
         if marker:
-            cap = min(room - 1, MAX_WAKE_ROWS)
+            # Reserve a row for the "… N more" marker. At the floor budget
+            # (room == 1) this drops the one visible wake in favour of the
+            # count — a single "w1 …" line beside a silent "+5 hidden" is the
+            # bigger lie, since the header's total already implies the misses.
+            cap = min(max(room - 1, 0), MAX_WAKE_ROWS)
             if len(rows) == cap + 1:
                 # "… 1 more wake" costs exactly the row the wake itself costs.
                 cap += 1

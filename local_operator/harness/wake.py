@@ -261,6 +261,11 @@ def format_duration(ms: int) -> str:
             if rem % sub_step == 0:
                 return f"{head}{unit}{rem // sub_step}{smaller}"
         break
+    # Unrepresentable as a clean one/two-term duration (e.g. a sub-second or
+    # odd-millisecond value). ``ms`` is NOT a parseable unit, so this does not
+    # round-trip — acceptable because every caller passes a schedule interval
+    # (>= MIN_WAKE_INTERVAL_MS = 60 s), which always decomposes above. The
+    # fallback exists so a stray value renders SOMETHING rather than raising.
     return f"{ms}ms"
 
 

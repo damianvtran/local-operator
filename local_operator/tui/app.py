@@ -5660,7 +5660,19 @@ class OperatorApp(App[None]):
             rows = len([job for job in jobs.list() if getattr(job, "type", "") == "task"])
         except Exception:  # unreadable ledger; nothing to protect against
             return True
-        return rows + _SUBAGENT_DOCK_ROWS < screen_height
+        # A displayed WakePanel spends up to ``MAX_WAKE_ROWS`` content rows the
+        # subagent budget does not know about; counting its settled prediction
+        # keeps the inset gate honest on a near-threshold screen where both
+        # panels are visible. Read off ``predicted_rows`` (a count, settled) for
+        # the same no-flip reason the job count is used over a measured height.
+        wake_rows = 0
+        wake_panel = self._wake_panel
+        if wake_panel is not None and wake_panel.display:
+            try:
+                wake_rows = int(wake_panel.predicted_rows())
+            except Exception:
+                wake_rows = 0
+        return rows + wake_rows + _SUBAGENT_DOCK_ROWS < screen_height
 
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
