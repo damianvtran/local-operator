@@ -258,6 +258,7 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
     # the source of truth, and the phone keys drafts and commands on it.
     projection.pid = record.pid
     projection.transcript = build(TranscriptEntry, data.get("transcript", []))
+    _pin_opening_user_message(projection, record)
     projection.todos = build(TodoItem, data.get("todos", []))
     projection.subagents = build(SubagentRow, data.get("subagents", []))
     pending = data.get("pending")
@@ -269,6 +270,71 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
         else None
     )
     return projection
+
+
+def _pin_opening_user_message(projection: SessionProjection, record: SessionRecord) -> None:
+    """Guarantee the transcript opens with the conversation's first user
+    message, even when the SESSION that folded it is running older code.
+
+    Two independent gaps hid it: the harness never emits MessageStartEvent
+    for user messages (fixed in the handle), and the 80-entry tail cap drops
+    the opening prompt on any long session (fixed in the fold). Both fixes
+    live in the session's own process — so a session on an older binary
+    still pushes a wire projection with no user rows. The daemon can't fix
+    the session's fold, but it CAN repair the view: read the opening user
+    turn from the on-disk transcript (the same store /resume reads) and pin
+    it at the head. Idempotent — a projection that already opens with a user
+    row is left alone.
+    """
+    transcript = projection.transcript
+    if any(e.kind == "user" for e in transcript):
+        return
+    try:
+        from local_operator.paths import config_dir
+        from local_operator.session.transcript import Transcript
+
+        path = config_dir() / "sessions" / record.session_id / "transcript.jsonl"
+        if not path.exists():
+            return
+        # Read only the head: the opening user turn is within the first few
+        # entries, and a 10 MB transcript should not be replayed per repaint.
+        import json as _json
+
+        with path.open() as fh:
+            for line in fh:
+                try:
+                    entry = _json.loads(line)
+                except ValueError:
+                    continue
+                if entry.get("type") != "message":
+                    continue
+                payload = entry.get("payload") or {}
+                if payload.get("role") != "user":
+                    continue
+                # Transcript text blocks are stored as {"text": ...} WITHOUT a
+                # "type" discriminator (the in-memory TextContent adds it), so
+                # match on the text key itself rather than a type field.
+                text = "".join(
+                    block["text"]
+                    for block in payload.get("content", [])
+                    if isinstance(block, dict) and isinstance(block.get("text"), str)
+                )
+                if not text.strip():
+                    continue
+                from local_operator.mobile.types import TranscriptEntry
+
+                projection.transcript = [
+                    TranscriptEntry(
+                        id=entry.get("id") or f"user-{record.pid}",
+                        kind="user",
+                        text=text,
+                        final=True,
+                    ),
+                    *transcript,
+                ]
+                return
+    except Exception:  # noqa: BLE001 — a missing/odd transcript must never break a repaint
+        return
 
 
 def _fan_out(entry: SessionEntry) -> None:
