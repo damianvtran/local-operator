@@ -520,6 +520,7 @@ class AuthStore:
         a different scope) recorded against the same row.
         """
         credential = self.get_credential(credential_id)
+        provider = self._storage_id(provider)
         provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
         self._conn.execute(
             "DELETE FROM auth_credential_blocks"

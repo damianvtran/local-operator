@@ -1833,7 +1833,6 @@ class SessionStreamFn:
 
             shared_remaining, tier_binding = shared_tier_saturation(
                 report,
-                model.model_id,
                 reserve_percent=retry.usage_reserve_percent,
             )
             remaining = (
@@ -1875,7 +1874,7 @@ class SessionStreamFn:
         access: Any,
         storage: str,
         health: Any,
-        shared_remaining: float,
+        shared_remaining: float | None,
         tier_binding: bool,
         retry: Any,
     ) -> bool:
@@ -1898,7 +1897,10 @@ class SessionStreamFn:
         from local_operator.providers.failover import parse_selector
 
         threshold = min(100.0, max(0.0, float(retry.usage_reserve_percent))) / 100.0
-        shared_above_reserve = shared_remaining > threshold
+        # ``None`` means no shared window carried a number — indeterminate, not
+        # headroom, so the tier-cap guard stays off and the cautious rotate /
+        # failover path runs.
+        shared_above_reserve = shared_remaining is not None and shared_remaining > threshold
         remaining = (
             ""
             if health.remaining_fraction is None
@@ -2003,7 +2005,7 @@ class SessionStreamFn:
         storage: str,
         rows: list[Any],
         retry: Any,
-    ) -> tuple[Any, float, bool, Any] | None:
+    ) -> tuple[Any, float | None, bool, Any] | None:
         """Re-check every blocked account before a provider failover.
 
         ``get_oauth_access`` returns None the moment all credentials are
@@ -2029,10 +2031,12 @@ class SessionStreamFn:
                 access = await self._auth_store.get_oauth_access(model.provider, self._session_id)
             except Exception:
                 access = None
-            if access is None or access.kind != "oauth":
-                # Not recoverable as an OAuth account (refresh failure, or the
-                # cascade fell through to an API key); stand the backoff back up
-                # and keep looking.
+            if access is None or access.kind != "oauth" or access.credential_id != row.id:
+                # Only a verdict for the exact row just unblocked counts. The
+                # cascade can fall through to a different credential (an API
+                # key, or a sibling that outranked this one), and attributing
+                # that credential's quota to this row would unblock the wrong
+                # account. Stand the backoff back up and keep looking.
                 self._auth_store.block_credential(
                     row.id, storage, block_ms=self.DEFAULT_USAGE_BLOCK_MS
                 )
@@ -2060,7 +2064,6 @@ class SessionStreamFn:
                 continue
             shared_remaining, tier_binding = shared_tier_saturation(
                 report,
-                model.model_id,
                 reserve_percent=retry.usage_reserve_percent,
             )
             if health.state == "healthy":

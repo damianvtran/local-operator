@@ -388,10 +388,9 @@ def usage_health(
 
 def shared_tier_saturation(
     report: UsageReport,
-    model_id: str,
     *,
     reserve_percent: float = 10.0,
-) -> tuple[float, bool]:
+) -> tuple[float | None, bool]:
     """How full the shared windows are, and whether they are the binding limit.
 
     ``usage_health`` reduces a report to the single tightest window, so a
@@ -404,6 +403,10 @@ def shared_tier_saturation(
     the shared windows are binding too; a report whose tight window is scoped
     while the shared windows still hold quota is a tier cap, not an empty
     account, and rotating or failing over on it strands usable reserve.
+
+    The shared fraction is ``None`` when no shared window carries a numeric
+    amount — an INDETERMINATE answer, not "full headroom", so a caller cannot
+    mistake an unparseable report for a licence to spend.
     """
     threshold = min(100.0, max(0.0, float(reserve_percent))) / 100.0
     shared: list[float] = []
@@ -419,7 +422,7 @@ def shared_tier_saturation(
             shared.append(remaining)
         elif remaining <= threshold:
             tier_binding = True
-    return (min(shared) if shared else 1.0), tier_binding
+    return (min(shared) if shared else None), tier_binding
 
 
 # ---------------------------------------------------------------------------
