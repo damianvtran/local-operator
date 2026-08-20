@@ -159,12 +159,13 @@ class TestMcpTokenStorage:
         drop it (and persist the drop) so the flow re-registers / re-seeds.
         """
         from mcp.shared.auth import OAuthClientInformationFull
+        from pydantic import AnyUrl
 
         store = FakeAuthStore()
         storage = McpTokenStorage("https://srv.example/mcp", store)
         info = OAuthClientInformationFull(
             client_id="cid",
-            redirect_uris=["http://127.0.0.1:3000/callback"],
+            redirect_uris=[AnyUrl("http://127.0.0.1:3000/callback")],
         )
         await storage.set_client_info(info)
 
@@ -176,12 +177,13 @@ class TestMcpTokenStorage:
     @pytest.mark.asyncio
     async def test_get_client_info_keeps_current_port_registration(self) -> None:
         from mcp.shared.auth import OAuthClientInformationFull
+        from pydantic import AnyUrl
 
         store = FakeAuthStore()
         storage = McpTokenStorage("https://srv.example/mcp", store)
         info = OAuthClientInformationFull(
             client_id="cid",
-            redirect_uris=["http://127.0.0.1:33441/callback"],
+            redirect_uris=[AnyUrl("http://127.0.0.1:33441/callback")],
         )
         await storage.set_client_info(info)
         kept = await storage.get_client_info()
