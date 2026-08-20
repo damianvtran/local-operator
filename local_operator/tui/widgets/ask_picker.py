@@ -213,6 +213,13 @@ FIELD_CARET = "▌"
 #: it is selected rather than after.
 OTHER_HINT = "an answer that is not on the list — type it here"
 
+#: A secret question has no options: the one row IS the paste field.
+SECRET_LABEL = "Paste the value (hidden)"
+SECRET_PREFIX = "Value: "
+SECRET_HINT = "hidden as you type — enter stores, esc skips"
+#: Same glyph the login key prompt uses, so a secret paste looks like one.
+SECRET_MASK = "•"
+
 #: The tag marking the option the model recommends. Words, not a glyph: this is
 #: the one row the user is being nudged toward, and a nudge nobody can read is
 #: just an unexplained difference in colour.
@@ -389,6 +396,10 @@ class AskPickerScreen(Container):
             # of recommending is that Enter alone should take it.
             if question.recommended is not None:
                 state.selected = question.recommended
+            elif question.secret:
+                # The only row. Parking the cursor anywhere else would be a
+                # destination that does not exist.
+                state.selected = 0
         self._offset = 0
         self._hovered: int | None = None
         #: Body-relative line index -> the row it belongs to. Recorded while the
@@ -444,7 +455,13 @@ class AskPickerScreen(Container):
 
     @property
     def row_count(self) -> int:
-        """Options, plus the free-text row where this surface offers one."""
+        """Options, plus the free-text row where this surface offers one.
+
+        A secret question has no options: the one row IS the paste field, so
+        the count is 1 regardless of ``_allow_free_text``.
+        """
+        if self.question.secret:
+            return 1
         return len(self.question.options) + (1 if self._allow_free_text else 0)
 
     @property
@@ -459,7 +476,12 @@ class AskPickerScreen(Container):
         file then answers False without a second condition beside it, and the
         one place the value is used as a destination (:meth:`action_jump_other`)
         guards on the flag instead.
+
+        A secret question's only row is this row: there is nothing else to
+        select, and the typed value is the whole answer.
         """
+        if self.question.secret:
+            return 0
         return self.row_count - 1 if self._allow_free_text else -1
 
     @property
@@ -683,6 +705,26 @@ class AskPickerScreen(Container):
             self.state.typed += char
             self._rejected = False
             self._repaint()
+
+    def on_paste(self, event) -> None:  # type: ignore[no-untyped-def]
+        """A bracketed paste into the free-text (or secret) row.
+
+        Pasting is the primary input for a secret question — a token arrives
+        as one ``Paste`` event, not as keystrokes — and without this the
+        value would land in the composer behind the card instead.
+        """
+        if self.state.selected != self.other_row:
+            return
+        text = getattr(event, "text", "") or ""
+        if not text:
+            return
+        event.stop()
+        event.prevent_default()
+        # A paste routinely carries a trailing newline; keep it out of the
+        # field so Enter is not fighting a leftover ``\\n``.
+        self.state.typed += text.replace("\r", "").rstrip("\n")
+        self._rejected = False
+        self._repaint()
 
     # -- mouse ---------------------------------------------------------------
     # The wheel moves the cursor a row at a time, which scrolls the window with
@@ -1563,13 +1605,20 @@ class AskPickerScreen(Container):
         if index != self.other_row:
             return self.question.options[index].label
         typed = self.state.typed
+        if self.question.secret:
+            if typed or self.state.selected == self.other_row:
+                # Masked: a secret that paints into the transcript is the
+                # failure this surface exists to prevent. The length is the
+                # one property a paste needs to check (did it arrive whole).
+                return f"{SECRET_PREFIX}{SECRET_MASK * len(typed)}"
+            return SECRET_LABEL
         if typed or self.state.selected == self.other_row:
             return f"{OTHER_PREFIX}{typed}"
         return OTHER_LABEL
 
     def _row_description(self, index: int) -> str:
         if index == self.other_row:
-            return OTHER_HINT
+            return SECRET_HINT if self.question.secret else OTHER_HINT
         return self.question.options[index].description
 
     def _card_text(self) -> Text:
@@ -1838,9 +1887,15 @@ class AskPickerScreen(Container):
             # would hide the characters being typed, which is the only part of
             # it the user is looking at.
             budget -= cell_len(FIELD_CARET)
-            row.append(OTHER_PREFIX, style=accent if taken else ground + fg)
+            if self.question.secret:
+                prefix = SECRET_PREFIX
+                rendered = SECRET_MASK * len(self.state.typed)
+            else:
+                prefix = OTHER_PREFIX
+                rendered = _tail_cells(self.state.typed, max(1, budget - cell_len(OTHER_PREFIX)))
+            row.append(prefix, style=accent if taken else ground + fg)
             row.append(
-                _tail_cells(self.state.typed, max(1, budget - cell_len(OTHER_PREFIX))),
+                truncate_cells(rendered, max(1, budget - cell_len(prefix))),
                 style=ground + fg,
             )
             row.append(FIELD_CARET, style=accent if taken else ground + dim)
@@ -1979,8 +2034,14 @@ class AskPickerScreen(Container):
             return self._shed_to_fit(hints, shed_first, width)
 
         if self.state.selected == self.other_row:
-            hints = [("type", "your answer"), ("↑↓", "move"), ("enter", "accept")]
-            ladder = ["↑↓", "type", "enter", "esc"]
+            if self.question.secret:
+                # No movement keys: there is only one row, and advertising
+                # arrows or digits would describe a keyboard that does nothing.
+                hints = [("type", "the value"), ("enter", "store")]
+                ladder = ["type", "enter", "esc"]
+            else:
+                hints = [("type", "your answer"), ("↑↓", "move"), ("enter", "accept")]
+                ladder = ["↑↓", "type", "enter", "esc"]
         elif self.question.multi:
             hints = [("↑↓", "move"), ("space", "toggle"), ("enter", "confirm")]
             ladder = ["↑↓", "enter", "esc", "space"]
@@ -2088,6 +2149,7 @@ def _sanitize(question: AskQuestion) -> AskQuestion:
     control sequences, so nothing reaching the terminal can move the cursor."""
     return question.model_copy(
         update={
+            "id": strip_control_sequences(question.id),
             "question": strip_control_sequences(question.question),
             "options": [
                 option.model_copy(

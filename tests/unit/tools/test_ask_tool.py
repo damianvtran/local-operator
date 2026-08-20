@@ -250,3 +250,63 @@ async def test_a_missing_host_hook_is_an_error_not_a_user_refusal() -> None:
 
     assert result.is_error is True
     assert "cannot" in result.text
+
+
+# --- secret questions -------------------------------------------------------
+
+
+def _secret_question(qid: str = "GITHUB_TOKEN") -> dict[str, Any]:
+    return {
+        "id": qid,
+        "question": "Paste the deploy token.",
+        "options": [],
+        "secret": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_secret_question_with_options_is_refused() -> None:
+    """A secret question is a masked paste, not a picker. Options would put a
+    choice list on a surface that must never echo the value."""
+    hook, seen = await _answer_with({"GITHUB_TOKEN": ["sk-secret"]})
+    args = _secret_question()
+    args["options"] = [{"label": "Use the env one"}, {"label": "Skip"}]
+    result = await _call(_context(hook), {"questions": [args]})
+    assert result.is_error is True
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_secret_question_stores_the_value_and_reports_only_the_key() -> None:
+    """The pasted bytes must not ride the tool result: that text is persisted
+    to the transcript and replayed to the provider."""
+    from local_operator.variables import VariableStore
+
+    secret = "ghp_this_is_a_real_looking_token"
+    hook, seen = await _answer_with({"GITHUB_TOKEN": [secret]})
+    store = VariableStore(cwd="/tmp", env={})
+    context = ToolContext(cwd=".", session_id="s", has_ui=True, ask_user=hook, variables=store)
+    result = await _call(context, {"questions": [_secret_question()]})
+
+    assert result.is_error is False
+    assert secret not in result.text
+    assert "answer: GITHUB_TOKEN" in result.text
+    assert result.details == {"answers": {"GITHUB_TOKEN": ["GITHUB_TOKEN"]}}
+    assert store.credential_names() == ["GITHUB_TOKEN"]
+    assert store.credential_env()["GITHUB_TOKEN"] == secret
+    assert seen[0][0].secret is True
+
+
+@pytest.mark.asyncio
+async def test_a_declined_secret_question_is_the_same_as_answering_nothing() -> None:
+    """Escaping a secret question is a refusal, not a stored blank. The
+    existing unanswered path already tells the model not to ask again."""
+    hook, _seen = await _answer_with(None)
+    from local_operator.variables import VariableStore
+
+    store = VariableStore(cwd="/tmp", env={})
+    context = ToolContext(cwd=".", session_id="s", has_ui=True, ask_user=hook, variables=store)
+    result = await _call(context, {"questions": [_secret_question()]})
+    assert result.is_error is False
+    assert "nothing was chosen" in result.text
+    assert store.credential_names() == []

@@ -269,6 +269,7 @@ def build_system_blocks(
     goal: str = "",
     user_instructions: str = "",
     repo_guidance: str = "",
+    credentials: Sequence[str] | None = None,
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -282,10 +283,12 @@ def build_system_blocks(
     The env block carries the calendar date — never a timestamp — plus
     volatile environment facts.
 
-    ``goal`` (the session objective set by ``/goal``) shares that volatile
-    tail block rather than adding a fifth one: that keeps the arity fixed,
-    and an edited goal then invalidates only the tail instead of the whole
-    conversation prefix.
+    ``goal`` (the session objective set by ``/goal``) and ``credentials``
+    (the names of session secrets set by ``/credential`` or ``ask``) share
+    that volatile tail block rather than adding a fifth one: that keeps the
+    arity fixed, and an edited goal or a newly stored key then invalidates
+    only the tail instead of the whole conversation prefix. Sessions that
+    never use either feature pay nothing for them.
 
     ``user_instructions`` (the operator's standing customization, read once at
     session start from ``system_prompt.md``) rides the HEAD block instead,
@@ -338,6 +341,28 @@ def build_system_blocks(
         tail = (
             f"{tail}\n\n<goal>\nThe user's standing objective for this "
             f"session:\n{goal}\n</goal>"
+        )
+    names = [name for name in (credentials or ()) if name]
+    if names:
+        # Names only. The values live in process memory and are injected into
+        # bash; putting a value (or even a reversible placeholder) here would
+        # ship the secret to the provider on every later turn.
+        listed = "\n".join(f"- `{name}`" for name in names)
+        tail = (
+            f"{tail}\n\n<session-credentials>\n"
+            "The operator has handed this session credentials you can USE but "
+            "never READ. Each name below is an environment variable on every "
+            "`bash` command; the real value is never visible to you.\n\n"
+            "- NEVER print, echo, log, commit, or write one of these values. "
+            "If a command would display it, do not run that command.\n"
+            "- Prefer letting the child process inherit the variable over "
+            "inlining it in a command string, so the value never reaches a "
+            "shell history or a rendered command line.\n"
+            "- These live in memory for this session only. Asked to persist "
+            "one, put it in a real secrets manager or vault — never a "
+            "dotfile in the repo.\n\n"
+            f"{listed}\n"
+            "</session-credentials>"
         )
 
     return [instructions, inventory, env_block, tail]

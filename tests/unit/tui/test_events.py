@@ -125,6 +125,15 @@ class FakeSession:
         self._goal = (text or "").strip()
         return self._goal
 
+    @property
+    def variables(self) -> Any:
+        store = getattr(self, "_variables", None)
+        if store is None:
+            from local_operator.variables import VariableStore
+
+            store = self._variables = VariableStore(cwd="/tmp", env={})
+        return store
+
     async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         pass
 

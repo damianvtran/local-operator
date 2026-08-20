@@ -185,6 +185,50 @@ async def test_full_turn_text_tool_text():
 
 
 @pytest.mark.asyncio
+async def test_a_tool_result_is_redacted_before_it_reaches_the_model() -> None:
+    """The ``read`` path the reviewer reproduced: a credential written by one
+    tool and read by another must not survive into the tool message."""
+    from local_operator.variables import VariableStore
+
+    secret = "leaked-by-read-before-the-fix"
+    store = VariableStore(cwd="/tmp", env={})
+    store.store_credential("LO_TEST_TOKEN", secret, "command")
+
+    async def read_execute(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="read",
+            content=[TextContent(text=secret)],
+        )
+
+    read_tool = AgentTool(
+        name="read",
+        parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+        execute=read_execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="read", args='{"path": "/tmp/secret"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[read_tool])
+    config = make_config(stream, redact_tool_result=store.redact)
+    loop = AgentLoop()
+
+    events = []
+    async for event in loop.run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    tool_msg = next(m for m in events[-1].messages if isinstance(m, Message) and m.role == "tool")
+    assert secret not in tool_msg.text
+    assert tool_msg.text == "[redacted]"
+
+
+@pytest.mark.asyncio
 async def test_abort_pairs_dangling_tool_calls():
     """stop_reason 'aborted': every dangling tool call gets a synthetic
     is_error result; tools are NOT executed; agent_end is aborted."""
