@@ -1777,6 +1777,10 @@ def main() -> int:
                     )
             finally:
                 try:
+                    tui_controller.close()
+                except Exception:  # noqa: BLE001 — closing on teardown, never fatal
+                    pass
+                try:
                     tui_auth_store.close()
                 except Exception:  # noqa: BLE001 — closing on teardown, never fatal
                     pass
