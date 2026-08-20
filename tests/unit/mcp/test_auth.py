@@ -764,6 +764,30 @@ class TestWireOauthAuth:
         rows = store.list_credentials(MCP_OAUTH_PROVIDER)
         assert rows[0].data["client_info"]["token_endpoint_auth_method"] == "none"
 
+    def test_reseed_overwrites_stale_token_endpoint_auth_method(self) -> None:
+        """The field-recovery path this fix depends on: a stored registration
+        whose method is wrong/absent (written before the stamp, or by hand)
+        must be corrected by the re-seed ``wire_oauth_auth`` runs on every
+        login — not left to fail the token exchange again."""
+        from mcp.shared.auth import OAuthClientInformationFull
+
+        store = FakeAuthStore()
+        storage = McpTokenStorage("https://srv.example/mcp", store)
+        # Pre-fix shape: a pinned registration with no auth method stamped.
+        bad = OAuthClientInformationFull(client_id="pinned-cid", client_secret="sec")
+        assert bad.token_endpoint_auth_method is None
+        import asyncio
+
+        asyncio.run(storage.set_client_info(bad))
+
+        cfg = MCPHttpServerConfig(
+            url="https://srv.example/mcp",
+            auth=MCPAuthConfig(type="oauth", client_id="pinned-cid", client_secret="sec"),
+        )
+        wire_oauth_auth("https://srv.example/mcp", cfg, store)
+        rows = store.list_credentials(MCP_OAUTH_PROVIDER)
+        assert rows[0].data["client_info"]["token_endpoint_auth_method"] == "client_secret_post"
+
     @pytest.mark.asyncio
     async def test_preseeded_client_info_visible_to_sdk(self) -> None:
         cfg = MCPHttpServerConfig(
