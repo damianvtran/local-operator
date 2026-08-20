@@ -809,28 +809,30 @@ _LOGIN_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>local operator — sign in</title>
 <style>
+  /* Values from local_operator/tui/theme.py BRAND_TOKENS.dark — the login
+     page predates the SPA's role system (it is server-rendered so the auth
+     gate has zero client-side surface), so it tracks the TUI's own tokens
+     by hand. Keep the two in sync: the TUI palette is the brand. */
   :root { color-scheme: dark; }
   body {
     margin: 0; min-height: 100dvh; display: grid; place-items: center;
-    background: #14110c; color: #e9e5db;
+    background: #14110c; color: #e9e5db;           /* bg / fg */
     font: 16px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
   }
   form { display: grid; gap: 16px; width: min(320px, 84vw); }
   h1 { font-size: 20px; font-weight: 600; margin: 0; text-align: center; }
-  .mark {
-    text-align: center; font-size: 28px; color: #38c96a;
-    font-family: ui-monospace, monospace;
-  }
+  .mark { text-align: center; font-size: 28px; color: #38c96a; } /* accent */
   input {
     font-size: 16px; padding: 12px 14px; border-radius: 10px;
-    border: 1px solid #3a352b; background: #1d1913; color: #e9e5db;
+    border: 1px solid #3b3527;                     /* edge */
+    background: #1e1a14; color: #e9e5db;           /* surface / fg */
   }
   input:focus { outline: 2px solid #38c96a; outline-offset: 1px; border-color: transparent; }
   button {
     font-size: 16px; font-weight: 600; padding: 12px; border: 0; border-radius: 10px;
-    background: #38c96a; color: #0d0b08; cursor: pointer;
+    background: #38c96a; color: #14110c; cursor: pointer;  /* accent on bg */
   }
-  .error { color: #e5534b; text-align: center; margin: 0; font-size: 14px; }
+  .error { color: #ef8078; text-align: center; margin: 0; font-size: 14px; } /* danger */
 </style>
 </head>
 <body>
@@ -838,7 +840,7 @@ _LOGIN_HTML = """<!doctype html>
   <div class="mark">▲</div>
   <h1>Local Operator</h1>
   <!--ERROR-->
-  <input type="password" name="password" placeholder="Password"
+  <input type="password" name="password" placeholder="password"
          autocomplete="current-password" autofocus required>
   <button type="submit">Sign in</button>
 </form>

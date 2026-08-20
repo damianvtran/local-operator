@@ -97,7 +97,7 @@ export function PendingCard({
 							type="button"
 							disabled={busy}
 							onClick={() => approve(false)}
-							className="flex min-h-11 flex-1 items-center justify-center rounded-sm border border-danger-border bg-danger-wash text-body-sm text-danger active:opacity-80"
+							className="flex min-h-11 flex-1 items-center justify-center rounded-sm border border-danger-border bg-danger-wash text-body-sm text-danger active:bg-danger-wash"
 						>
 							deny
 						</button>

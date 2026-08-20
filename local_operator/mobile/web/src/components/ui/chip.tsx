@@ -15,7 +15,7 @@ export function Chip({
 		<button
 			type="button"
 			className={cn(
-				"inline-flex min-h-8 items-center gap-1 rounded-sm border border-control bg-surface px-2 text-mono-sm text-ink-muted select-none active:bg-elevated",
+				"inline-flex min-h-11 items-center gap-1 rounded-sm border border-control bg-surface px-2 text-mono-sm text-ink-muted select-none active:bg-elevated",
 				className,
 			)}
 			{...rest}

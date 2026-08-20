@@ -115,11 +115,13 @@ function ThemePicker({
 					>
 						<span
 							className={cn(
-								"size-2 shrink-0 rounded-full",
-								t.id === current ? "bg-accent" : "bg-hairline",
+								"w-4 shrink-0 font-mono text-mono-sm",
+								t.id === current ? "text-accent" : "text-ink-disabled",
 							)}
 							aria-hidden
-						/>
+						>
+							{t.id === current ? "✓" : ""}
+						</span>
 						<span className="min-w-0 flex-1">
 							<span className="block truncate text-body">
 								{t.name}
@@ -152,7 +154,7 @@ export function SessionListScreen() {
 	return (
 		<div className="flex min-h-full flex-col">
 			<header className="px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-2">
-				<h1 className="font-mono text-mono text-ink-dim">
+				<h1 className="text-heading text-ink-dim">
 					local operator
 				</h1>
 			</header>

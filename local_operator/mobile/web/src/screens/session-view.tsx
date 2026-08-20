@@ -17,7 +17,6 @@ import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
-import { Chip } from "../components/ui/chip";
 import { cn } from "../lib/cn";
 import { navigate } from "../router";
 import { retainProjectionStream, useProjection } from "../store";
@@ -25,12 +24,8 @@ import type { SessionProjection } from "../types";
 
 function Header({
 	projection,
-	onOpenModels,
-	onOpenEffort,
 }: {
 	projection: SessionProjection;
-	onOpenModels: () => void;
-	onOpenEffort: () => void;
 }) {
 	const status = projection.ended
 		? "bg-ink-disabled"
@@ -56,14 +51,6 @@ function Header({
 			<span className="min-w-0 flex-1 truncate text-heading">
 				{projection.conversation_name || "untitled"}
 			</span>
-			<Chip onClick={onOpenModels}>
-				{projection.model_label || "model"}
-			</Chip>
-			{projection.effort_ladder.length > 0 ? (
-				<Chip onClick={onOpenEffort}>
-					{projection.effort || "effort"}
-				</Chip>
-			) : null}
 		</header>
 	);
 }
@@ -129,11 +116,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 			ref={rootRef}
 			className="flex h-dvh flex-col overflow-hidden"
 		>
-			<Header
-				projection={projection}
-				onOpenModels={() => setModelsOpen(true)}
-				onOpenEffort={() => setEffortOpen(true)}
-			/>
+			<Header projection={projection} />
 
 			<Transcript entries={projection.transcript} />
 
