@@ -28,12 +28,12 @@ Do the work. Do not dump the commands and wait. The sequence is:
 ### 1. Ask how to deliver the password
 
 The portal password is the whole credential for the phone UI. It must not
-land in the transcript, a commit, a ticket, Slack, or a log. Use the `ask`
-tool **before** install, with one question and these options (consequence in
-the description, recommended first):
+land in the **transcript or any other model-visible context** — a reply,
+a tool argument, a notice, a commit, a ticket, Slack, or a log. Printing
+it "just this once" still writes it into the conversation the next turn
+re-sends. Use the `ask` tool **before** install, with one question and
+these options (consequence in the description, recommended first):
 
-- **Show it once in this chat** — you print it in the next reply and nowhere
-  else. Fine on a private machine; the chat log will contain it.
 - **Leave it in the Keychain only** — you never print it. They retrieve it
   themselves with `lop mobile password` (or Keychain Access, service
   `lop-mobile`). Best default when they will type it into the phone once.
@@ -47,8 +47,9 @@ the description, recommended first):
 If they answer nothing, take **Leave it in the Keychain only** and say so in
 one line.
 
-Never invent a fourth channel (email, Slack, a gist, a Linear comment). If
-they ask for one, refuse and re-offer the four above.
+Never invent a fourth channel (email, Slack, a gist, a Linear comment, or
+"I'll just paste it here"). If they ask to see it in chat, refuse: the
+transcript is the context window. Re-offer the three above.
 
 ### 2. Install
 
@@ -89,14 +90,14 @@ Match the choice from step 1 exactly:
 
 | Choice | What you do |
 |---|---|
-| Show it once | Print the password `install` just reported (or `lop mobile password` if they already had one). Do not repeat it later in the session. |
 | Keychain only | Print nothing. Tell them: `lop mobile password` shows it; Keychain Access → service `lop-mobile`. |
 | Clipboard | `printf '%s' "$pw" \| pbcopy` (macOS). Confirm "it's on the clipboard", never the value. |
 | 0600 file | Write the path they named, `chmod 0600`, tell them the path. |
 
-`install` prints the password when it generated a new one. If the choice was
-not "show it once", do not relay that line into the chat — read it from the
-command result for the clipboard/file paths, and omit it from your reply.
+`install` prints the password when it generated a new one. That line is
+already in the tool result — do **not** copy it into your reply. For
+clipboard/file, read it from the command result in the same turn and
+discard it; the next model call must not see the value.
 
 ### 5. What you tell them afterwards
 

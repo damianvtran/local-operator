@@ -170,9 +170,7 @@ def test_mobile_guide_requires_a_password_delivery_ask() -> None:
     """An agent that 'just prints the password' is the failure this guide exists
     to prevent. The four channels and the ask-first rule have to be in the
     body, not implied."""
-    body = make_guide_resolver({guide.name: guide for guide in discover_guides()})(
-        "guide://mobile"
-    )
+    body = make_guide_resolver({guide.name: guide for guide in discover_guides()})("guide://mobile")
 
     assert body is not None
     assert "ask" in body.lower()
@@ -181,6 +179,8 @@ def test_mobile_guide_requires_a_password_delivery_ask() -> None:
     assert "0600" in body
     assert "Never invent a fourth channel" in body
     assert "lop mobile install" in body
+    assert "Show it once" not in body
+    assert "context window" in body
 
 
 def test_configuration_guide_names_the_real_instructions_file() -> None:
