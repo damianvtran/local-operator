@@ -422,8 +422,17 @@ class AgentLoop:
                     context.messages.append(assistant)
                     new_messages.append(assistant)
 
-                    if stop_reason in ("error", "aborted"):
+                    if stop_reason in ("error", "aborted", "refusal"):
                         # Pair every dangling tool call so the wire stays legal.
+                        # "refusal" rides this branch because it is terminal the
+                        # same way an error is: the model declined, so there is
+                        # nothing to feed back for another call — and it must
+                        # NOT fall through to the clean-stop path, where the
+                        # turn ended with an empty frame and no explanation of
+                        # what the provider refused (the silent-refusal bug).
+                        # ``stream_error`` carries the provider's own refusal
+                        # message, which is what lets the user decide whether
+                        # to rephrase or switch models.
                         placeholders = [
                             self._synthetic_result(call, ABORTED_RESULT_TEXT)
                             for call in assistant.tool_calls
@@ -723,6 +732,12 @@ class AgentLoop:
                         usage = event.usage
                     provider_payload = event.provider_payload
                     error = event.error
+                    if stop_reason == "refusal" and not error:
+                        # Belt-and-braces: every wire client composes a refusal
+                        # message, but a bare "refusal" end from a client that
+                        # forgot must still say SOMETHING — a refusal nobody can
+                        # see is the exact bug this stop_reason exists to fix.
+                        error = "model refused the request (no details from provider)"
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -752,6 +767,15 @@ class AgentLoop:
         ]
         assistant.stop_reason = stop_reason
         assistant.usage = usage
+        if stop_reason == "refusal" and error:
+            # The refusal message otherwise lives only in the run's AgentEndEvent
+            # and dies with it: a resumed session replaying this message could
+            # say "the model refused" but not WHAT it said, which is the half of
+            # the diagnosis that decides between rephrasing and switching models.
+            # ``provider_payload`` is the established home for harness bookkeeping
+            # that must survive into the transcript (see ``pruned``/``details``);
+            # wire clients never replay these keys to providers.
+            provider_payload = {**(provider_payload or {}), "refusal": error}
         assistant.provider_payload = provider_payload
         # Token-cache settle gate (review RC-20): the message is finalized
         # (usage/stop_reason set), so any provisional cached estimate must be

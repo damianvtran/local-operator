@@ -1811,3 +1811,585 @@ def test_non_object_raw_arguments_fall_back_to_parsed_arguments() -> None:
         "arguments"
     ]
     assert json.loads(arguments) == {"a": 1}
+
+
+# ---------------------------------------------------------------------------
+# Refusal surfacing: the provider said no, and the user must see its words
+# ---------------------------------------------------------------------------
+
+
+class TestRefusalsAreSurfacedNotSwallowed:
+    """A provider refusal used to end the turn as a clean ``stop``: nothing on
+    screen, no explanation, indistinguishable from a no-op. Every wire's
+    refusal marker must map to ``stop_reason="refusal"`` with the provider's
+    own message (or a line naming the marker, when the wire sends no prose)
+    in ``StreamEndEvent.error`` — that message is what lets the user decide
+    between rephrasing and switching models.
+    """
+
+    @staticmethod
+    def _end(events: list[Any]) -> StreamEndEvent:
+        end = events[-1]
+        assert isinstance(end, StreamEndEvent)
+        return end
+
+    async def test_chat_completions_content_filter_is_a_refusal(self) -> None:
+        """``finish_reason=content_filter`` (Azure/OpenRouter-style filters)."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse([{"choices": [{"delta": {}, "finish_reason": "content_filter"}]}]),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.test.example/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "content_filter" in end.error
+
+    async def test_chat_completions_refusal_delta_carries_the_providers_words(self) -> None:
+        """OpenAI streams refusal prose in ``delta.refusal`` with
+        ``finish_reason=stop`` — the prose slot, not the finish reason, is the
+        signal, and its text must reach the frame verbatim."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"choices": [{"delta": {"refusal": "I can't help "}}]},
+                        {
+                            "choices": [
+                                {"delta": {"refusal": "with that."}, "finish_reason": "stop"}
+                            ]
+                        },
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.test.example/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+        # Refusal prose is not an answer: it must not have streamed as text.
+        assert not [e for e in events if isinstance(e, StreamTextDelta)]
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "I can't help with that." in end.error
+
+    async def test_responses_content_filter_is_a_refusal_not_a_provider_error(self) -> None:
+        """``response.incomplete`` with ``reason=content_filter`` used to raise
+        ProviderError, sending a content decline into transport-retry
+        machinery. It is a refusal: terminal, visible, not retried."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {
+                            "type": "response.incomplete",
+                            "response": {
+                                "id": "resp_1",
+                                "incomplete_details": {"reason": "content_filter"},
+                                "usage": {"input_tokens": 5, "output_tokens": 0},
+                            },
+                        }
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.openai.com/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            openai_api="responses",
+        )
+        events = await _collect(
+            client.stream(
+                ChatRequest(
+                    model=_spec("openai", "gpt-5.4").model_copy(
+                        update={"supports_responses_api": True}
+                    ),
+                    messages=[Message.user("hi")],
+                ),
+                "sk-test",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "content_filter" in end.error
+
+    async def test_responses_refusal_item_beats_the_completed_terminal(self) -> None:
+        """A ``response.completed`` whose only output was a refusal item says
+        "completed" on the wire and "no" in the content; the content wins."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"type": "response.refusal.delta", "delta": "I won't do that."},
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_2",
+                                "usage": {"input_tokens": 5, "output_tokens": 3},
+                            },
+                        },
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.openai.com/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            openai_api="responses",
+        )
+        events = await _collect(
+            client.stream(
+                ChatRequest(
+                    model=_spec("openai", "gpt-5.4").model_copy(
+                        update={"supports_responses_api": True}
+                    ),
+                    messages=[Message.user("hi")],
+                ),
+                "sk-test",
+            )
+        )
+        assert not [e for e in events if isinstance(e, StreamTextDelta)]
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "I won't do that." in end.error
+
+    async def test_anthropic_refusal_stop_reason_is_mapped_and_named(self) -> None:
+        """Anthropic's documented ``stop_reason: refusal`` passed through the
+        terminal map unmapped, and downstream read the unknown value as a
+        clean stop."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = _sse(
+                [
+                    {
+                        "type": "message_start",
+                        "message": {"usage": {"input_tokens": 7}},
+                    },
+                    {"type": "message_delta", "delta": {"stop_reason": "refusal"}, "usage": {}},
+                ]
+            )
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+        client = AnthropicClient(
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("anthropic", "claude-x"), messages=[Message.user("hi")]),
+                "sk-ant",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "stop_reason=refusal" in end.error
+
+    @pytest.mark.parametrize("reason", ["SAFETY", "RECITATION", "PROHIBITED_CONTENT", "OTHER"])
+    async def test_google_safety_finishes_are_refusals(self, reason: str) -> None:
+        """Every non-STOP/MAX_TOKENS/TOOL_USE Gemini finishReason is a refusal,
+        and the visible line names WHICH classifier fired."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse([{"candidates": [{"finishReason": reason}]}]),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = GoogleClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("google", "gemini-2.5-pro"), messages=[Message.user("hi")]),
+                "g-key",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and reason in end.error
+
+    async def test_google_blocked_prompt_is_a_refusal(self) -> None:
+        """A blocked prompt yields NO candidates, only promptFeedback — the
+        exact shape that used to end as the silent ``stop`` default."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse([{"promptFeedback": {"blockReason": "SAFETY"}}]),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = GoogleClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("google", "gemini-2.5-pro"), messages=[Message.user("hi")]),
+                "g-key",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "blockReason=SAFETY" in end.error
+
+    async def test_google_normal_finishes_are_untouched(self) -> None:
+        """The refusal mapping must not reclassify the three normal finishes."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {
+                            "candidates": [
+                                {"content": {"parts": [{"text": "hi"}]}, "finishReason": "STOP"}
+                            ]
+                        }
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = GoogleClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("google", "gemini-2.5-pro"), messages=[Message.user("hi")]),
+                "g-key",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "stop"
+        assert end.error is None
+
+    async def test_mock_refuse_trigger_emits_the_full_shape(self) -> None:
+        """``[refuse]`` exists so the whole path can be exercised against a
+        real running app; it must produce the same event shape a real wire
+        does."""
+        client = MockClient()
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("test", "m"), messages=[Message.user("[refuse] hi")]),
+                None,
+            )
+        )
+        end = events[-1]
+        assert isinstance(end, StreamEndEvent)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "can't help" in end.error
+
+    async def test_chat_completions_refusal_truncated_by_length_still_surfaces(self) -> None:
+        """Refusal prose cut by the token cap ended as a bare ``length`` with
+        the collected prose dropped — the swallowed-refusal shape again
+        (review R1-3)."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"choices": [{"delta": {"refusal": "I can't hel"}}]},
+                        {"choices": [{"delta": {}, "finish_reason": "length"}]},
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.test.example/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "I can't hel" in end.error
+
+    async def test_responses_refusal_truncated_by_output_cap_still_surfaces(self) -> None:
+        """Same gap on the Responses wire: ``response.incomplete`` with
+        ``reason=max_output_tokens`` after refusal deltas (review R1-3)."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"type": "response.refusal.delta", "delta": "I won't"},
+                        {
+                            "type": "response.incomplete",
+                            "response": {
+                                "id": "resp_3",
+                                "incomplete_details": {"reason": "max_output_tokens"},
+                                "usage": {"input_tokens": 5, "output_tokens": 2},
+                            },
+                        },
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.openai.com/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            openai_api="responses",
+        )
+        events = await _collect(
+            client.stream(
+                ChatRequest(
+                    model=_spec("openai", "gpt-5.4").model_copy(
+                        update={"supports_responses_api": True}
+                    ),
+                    messages=[Message.user("hi")],
+                ),
+                "sk-test",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "I won't" in end.error
+
+    async def test_responses_plain_length_is_still_length(self) -> None:
+        """The R1-3 fix must not reclassify an ordinary truncation: no refusal
+        deltas means ``max_output_tokens`` stays ``length``."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"type": "response.output_text.delta", "delta": "partial answ"},
+                        {
+                            "type": "response.incomplete",
+                            "response": {
+                                "id": "resp_4",
+                                "incomplete_details": {"reason": "max_output_tokens"},
+                                "usage": {"input_tokens": 5, "output_tokens": 2},
+                            },
+                        },
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.openai.com/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            openai_api="responses",
+        )
+        events = await _collect(
+            client.stream(
+                ChatRequest(
+                    model=_spec("openai", "gpt-5.4").model_copy(
+                        update={"supports_responses_api": True}
+                    ),
+                    messages=[Message.user("hi")],
+                ),
+                "sk-test",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "length"
+        assert end.error is None
+
+    @pytest.mark.parametrize("reason", ["MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL"])
+    async def test_google_model_defects_are_errors_not_refusals(self, reason: str) -> None:
+        """Gemini's tooling-defect finishes are not content refusals: calling
+        them refusals steers the user to rephrase/switch when a plain retry
+        usually works (review R1-2). They end as ``error`` naming the marker."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse([{"candidates": [{"finishReason": reason}]}]),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = GoogleClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("google", "gemini-2.5-pro"), messages=[Message.user("hi")]),
+                "g-key",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "error"
+        assert end.error is not None and reason in end.error and "refused" not in end.error
+
+    async def test_anthropic_refusal_after_partial_prose_says_cut_short(self) -> None:
+        """Design review D1: 'sent no message' directly under a partially
+        rendered answer asserts the opposite of what is on screen. When text
+        streamed before the refusal terminal, the line says the reply was cut."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = _sse(
+                [
+                    {"type": "message_start", "message": {"usage": {"input_tokens": 7}}},
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "Here is the beginning of"},
+                    },
+                    {"type": "message_delta", "delta": {"stop_reason": "refusal"}, "usage": {}},
+                ]
+            )
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+        client = AnthropicClient(
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("anthropic", "claude-x"), messages=[Message.user("hi")]),
+                "sk-ant",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None
+        assert "cut the reply short" in end.error
+        assert "sent no message" not in end.error
+
+    async def test_google_refusal_after_partial_prose_says_cut_short(self) -> None:
+        """Same D1 state on the Gemini wire, where safety stops commonly cut a
+        partial answer."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"candidates": [{"content": {"parts": [{"text": "Starting to answ"}]}}]},
+                        {"candidates": [{"finishReason": "SAFETY"}]},
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = GoogleClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("google", "gemini-2.5-pro"), messages=[Message.user("hi")]),
+                "g-key",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None and "cut the reply short" in end.error
+
+    async def test_prose_slot_refusal_names_the_slot_not_just_the_finish(self) -> None:
+        """Design review D2: '(finish_reason=stop)' beside the word 'refused'
+        names a mechanism that did not fire. When the prose slot detected the
+        refusal, the marker names the slot."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [{"choices": [{"delta": {"refusal": "No."}, "finish_reason": "stop"}]}]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.test.example/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+        end = self._end(events)
+        assert end.error is not None and "delta.refusal" in end.error
+
+    async def test_chat_content_filter_after_prose_says_cut_short(self) -> None:
+        """Review R3-1: a third-party filter (Azure-style) commonly terminates
+        with ``content_filter`` AFTER answer chunks rendered and sends no
+        refusal prose — 'sent no message' under that partial reply is the D1
+        contradiction on this wire."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"choices": [{"delta": {"content": "The document says"}}]},
+                        {"choices": [{"delta": {}, "finish_reason": "content_filter"}]},
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.test.example/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None
+        assert "cut the reply short" in end.error
+        assert "sent no message" not in end.error
+
+    async def test_responses_content_filter_after_prose_says_cut_short(self) -> None:
+        """Same R3-1 state on the Responses wire: output text streamed, then
+        ``response.incomplete`` with ``reason=content_filter`` and no refusal
+        deltas."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_sse(
+                    [
+                        {"type": "response.output_text.delta", "delta": "The document says"},
+                        {
+                            "type": "response.incomplete",
+                            "response": {
+                                "id": "resp_5",
+                                "incomplete_details": {"reason": "content_filter"},
+                                "usage": {"input_tokens": 5, "output_tokens": 3},
+                            },
+                        },
+                    ]
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = OpenAICompatClient(
+            "https://api.openai.com/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            openai_api="responses",
+        )
+        events = await _collect(
+            client.stream(
+                ChatRequest(
+                    model=_spec("openai", "gpt-5.4").model_copy(
+                        update={"supports_responses_api": True}
+                    ),
+                    messages=[Message.user("hi")],
+                ),
+                "sk-test",
+            )
+        )
+        end = self._end(events)
+        assert end.stop_reason == "refusal"
+        assert end.error is not None
+        assert "cut the reply short" in end.error
+        assert "sent no message" not in end.error

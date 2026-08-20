@@ -171,7 +171,7 @@ class Message(BaseModel):
     tool_call_id: str | None = None
     tool_name: str | None = None
     is_error: bool = False
-    stop_reason: str | None = None  # stop | length | toolUse | error | aborted
+    stop_reason: str | None = None  # stop | length | toolUse | refusal | error | aborted
     usage: "Usage | None" = None
     # Provider-native replay payload (opaque to the harness). NOTE: the loop
     # stores harness bookkeeping under ``provider_payload["details"]`` (tool
@@ -1305,9 +1305,17 @@ class StreamUsageEvent(BaseModel):
 
 class StreamEndEvent(BaseModel):
     type: Literal["end"] = "end"
-    stop_reason: str  # stop | length | toolUse | error | aborted
+    stop_reason: str  # stop | length | toolUse | refusal | error | aborted
     usage: Usage | None = None
     provider_payload: dict[str, Any] | None = None
+    #: The provider's own words about an abnormal end. For ``refusal`` this is
+    #: the refusal message (or a line naming the provider's terminal marker when
+    #: it sent no prose). Refusals used to be mapped onto ``stop``, which ended
+    #: the turn with a clean frame and NOTHING on screen — the user saw an empty
+    #: turn and could not tell a refusal from a no-op, let alone decide to
+    #: switch models. The wire clients are the only place the provider's actual
+    #: marker (``content_filter``, ``refusal``, ``SAFETY``…) is still visible,
+    #: so they must put it here; downstream only ever sees the normalized stop.
     error: str | None = None
 
 

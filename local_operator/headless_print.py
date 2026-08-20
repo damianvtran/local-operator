@@ -241,7 +241,16 @@ class PrintRenderer:
             self.console.print("[dim]compacting context…[/dim]", highlight=False)
         elif isinstance(event, AgentEndEvent):
             if event.error:
-                self.console.print(f"[red]Error: {event.error}[/red]", highlight=False)
+                # ``markup=False`` for the same reason as the notice branch
+                # above: ``error`` now carries model-authored prose (a
+                # provider's refusal message), and adversarial text like
+                # ``[/see policy]`` raised MarkupError inside this subscriber —
+                # BEFORE ``_track_outcome`` ran, so the process printed a
+                # traceback instead of the error line and exited 0. The text is
+                # data, never markup. (Review R1-1.)
+                self.console.print(
+                    f"Error: {event.error}", style="red", highlight=False, markup=False
+                )
             elif event.aborted:
                 self.console.print("[red]aborted[/red]", highlight=False)
 

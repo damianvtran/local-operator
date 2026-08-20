@@ -440,6 +440,29 @@ def test_a_notice_cannot_smuggle_control_sequences_to_the_terminal() -> None:
     assert out.startswith("✗ Tool not found: ")
 
 
+def test_a_refusal_with_markup_shaped_prose_still_prints_and_fails(fake_factory, capsys) -> None:
+    """Review R1-1. ``agent_end.error`` now carries MODEL-AUTHORED prose (a
+    provider's refusal message), and rendering it as rich markup meant prose
+    like ``[/see our policy]`` raised MarkupError inside the subscriber —
+    BEFORE the outcome tracker ran, so exec printed a traceback instead of the
+    error line and exited 0: the silent-refusal bug resurfacing on adversarial
+    text. The text is data, never markup.
+    """
+    refusal = "model refused: I can't comply [/see our policy] with that. (finish_reason=stop)"
+    reply = Message(role="assistant", stop_reason="refusal")
+    script: list[AgentEvent] = [
+        AgentStartEvent(),
+        MessageStartEvent(message=reply),
+        MessageEndEvent(message=reply),
+        AgentEndEvent(messages=[reply], error=refusal),
+    ]
+    fake_factory(FakeSession([script]))
+    code = exec_mode.run_exec("refused task", ExecArgs())
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "[/see our policy]" in captured.err
+
+
 def test_a_notice_cannot_forge_a_row_or_crash_the_renderer() -> None:
     """Design round 4, D14/D15. The tool name in a notice is model-chosen.
 

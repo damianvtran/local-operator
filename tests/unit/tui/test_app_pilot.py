@@ -3926,6 +3926,58 @@ class TestResumeReplaysTheWholeConversation:
         assert counts["user"] == 2 and counts["notice"] == 1
 
     @pytest.mark.asyncio
+    async def test_a_refused_turn_replays_the_providers_refusal(self) -> None:
+        """A refusal is not a generic "turn failed": the loop stashes the
+        provider's own words on the assistant message so a resumed session can
+        show WHAT was refused — the half of the diagnosis that decides between
+        rephrasing and switching models."""
+        from local_operator.harness.types import Message
+        from local_operator.tui.widgets.transcript import NoticeBlock
+
+        session = _resumed(
+            Message.user("do the thing"),
+            Message(
+                role="assistant",
+                stop_reason="refusal",
+                provider_payload={"refusal": "model refused: I can't help with that. [marker]"},
+            ),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(pilot, lambda: _blocks_by_type(app)["notice"] == 1)
+            notice = next(
+                b for b in app.query_one(TranscriptView).blocks() if isinstance(b, NoticeBlock)
+            )
+        assert "I can't help with that." in notice._text
+
+    @pytest.mark.asyncio
+    async def test_a_refused_turn_with_partial_prose_still_shows_the_refusal(self) -> None:
+        """Gemini safety stops often cut a partial answer: the prose alone
+        reads as a complete, oddly short reply, so the refusal notice must
+        appear even when text was streamed."""
+        from local_operator.harness.types import Message
+        from local_operator.harness.types import TextContent as _Text
+
+        session = _resumed(
+            Message.user("do the thing"),
+            Message(
+                role="assistant",
+                content=[_Text(text="Here is the beginning of")],
+                stop_reason="refusal",
+                provider_payload={"refusal": "model refused and sent no message [SAFETY]"},
+            ),
+        )
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _settle(
+                pilot,
+                lambda: _blocks_by_type(app)["notice"] == 1
+                and _blocks_by_type(app)["assistant"] == 1,
+            )
+            counts = _blocks_by_type(app)
+        assert counts["assistant"] == 1 and counts["notice"] == 1
+
+    @pytest.mark.asyncio
     async def test_a_fresh_session_still_replays_nothing(self) -> None:
         """The splash must not be retired by an empty history."""
         app = OperatorApp(lambda: _factory(_resumed()))
