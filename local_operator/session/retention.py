@@ -36,8 +36,6 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from local_operator.resume import ORIGIN_NAME
-
 logger = logging.getLogger(__name__)
 
 #: Directory under the config dir holding ephemeral per-run transcripts.
@@ -84,17 +82,19 @@ def _dir_size(directory: Path) -> int:
     """Bytes under ``directory``. Files that vanish mid-walk are skipped: a
     concurrent process disposing its own session is normal, not an error.
 
-    The origin marker is EXCLUDED from the total, which is what keeps the
-    "empty directories are always reaped" rule meaning what it says. A
-    session is stamped before its transcript exists, so a run that aborts in
-    between leaves a directory holding nothing but a 43-byte marker. The
-    marker is bookkeeping ABOUT the session, never session content, so it
-    does not make the directory non-empty.
+    Every file counts, including the origin marker. A directory holding
+    only ``origin.json`` is a session that has been claimed — typically a
+    child between ``mark_session_origin`` and its first append, or a run
+    that aborted in that window. Treating the marker as invisible made
+    those directories look empty and the sweep rmtree'd them, which is
+    exactly the ``FileNotFoundError: .../transcript.jsonl`` kill this
+    module exists to prevent. A 43-byte marker is cheaper than a lost
+    session; abandoned markers accumulate and the user can remove them.
     """
     total = 0
     for entry in directory.rglob("*"):
         try:
-            if entry.is_file() and entry.name != ORIGIN_NAME:
+            if entry.is_file():
                 total += entry.stat().st_size
         except OSError:
             continue
@@ -112,13 +112,16 @@ def sweep_sessions(
 ) -> SweepResult:
     """Reap EMPTY session directories. Never delete anything else.
 
-    The ceiling parameters and ``live_dir`` are accepted for call-site
-    compatibility and are IGNORED: no configuration can make this function
-    delete a directory that holds content. A transcript is removed only when
-    the user explicitly disposes of the session — there is no automated
-    path, because the failure mode of an automated path (a running session's
-    transcript vanishing underneath it) costs the user the whole session,
-    and the benefit (bounded disk) is recoverable by hand at any time.
+    The ceiling parameters are accepted for call-site compatibility and
+    are IGNORED: no configuration can make this function delete a
+    directory that holds content. ``live_dir`` is still honoured as a
+    belt: even a literally-empty live directory is skipped, because the
+    caller just created it and has not written a turn yet. A transcript
+    is removed only when the user explicitly disposes of the session —
+    there is no automated path, because the failure mode of an automated
+    path (a running session's transcript vanishing underneath it) costs
+    the user the whole session, and the benefit (bounded disk) is
+    recoverable by hand at any time.
 
     Idempotent and safe to call on every startup: a missing ``sessions_dir``
     is a no-op rather than an error — the first run of a fresh install has
@@ -132,6 +135,7 @@ def sweep_sessions(
     evicted = 0
     errors = 0
     bytes_remaining = 0
+    live_resolved = live_dir.resolve() if live_dir is not None else None
     try:
         children = [child for child in sessions_dir.iterdir() if child.is_dir()]
     except OSError as exc:
@@ -141,6 +145,10 @@ def sweep_sessions(
     for child in children:
         scanned += 1
         try:
+            if live_resolved is not None and child.resolve() == live_resolved:
+                # The caller just created this directory and has not written
+                # a turn. It is empty by construction and must still survive.
+                continue
             size = _dir_size(child)
         except OSError:
             # A directory another process removed mid-scan. Nothing to do.
@@ -148,8 +156,8 @@ def sweep_sessions(
         if size > 0:
             bytes_remaining += size
             continue
-        # Empty by construction: no transcript, no content. Deleting it
-        # loses nothing, and it was never a real session.
+        # Literally empty: no files at all, not even a marker. Deleting
+        # it loses nothing, and it was never a real session.
         try:
             shutil.rmtree(child)
         except OSError as exc:

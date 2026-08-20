@@ -61,18 +61,21 @@ def test_no_ceiling_combination_ever_deletes_a_transcript(tmp_path):
         assert (directory / "transcript.jsonl").read_text() == "x" * 1_000_000
 
 
-def test_live_dir_is_redundant_but_harmless(tmp_path):
-    """``live_dir`` is accepted for call-site compatibility and ignored:
-    every session is as protected as the live one used to be."""
+def test_live_dir_is_never_reaped_even_when_empty(tmp_path):
+    """The caller just created this directory and has not written a turn.
+    It is empty by construction; ``live_dir`` is the belt that keeps the
+    sweep from rmtree'ing it in the same call that created it."""
     sessions = tmp_path / "sessions"
-    live = _session(sessions, "live", size=5_000_000, age_days=400)
-    other = _session(sessions, "other", size=1000, age_days=1)
+    live = sessions / "live"
+    live.mkdir(parents=True)
+    other = sessions / "other"
+    other.mkdir(parents=True)
 
-    result = sweep_sessions(sessions, live_dir=live, max_sessions=1, max_bytes=1000, max_age_days=1)
+    result = sweep_sessions(sessions, live_dir=live)
 
-    assert result.evicted == 0
-    assert (live / "transcript.jsonl").exists()
-    assert (other / "transcript.jsonl").exists()
+    assert live.exists()
+    assert not other.exists()
+    assert result.evicted == 1
 
 
 def test_empty_directories_are_reaped(tmp_path):
@@ -90,11 +93,12 @@ def test_empty_directories_are_reaped(tmp_path):
     assert result.evicted == 1
 
 
-def test_a_marker_alone_does_not_make_a_directory_non_empty(tmp_path):
-    """A session is stamped with its origin BEFORE its transcript exists, so
-    a run that aborts in between leaves a directory holding only the marker.
-    The marker is bookkeeping ABOUT the session, never session content, so
-    the directory is still empty — and still reaped."""
+def test_a_marker_alone_protects_the_directory(tmp_path):
+    """A session is stamped with its origin BEFORE its transcript exists.
+    Treating that marker as invisible made the directory look empty, and
+    a concurrent process's startup sweep rmtree'd it — the child's first
+    append then died on FileNotFoundError, the exact kill this module
+    exists to prevent. A marker is a claim: the directory stays."""
     from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 
     sessions = tmp_path / "sessions"
@@ -104,8 +108,8 @@ def test_a_marker_alone_does_not_make_a_directory_non_empty(tmp_path):
 
     result = sweep_sessions(sessions)
 
-    assert not hollow.exists()
-    assert result.evicted == 1
+    assert hollow.exists()
+    assert result.evicted == 0
 
 
 def test_any_content_at_all_protects_the_directory(tmp_path):

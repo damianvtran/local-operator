@@ -126,7 +126,13 @@ class AttachmentStore:
                 self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
                 # Write content before the sidecar: a sidecar pointing at
                 # absent content would resolve to nothing on read, while
-                # content without a sidecar is merely unused disk.
+                # content without a sidecar is merely unused disk. Two
+                # concurrent writers of the same digest always write
+                # identical bytes (the digest IS the content), so the
+                # exists()-then-write race is a wasted write, never a
+                # torn file. A crash between the two writes leaves
+                # content without a sidecar, which ``get`` treats as
+                # missing — the next ``put`` of the same image retries.
                 content.write_bytes(raw)
                 meta = {"digest": digest, "mime_type": mime_type, "bytes": len(raw)}
                 self._meta_path(digest).write_text(json.dumps(meta), encoding="utf-8")
@@ -151,5 +157,12 @@ class AttachmentStore:
             meta = json.loads(self._meta_path(digest).read_text(encoding="utf-8"))
             mime_type = str(meta.get("mime_type", "image/png"))
         except (OSError, ValueError):
+            return None
+        # The filename IS the digest. A bit-rotted or truncated file
+        # that still has a sidecar would otherwise flow silently-wrong
+        # bytes into the model; treat a mismatch as missing so replay
+        # degrades to a placeholder instead.
+        if hashlib.sha256(raw).hexdigest()[:_DIGEST_CHARS] != digest:
+            logger.warning("attachment store: digest mismatch for %s", digest)
             return None
         return base64.b64encode(raw).decode("ascii"), mime_type

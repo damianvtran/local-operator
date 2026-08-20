@@ -17,6 +17,21 @@ from local_operator.harness.types import ImageContent, Message, TextContent
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.transcript import Transcript
 
+
+@pytest.fixture(autouse=True)
+def _isolate_attachments(tmp_path, monkeypatch):
+    """Every test in this module writes into a tmp store, never the
+    developer's real ``~/.local-operator/attachments``."""
+    store_root = tmp_path / "attachments"
+    store_root.mkdir()
+    monkeypatch.setattr("local_operator.session.attachments.attachments_dir", lambda: store_root)
+    monkeypatch.setattr(
+        "local_operator.session.transcript.AttachmentStore",
+        lambda root=None: AttachmentStore(root or store_root),
+    )
+    return store_root
+
+
 #: A valid 1x1-ish payload well over the 1 KiB externalization floor.
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 2048
 PNG_B64 = base64.b64encode(PNG_BYTES).decode("ascii")
@@ -68,6 +83,16 @@ def test_put_failure_returns_none_and_caller_keeps_inline(tmp_path, monkeypatch)
 
 def test_get_unknown_digest_is_none_not_an_error(tmp_path):
     assert AttachmentStore(tmp_path).get("0" * 32) is None
+
+
+def test_get_rejects_a_digest_mismatch(tmp_path):
+    """A bit-rotted or truncated file must not flow silently-wrong bytes
+    into the model: treat it as missing so replay degrades."""
+    store = AttachmentStore(tmp_path)
+    ref = store.put(PNG_B64, "image/png")
+    assert ref is not None
+    (tmp_path / f"{ref.digest}.bin").write_bytes(b"partial")
+    assert store.get(ref.digest) is None
 
 
 def test_put_rejects_undecodable_input(tmp_path):

@@ -293,12 +293,14 @@ def measure_retention(generated: int, session_bytes: int) -> RetentionReport:
         sessions = root / "sessions"
         sessions.mkdir()
         (sessions / "hollow").mkdir()
+        empties_reaped = 0
 
         for i in range(generated):
             directory = sessions / f"s{i:04d}"
             directory.mkdir()
             (directory / "transcript.jsonl").write_text("x" * session_bytes)
-            sweep_sessions(sessions)
+            result = sweep_sessions(sessions)
+            empties_reaped += result.evicted
 
         transcripts_intact = all(
             (sessions / f"s{i:04d}" / "transcript.jsonl").read_text() == "x" * session_bytes
@@ -309,7 +311,7 @@ def measure_retention(generated: int, session_bytes: int) -> RetentionReport:
             generated=generated,
             remaining=len(list(sessions.iterdir())),
             transcripts_intact=transcripts_intact,
-            empties_reaped=1,
+            empties_reaped=empties_reaped,
         )
     finally:
         shutil.rmtree(root, ignore_errors=True)
