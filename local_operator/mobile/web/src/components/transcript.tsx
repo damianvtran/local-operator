@@ -9,10 +9,10 @@
  * the bottom. Scrolling up to read must never be yanked back by a repaint.
  */
 import { useEffect, useRef, useState } from "react";
-import { Markdown } from "../markdown";
-import { ToolRow } from "../tool-row";
-import { cn } from "../../lib/cn";
-import type { TranscriptEntry } from "../../types";
+import { Markdown } from "./markdown"
+import { ToolRow } from "./tool-row"
+import { cn } from "../lib/cn";
+import type { TranscriptEntry } from "../types";
 
 const PAGE = 120;
 

@@ -17,11 +17,6 @@ export interface ProjectionSlot {
 	connected: boolean;
 }
 
-interface StoreState {
-	sessions: SessionSummary[];
-	sessionsConnected: boolean;
-	projections: Map<number, ProjectionSlot>;
-}
 
 let sessions: SessionSummary[] = [];
 let sessionsConnected = false;

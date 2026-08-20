@@ -10,10 +10,11 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCommands, sendCommand } from "../api";
+import { Sheet } from "./ui/sheet";
 import { cn } from "../lib/cn";
 import { useDraft } from "../store";
 import type { SessionProjection, SlashCommand } from "../types";
-import { Sheet } from "../ui/sheet";
+
 
 /** Detect "/cmd args" at the very start of the draft — the slash trigger. */
 function slashQuery(text: string): string | null {
@@ -316,7 +317,7 @@ export function Composer({
 				<button
 					type="button"
 					onClick={onOpenModels}
-					className="font-mono text-mono-sm text-ink-dim active:text-ink-muted"
+					className="flex min-h-11 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
 				>
 					{projection.model_label || "model"}
 				</button>
@@ -324,7 +325,7 @@ export function Composer({
 					<button
 						type="button"
 						onClick={onOpenEffort}
-						className="font-mono text-mono-sm text-ink-dim active:text-ink-muted"
+						className="flex min-h-11 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
 					>
 						{projection.effort || "effort"}
 					</button>

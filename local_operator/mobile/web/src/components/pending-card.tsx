@@ -80,7 +80,7 @@ export function PendingCard({
 							type="checkbox"
 							checked={remember}
 							onChange={(e) => setRemember(e.target.checked)}
-							className="size-4 accent-(--color-accent)"
+							className="size-4 accent-accent"
 						/>
 						remember this choice
 					</label>

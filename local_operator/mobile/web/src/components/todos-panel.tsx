@@ -2,9 +2,9 @@
  * Todos panel: collapsible, one line per item. Default-collapsed once most
  * items are done — a finished list is context, not work in progress.
  */
-import { cn } from "../../lib/cn";
-import type { TodoItem } from "../../types";
-import { Disclosure } from "../ui/disclosure";
+import { cn } from "../lib/cn";
+import type { TodoItem } from "../types";
+import { Disclosure } from "./ui/disclosure";
 
 const GLYPH: Record<TodoItem["status"], string> = {
 	pending: "☐",

@@ -4,11 +4,11 @@
  * the sheet's own close as the back affordance to the parent session.
  */
 import { useState } from "react";
-import { cn } from "../../lib/cn";
-import { formatElapsed } from "../../lib/format";
-import type { SubagentRow } from "../../types";
-import { Disclosure } from "../ui/disclosure";
-import { Sheet } from "../ui/sheet";
+import { cn } from "../lib/cn";
+import { formatElapsed } from "../lib/format";
+import type { SubagentRow } from "../types";
+import { Disclosure } from "./ui/disclosure";
+import { Sheet } from "./ui/sheet";
 
 const GLYPH: Record<SubagentRow["status"], string> = {
 	running: "⟳",

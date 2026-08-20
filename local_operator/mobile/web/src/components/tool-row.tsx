@@ -8,9 +8,9 @@
  * there is no separate spinner.
  */
 import { useState } from "react";
-import { cn } from "../../lib/cn";
-import { formatElapsed } from "../../lib/format";
-import type { TranscriptEntry } from "../../types";
+import { cn } from "../lib/cn";
+import { formatElapsed } from "../lib/format";
+import type { TranscriptEntry } from "../types";
 
 const GLYPH: Record<TranscriptEntry["tool_state"], string> = {
 	composing: "⟳",
