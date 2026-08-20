@@ -315,6 +315,7 @@ class Registrant:
             await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             await self._send({"op": "error", "req": req, "message": str(exc)[:400]})
+            await self._push()
 
     async def _dispatch(self, op: str, frame: dict[str, Any]) -> str:
         h = self._handle

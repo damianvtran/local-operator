@@ -56,7 +56,17 @@ async def amain() -> int:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.WARNING)
+    # A child has no terminal and no inherited log stream — without this its
+    # warnings (a failed prompt, a dead provider) vanish, which is how a
+    # silently-dropped turn went undiagnosed. The daemon's own log file is
+    # the natural place: `lop mobile logs` covers both.
+    from local_operator.paths import log_dir
+
+    log_dir().mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        filename=str(log_dir() / "mobile.log"),
+    )
     try:
         return asyncio.run(amain())
     except KeyboardInterrupt:
