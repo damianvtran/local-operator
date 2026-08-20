@@ -39,7 +39,7 @@ from local_operator.tui.widgets.editor import ASIDE_PLACEHOLDER, Editor
 from local_operator.tui.widgets.session_picker import SessionPickerScreen
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.conftest import caret_cells, chevron_colour, composer_cells
 
@@ -324,6 +324,13 @@ async def test_boot_typing_sends_prompt() -> None:
 
 @pytest.mark.asyncio
 async def test_boot_renders_non_blocking_quota_warning() -> None:
+    """A quota fallback is harness news, not a conversation.
+
+    Routing it through the default notice path retired the splash for a
+    single yellow line over an empty screen — a launch that looked like
+    a conversation that had already started. The splash stays; the
+    warning is a toast and a splash row.
+    """
     session = FakeSession()
     session.preflight_notice = (
         "anthropic quota exhausted — falling back to openai/gpt-5.3-codex (high effort)"
@@ -331,13 +338,39 @@ async def test_boot_renders_non_blocking_quota_warning() -> None:
     app = OperatorApp(lambda: _factory(session))
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        await pilot.pause()
+        for _ in range(8):
+            await pilot.pause()
+            if app._splash_notice:
+                break
 
-        text = _transcript_text(app)
-        assert "anthropic quota exhausted" in text
-        assert "falling back to openai/gpt-5.3-codex (high effort)" in text
         assert session.prompts == []
+        welcome = app.query_one(WelcomeView)
+        assert welcome.display is True, "a quota notice must not retire the splash"
+        assert app.screen.has_class(BOOT_LAYOUT_CLASS)
+        assert app.query_one(TranscriptView).blocks() == []
+        assert "anthropic quota exhausted" in (welcome._info.notice or "")
+        assert "falling back to openai/gpt-5.3-codex (high effort)" in (welcome._info.notice or "")
+        toast = app.query_one(Toast)
+        assert toast.display is True
+        assert "anthropic quota exhausted" in toast.message
+
+
+@pytest.mark.asyncio
+async def test_a_notice_after_the_conversation_starts_is_a_transcript_row() -> None:
+    """Once a user message has retired the splash, a later notice is just
+    another line — the toast/splash path is only for the empty state."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._append_block(UserBlock("hello"))
+        await pilot.pause()
+        assert app.query_one(WelcomeView).display is False
+        session.emit(NoticeEvent(text="anthropic quota low — falling back", kind="warning"))
+        await pilot.pause()
+        assert "anthropic quota low" in _transcript_text(app)
+        assert app.query_one(WelcomeView).display is False
+        assert app.query_one(Toast).display is False
 
 
 @pytest.mark.asyncio
