@@ -104,7 +104,7 @@ class TestSingleServerConnection:
         manager = McpManager(str(tmp_path))
         attempted: list[tuple[str, float | None]] = []
 
-        async def fake_connect(name: str, cfg: Any) -> ServerConnection:
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
             attempted.append((name, cfg.timeout))
             return _make_conn(name, cfg)
 
@@ -967,3 +967,150 @@ def test_per_tool_filter_allow_deny_and_deny_wins(project: Path) -> None:
     assert manager._tool_is_enabled("srv", "get_one") is False  # deny wins
     assert manager._tool_is_enabled("srv", "unlisted") is False
     assert manager._tool_is_enabled("missing", "anything") is True
+
+
+class TestAuthRequiredHandling:
+    """An expired OAuth grant surfaces as an actionable failure, never a popup.
+
+    Startup and auto-reconnect are non-interactive: when the stored grant
+    cannot be refreshed, the connect raises ``McpAuthRequiredError``. The
+    manager turns that into a ``run /mcp login <name>`` message for the toast,
+    and the reconnect loop abandons (an expired grant will not heal by
+    retrying) instead of burning the breaker window.
+    """
+
+    def test_unwrap_auth_required_recognises_plain_and_grouped(self) -> None:
+        """The transport wraps the handler's raise in an ExceptionGroup; the
+        manager must recognise the auth error in BOTH delivery shapes."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+        from local_operator.mcp.manager import _unwrap_auth_required
+
+        plain = McpAuthRequiredError("https://srv.example/mcp")
+        assert _unwrap_auth_required(plain) is plain
+
+        grouped = ExceptionGroup("unhandled errors in a TaskGroup (1 sub-exception)", [plain])
+        unwrapped = _unwrap_auth_required(grouped)
+        assert isinstance(unwrapped, McpAuthRequiredError)
+        assert unwrapped.server_url == "https://srv.example/mcp"
+
+        # Non-auth exceptions pass through untouched.
+        other = RuntimeError("boom")
+        assert _unwrap_auth_required(other) is other
+        other_group = ExceptionGroup("g", [other])
+        assert _unwrap_auth_required(other_group) is other_group
+
+    def test_fire_auth_required_calls_the_ui_sink(self) -> None:
+        """The UI hook receives the server name and the actionable message."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        manager = McpManager("/tmp")
+        seen: list[tuple[str, str]] = []
+        manager.on_auth_required = lambda name, msg: seen.append((name, msg))
+        manager._fire_auth_required("notion", McpAuthRequiredError("https://mcp.notion.com/mcp"))
+        assert seen == [("notion", "needs authorization — run /mcp login notion")]
+
+    def test_fire_auth_required_survives_a_raising_sink(self) -> None:
+        """A broken UI hook must not take down the connect machinery."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        manager = McpManager("/tmp")
+
+        def broken(name: str, msg: str) -> None:
+            raise RuntimeError("ui exploded")
+
+        manager.on_auth_required = broken
+        # Must not raise.
+        manager._fire_auth_required("notion", McpAuthRequiredError("https://mcp.notion.com/mcp"))
+
+    def test_fire_auth_required_is_deduped_until_reconnect(self) -> None:
+        """A dead grant a tool call keeps retrying must not re-toast every time;
+        a successful reconnect clears the latch so a later expiry toasts again."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        manager = McpManager("/tmp")
+        seen: list[str] = []
+        manager.on_auth_required = lambda name, msg: seen.append(name)
+        exc = McpAuthRequiredError("https://mcp.notion.com/mcp")
+
+        manager._fire_auth_required("notion", exc)
+        manager._fire_auth_required("notion", exc)
+        manager._fire_auth_required("notion", exc)
+        assert seen == ["notion"]  # only the first fires
+
+        # A successful (re)connect clears the latch.
+        manager._auth_toasted.discard("notion")
+        manager._fire_auth_required("notion", exc)
+        assert seen == ["notion", "notion"]
+
+    @pytest.mark.asyncio
+    async def test_auth_required_text_names_the_login_command(self) -> None:
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        manager = McpManager("/tmp")
+        exc = McpAuthRequiredError("https://srv.example/mcp")
+        text = manager._auth_required_text("datadog", exc)
+        assert "datadog" in text
+        assert "/mcp login datadog" in text
+
+    @pytest.mark.asyncio
+    async def test_connect_round_reports_auth_required_actionably(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A server that needs auth lands in ``errors`` with the login command."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(
+            url="https://srv.example/mcp",
+            auth=MCPAuthConfig(type="oauth"),
+        )
+
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            raise McpAuthRequiredError("https://srv.example/mcp")
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        result = await manager._connect_round({"dd": cfg}, {"dd": "global"})
+        assert "dd" in result.errors
+        assert "/mcp login dd" in result.errors["dd"]
+        assert result.connected_servers == []
+
+    @pytest.mark.asyncio
+    async def test_reconnect_abandons_on_auth_required(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An auth failure during reconnect abandons rather than re-scheduling.
+
+        An expired grant will not heal by retrying, so further attempts would
+        only burn the breaker window. The manager abandons auto-reconnect and
+        leaves ``/mcp login`` as the recovery path.
+        """
+        from local_operator.mcp.auth import McpAuthRequiredError
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(
+            url="https://srv.example/mcp",
+            auth=MCPAuthConfig(type="oauth"),
+        )
+        manager._configs["dd"] = cfg
+
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            raise McpAuthRequiredError("https://srv.example/mcp")
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+
+        scheduled = {"called": False}
+
+        def fake_schedule(name: str) -> None:
+            scheduled["called"] = True
+
+        monkeypatch.setattr(manager, "_schedule_reconnect", fake_schedule)
+
+        # Run one reconnect attempt with zero delay.
+        await manager._reconnect("dd", 0.0, manager._epoch)
+
+        # The reconnect must NOT have re-scheduled itself (abandoned instead).
+        assert scheduled["called"] is False
+        # And the server must be marked as having abandoned auto-reconnect.
+        assert manager.reconnect_suspended("dd") is True

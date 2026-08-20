@@ -5,6 +5,14 @@ Flow (official SDK PKCE + RFC 7591 DCR under the hood):
 - ``build_oauth_provider(server_url, cfg)`` is the entry point: it wires the
   provider AND primes it with the stored token's expiry, which is what makes a
   restart spend the refresh token instead of re-running a browser grant.
+- ``ensure_mcp_oauth_fresh(server_url, cfg)`` refreshes an expired access
+  token BEFORE connecting, against the token endpoint resolved from the
+  server's OAuth metadata (PRM + ASM discovery). This is what stops a day-old
+  token from forcing a browser grant on startup for providers whose token
+  endpoint is not ``<server_base>/token`` (the SDK's fallback guess 404s for
+  e.g. Datadog). The refresh is serialized across processes with a file lock
+  and the token is re-read under it, so concurrently starting sessions cannot
+  spend a rotating refresh token twice.
 - ``wire_oauth_auth(server_url, cfg)`` returns the ``OAuthClientProvider``
   kwargs: client metadata with a loopback redirect URI, a token storage bound
   to the shared credential store, and a :class:`LoopbackAuthFlow` that
@@ -13,6 +21,13 @@ Flow (official SDK PKCE + RFC 7591 DCR under the hood):
 - ``McpTokenStorage`` is the SDK ``TokenStorage``: one row per server URL in
   the real ``providers.auth_store.AuthStore``, keyed ``mcp_oauth:<url>``, with
   the token's issue time recorded so its lifetime survives the process.
+
+Non-interactive connects (ordinary startup and auto-reconnect) pass
+``interactive=False``: when the stored grant cannot be refreshed the flow
+raises :class:`McpAuthRequiredError` instead of opening a browser, and the
+manager surfaces that as an actionable "run /mcp login <name>" failure. Only
+an explicit login (``/mcp login`` / ``local-operator mcp login``) runs
+interactive and may open a browser.
 
 Credential mapping onto the REAL AuthStore API (MCP-03): the store is keyed
 by integer row id + ``provider`` column + ``identity_key``, so the logical
@@ -28,8 +43,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import sys
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlparse
 
@@ -44,7 +61,9 @@ if TYPE_CHECKING:
     from mcp.shared.auth import (
         AuthorizationCodeResult,
         OAuthClientInformationFull,
+        OAuthMetadata,
         OAuthToken,
+        ProtectedResourceMetadata,
     )
 
     from local_operator.mcp.config import MCPServerConfig
@@ -65,6 +84,33 @@ DEFAULT_CALLBACK_PATH = "/callback"
 #: token was issued. Not part of the SDK's ``OAuthToken`` — see
 #: :meth:`McpTokenStorage.stored_token_expiry` for why we have to record it.
 TOKENS_OBTAINED_AT_KEY = "tokens_obtained_at"
+
+#: Refresh this far BEFORE the stored access token's deadline. A connect that
+#: starts with a token dying in ten seconds would otherwise open with a 401 and
+#: lean on the in-flow refresh at the worst possible moment; spending the
+#: refresh grant proactively keeps the first request authenticated.
+REFRESH_SKEW_S = 60.0
+
+#: Bound on one proactive refresh's HTTP round trips (metadata discovery plus
+#: the token POST). A slow authorization server must not park the connect —
+#: the startup gate defers us, and the breaker bounds retries.
+REFRESH_HTTP_TIMEOUT_S = 10.0
+
+
+class McpAuthRequiredError(RuntimeError):
+    """An MCP server needs an interactive OAuth grant this run cannot open.
+
+    Raised instead of opening a browser when the connect is NON-interactive
+    (ordinary session startup and auto-reconnects): a background connect that
+    pops a login tab is an interruption the user never asked for, and several
+    sessions starting at once would each pop one. The connect fails with an
+    actionable message instead; ``/mcp login <name>`` (or
+    ``local-operator mcp login <name>``) runs the same grant deliberately.
+    """
+
+    def __init__(self, server_url: str) -> None:
+        super().__init__(f"MCP OAuth authorization required for {server_url}")
+        self.server_url = server_url
 
 
 def mcp_oauth_credential_id(server_url: str) -> str:
@@ -471,7 +517,13 @@ class LoopbackAuthFlow:
     stderr or to the log file.
     """
 
-    def __init__(self, redirect_uri: str, server_url: str | None = None) -> None:
+    def __init__(
+        self,
+        redirect_uri: str,
+        server_url: str | None = None,
+        *,
+        interactive: bool = True,
+    ) -> None:
         parsed = urlparse(redirect_uri)
         self.redirect_uri = redirect_uri
         #: Named on the callback page. Someone with several MCP servers
@@ -479,6 +531,12 @@ class LoopbackAuthFlow:
         #: authorization, and "Authorized" without a subject is a page that
         #: could be about anything.
         self.server_url = server_url
+        #: Whether this flow may open a browser. Ordinary session startup and
+        #: auto-reconnects pass ``False``: when the stored grant cannot be
+        #: refreshed they must fail with :class:`McpAuthRequiredError` instead
+        #: of popping a login tab the user never asked for. Only an explicit
+        #: ``/mcp login`` / ``local-operator mcp login`` runs interactive.
+        self.interactive = interactive
         self._host = parsed.hostname or ""
         self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self._path = parsed.path or "/"
@@ -515,7 +573,16 @@ class LoopbackAuthFlow:
 
         The URL is hard-wrapped in brackets so trailing OAuth params can never
         be silently lost on copy (a real production paste bug).
+
+        Non-interactive flows RAISE here instead of opening a browser: the SDK
+        only reaches this handler once the stored grant could not be refreshed,
+        and a background connect must surface that as an actionable failure
+        ("run /mcp login <name>"), never as a login tab popping up over the
+        user's work. The exception propagates out of the connect cleanly — the
+        SDK re-raises whatever the handler raises.
         """
+        if not self.interactive:
+            raise McpAuthRequiredError(self.server_url or self.redirect_uri)
         await self._start_server()
         lines = [
             "\nMCP OAuth authorization required. Open this URL in a browser:",
@@ -808,8 +875,310 @@ class LoopbackAuthFlow:
             self._result.set_exception(exc)
 
 
+# --- proactive OAuth refresh -------------------------------------------------
+#
+# Why this block exists: the SDK only refreshes a token INSIDE its 401 handler,
+# and it derives the token endpoint from ``oauth_metadata`` — which a fresh
+# process has not discovered yet, so the refresh falls back to
+# ``urljoin(server_base, "/token")``. For providers whose token endpoint lives
+# elsewhere (Datadog: ``https://us3.datadoghq.com/api/v2/oauth2/token``) that
+# guess 404s, the refresh fails, and the SDK escalates to a FULL browser grant
+# — the login tab popping up on every startup even though a valid refresh token
+# sat in auth.db. The fix is to discover the real endpoints and spend the
+# refresh token ourselves BEFORE the provider is built, race-free across the
+# several sessions that start together.
+
+
+@dataclass
+class DiscoveredOAuthEndpoints:
+    """What PRM/ASM discovery learned about one server's OAuth setup.
+
+    ``oauth_metadata`` carries the real ``token_endpoint`` the refresh must
+    target. ``protected_resource_metadata`` (when the server publishes it) is
+    what makes the refresh include the RFC 8707 ``resource`` parameter, which
+    some providers (Datadog) require. Both are also handed to the provider so a
+    later in-flow refresh — e.g. a token that dies mid-session — targets the
+    same endpoints instead of re-deriving the wrong guess.
+    """
+
+    oauth_metadata: "OAuthMetadata"
+    protected_resource_metadata: "ProtectedResourceMetadata | None" = None
+    auth_server_url: str | None = None
+
+
+async def discover_oauth_endpoints(server_url: str) -> DiscoveredOAuthEndpoints | None:
+    """Resolve a server's OAuth metadata via SEP-985 PRM then RFC 8414 ASM.
+
+    Returns ``None`` when authorization-server metadata cannot be discovered;
+    the caller then degrades to the SDK's own defaults (the pre-fix behavior)
+    rather than failing the connect. Discovery is two unauthenticated GETs and
+    only runs for OAuth servers, which are already the slow, deferred connects.
+
+    Successful results are cached per process: reconnects rebuild the provider
+    and would otherwise re-fetch stable metadata on every backoff rung. Only
+    SUCCESSES are cached, so a transient discovery failure retries next time.
+    """
+    cached = _DISCOVERED_ENDPOINTS_CACHE.get(server_url)
+    if cached is not None:
+        return cached
+    result = await _discover_oauth_endpoints_uncached(server_url)
+    if result is not None:
+        _DISCOVERED_ENDPOINTS_CACHE[server_url] = result
+    return result
+
+
+#: Per-process cache of successful endpoint discoveries, keyed by server URL.
+_DISCOVERED_ENDPOINTS_CACHE: dict[str, DiscoveredOAuthEndpoints] = {}
+
+
+async def _discover_oauth_endpoints_uncached(
+    server_url: str,
+) -> DiscoveredOAuthEndpoints | None:
+    """The actual PRM/ASM fetch; :func:`discover_oauth_endpoints` caches it."""
+    import httpx
+    from mcp.client.auth.utils import (
+        build_oauth_authorization_server_metadata_discovery_urls,
+        build_protected_resource_metadata_discovery_urls,
+    )
+    from mcp.shared.auth import OAuthMetadata, ProtectedResourceMetadata
+
+    prm: ProtectedResourceMetadata | None = None
+    auth_server_url: str | None = None
+    timeout = httpx.Timeout(REFRESH_HTTP_TIMEOUT_S)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            for url in build_protected_resource_metadata_discovery_urls(None, server_url):
+                try:
+                    response = await client.get(url)
+                except httpx.HTTPError:
+                    continue
+                if response.status_code != 200:
+                    continue
+                try:
+                    prm = ProtectedResourceMetadata.model_validate_json(response.content)
+                except Exception:  # noqa: BLE001 — malformed metadata: try the next URL
+                    continue
+                if prm.authorization_servers:
+                    auth_server_url = str(prm.authorization_servers[0])
+                break
+
+            asm: OAuthMetadata | None = None
+            for url in build_oauth_authorization_server_metadata_discovery_urls(
+                auth_server_url, server_url
+            ):
+                try:
+                    response = await client.get(url)
+                except httpx.HTTPError:
+                    continue
+                # Mirror the SDK's fallback semantics: a 4xx means "try the next
+                # discovery URL"; anything else non-200 means "stop looking".
+                if 400 <= response.status_code < 500:
+                    continue
+                if response.status_code != 200:
+                    break
+                try:
+                    asm = OAuthMetadata.model_validate_json(response.content)
+                except Exception:  # noqa: BLE001 — treat as not-found here
+                    asm = None
+                break
+            if asm is None:
+                return None
+            return DiscoveredOAuthEndpoints(
+                oauth_metadata=asm,
+                protected_resource_metadata=prm,
+                auth_server_url=auth_server_url,
+            )
+    except Exception:  # noqa: BLE001 — discovery is best-effort; degrade, don't fail
+        logger.debug("OAuth metadata discovery failed for %s", server_url, exc_info=True)
+        return None
+
+
+def _lock_exclusive(fd: int) -> None:
+    if os.name == "nt":  # pragma: no cover - platform specific
+        import msvcrt
+
+        # ``LK_LOCK`` blocks (retrying up to ~10 s) until the byte is free.
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _unlock(fd: int) -> None:
+    if os.name == "nt":  # pragma: no cover - platform specific
+        import msvcrt
+
+        with contextlib.suppress(OSError):
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextlib.asynccontextmanager
+async def _oauth_refresh_lock(server_url: str):
+    """Serialize the refresh exchange across processes for one server.
+
+    Rotating refresh tokens make concurrent refreshes destructive: whichever
+    process spends the current token second gets an error — or invalidates the
+    first process's brand-new token. Holding an exclusive file lock around the
+    exchange, and RE-READING the stored token after acquiring it, guarantees
+    exactly one process performs the refresh no matter how many sessions start
+    at once. The lock file lives next to ``auth.db`` and is only ever flocked,
+    never written.
+    """
+    from local_operator.paths import config_dir
+
+    lock_dir = config_dir()
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "mcp_oauth_refresh.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        # Acquire off the event loop: a contended lock must not stall other
+        # servers' connects. The lock is on the fd, so it survives the await.
+        await asyncio.to_thread(_lock_exclusive, fd)
+        yield
+    finally:
+        with contextlib.suppress(Exception):
+            _unlock(fd)
+        os.close(fd)
+
+
+async def _refresh_oauth_token_locked(
+    server_url: str,
+    storage: McpTokenStorage,
+    endpoints: DiscoveredOAuthEndpoints,
+) -> bool:
+    """Spend the stored refresh token against the DISCOVERED token endpoint.
+
+    Returns ``True`` when a fresh access token was persisted. The caller holds
+    the cross-process refresh lock, so exactly one process performs this
+    exchange even when several sessions start together. Mirrors the SDK's
+    refresh request exactly (grant type, client auth methods, RFC 6749 §6
+    carry-forward) so a provider cannot tell the two apart.
+    """
+    import base64
+    from urllib.parse import quote
+
+    import httpx
+    from mcp.shared.auth import OAuthToken
+    from mcp.shared.auth_utils import resource_url_from_server_url
+
+    tokens = await storage.get_tokens()
+    client_info = await storage.get_client_info()
+    if tokens is None or not tokens.refresh_token or client_info is None:
+        return False
+
+    token_endpoint = str(endpoints.oauth_metadata.token_endpoint)
+    data: dict[str, str] = {
+        "grant_type": "refresh_token",
+        "refresh_token": tokens.refresh_token,
+        "client_id": client_info.client_id,
+    }
+    # RFC 8707 resource indicator: included when the server publishes protected
+    # resource metadata, matching the SDK's ``should_include_resource_param``.
+    if endpoints.protected_resource_metadata is not None:
+        data["resource"] = resource_url_from_server_url(server_url)
+
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    auth_method = client_info.token_endpoint_auth_method
+    if auth_method == "client_secret_post" and client_info.client_secret:
+        data["client_secret"] = client_info.client_secret
+    elif auth_method == "client_secret_basic" and client_info.client_secret:
+        cid = quote(client_info.client_id, safe="")
+        csecret = quote(client_info.client_secret, safe="")
+        encoded = base64.b64encode(f"{cid}:{csecret}".encode()).decode()
+        headers["Authorization"] = f"Basic {encoded}"
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(REFRESH_HTTP_TIMEOUT_S)) as client:
+            response = await client.post(token_endpoint, data=data, headers=headers)
+    except httpx.HTTPError:
+        logger.debug("MCP token refresh request failed for %s", server_url, exc_info=True)
+        return False
+    if response.status_code != 200:
+        # Informational, not debug: a rejected refresh is the thing that turns
+        # into a login prompt, so its cause belongs in the readable log.
+        logger.info("MCP token refresh rejected for %s: HTTP %s", server_url, response.status_code)
+        return False
+    try:
+        new_tokens = OAuthToken.model_validate_json(response.content)
+    except Exception:  # noqa: BLE001 — an unparseable token is a failed refresh
+        logger.debug(
+            "MCP token refresh returned an invalid token for %s", server_url, exc_info=True
+        )
+        return False
+
+    # RFC 6749 §6: a refresh response may omit ``scope`` (unchanged) and
+    # ``refresh_token`` (not rotated). Carry both forward so the persisted row
+    # stays self-describing and can refresh again next time.
+    if new_tokens.scope is None and tokens.scope is not None:
+        new_tokens.scope = tokens.scope
+    if new_tokens.refresh_token is None:
+        new_tokens.refresh_token = tokens.refresh_token
+    await storage.set_tokens(new_tokens)
+    return True
+
+
+async def ensure_mcp_oauth_fresh(
+    server_url: str,
+    cfg: MCPServerConfig,
+    store: StructuralAuthStore | None = None,
+) -> DiscoveredOAuthEndpoints | None:
+    """Refresh a stored OAuth grant before connecting, race-free. Best-effort.
+
+    Returns the discovered endpoints so the provider can be primed with them
+    (``None`` when discovery failed and the SDK should fall back to its own
+    defaults). This never raises and never opens a browser: when the grant
+    cannot be refreshed it simply leaves the stored token as-is, and the
+    provider's non-interactive redirect handler is what converts the resulting
+    grant attempt into an actionable :class:`McpAuthRequiredError` instead of a
+    login tab.
+
+    The refresh is wrapped in a cross-process lock with a re-read after
+    acquiring it, so only one of several concurrently starting sessions spends
+    a rotating refresh token.
+    """
+    storage = McpTokenStorage(server_url, store)
+    endpoints = await discover_oauth_endpoints(server_url)
+
+    def _still_good(expiry: float | None, tokens: Any) -> bool:
+        # ``expiry is None`` means "no lifetime recorded" — the SDK treats such
+        # a token as valid, so we must not force a refresh on it.
+        return bool(tokens is not None and tokens.access_token) and (
+            expiry is None or time.time() < expiry - REFRESH_SKEW_S
+        )
+
+    if _still_good(storage.stored_token_expiry(), await storage.get_tokens()):
+        return endpoints
+
+    tokens = await storage.get_tokens()
+    if (
+        endpoints is None
+        or await storage.get_client_info() is None
+        or tokens is None
+        or not tokens.refresh_token
+    ):
+        return endpoints
+
+    async with _oauth_refresh_lock(server_url):
+        # Re-read under the lock: another session may have refreshed while we
+        # waited. Spending a rotated refresh token a second time is exactly the
+        # race this lock exists to prevent.
+        if not _still_good(storage.stored_token_expiry(), await storage.get_tokens()):
+            await _refresh_oauth_token_locked(server_url, storage, endpoints)
+    return endpoints
+
+
 def wire_oauth_auth(
-    server_url: str, cfg: MCPServerConfig, store: StructuralAuthStore | None = None
+    server_url: str,
+    cfg: MCPServerConfig,
+    store: StructuralAuthStore | None = None,
+    *,
+    interactive: bool = True,
 ) -> dict[str, Any]:
     """Build ``OAuthClientProvider`` kwargs for one server.
 
@@ -827,6 +1196,11 @@ def wire_oauth_auth(
     - ``redirect_handler`` / ``callback_handler``: the two halves of one
       :class:`LoopbackAuthFlow`, which listens on that redirect URI for the
       duration of the grant (see the module docstring).
+
+    ``interactive`` controls whether the flow may open a browser. Ordinary
+    session startup and auto-reconnects pass ``False`` so an unrefreshable
+    grant surfaces as :class:`McpAuthRequiredError` instead of popping a login
+    tab; only an explicit ``/mcp login`` runs interactive.
 
     The returned dict is constructed eagerly but imports ``mcp`` lazily inside
     so config-only code paths never touch the SDK.
@@ -874,7 +1248,7 @@ def wire_oauth_auth(
     if client_id:
         storage.seed_client_info(client_id, client_secret)
 
-    flow = LoopbackAuthFlow(redirect_uri, server_url=server_url)
+    flow = LoopbackAuthFlow(redirect_uri, server_url=server_url, interactive=interactive)
     return {
         "server_url": server_url,
         "client_metadata": client_metadata,
@@ -885,7 +1259,12 @@ def wire_oauth_auth(
 
 
 def build_oauth_provider(
-    server_url: str, cfg: MCPServerConfig, store: StructuralAuthStore | None = None
+    server_url: str,
+    cfg: MCPServerConfig,
+    store: StructuralAuthStore | None = None,
+    *,
+    interactive: bool = True,
+    endpoints: DiscoveredOAuthEndpoints | None = None,
 ) -> Any:
     """An ``OAuthClientProvider`` that knows when its stored token expires.
 
@@ -901,11 +1280,22 @@ def build_oauth_provider(
     token now takes the refresh grant, silently, with no browser. It is set
     after construction rather than passed in because the SDK offers no
     constructor argument for it, and ``_initialize`` does not clear it.
+
+    ``interactive`` is forwarded to the flow (see :func:`wire_oauth_auth`).
+    ``endpoints`` — the result of :func:`ensure_mcp_oauth_fresh` — primes the
+    provider's authorization-server metadata, so a token that dies MID-session
+    and needs an in-flow refresh targets the real token endpoint instead of the
+    SDK's ``<server_base>/token`` guess (which 404s for providers like Datadog
+    whose token endpoint lives on a different host).
     """
     from mcp.client.auth import OAuthClientProvider
 
-    kwargs = wire_oauth_auth(server_url, cfg, store=store)
+    kwargs = wire_oauth_auth(server_url, cfg, store=store, interactive=interactive)
     provider = OAuthClientProvider(**kwargs)
+    if endpoints is not None:
+        provider.context.oauth_metadata = endpoints.oauth_metadata
+        provider.context.protected_resource_metadata = endpoints.protected_resource_metadata
+        provider.context.auth_server_url = endpoints.auth_server_url
     storage = kwargs["storage"]
     try:
         expiry = storage.stored_token_expiry()

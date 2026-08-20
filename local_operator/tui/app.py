@@ -145,6 +145,7 @@ from local_operator.tui.widgets.session_picker import (
     SessionPickerScreen,
 )
 from local_operator.tui.widgets.status_line import (
+    ICON_MCP,
     McpStatus,
     StatusLine,
     SubagentBand,
@@ -422,8 +423,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
     ),
     # The listing is the receipt.
     SlashCommand("skills", "List loaded skills"),
-    # The listing is the receipt.
-    SlashCommand("mcp", "List MCP servers"),
+    # The listing is the receipt; `/mcp login <name>` re-authorizes an OAuth
+    # server whose grant expired (startup never opens a browser on its own).
+    SlashCommand("mcp", "List MCP servers (/mcp login <name> to re-authorize)"),
     # The flow narrates itself: URL block, progress notices, then success.
     # REQUIRED for both: bare, neither has anything to run — the provider list
     # IS the command, which is why completing the word opens it instead of
@@ -2405,6 +2407,21 @@ class OperatorApp(App[None]):
                 self.call_later(self._measure_preloaded_context, session)
 
         manager.set_on_tools_changed(on_tools_changed)
+
+        def on_auth_required(server_name: str, message: str) -> None:
+            # An OAuth grant that expires AFTER the startup gate (the common
+            # case for HTTP servers) or mid-session never reached the boot
+            # toast, so raise a fresh one here. Hop onto the Textual thread:
+            # this fires from the manager's connect/reconnect task.
+            def _show() -> None:
+                from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
+
+                toast = self.query_one(Toast)
+                toast.show(f"{ICON_MCP} MCP {server_name} {message}", duration_ms=TOAST_FAILURE_MS)
+
+            self.call_later(_show)
+
+        manager.on_auth_required = on_auth_required
         self._refresh_mcp_status()
 
     def _refresh_mcp_status(self) -> None:
@@ -6090,11 +6107,7 @@ class OperatorApp(App[None]):
             else:
                 notice("no skills configured.")
         elif command == "/mcp":
-            block = self._mcp_block()
-            if block is not None:
-                self._append_block(block)
-            else:
-                notice("no MCP servers configured.")
+            self._cmd_mcp(arg, notice)
         elif command == "/login":
             self._cmd_login(arg, notice)
         elif command == "/logout":
@@ -8453,6 +8466,67 @@ class OperatorApp(App[None]):
             return RichBlock(_tree_listing(items, "Estimated next request", detail_token="muted"))
         except Exception:
             return None
+
+    def _cmd_mcp(self, arg: str, notice: NoticeFn) -> None:
+        """``/mcp`` lists servers; ``/mcp login <name>`` runs an OAuth grant.
+
+        The login subcommand is the in-TUI twin of ``local-operator mcp login``:
+        it exists because startup and auto-reconnect are deliberately
+        non-interactive (they never pop a browser tab), so an expired grant
+        surfaces as an actionable failure and this command is the one place a
+        user can deliberately re-authorize without leaving the session. The
+        flow runs on a worker so the UI stays responsive while the browser
+        round trip completes.
+        """
+        parts = arg.split()
+        if not parts:
+            block = self._mcp_block()
+            if block is not None:
+                self._append_block(block)
+            else:
+                notice("no MCP servers configured.")
+            return
+        sub = parts[0].lower()
+        if sub != "login":
+            self._system_notice(
+                f"unknown mcp subcommand: {parts[0]} — try /mcp login <name>", "warning"
+            )
+            return
+        if len(parts) < 2:
+            self._system_notice("usage: /mcp login <name>", "warning")
+            return
+        name = parts[1]
+        manager = getattr(self._session, "mcp_manager", None)
+        if manager is None:
+            self._system_notice("MCP is not available in this session.", "warning")
+            return
+        cfg = manager.get_server_config(name)
+        if cfg is None:
+            self._system_notice(f"MCP server {name!r} is not configured — see /mcp", "warning")
+            return
+        auth = getattr(cfg, "auth", None)
+        if auth is None or getattr(auth, "type", None) != "oauth":
+            self._system_notice(f"MCP server {name!r} does not use OAuth login.", "warning")
+            return
+        notice(f"logging in to MCP server {name}…")
+        self.run_worker(self._mcp_login_worker(manager, name), thread=False, group="mcp-login")
+
+    async def _mcp_login_worker(self, manager: Any, name: str) -> None:
+        """Run one interactive MCP OAuth exchange, reporting into the transcript.
+
+        The manager's ``connect_configured_server`` opens the browser
+        (interactive=True) and waits for the loopback redirect. Success fires
+        ``on_tools_changed``, which the session's wiring uses to merge the new
+        tools in and repaint the band.
+        """
+        try:
+            conn = await manager.connect_configured_server(name, timeout_ms=600_000)
+        except Exception as exc:  # noqa: BLE001 — report any failure, don't crash the app
+            self._system_notice(f"MCP login failed for {name!r}: {exc}", "error")
+            return
+        self._system_notice(
+            f"authenticated MCP server {name!r}; {len(conn.tools)} tools available.", "success"
+        )
 
     def _mcp_block(self) -> RichBlock | None:
         """Per-server MCP state: connection status plus the error when it failed.
