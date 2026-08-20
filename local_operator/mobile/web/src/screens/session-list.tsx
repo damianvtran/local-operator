@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import { getDirectories } from "../api";
 import { Sheet } from "../components/ui/sheet";
+import { Spinner } from "../components/spinner";
 import { navigate } from "../router";
 import { retainSessionListStream, useSessions } from "../store";
 import { applyTheme, getTheme, THEMES } from "../theme";
@@ -42,6 +43,12 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 						aria-hidden
 					/>
 				) : null}
+				{s.streaming && !s.ended ? (
+					/* The obvious in-progress mark beside the title: a small loading
+					   wheel, not just the text sweep — the sweep alone was too
+					   subtle to catch at a glance. */
+					<Spinner />
+				) : null}
 				<span
 					className={cn(
 						"min-w-0 flex-1 truncate text-body-sm font-medium",
@@ -56,13 +63,15 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 					</span>
 				) : null}
 				{s.subagents_running > 0 ? (
+					/* ⟳ and ☐ render as tofu boxes on phones whose system font lacks
+					   those codepoints. Text marks survive every font. */
 					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
-						⟳ {s.subagents_running}
+						{s.subagents_running} agent{s.subagents_running === 1 ? "" : "s"}
 					</span>
 				) : null}
 				{s.todos_open ? (
 					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
-						☐ {s.todos_open}
+						{s.todos_open} todo
 					</span>
 				) : null}
 				{s.ended ? (

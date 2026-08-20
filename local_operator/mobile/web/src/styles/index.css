@@ -244,6 +244,21 @@ html :focus-visible {
 	}
 }
 
+/* The roster loading wheel — a border ring that rotates. No icon font, so it
+   renders on phones whose system font lacks the ⟳ / ☐ codepoints that used
+   to show as tofu. Two segments of the ring carry the accent; the rest is a
+   hairline, so it reads as motion, not a badge. */
+@keyframes lo-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+.lo-spinner {
+	border: 2px solid var(--color-hairline);
+	border-top-color: var(--color-accent);
+	animation: lo-spin 0.8s linear infinite;
+}
+
 /* The running tool glyph's pulse — quieter than the shimmer, it shares the
    row with real text. */
 @keyframes lo-pulse {
