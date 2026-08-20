@@ -9922,6 +9922,12 @@ class OperatorApp(App[None]):
         rule as the toast slot. The toast is the interruption; the splash
         row is what is still there after the toast dismisses, until a
         real message starts the conversation.
+
+        The toast is a SHORT headline, not the same sentence. Repeating
+        the full line made a two-row card that sat on the mark's crown
+        (design round 1, D1) and read as a label stuck on the logo
+        rather than as a complementary alert (D2). The splash row keeps
+        the reason; the toast only has to say that something happened.
         """
         self._splash_notice = text
         if self._welcome is not None:
@@ -9931,7 +9937,7 @@ class OperatorApp(App[None]):
         except NoMatches:
             return
         duration = TOAST_FAILURE_MS if kind in ("warning", "error") else TOAST_DEFAULT_MS
-        toast.show(text, duration_ms=duration)
+        toast.show(_splash_toast_headline(text), duration_ms=duration)
 
     def _settle_queued_steer_notices_unsent(self) -> None:
         """Retire queued-steer rows the turn that just ended did not deliver.
@@ -10415,6 +10421,33 @@ def _first_line(text: str) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def _splash_toast_headline(text: str) -> str:
+    """The toast half of a splash announcement: a glance, not the reason.
+
+    The splash row already carries the full sentence. Repeating it in the
+    toast made a two-row card that sat on the mark (design round 1, D1)
+    and printed the same 64 characters twice in one viewport (D2). A
+    fallback notice's useful glance is the TARGET — ``Fell back to
+    zai/glm-5.3`` — because that is the model the next prompt will hit.
+    Anything else stays one short clause, never the whole line.
+    """
+    body = " ".join(text.split())
+    if not body:
+        return "Notice"
+    marker = "falling back to "
+    index = body.lower().rfind(marker)
+    if index >= 0:
+        target = body[index + len(marker) :].strip()
+        if target:
+            return f"Fell back to {target}"
+    # One clause, no wrap: the toast sits over the lockup, and a second
+    # row is what buried the mark. 36 cells is comfortably inside the
+    # right-hand gutter of a 80-col boot frame.
+    if len(body) <= 36:
+        return body
+    return body[:35].rstrip() + "…"
 
 
 def _partial_text(partial_result) -> str:

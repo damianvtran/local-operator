@@ -30,6 +30,7 @@ from local_operator.tui.app import (
     PERSIST_HINT,
     SLASH_COMMANDS,
     OperatorApp,
+    _splash_toast_headline,
 )
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.events import TurnEnded, TurnStarted
@@ -322,6 +323,22 @@ async def test_boot_typing_sends_prompt() -> None:
         assert len(transcript.blocks()) == 1
 
 
+def test_splash_toast_headline_names_the_fallback_target() -> None:
+    """The toast is a glance; the splash row keeps the reason."""
+    assert (
+        _splash_toast_headline("anthropic quota low (8% remaining) — falling back to zai/glm-5.3")
+        == "Fell back to zai/glm-5.3"
+    )
+    assert (
+        _splash_toast_headline(
+            "anthropic quota exhausted — falling back to openai/gpt-5.3-codex (high effort)"
+        )
+        == "Fell back to openai/gpt-5.3-codex (high effort)"
+    )
+    assert _splash_toast_headline("session failed to start") == "session failed to start"
+    assert _splash_toast_headline("") == "Notice"
+
+
 @pytest.mark.asyncio
 async def test_boot_renders_non_blocking_quota_warning() -> None:
     """A quota fallback is harness news, not a conversation.
@@ -352,7 +369,11 @@ async def test_boot_renders_non_blocking_quota_warning() -> None:
         assert "falling back to openai/gpt-5.3-codex (high effort)" in (welcome._info.notice or "")
         toast = app.query_one(Toast)
         assert toast.display is True
-        assert "anthropic quota exhausted" in toast.message
+        # Headline, not the full sentence: the splash row already carries
+        # the reason, and repeating it made a two-row card that sat on
+        # the mark (design round 1, D1/D2).
+        assert toast.message == "Fell back to openai/gpt-5.3-codex (high effort)"
+        assert "quota exhausted" not in toast.message
 
 
 @pytest.mark.asyncio
