@@ -1062,6 +1062,9 @@ class AgentLoop:
         ``STEERING_INTERRUPT_POLL_S`` while ``interrupt_mode == "immediate"``);
         on a steering signal the tool task is cancelled and paired with a
         synthetic skipped result so tool_use/tool_result pairing stays legal.
+        The poll uses the URGENT peek: courtesy injections (a scheduled wake
+        riding the busy path) share the steering queue but must wait for the
+        next successful tool boundary rather than kill a running tool.
         On generator cancellation (GeneratorExit) every runner task is
         cancelled before this generator returns.
 
@@ -1089,9 +1092,12 @@ class AgentLoop:
         queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone] = asyncio.Queue()
         results_by_slot: list[ToolResult | None] = [None] * len(batch)
         tasks: list[asyncio.Task[None]] = []
-        poll_interruptible = (
-            config.interrupt_mode == "immediate" and config.has_steering_messages is not None
+        peek = (
+            config.has_urgent_steering_messages
+            if config.has_urgent_steering_messages is not None
+            else config.has_steering_messages
         )
+        poll_interruptible = config.interrupt_mode == "immediate" and peek is not None
         # Set by the abort watcher so the runners' cancellation handlers can
         # tell an abort apart from a steering interrupt and label their
         # synthetic results correctly.
@@ -1643,10 +1649,15 @@ class AgentLoop:
 
     @staticmethod
     def _peek_steering(config: LoopConfig) -> bool:
-        if config.has_steering_messages is None:
+        peek = (
+            config.has_urgent_steering_messages
+            if config.has_urgent_steering_messages is not None
+            else config.has_steering_messages
+        )
+        if peek is None:
             return False
         try:
-            return bool(config.has_steering_messages())
+            return bool(peek())
         except Exception:
             return False
 
