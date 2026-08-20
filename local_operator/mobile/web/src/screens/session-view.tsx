@@ -35,7 +35,7 @@ function Header({
 				? "lo-pulse bg-accent"
 				: "bg-success";
 	return (
-		<header className="flex items-center gap-1 border-b border-hairline px-2 py-1.5 pt-[max(env(safe-area-inset-top),0.375rem)]">
+		<header className="flex items-center gap-2 border-b border-hairline px-2 py-2 pt-[max(env(safe-area-inset-top),0.5rem)]">
 			<button
 				type="button"
 				onClick={() => navigate("/")}
@@ -90,7 +90,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 				ref={rootRef}
 				className="flex h-dvh flex-col overflow-hidden"
 			>
-				<header className="flex items-center gap-1 border-b border-hairline px-2 py-1.5 pt-[max(env(safe-area-inset-top),0.375rem)]">
+				<header className="flex items-center gap-2 border-b border-hairline px-2 py-2 pt-[max(env(safe-area-inset-top),0.5rem)]">
 					<button
 						type="button"
 						onClick={() => navigate("/")}

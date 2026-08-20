@@ -30,8 +30,8 @@ function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
 			type="button"
 			onClick={() => navigate(`/s/${s.pid}`)}
 			className={cn(
-				"flex w-full flex-col gap-1 rounded-lg border border-hairline bg-surface p-3 text-left select-none active:bg-elevated",
-				s.ended && "opacity-60",
+				"flex w-full flex-col gap-1.5 rounded-md px-3 py-3 text-left select-none active:bg-elevated",
+				s.ended && "text-ink-disabled",
 			)}
 		>
 			<div className="flex items-center gap-2">
@@ -153,14 +153,21 @@ export function SessionListScreen() {
 
 	return (
 		<div className="flex min-h-full flex-col">
-			<header className="px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-2">
-				<h1 className="text-heading text-ink-dim">
+			<header className="flex items-center gap-3 px-4 pt-[max(env(safe-area-inset-top),1.25rem)] pb-4">
+				<img
+					src="/mark.png"
+					alt=""
+					width={28}
+					height={28}
+					className="opacity-70"
+				/>
+				<h1 className="text-meta font-medium tracking-[0.18em] text-ink">
 					local operator
 				</h1>
 			</header>
-			<main className="flex flex-1 flex-col gap-3 px-4 pb-4">
+			<main className="flex flex-1 flex-col px-2 pb-4">
 				{sessions.length === 0 ? (
-					<div className="flex flex-1 flex-col items-center justify-center gap-1 text-center">
+					<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
 						<p className="text-body text-ink-muted">
 							{connected
 								? "no sessions running"
@@ -171,23 +178,25 @@ export function SessionListScreen() {
 						</p>
 					</div>
 				) : (
-					sessions.map((s) => (
-						<SessionCard key={s.pid} s={s} home={home} />
-					))
+					<div className="flex flex-col">
+						{sessions.map((s) => (
+							<SessionCard key={s.pid} s={s} home={home} />
+						))}
+					</div>
 				)}
 			</main>
-			<footer className="flex items-center gap-2 border-t border-hairline px-4 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
+			<footer className="flex items-center gap-2 border-t border-hairline px-4 py-3 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
 				<button
 					type="button"
 					onClick={() => navigate("/new")}
-					className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-accent text-body-sm font-medium text-on-accent select-none active:bg-accent-active"
+					className="flex min-h-11 flex-1 items-center justify-center rounded-md bg-accent text-body-sm font-medium text-on-accent select-none active:bg-accent-active"
 				>
 					new session
 				</button>
 				<button
 					type="button"
 					onClick={() => navigate("/past")}
-					className="flex min-h-11 items-center justify-center rounded-sm border border-control bg-surface px-4 text-body-sm text-ink select-none active:bg-elevated"
+					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-4 text-body-sm text-ink select-none active:bg-elevated"
 				>
 					past
 				</button>
@@ -195,7 +204,7 @@ export function SessionListScreen() {
 					type="button"
 					onClick={() => setThemeOpen(true)}
 					aria-label="choose theme"
-					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm border border-control bg-surface text-ink-muted select-none active:bg-elevated"
+					className="flex min-h-11 min-w-11 items-center justify-center rounded-md border border-control bg-surface text-ink-muted select-none active:bg-elevated"
 				>
 					◐
 				</button>

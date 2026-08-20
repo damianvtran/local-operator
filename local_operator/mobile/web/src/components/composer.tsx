@@ -242,7 +242,7 @@ export function Composer({
 	};
 
 	return (
-		<div className="flex flex-col gap-2 px-3 pt-1 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
+		<div className="flex flex-col gap-2 px-3 pt-2 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
 			{showResume && !projection.streaming && !disabled ? (
 				<button
 					type="button"
@@ -256,7 +256,7 @@ export function Composer({
 			{error ? <p className="text-body-sm text-danger">{error}</p> : null}
 
 			<div className="flex items-end gap-2">
-				<div className="flex min-w-0 flex-1 items-end rounded-frame border border-control bg-elevated px-3 py-2">
+				<div className="flex min-w-0 flex-1 items-end rounded-md border border-control bg-elevated px-3.5 py-2.5">
 					<textarea
 						ref={textareaRef}
 						value={text}

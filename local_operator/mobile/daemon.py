@@ -69,6 +69,10 @@ DEFAULT_PORT = 4098
 
 _WEB_DIR = Path(__file__).parent / "web"
 _DIST_DIR = _WEB_DIR / "dist"
+#: The cropped LO mark (figure with a raised hand) served to the login page
+#: and, via the same path, to the SPA. Lives next to this module so the
+#: login HTML never depends on a Vite rebuild.
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +496,14 @@ def build_app(daemon: MobileDaemon):
         response.delete_cookie(COOKIE_NAME)
         return response
 
+    async def mark_png(request: Request) -> Response:
+        """The LO mark — unauthenticated because the login page needs it
+        before a cookie exists. It is a public brand asset, not a secret."""
+        path = _STATIC_DIR / "mark.png"
+        if not path.exists():
+            return PlainTextResponse("mark missing", status_code=404)
+        return FileResponse(path, media_type="image/png")
+
     async def index(request: Request) -> Response:
         denied = gate(request)
         if denied is not None:
@@ -685,6 +697,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/{pid:int}/command", api_command, methods=["POST"]),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
+        Route("/mark.png", mark_png),
         Route("/", index),
     ]
     if _DIST_DIR.exists():
@@ -807,42 +820,120 @@ _LOGIN_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14110c">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>local operator — sign in</title>
 <style>
   /* Values from local_operator/tui/theme.py BRAND_TOKENS.dark — the login
-     page predates the SPA's role system (it is server-rendered so the auth
-     gate has zero client-side surface), so it tracks the TUI's own tokens
-     by hand. Keep the two in sync: the TUI palette is the brand. */
+     page is server-rendered so the auth gate has zero client-side surface,
+     so it tracks the TUI's own tokens by hand. Keep the two in sync: the
+     TUI palette is the brand. Layout follows the TUI welcome lockup
+     (welcome.py): the mark, then the letterspaced wordmark, then the
+     form — no box, no accent spent on the identity. */
   :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    margin: 0; min-height: 100dvh; display: grid; place-items: center;
-    background: #14110c; color: #e9e5db;           /* bg / fg */
+    margin: 0;
+    min-height: 100dvh;
+    display: grid;
+    place-items: center;
+    padding: max(env(safe-area-inset-top), 32px) 24px max(env(safe-area-inset-bottom), 32px);
+    background: #14110c;                           /* bg */
+    color: #e9e5db;                                /* fg */
     font: 16px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
   }
-  form { display: grid; gap: 16px; width: min(320px, 84vw); }
-  h1 { font-size: 20px; font-weight: 600; margin: 0; text-align: center; }
-  .mark { text-align: center; font-size: 28px; color: #38c96a; } /* accent */
+  form {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    width: min(320px, 100%);
+  }
+  .lockup {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-bottom: 40px;
+  }
+  .mark {
+    width: 72px;
+    height: 72px;
+    display: block;
+    /* The source PNG is white-on-transparent; dim it to the TUI mark's
+       resting ink so a boot frame is not a wall of bright white. */
+    opacity: 0.72;
+  }
+  h1 {
+    margin: 20px 0 0;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.22em;
+    text-transform: lowercase;
+    color: #e9e5db;                                /* fg — the brightest row */
+    text-align: center;
+  }
+  .field { display: flex; flex-direction: column; gap: 8px; }
+  label {
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: #837c6d;                                /* dim */
+  }
   input {
-    font-size: 16px; padding: 12px 14px; border-radius: 10px;
+    font-size: 16px;                               /* iOS no-zoom floor */
+    line-height: 1.4;
+    padding: 14px 16px;
+    border-radius: 10px;                           /* radius-md */
     border: 1px solid #3b3527;                     /* edge */
-    background: #1e1a14; color: #e9e5db;           /* surface / fg */
+    background: #1e1a14;                           /* surface */
+    color: #e9e5db;
+    width: 100%;
+    -webkit-appearance: none;
+    appearance: none;
   }
-  input:focus { outline: 2px solid #38c96a; outline-offset: 1px; border-color: transparent; }
+  input::placeholder { color: #837c6d; }           /* dim */
+  input:focus {
+    outline: 2px solid #38c96a;                    /* accent — the one green */
+    outline-offset: 1px;
+    border-color: transparent;
+  }
   button {
-    font-size: 16px; font-weight: 600; padding: 12px; border: 0; border-radius: 10px;
-    background: #38c96a; color: #14110c; cursor: pointer;  /* accent on bg */
+    margin-top: 16px;
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    padding: 14px 16px;
+    min-height: 48px;
+    border: 0;
+    border-radius: 10px;
+    background: #38c96a;                           /* accent */
+    color: #14110c;                                /* on-accent = island ground */
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
   }
-  .error { color: #ef8078; text-align: center; margin: 0; font-size: 14px; } /* danger */
+  button:active { background: #2fb05c; }           /* a step down, not opacity */
+  .error {
+    color: #ef8078;                                /* danger */
+    text-align: center;
+    margin: 0 0 16px;
+    font-size: 13px;
+  }
 </style>
 </head>
 <body>
 <form method="post" action="/login">
-  <div class="mark">▲</div>
-  <h1>Local Operator</h1>
+  <div class="lockup">
+    <img class="mark" src="/mark.png" width="72" height="72" alt="">
+    <h1>local operator</h1>
+  </div>
   <!--ERROR-->
-  <input type="password" name="password" placeholder="password"
-         autocomplete="current-password" autofocus required>
-  <button type="submit">Sign in</button>
+  <div class="field">
+    <label for="password">password</label>
+    <input id="password" type="password" name="password"
+           autocomplete="current-password" autofocus required>
+  </div>
+  <button type="submit">sign in</button>
 </form>
 </body>
 </html>

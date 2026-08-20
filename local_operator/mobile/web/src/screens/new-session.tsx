@@ -68,7 +68,7 @@ export function NewSessionScreen() {
 
 	return (
 		<div className="flex min-h-full flex-col">
-			<header className="flex items-center gap-2 px-2 pt-[max(env(safe-area-inset-top),0.5rem)] pb-2">
+			<header className="flex items-center gap-2 px-2 pt-[max(env(safe-area-inset-top),0.75rem)] pb-3">
 				<button
 					type="button"
 					onClick={() => navigate("/")}

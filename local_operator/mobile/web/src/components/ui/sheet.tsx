@@ -49,8 +49,10 @@ export function Sheet({
 				)}
 			>
 				{title ? (
-					<div className="flex items-center justify-between border-b border-hairline px-4 py-3">
-						<span className="text-heading">{title}</span>
+					<div className="flex items-center justify-between px-4 pt-3 pb-2">
+						<span className="text-meta font-medium tracking-[0.08em] text-ink-muted">
+							{title}
+						</span>
 						<button
 							type="button"
 							onClick={onClose}
