@@ -1,0 +1,204 @@
+/**
+ * Session list (`#/`) — the phone's home. One card per live session, kept
+ * current by the list SSE; footer row with new session, past sessions, and
+ * the theme picker.
+ *
+ * Visual contract: a streaming session shimmers its name (the row itself is
+ * the indicator — no spinner); a session waiting on the user carries the
+ * danger dot and a word ("approval" / "question"), because that is the one
+ * card that needs a decision (branding §7).
+ */
+import { useEffect, useState } from "react";
+import { getDirectories } from "../api";
+import { Sheet } from "../components/ui/sheet";
+import { navigate } from "../router";
+import { retainSessionListStream, useSessions } from "../store";
+import { applyTheme, getTheme, THEMES } from "../theme";
+import { basename, shortenHome } from "../lib/format";
+import type { SessionSummary } from "../types";
+import { cn } from "../lib/cn";
+
+function SessionCard({ s, home }: { s: SessionSummary; home: string }) {
+	const pendingLabel =
+		s.pending_kind === "approval"
+			? "approval"
+			: s.pending_kind === "ask"
+				? "question"
+				: null;
+	return (
+		<button
+			type="button"
+			onClick={() => navigate(`/s/${s.pid}`)}
+			className={cn(
+				"flex w-full flex-col gap-1 rounded-lg border border-hairline bg-surface p-3 text-left select-none active:bg-elevated",
+				s.ended && "opacity-60",
+			)}
+		>
+			<div className="flex items-center gap-2">
+				{s.needs_attention && pendingLabel ? (
+					<>
+						<span
+							className="lo-pulse inline-block size-2 shrink-0 rounded-full bg-danger"
+							aria-hidden
+						/>
+						<span className="text-meta text-danger">
+							{pendingLabel}
+						</span>
+					</>
+				) : null}
+				<span
+					className={cn(
+						"min-w-0 flex-1 truncate text-heading",
+						s.streaming && !s.ended && "lo-shimmer",
+					)}
+				>
+					{s.conversation_name || "untitled"}
+				</span>
+				{s.subagents_running > 0 ? (
+					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
+						⟳ {s.subagents_running}
+					</span>
+				) : null}
+				{s.todos_open ? (
+					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
+						{s.todos_open}
+					</span>
+				) : null}
+			</div>
+			<div className="flex items-baseline gap-2">
+				<span className="shrink-0 font-mono text-mono-sm text-ink-muted">
+					{basename(s.cwd)}
+				</span>
+				<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
+					{shortenHome(s.cwd, home)}
+				</span>
+			</div>
+			<div className="flex items-center gap-2">
+				<span className="min-w-0 flex-1 truncate text-meta text-ink-dim">
+					{s.model_label}
+				</span>
+				{s.degraded ? (
+					<span className="shrink-0 rounded-sm bg-warning-wash px-1.5 text-meta text-warning">
+						reconnecting
+					</span>
+				) : null}
+				{s.ended ? (
+					<span className="shrink-0 rounded-sm bg-sunken px-1.5 text-meta text-ink-dim">
+						ended
+					</span>
+				) : null}
+			</div>
+		</button>
+	);
+}
+
+function ThemePicker({
+	open,
+	onClose,
+}: {
+	open: boolean;
+	onClose: () => void;
+}) {
+	const [current, setCurrent] = useState(getTheme);
+	return (
+		<Sheet open={open} onClose={onClose} title="theme">
+			<div className="flex flex-col p-2">
+				{THEMES.map((t) => (
+					<button
+						key={t.id}
+						type="button"
+						onClick={() => {
+							applyTheme(t.id);
+							setCurrent(t.id);
+						}}
+						className="flex min-h-11 items-center gap-3 rounded-sm px-3 text-left active:bg-surface"
+					>
+						<span
+							className={cn(
+								"size-2 shrink-0 rounded-full",
+								t.id === current ? "bg-accent" : "bg-hairline",
+							)}
+							aria-hidden
+						/>
+						<span className="min-w-0 flex-1">
+							<span className="block truncate text-body">
+								{t.name}
+							</span>
+							<span className="block truncate text-meta text-ink-dim">
+								{t.description}
+							</span>
+						</span>
+					</button>
+				))}
+			</div>
+		</Sheet>
+	);
+}
+
+export function SessionListScreen() {
+	const { sessions, connected } = useSessions();
+	const [home, setHome] = useState("");
+	const [themeOpen, setThemeOpen] = useState(false);
+
+	useEffect(() => retainSessionListStream(), []);
+	useEffect(() => {
+		getDirectories()
+			.then((d) => setHome(d.home))
+			.catch(() => {
+				/* Home is cosmetic (path shortening); the list works without it. */
+			});
+	}, []);
+
+	return (
+		<div className="flex min-h-full flex-col">
+			<header className="px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-2">
+				<h1 className="font-mono text-mono text-ink-dim">
+					local operator
+				</h1>
+			</header>
+			<main className="flex flex-1 flex-col gap-3 px-4 pb-4">
+				{sessions.length === 0 ? (
+					<div className="flex flex-1 flex-col items-center justify-center gap-1 text-center">
+						<p className="text-body text-ink-muted">
+							{connected
+								? "no sessions running"
+								: "connecting…"}
+						</p>
+						<p className="text-body-sm text-ink-dim">
+							start one below, or from the TUI on your machine
+						</p>
+					</div>
+				) : (
+					sessions.map((s) => (
+						<SessionCard key={s.pid} s={s} home={home} />
+					))
+				)}
+			</main>
+			<footer className="flex items-center gap-2 border-t border-hairline px-4 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
+				<button
+					type="button"
+					onClick={() => navigate("/new")}
+					className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-accent text-body-sm font-medium text-on-accent select-none active:bg-accent-active"
+				>
+					new session
+				</button>
+				<button
+					type="button"
+					onClick={() => navigate("/past")}
+					className="flex min-h-11 items-center justify-center rounded-sm border border-control bg-surface px-4 text-body-sm text-ink select-none active:bg-elevated"
+				>
+					past
+				</button>
+				<button
+					type="button"
+					onClick={() => setThemeOpen(true)}
+					aria-label="choose theme"
+					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm border border-control bg-surface text-ink-muted select-none active:bg-elevated"
+				>
+					◐
+				</button>
+			</footer>
+			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)} />
+		</div>
+	);
+}

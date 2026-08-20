@@ -340,6 +340,26 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Enable hot reload for the server",
     )
 
+    # Mobile command: the phone-facing control plane (daemon + supervision).
+    # Same lazy-import rule as ``serve`` — the mobile modules pull starlette/
+    # uvicorn only when a mobile command actually runs.
+    mobile_parser = subparsers.add_parser(
+        "mobile", help="Phone access: control this machine's lop sessions", parents=[parent_parser]
+    )
+    mobile_subparsers = mobile_parser.add_subparsers(dest="mobile_command")
+    mobile_subparsers.add_parser("install", help="Install the daemon, password and LaunchAgent")
+    mobile_subparsers.add_parser("status", help="Daemon health, gate and live sessions")
+    for action in ("start", "stop", "restart"):
+        mobile_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
+    logs_parser = mobile_subparsers.add_parser("logs", help="Tail the daemon log")
+    logs_parser.add_argument("--lines", type=int, default=100)
+    logs_parser.add_argument("--follow", "-f", action="store_true")
+    mobile_subparsers.add_parser("password", help="Show or rotate the portal password")
+    uninstall_parser = mobile_subparsers.add_parser("uninstall", help="Remove the LaunchAgent")
+    uninstall_parser.add_argument("--purge", action="store_true", help="Also delete the password")
+    serve_mobile_parser = mobile_subparsers.add_parser("serve", help="Run the daemon (foreground)")
+    serve_mobile_parser.add_argument("--port", type=int, default=4097)
+
     # Exec command for single execution mode
     exec_parser = subparsers.add_parser(
         "exec",
@@ -661,6 +681,101 @@ def config_list_command() -> int:
         print(f"\033[1;32m│   Description: {description}\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
     return 0
+
+
+def mobile_command(args: argparse.Namespace) -> int:
+    """Dispatch ``lop mobile …``. Imports are lazy: the mobile package pulls
+    starlette/uvicorn only on commands that serve, and the CLI startup path
+    must stay free of both."""
+    command = getattr(args, "mobile_command", None)
+
+    if command == "serve":
+        from local_operator.mobile.service import main as serve_main
+
+        return serve_main(args.port)
+
+    from local_operator.mobile import install as mobile_install
+
+    if command == "install":
+        result = mobile_install.install()
+        for step in result.get("steps", []):
+            print(f"  {step}")
+        if result.get("ok"):
+            password = result.get("password")
+            print("\nmobile daemon installed and healthy.")
+            print("  open http://127.0.0.1:4097 and sign in with your portal password")
+            if password:
+                print(f"  password: {password}")
+                print(
+                    "  (also in the login Keychain as 'lop-mobile'; `lop mobile password` rotates it)"
+                )
+            return 0
+        print(f"\n\033[1;31m{result.get('error', 'install failed')}\033[0m")
+        return -1
+
+    if command == "status":
+        result = mobile_install.status()
+        print(f"installed:    {'yes' if result['installed'] else 'no'}")
+        print(f"password set: {'yes' if result['password_set'] else 'no'}")
+        print(f"healthy:      {'yes' if result['healthy'] else 'no'}")
+        print(
+            f"auth gate:    {'closed' if result['gate_closed'] else 'OPEN (this is a boundary failure)'}"
+        )
+        print(f"log:          {result['log']}")
+        sessions = result.get("sessions", [])
+        print(f"sessions:     {len(sessions)}")
+        for session in sessions:
+            print(
+                f"  [{session['state']}] pid {session['pid']} · {session['kind']} · "
+                f"{session['conversation_name'] or session['session_id']} · {session['model_label']}"
+            )
+        return 0 if result["healthy"] else -1
+
+    if command in ("start", "stop", "restart"):
+        result = mobile_install.service_action(command)
+        if not result["ok"]:
+            print(f"\n\033[1;31m{result['error']}\033[0m")
+            return -1
+        print(f"mobile daemon {command} ok")
+        return 0
+
+    if command == "logs":
+        import subprocess
+
+        log = mobile_install.log_path()
+        tail = ["tail", "-n", str(args.lines)]
+        if args.follow:
+            tail.append("-f")
+        tail.append(str(log))
+        return subprocess.call(tail)
+
+    if command == "password":
+        from local_operator.mobile.auth import (
+            generate_password,
+            load_password,
+            store_password,
+        )
+
+        current = load_password()
+        if current:
+            print(f"current password: {current}")
+            answer = input("rotate it? [y/N] ").strip().lower()
+            if answer != "y":
+                return 0
+        new = generate_password()
+        store_password(new)
+        print(f"new password: {new}")
+        print("restart the daemon to invalidate existing cookies: lop mobile restart")
+        return 0
+
+    if command == "uninstall":
+        result = mobile_install.uninstall(purge=args.purge)
+        for step in result.get("steps", []):
+            print(f"  {step}")
+        return 0
+
+    print("usage: lop mobile {install|status|start|stop|restart|logs|password|uninstall|serve}")
+    return -1
 
 
 def serve_command(host: str, port: int, reload: bool) -> int:
@@ -1519,6 +1634,8 @@ def main() -> int:
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload)
+        elif args.subcommand == "mobile":
+            return mobile_command(args)
         elif args.subcommand == "login":
             return login_command(args)
         elif args.subcommand == "logout":
