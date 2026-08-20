@@ -1762,15 +1762,38 @@ class SessionStreamFn:
         *,
         different_provider: bool = False,
     ) -> Any | None:
+        """The first configured fallback with working auth, bench-aware.
+
+        "First configured" alone is what replayed the waterfall on every
+        message boundary: with the chain's head providers down, each quota
+        preflight re-selected the first entry, re-pinned it, and the stream
+        walk then re-paid one failure notice and one serial timeout per dead
+        target before landing back on the one provider that had actually been
+        serving. Targets the stream driver recently benched (see
+        ``FailoverRouteState.mark_target_failed``) are therefore passed over
+        here, so a session that has settled on a working fallback stays on it.
+
+        The bench is a preference, not a verdict: when EVERY authed candidate
+        is benched, the first of them is returned anyway — returning ``None``
+        would report "no configured fallback" to a user who has several, and
+        the stream walk's own retry machinery is the right place to discover
+        which bench has expired.
+        """
         from local_operator.providers.failover import parse_selector
 
+        first_benched: Any | None = None
         for target in self._fallback_targets(model):
             provider, _model_id = parse_selector(target.selector)
             if different_provider and provider == model.provider:
                 continue
-            if await self._target_has_auth(target):
-                return target
-        return None
+            if not await self._target_has_auth(target):
+                continue
+            if not self._route_state.target_retry_due(target):
+                if first_benched is None:
+                    first_benched = target
+                continue
+            return target
+        return first_benched
 
     @staticmethod
     def _storage_provider(provider: str) -> str:
