@@ -111,17 +111,23 @@ def _row_word(rendered_row: str) -> str:
     to nothing (the F3 review finding).
     """
     tokens = rendered_row.split()
+    # Whether the row is indented. Rich paints an ordered-list marker with a
+    # leading space (`` 1 alpha``, `` 100 item``); a number-led PARAGRAPH is
+    # flush left (``2026 roadmap``). The indent is what tells a bare-number
+    # marker from number-led content, at ANY marker width — a length cap broke
+    # three-digit lists (the H1 review finding).
+    indented = rendered_row[:1] in (" ", "\t")
     for index, token in enumerate(tokens):
         if _MARKER_TOKEN_RE.fullmatch(token):
             if not token.isdigit():
                 continue  # a bullet, bar, or ordered marker-with-dot: structure
-            # A BARE number is an ordered-list marker only when it is a short
-            # list number followed by the item's text (`` 1 alpha``). A long
-            # number (``2026 roadmap``) or a number that begins an item's content
-            # (``- 3 ways``) is CONTENT and must be returned as the anchor —
-            # skipping it dropped every such line from the copy (G1/G2).
+            # A bare number is an ordered-list marker only when it is indented
+            # and followed by the item's text. A number that begins CONTENT —
+            # a flush-left number-led paragraph (``2026 roadmap``), or an item's
+            # own text after a bullet (``- 3 ways``) — is the row's anchor and
+            # must be returned, not skipped (the G1/G2 review findings).
             preceded_by_marker = index > 0 and bool(_MARKER_TOKEN_RE.fullmatch(tokens[index - 1]))
-            if len(token) <= 2 and index + 1 < len(tokens) and not preceded_by_marker:
+            if indented and index + 1 < len(tokens) and not preceded_by_marker:
                 continue  # standalone ordered marker
             # number-led content: fall through and return it
         return _first_word(token)

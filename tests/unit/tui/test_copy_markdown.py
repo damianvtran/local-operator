@@ -177,3 +177,24 @@ def test_a_nested_quote_keeps_its_levels() -> None:
     assert _full_slice("> outer\n>> inner\n> outer again", 40) == (
         "> outer\n>> inner\n> outer again"
     )
+
+
+# -- review-round-3 regression (H1) -------------------------------------------
+@pytest.mark.parametrize(
+    "source",
+    [
+        "100. item hundred\n101. item hundred one",  # three-digit markers
+        "1. alpha\n2. beta",  # one-digit markers
+        "2026 roadmap",  # number-led paragraph (flush left)
+        "42",  # a paragraph that is only a number
+        "- 7",  # an item that is only a number
+        "- 3 ways to fix",  # an item whose content starts with a number
+        "1. first\n\n2026 was the year",  # ordered list, then a number-led paragraph
+    ],
+)
+def test_number_markers_and_number_led_content_both_anchor(source: str) -> None:
+    """H1: the marker/content discriminator is the row's INDENT, not the number's
+    length — Rich indents a real ordered marker (`` 100 item``) at any width and
+    leaves a number-led paragraph flush left (``2026 roadmap``)."""
+    copied = _full_slice(source, 40)
+    assert copied.split() == source.strip().split()
