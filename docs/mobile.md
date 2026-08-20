@@ -97,10 +97,11 @@ session is shown as ended (its history stays resumable).
   loopback only.
 - **Registry watcher**: scans the record directory, dials new sessions,
   reaps dead ones.
-- **Owned sessions**: sessions started from the phone are built in-process
-  with `session_factory.create_session` and driven directly (no socket hop).
-  The daemon registers them through the same code path so every phone-visible
-  session, owned or remote, has one shape.
+- **Owned sessions**: sessions started from the phone run as supervised
+  CHILD PROCESSES (`python -m local_operator.mobile.child`), each with its
+  own pid and its own registrant — so a daemon restart costs the phone its
+  view, never the session its work, and every phone-visible session (owned
+  or terminal) has exactly one shape: record + control socket.
 - **Auth**: signed cookie (`hmac-sha256(password, expiry)`) via
   `itsdangerous`-free stdlib signing; login form POST → 303, API → 401.
   `/healthz` is unauthenticated and asserts the gate.
@@ -160,6 +161,12 @@ Screens, following branding.md §7's agent-output hierarchy:
 - **Upgrade**: `lop mobile restart` after `lop-update`; the daemon re-serves
   the new bundle, phones reload on next open, cookies survive (keyed on the
   password, not the build).
+- **Approvals on terminal sessions**: a TUI-mounted approval card is answered
+  at the terminal (the phone shows the wait and says so); phone-answering
+  needs a resolution protocol the TUI card does not yet have. Sessions the
+  phone spawned answer from the phone. This is a deliberate v1 boundary, not
+  an oversight: racing two front ends over one modal is worse than a clear
+  owner.
 
 ## Non-goals (v1)
 
