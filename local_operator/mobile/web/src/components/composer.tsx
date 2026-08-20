@@ -28,21 +28,33 @@ function SlashSheet({
 	open,
 	onClose,
 	onPick,
+	query,
 }: {
 	open: boolean;
 	onClose: () => void;
 	/** fill: text to place in the composer; submit: send immediately. */
 	onPick: (fill: string, submit: boolean) => void;
+	/** The token after `/` in the composer — seeds the filter. */
+	query: string;
 }) {
 	const [commands, setCommands] = useState<SlashCommand[]>([]);
-	const [filter, setFilter] = useState("");
+	const [filter, setFilter] = useState(query);
+	const [loaded, setLoaded] = useState(false);
 
 	useEffect(() => {
 		if (!open) return;
+		setFilter(query);
+		setLoaded(false);
 		getCommands()
-			.then((r) => setCommands(r.commands))
-			.catch(() => setCommands([]));
-	}, [open]);
+			.then((r) => {
+				setCommands(r.commands);
+				setLoaded(true);
+			})
+			.catch(() => {
+				setCommands([]);
+				setLoaded(true);
+			});
+	}, [open, query]);
 
 	const filtered = useMemo(() => {
 		const q = filter.trim().toLowerCase();
@@ -92,7 +104,11 @@ function SlashSheet({
 						</span>
 					</button>
 				))}
-				{filtered.length === 0 ? (
+				{!loaded ? (
+					<p className="px-3 py-2 text-body-sm text-ink-dim">
+						loading…
+					</p>
+				) : filtered.length === 0 ? (
 					<p className="px-3 py-2 text-body-sm text-ink-dim">
 						no matching commands
 					</p>
@@ -105,15 +121,17 @@ function SlashSheet({
 function EffortSheet({
 	open,
 	onClose,
+	pid,
 	projection,
 }: {
 	open: boolean;
 	onClose: () => void;
+	pid: number;
 	projection: SessionProjection;
 }) {
 	const set = async (effort: string) => {
 		try {
-			await sendCommand(projection.pid, { op: "set_effort", effort });
+			await sendCommand(pid, { op: "set_effort", effort });
 		} catch {
 			/* The next repaint shows the truth; a failed set leaves it. */
 		}
@@ -151,19 +169,21 @@ function EffortSheet({
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 
 export function Composer({
+	pid,
 	projection,
 	onOpenModels,
 	onOpenEffort,
 	effortOpen,
 	onCloseEffort,
 }: {
+	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
+	pid: number;
 	projection: SessionProjection;
 	onOpenModels: () => void;
 	onOpenEffort: () => void;
 	effortOpen: boolean;
 	onCloseEffort: () => void;
 }) {
-	const pid = projection.pid;
 	const [text, setText] = useDraft(pid);
 	const [slashOpen, setSlashOpen] = useState(false);
 	const [sending, setSending] = useState(false);
@@ -334,10 +354,12 @@ export function Composer({
 				open={slashOpen && !disabled}
 				onClose={() => setSlashOpen(false)}
 				onPick={onSlashPick}
+				query={slashQuery(text) ?? ""}
 			/>
 			<EffortSheet
 				open={effortOpen}
 				onClose={onCloseEffort}
+				pid={pid}
 				projection={projection}
 			/>
 		</div>

@@ -70,8 +70,11 @@ export function SessionScreen({ pid }: { pid: number }) {
 		const el = rootRef.current;
 		if (!vv || !el) return;
 		const sync = () => {
+			/* Height + top, never transform: a transform on this column
+			   creates a containing block that traps `position: fixed`
+			   sheets (slash, model, effort) and clips them to a sliver. */
 			el.style.height = `${vv.height}px`;
-			el.style.transform = `translateY(${vv.offsetTop}px)`;
+			el.style.top = `${vv.offsetTop}px`;
 		};
 		sync();
 		vv.addEventListener("resize", sync);
@@ -80,7 +83,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 			vv.removeEventListener("resize", sync);
 			vv.removeEventListener("scroll", sync);
 			el.style.height = "";
-			el.style.transform = "";
+			el.style.top = "";
 		};
 	}, []);
 
@@ -88,7 +91,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 		return (
 			<div
 				ref={rootRef}
-				className="mx-auto flex h-dvh w-full max-w-md flex-col overflow-hidden"
+				className="relative mx-auto flex h-dvh w-full max-w-md flex-col overflow-hidden"
 			>
 				<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 					<button
@@ -114,7 +117,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 	return (
 		<div
 			ref={rootRef}
-			className="mx-auto flex h-dvh w-full max-w-md flex-col overflow-hidden"
+			className="relative mx-auto flex h-dvh w-full max-w-md flex-col overflow-hidden"
 		>
 			<Header projection={projection} />
 
@@ -143,6 +146,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 			) : null}
 
 			<Composer
+				pid={pid}
 				projection={projection}
 				onOpenModels={() => setModelsOpen(true)}
 				onOpenEffort={() => setEffortOpen(true)}
@@ -153,6 +157,7 @@ export function SessionScreen({ pid }: { pid: number }) {
 			<ModelSheet
 				open={modelsOpen}
 				onClose={() => setModelsOpen(false)}
+				pid={pid}
 				projection={projection}
 			/>
 		</div>

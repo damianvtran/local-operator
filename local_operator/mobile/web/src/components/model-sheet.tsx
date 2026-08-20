@@ -12,10 +12,13 @@ import { Sheet } from "./ui/sheet";
 export function ModelSheet({
 	open,
 	onClose,
+	pid,
 	projection,
 }: {
 	open: boolean;
 	onClose: () => void;
+	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
+	pid: number;
 	projection: SessionProjection;
 }) {
 	const [models, setModels] = useState<ModelEntry[]>([]);
@@ -49,7 +52,7 @@ export function ModelSheet({
 
 	const choose = async (m: ModelEntry) => {
 		try {
-			await sendCommand(projection.pid, {
+			await sendCommand(pid, {
 				op: "set_model",
 				provider: m.provider,
 				model_id: m.model_id,

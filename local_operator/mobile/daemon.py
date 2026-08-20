@@ -240,6 +240,10 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
         if k in known and k not in ("transcript", "todos", "subagents", "pending")
     }
     projection = SessionProjection(**base)
+    # The fold stamps pid=0 (the registrant does not know its own listen
+    # pid until after the record is published). The discovery record is
+    # the source of truth, and the phone keys drafts and commands on it.
+    projection.pid = record.pid
     projection.transcript = build(TranscriptEntry, data.get("transcript", []))
     projection.todos = build(TodoItem, data.get("todos", []))
     projection.subagents = build(SubagentRow, data.get("subagents", []))

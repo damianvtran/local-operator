@@ -8,7 +8,6 @@
  * click dismisses; there is no drag gesture in v1.
  */
 import { useEffect, type ReactNode } from "react";
-import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn";
 
 export function Sheet({
@@ -33,18 +32,16 @@ export function Sheet({
 	}, [open, onClose]);
 
 	if (!open) return null;
-	/* Portal to body so a parent transform (the iOS visualViewport pin
-	   on the session column) cannot trap `position: fixed` and clip the
-	   sheet to a sliver at the column's bottom. */
-	return createPortal(
+	/* In-flow overlay, not a portal: the cmux screenshot surface is the
+	   phone column, and a body portal paints outside it. The session
+	   column is `relative` and no longer uses transform, so `absolute
+	   inset-0` covers exactly the column. */
+	return (
 		<div
-			className="fixed inset-0 z-50 flex justify-center"
+			className="absolute inset-0 z-50"
 			role="dialog"
 			aria-modal="true"
 		>
-			{/* The phone column is max-w-md; keep the sheet inside it even
-			    after portaling out of the transformed session root. */}
-			<div className="relative h-full w-full max-w-md">
 			<button
 				type="button"
 				aria-label="close"
@@ -78,8 +75,6 @@ export function Sheet({
 					{children}
 				</div>
 			</div>
-			</div>
-		</div>,
-		document.body,
+		</div>
 	);
 }
