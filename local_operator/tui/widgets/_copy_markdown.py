@@ -63,31 +63,58 @@ def _strip_markup(line: str) -> str:
 #: A rendered row's leading structure: a quote bar (``▌ ``), a bullet (``• ``)
 #: or an ordered marker (``1. ``), any of them nested. Stripped before the
 #: row's first CONTENT word is read so it can be anchored to its source line.
-_RENDERED_PREFIX_RE = re.compile(r"^\s*(?:(?:▌|•|◦|▪|\d{1,9}[.)])\s+)*")
+_RENDERED_PREFIX_RE = re.compile(r"^\s*(?:(?:▌|•|◦|▪|\d{1,9}[.)])\s*)*")
 
 #: A leading LIST marker on a rendered row (bullet or number). A new list item
 #: always opens with one and a wrapped continuation never does, so its presence
 #: means the row starts a new source line. The quote bar is NOT in this set:
 #: Rich repeats ``▌`` on every row of a quote, continuations included, so a bar
 #: says nothing about whether the row is a new source line.
-_RENDERED_MARKER_RE = re.compile(r"^\s*(?:•|◦|▪|\d{1,9}[.)])\s")
+_RENDERED_MARKER_RE = re.compile(r"^\s*(?:•|◦|▪|\d{1,9}[.)])(?:\s|$)")
+
+#: A single whitespace-delimited token that is ONLY a structure marker (quote
+#: bar, bullet, or ordered number) — skipped when reading a row's content word.
+#: Rich renders an ordered marker as a bare number (`` 1 alpha`` splits to the
+#: token ``1``, the ``.`` is not painted), so the marker token is a bullet, a
+#: bar, an ordered marker WITH its dot, or a bare integer.
+_MARKER_TOKEN_RE = re.compile(r"(?:▌|•|◦|▪|\d{1,9}[.)]|\d{1,9})")
 
 
 def _first_word(text: str) -> str:
     """The first run of non-space, non-markup characters, lowercased.
 
     ``**bold** lead`` anchors on ``bold``; the asterisks never reach the frame.
+    A token that is ONLY a list marker (``1.``, ``-``) or only punctuation is
+    skipped, so an ordered item anchors on its first content word (``alpha`` in
+    ``1. alpha``), not on the marker — stripping ``.`` off a bare ``1`` used to
+    leave an empty anchor and the item never matched (the F3 review finding).
+    As a last resort a token that stripping empties entirely is returned raw,
+    so a punctuation-led line still has something to anchor on.
     """
+    fallback = ""
     for token in text.split():
         word = token.strip("*_`~#>|-+.")
         if word:
             return word.lower()
-    return ""
+        if not fallback and token.strip("*_`~"):
+            fallback = token.lower()
+    return fallback
 
 
 def _row_word(rendered_row: str) -> str:
-    """A rendered row's first content word, structure markers stripped."""
-    return _first_word(_RENDERED_PREFIX_RE.sub("", rendered_row))
+    """A rendered row's first content word, structure markers stripped.
+
+    The marker strip and the word read are one loop rather than a regex sub
+    followed by a scan, because a marker and its text can be separated by a
+    single space (``1 alpha``) — a ``\\s+``-after-marker pattern misses that and
+    leaves the bare number as the "word", which is why an ordered list anchored
+    to nothing (the F3 review finding).
+    """
+    for token in rendered_row.split():
+        if _MARKER_TOKEN_RE.fullmatch(token):
+            continue  # a bullet, bar or ordered marker, not content
+        return _first_word(token)
+    return ""
 
 
 def classify(lines: list[str]) -> tuple[set[int], set[int]]:
@@ -199,42 +226,42 @@ def align(source: str, rendered_rows: list[str]) -> list[int | None]:
             placed = current
             budget -= 1
         else:
-            # Two passes so a STRUCTURAL start wins over a plain paragraph whose
-            # first word happens to match — otherwise a quote line's first word
-            # can steal a row meant for a later item.
-            for want_structure in (True, False):
-                for look in range(src, min(src + _LOOKAHEAD, n)):
-                    line = src_lines[look]
-                    if look in markers:
-                        continue  # backtick rows paint nothing; step over
-                    if look in covered:
-                        if not want_structure and line.strip() and row.strip() == line.strip():
-                            placed = look
-                            break
-                        continue
-                    if not line.strip():
-                        continue  # content is further on; blanks pair with blank rows
-                    structural = bool(
-                        _LIST_RE.match(line) or _QUOTE_RE.match(line) or _HEADING_RE.match(line)
-                    )
-                    if want_structure and not structural:
-                        continue
-                    anchor = _first_word(_strip_markup(line)) or _first_word(line)
-                    if word and anchor and word == anchor:
+            # Scan in SOURCE ORDER and take the first line this row can anchor
+            # to. Rendered rows and source lines are monotonic, so the earliest
+            # match is the right one — a plain paragraph anchors to ITSELF, never
+            # to a later quote that merely shares its first word (the F1 review
+            # finding, where a two-pass structural-first scan let the quote steal
+            # the paragraph's row). A fence body line matches on its exact text;
+            # anything else on its first content word, markup stripped.
+            for look in range(src, min(src + _LOOKAHEAD, n)):
+                line = src_lines[look]
+                if look in markers:
+                    continue  # backtick rows paint nothing; step over
+                if look in covered:
+                    if line.strip() and row.strip() == line.strip():
                         placed = look
                         break
-                    # An hr or a table divider renders as a bar with no anchor word.
-                    if not want_structure and _is_rule_like(line) and _is_rule_like(row):
-                        placed = look
-                        break
-                    # A table body row renders as its cells with the pipes
-                    # dropped; match it on the first cell's word. The divider
-                    # (a rule-like line) is caught above.
-                    if not want_structure and "|" in line and word and word in line.lower():
-                        placed = look
-                        break
-                if placed is not None:
+                    continue
+                if not line.strip():
+                    continue  # content is further on; blanks pair with blank rows
+                anchor = _first_word(_strip_markup(line)) or _first_word(line)
+                if word and anchor and word == anchor:
+                    placed = look
                     break
+                # An hr or a table divider renders as a bar with no anchor word.
+                if _is_rule_like(line) and _is_rule_like(row):
+                    placed = look
+                    break
+                # A table body row renders as its cells with the pipes dropped;
+                # match it on the first cell's word. Rich truncates a long cell
+                # with ``…``, so also match a truncated stem: the rendered word
+                # is the cell's prefix, not a substring of the full line (the F4
+                # review finding).
+                if "|" in line and word:
+                    stem = word.rstrip("…")
+                    if word in line.lower() or (stem and stem in line.lower()):
+                        placed = look
+                        break
             if placed is not None:
                 src = placed + 1
                 # A fence body line and a table row occupy exactly one row.
@@ -278,21 +305,29 @@ def slice_markdown(source: str, mapping: list[int | None], first_row: int, last_
         return ""
 
     # Fill the source lines between the first and last picked line. The walk
-    # maps the rendered rows it could place; the lines between them belong to
-    # the selection too — a fence's marker rows, the blank before a trailing
-    # paragraph, and the quote lines Rich merged into one wrapped block (a
-    # quote's consecutive ``>`` lines render as a single paragraph, so only the
-    # first anchors and the rest must be recovered here). Filling the whole
-    # contiguous span is what keeps that content instead of closing up.
+    # places rows by POSITION (earliest matching source line wins), so a gap
+    # line here is always inside the selected span, never an unselected block
+    # that happens to share a first word — the F1 failure came from the walk
+    # mis-anchoring, not from filling. Filling recovers the lines that render
+    # nothing of their own: fence markers, blank separators, reference-link
+    # definitions, and the quote lines Rich merged into one wrapped block.
     lo, hi = min(picked), max(picked)
     picked.update(range(lo, hi + 1))
+
+    # A selection that reaches the LAST rendered row covers the whole message,
+    # so it also covers any trailing source lines that render nothing of their
+    # own — a reference-link definition or a trailing blank. Without this those
+    # are dropped from a full-message copy (the F1b review finding).
+    n_rows = len(mapping)
+    if last_row >= n_rows - 1:
+        picked.update(range(hi, len(lines)))
 
     # Rich renders a quote's consecutive ``>`` lines as ONE wrapped block, so a
     # selection that reaches into a quote has highlighted the WHOLE merged block
     # even though only the first source line anchored. Extend the slice to the
-    # end of the quote run so the copy carries every line the reader saw, not
-    # just the one that happened to anchor. (Same recovery for a list, whose
-    # items likewise reflow together at some widths.)
+    # end of the quote run — stopping at the first line that is not itself a
+    # quote (a blank ends the run, so a following paragraph or heading is never
+    # absorbed). The run-stop is what the F1 finding's blanket fill lacked.
     n = len(lines)
     last = max(picked)
     if _QUOTE_RE.match(lines[last]):
@@ -305,29 +340,49 @@ def slice_markdown(source: str, mapping: list[int | None], first_row: int, last_
     in_fence_at_start = first in covered and first not in markers
     fence_marker = ""
     fence_lang = ""
+    open_marker_line: int | None = None
     if in_fence_at_start:
         for i in range(first, -1, -1):
             if i in markers:
                 m = _FENCE_RE.match(lines[i])
                 fence_marker = m.group(1)  # type: ignore[union-attr]
                 fence_lang = lines[i].strip()[len(fence_marker) :]
+                open_marker_line = i
                 break
+    # The quote prefix to re-apply to a mid-quote slice. It is derived from the
+    # first QUOTE line in the slice and applied only to lines that are themselves
+    # quotes — a trailing heading or paragraph after the quote run keeps its own
+    # form (the F1c review finding, where every non-covered line was re-quoted).
     quote_prefix = ""
-    if first not in covered:
-        qm = _QUOTE_RE.match(lines[first])
-        if qm is not None:
-            quote_prefix = qm.group(0)
+    for i in sorted(picked):
+        if i not in covered:
+            qm = _QUOTE_RE.match(lines[i])
+            if qm is not None:
+                quote_prefix = qm.group(0)
+                break
 
+    # Prepend the opener only when the slice does not already include the
+    # fence's own opening marker line; append the closer only when it does not
+    # include the closing marker. Without the symmetric end check a fence whose
+    # body runs to a blank line gets a spurious closing fence AFTER the trailing
+    # paragraph, swallowing it into the code block on paste (the F2 finding).
+    includes_open = open_marker_line in picked if open_marker_line is not None else False
+    includes_close = any(
+        i in markers and i != open_marker_line and i > (open_marker_line or -1) for i in picked
+    )
     out: list[str] = []
-    if in_fence_at_start and fence_marker:
+    if in_fence_at_start and fence_marker and not includes_open:
         out.append(fence_marker + fence_lang)
     for i in sorted(picked):
         text = lines[i]
-        if quote_prefix and i not in covered:
+        # Re-apply the quote prefix only to lines that are quotes in the source;
+        # everything else (headings, paragraphs, blanks, fence lines) is emitted
+        # as written.
+        if quote_prefix and i not in covered and _QUOTE_RE.match(text):
             body = _QUOTE_RE.sub("", text)
             out.append((quote_prefix + body) if body else quote_prefix.rstrip())
         else:
             out.append(text)
-    if in_fence_at_start and fence_marker:
+    if in_fence_at_start and fence_marker and not includes_close:
         out.append(fence_marker)
     return "\n".join(out).strip("\n")
