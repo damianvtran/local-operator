@@ -238,3 +238,93 @@ async def test_oversized_bash_output_keeps_the_loop_live(
         f"the loop thread burned {probe.worst:.3f}s of CPU without yielding while "
         "bash settled — the oversized-output tail is back on the render loop"
     )
+
+
+def _wide_tree(root: Path, *, dirs: int = 40, files_per_dir: int = 50) -> int:
+    """A many-file tree whose walk is thousands of scandir/stat calls.
+
+    2000 files is small enough to build in well under a second and large
+    enough that a walk accidentally back on the loop is visible to the
+    structural spy — which is the half with teeth here, because a tree walk
+    is blocking syscalls, not CPU (see the module docstring on which half
+    owns which shape).
+    """
+    total = 0
+    for d in range(dirs):
+        directory = root / f"pkg_{d:03d}"
+        directory.mkdir()
+        for f in range(files_per_dir):
+            (directory / f"mod_{f:03d}.py").write_text(f"needle_{d}_{f} = {f}\n")
+            total += 1
+    return total
+
+
+@pytest.mark.asyncio
+async def test_concurrent_grep_walks_keep_the_loop_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch of greps over a wide tree must not walk it on the render loop.
+
+    The regression this pins: ``execute_grep`` walked the target tree inline
+    before hopping to a worker thread, so under Textual's eager task factory
+    (which runs each new task synchronously up to its first true suspension)
+    a batch of grep/glob calls executed every walk back-to-back on the render
+    loop before the batch's first frame could paint. Observed live as a
+    session frozen at "composing…" with the main thread pinned in
+    os_lstat/os_scandir under ``task_eager_start``.
+    """
+    _wide_tree(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_GREP_ENGINE", "python")
+
+    # The walk (_grep_file_set) and the scan (_python_grep_scan) are the two
+    # filesystem-bound hops of the Python engine; both must run off-loop.
+    spy = OffLoopSpy(monkeypatch, "_grep_file_set", "_python_grep_scan")
+    context = builtin.ToolContext(cwd=str(tmp_path), session_id="liveness")
+    probe = LoopCpuProbe()
+    probe.start()
+    try:
+        results = await asyncio.gather(
+            *(
+                builtin.execute_grep(f"grep-{i}", {"pattern": f"needle_{i}_"}, None, None, context)
+                for i in range(3)
+            )
+        )
+    finally:
+        await probe.stop()
+
+    assert not any(r.is_error for r in results), "greps failed; liveness proved nothing"
+    spy.assert_all_off_loop()
+    assert probe.samples, "heartbeat never woke"
+    assert probe.worst < MAX_LOOP_CPU_S, (
+        f"the loop thread burned {probe.worst:.3f}s of CPU without yielding while "
+        "the greps ran — the tree walk is back on the render loop"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ripgrep_skipped_count_walk_stays_off_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rg engine's oversized-file recount re-walks the tree — off-loop.
+
+    The ripgrep subprocess never blocked the loop, but the footer's
+    skipped-file count is recovered by a second Python walk+stat pass, and
+    that pass carried the same inline-walk regression as the Python engine.
+    Skipped (not failed) when rg is not installed: the path under test does
+    not exist without it.
+    """
+    # Pin the engine selector to 'auto' so the skip condition below is purely
+    # about the rg binary, not an ambient LOCAL_OPERATOR_GREP_ENGINE override
+    # (review N2).
+    monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
+    if not builtin._use_ripgrep():
+        pytest.skip("ripgrep not on PATH; the rg recount path cannot run")
+    _wide_tree(tmp_path, dirs=10, files_per_dir=20)
+
+    spy = OffLoopSpy(monkeypatch, "_count_oversized_files")
+    context = builtin.ToolContext(cwd=str(tmp_path), session_id="liveness")
+    result = await builtin.execute_grep("grep-rg", {"pattern": "needle_"}, None, None, context)
+
+    assert not result.is_error, result.text
+    assert "(ripgrep)" in result.text, "rg engine did not run; recount path untested"
+    spy.assert_all_off_loop()
