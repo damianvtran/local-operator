@@ -217,13 +217,16 @@ async def test_rich_block_is_not_selectable() -> None:
 
 # -- markdown: what actually lands on the clipboard --------------------------
 @pytest.mark.asyncio
-async def test_markdown_copies_as_the_rendered_frame() -> None:
-    """The whole assistant message, copied — the acceptance case.
+async def test_markdown_copies_as_markdown() -> None:
+    """The whole assistant message copies as its source markdown.
 
-    Every construct at once, because the interesting thing is that they are
-    consistent: bold and inline code lose their markers, the fence loses its
-    backticks and keeps its indentation, the ordered list keeps its rendered
-    marker, and the link keeps its label.
+    The copy is NOT the rendered frame: a messenger or email client does not
+    recognise a ``▌`` quote bar or a ``•`` bullet, so the clipboard carries the
+    message's markdown, which Slack, GitHub, Linear and Notion all render and
+    which reads as tidy plain text anywhere else. Bold keeps its ``**``, the
+    fence keeps its backticks and language, the list keeps its markers, and the
+    link keeps its label (its URL stays on the frame as a hyperlink, asserted
+    below).
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(64, 40)) as pilot:
@@ -235,14 +238,12 @@ async def test_markdown_copies_as_the_rendered_frame() -> None:
 
         copied = _copy_all(app, block)
         assert copied is not None, "the agent message contributed nothing to the copy"
-        assert copied == "\n".join(MARKDOWN_ROWS)
         # The five constructs, called out so a failure says WHICH one moved.
-        assert "**" not in copied and "plan" in copied  # bold
-        assert "`" not in copied and "inline_code" in copied  # inline code
-        assert "```" not in copied  # fence markers
-        assert "def f(x):\n    return x + 1" in copied  # the code, verbatim
-        assert "https://example.com/x" not in copied  # the URL is not text
-        assert "link" in copied  # its label is
+        assert "**plan**" in copied  # bold keeps its markers
+        assert "`inline_code`" in copied  # inline code keeps its backticks
+        assert "```python\ndef f(x):\n    return x + 1\n```" in copied  # fence, verbatim
+        assert "1. first step" in copied and "2. second step" in copied  # ordered list
+        assert "[link](https://example.com/x)" in copied  # the link, label and URL
 
 
 @pytest.mark.asyncio
@@ -272,13 +273,12 @@ async def test_link_url_stays_on_the_frame_as_a_hyperlink() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fenced_code_copies_without_the_pad() -> None:
-    """A code fence pastes as runnable code, trailing pad trimmed.
+async def test_fenced_code_copies_as_a_fence() -> None:
+    """A code fence copies as a fenced block: backticks, language, no pad.
 
-    Rich pads every rendered row out to the full width, and ``Syntax`` paints
-    its ground across all of it. Without the right-trim in
-    ``TranscriptBlock.get_selection`` a two-line snippet arrives with fifty
-    spaces welded to each line.
+    Copying the source rather than the frame means the trailing pad Rich paints
+    across every row never reaches the clipboard at all, and the block arrives
+    as a runnable, language-tagged fence a markdown reader renders as code.
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(64, 40)) as pilot:
@@ -287,7 +287,86 @@ async def test_fenced_code_copies_without_the_pad() -> None:
         block.update_text("```python\nx = 1\n```")
         block.finalize_text()
         await pilot.pause()
-        assert _copy_all(app, block) == "x = 1"
+        assert _copy_all(app, block) == "```python\nx = 1\n```"
+
+
+# -- markdown copy: the regression this feature answers -----------------------
+@pytest.mark.asyncio
+async def test_blockquote_copies_as_markdown_not_the_bar() -> None:
+    """A blockquote's ``▌`` never reaches the clipboard — the reported bug.
+
+    The reader drags over a quoted reply and pastes it into Slack or an email;
+    what arrives must be the ``>`` markdown those clients render, not the
+    half-block bar Rich painted. Bold inside the quote keeps its ``**`` for the
+    same reason.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(
+            "Here is a reply you can paste:\n\n"
+            "> Thanks for the report. I verified the **flagged** value in out/main/index.jsc:\n"
+            "> it's the public project API key (phc_...), publishable by design.\n"
+        )
+        block.finalize_text()
+        await pilot.pause()
+        copied = _copy_all(app, block)
+        assert copied is not None
+        assert "▌" not in copied
+        assert "> Thanks for the report. I verified the **flagged** value" in copied
+        assert "> it's the public project API key" in copied
+
+
+@pytest.mark.asyncio
+async def test_table_copies_as_markdown_pipes() -> None:
+    """A table copies as markdown pipes, not box-drawing.
+
+    The rendered frame draws the table with ``─`` rules and drops the pipes;
+    pasted into a markdown reader that is not a table. The source pipes survive
+    the copy, header row and divider included.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        block = AssistantBlock()
+        await _mounted(app, block)
+        block.update_text(
+            "Results:\n\n| Name | Score |\n|------|-------|\n| alpha | 0.91 |\n| beta | 0.87 |\n"
+        )
+        block.finalize_text()
+        await pilot.pause()
+        copied = _copy_all(app, block)
+        assert copied is not None
+        assert "| Name | Score |" in copied
+        assert "| alpha | 0.91 |" in copied
+        assert "─" not in copied
+
+
+@pytest.mark.asyncio
+async def test_a_multi_block_copy_joins_plain_and_markdown() -> None:
+    """A drag across a user block and an answer copies both, cleanly.
+
+    The user block copies its text verbatim (no ``▌``), the assistant block its
+    markdown; ``Screen.get_selected_text`` joins the two contributions, so this
+    pins the seam rather than each block alone.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 40)) as pilot:
+        user = UserBlock("summarise the ingest path")
+        assistant = AssistantBlock()
+        await _mounted(app, user, assistant)
+        assistant.update_text("Here is the **plan**.")
+        assistant.finalize_text()
+        await pilot.pause()
+        app.screen.selections = {
+            user: Selection(None, None),
+            assistant: Selection(None, None),
+        }
+        copied = app.screen.get_selected_text()
+        assert copied is not None
+        assert "▌" not in copied
+        assert "summarise the ingest path" in copied
+        assert "**plan**" in copied
 
 
 # -- the other blocks --------------------------------------------------------
@@ -363,11 +442,14 @@ async def test_tool_card_expanded_output_copies_unindented() -> None:
 
 # -- highlight and clipboard cannot disagree ---------------------------------
 @pytest.mark.asyncio
-async def test_partial_selection_copies_only_the_highlighted_rows() -> None:
-    """A drag over rows 5-6 copies rows 5-6, clipped at the drag's columns.
+async def test_partial_selection_copies_a_valid_markdown_slice() -> None:
+    """A drag over the fence's rows copies the fence, closed.
 
-    The same ``Selection.get_span`` the highlight uses, so this is the
-    invariant rather than a second implementation of the arithmetic.
+    The highlighted rows come from the same ``Selection.get_span`` the band
+    uses, so the copy covers what was lit — but a partial markdown selection is
+    re-fenced on the way out, because raw ``def f(x):\\n    retu`` is neither
+    the code the reader pointed at nor valid markdown. The slice opens and
+    closes the fence so it pastes as a code block.
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(64, 40)) as pilot:
@@ -378,7 +460,8 @@ async def test_partial_selection_copies_only_the_highlighted_rows() -> None:
         await pilot.pause()
         # From the start of the fence's first row to mid-way through its second.
         selection = Selection.from_offsets(Offset(x=0, y=5), Offset(x=8, y=6))
-        assert block.get_selection(selection) == ("def f(x):\n    retu", "\n")
+        expected = ("```python\ndef f(x):\n    return x + 1\n```", "\n")
+        assert block.get_selection(selection) == expected
 
 
 @pytest.mark.asyncio
@@ -572,24 +655,14 @@ async def test_resize_rebuilds_at_the_new_width() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streaming_copy_is_the_streaming_frame() -> None:
-    """A mid-stream copy is the mid-stream FRAME, splice and all.
+async def test_streaming_copy_is_stable_across_the_splice() -> None:
+    """A mid-stream copy and a settled copy carry the same markdown.
 
-    The live block is a spliced frozen prefix plus a freshly flattened tail,
-    and the settled one is a single flatten of the whole text. Those two do NOT
-    produce identical rows, and that difference PREDATES the flatten: the old
-    ``Group(Markdown(prefix), Markdown(tail))`` splice dropped the blank row
-    markdown puts between two block elements in exactly the same place.
-    Measured on this message at 64 columns, the frozen prefix ends
-    ``"```\\n\\n"`` and the tail is ``"Done."``, so the live frame runs
-    ``return x + 1`` straight into ``Done.`` where the settled frame separates
-    them — one row that appears when the turn settles.
-
-    Asserted rather than fixed because the copy rule is "the glyphs that were
-    highlighted", so a copy taken mid-stream SHOULD be the mid-stream frame,
-    and closing the gap means changing the boundary semantics that TUI-010 and
-    TUI-011 pin. What must hold, and does, is that the words and their order
-    never depend on when the copy was taken.
+    The copy is the message's source, aligned to the highlighted rows — so it
+    does not inherit the live frame's splice gap (the frozen prefix plus a fresh
+    tail drops a blank row the settled frame keeps). What must hold is that the
+    words and their order never depend on when the copy was taken, and that the
+    markdown constructs survive either way.
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(64, 40)) as pilot:
@@ -609,11 +682,7 @@ async def test_streaming_copy_is_the_streaming_frame() -> None:
         assert settled is not None
 
         assert live.split() == settled.split()  # same words, same order
-        assert [row for row in live.split("\n") if row] == [
-            row for row in settled.split("\n") if row
-        ]
-        # The pre-existing difference, named so a change to it is deliberate.
-        assert live.count("\n\n") == settled.count("\n\n") - 1
+        assert "**plan**" in live and "```python" in live
 
 
 def test_the_splice_reproduces_the_group_it_replaced() -> None:
@@ -806,11 +875,11 @@ async def test_releasing_a_drag_puts_the_frame_on_the_clipboard() -> None:
 
         await _drag(app, pilot, (block.region.x, block.region.y), (79, 23))
 
-        # The RENDERED frame, which is the whole rule: no ``**`` around
-        # "plan", no backticks around "inline_code", no trailing pad — and the
-        # paragraph break kept, because the reader selected two paragraphs.
+        # The message's MARKDOWN: ``**`` around "plan", backticks around
+        # "inline_code", and the paragraph break kept, because the reader
+        # selected two paragraphs.
         assert app._clipboard.splitlines() == [
-            "Here is the plan with inline_code.",
+            "Here is the **plan** with `inline_code`.",
             "",
             "Second paragraph here.",
         ]
