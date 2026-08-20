@@ -823,6 +823,24 @@ MAX_SERVER_FAULT_REQUESTS_PER_TURN = 12
 #: sweep goes immediately and lets resolution report whatever is still blocked.
 LOOPBACK_MAX_WAIT_MS = 30_000
 
+#: How long a FALLBACK target that exhausted its provider stays out of
+#: consideration before the cascade asks it again. Without this the chain had
+#: no memory between turns: every message boundary re-selected the FIRST
+#: configured fallback, so a session that had settled on the one provider that
+#: works replayed the whole waterfall — quota notice, then one "provider
+#: failure" per dead target — on every single message, paying the serial
+#: latency each time. Five minutes, not the 60s the primary-probe cooldown
+#: uses: the primary is the model the user chose, so probing it early is worth
+#: a request, while a fallback that hard-failed is just one of several
+#: interchangeable reserves and nothing is lost by leaving it benched for a
+#: few minutes. A longer advertised ``Retry-After`` extends the mark (see the
+#: call site); a shorter one does not shrink it, because the annoyance this
+#: exists to fix is measured in message-boundary intervals, not in seconds.
+#: The mark is advisory, never a dead end: the loop-back sweep still revisits
+#: benched targets before a turn is declared exhausted, and a target that
+#: serves a request sheds its mark immediately.
+FALLBACK_FAILURE_COOLDOWN_MS = 5 * 60 * 1000
+
 #: Attempts the FIRST bearer may spend on a server-side fault before the turn
 #: tries another credential. It is deliberately below ``max_retries``: until a
 #: rotation has happened nothing knows whether a sibling exists, and spending
@@ -1069,6 +1087,20 @@ class FailoverRouteState:
     on_change: RouteChangeHandler | None = None
     primary_retry_at_ms: int = 0
     on_settle: RouteSettleHandler | None = None
+    #: Per-target bench: ``(selector, effort) -> earliest ms it may be asked
+    #: again``. Written when a FALLBACK target exhausts its provider during a
+    #: walk, consulted by the next walk's first pass and by preflight's
+    #: fallback selection, so a session that has settled past a dead target
+    #: does not replay its failure — one notice and one serial timeout per
+    #: message — at every message boundary. Deliberately NOT cleared by
+    #: :meth:`clear`: the bench records facts about the fallback providers
+    #: ("kimi 500'd out 40s ago"), and neither a model switch nor the primary
+    #: recovering changes those facts. Entries expire on their own, and a
+    #: target that serves a request sheds its mark via :meth:`clear_target`.
+    #: The bench is advisory: the stream driver's loop-back sweep re-walks
+    #: benched targets before any turn is declared exhausted, so it can delay
+    #: a target but never remove the last route to a served turn.
+    target_retry_at_ms: dict[tuple[str, str | None], int] = dataclasses.field(default_factory=dict)
 
     async def activate(
         self,
@@ -1104,6 +1136,31 @@ class FailoverRouteState:
     def primary_retry_due(self, now_ms: int | None = None) -> bool:
         now = int(time.time() * 1000) if now_ms is None else now_ms
         return now >= self.primary_retry_at_ms
+
+    def mark_target_failed(
+        self,
+        target: FallbackTarget,
+        *,
+        cooldown_ms: int,
+        now_ms: int | None = None,
+    ) -> None:
+        """Bench ``target`` until ``now + cooldown_ms``.
+
+        ``max()`` against any existing deadline so a fresh short failure
+        cannot shrink a longer advertised quota-reset wait already recorded.
+        """
+        now = int(time.time() * 1000) if now_ms is None else now_ms
+        key = (target.selector, target.effort)
+        self.target_retry_at_ms[key] = max(self.target_retry_at_ms.get(key, 0), now + cooldown_ms)
+
+    def target_retry_due(self, target: FallbackTarget, now_ms: int | None = None) -> bool:
+        """True when ``target`` is not benched (or its bench has expired)."""
+        now = int(time.time() * 1000) if now_ms is None else now_ms
+        return now >= self.target_retry_at_ms.get((target.selector, target.effort), 0)
+
+    def clear_target(self, target: FallbackTarget) -> None:
+        """Drop ``target``'s bench mark — it just served a request."""
+        self.target_retry_at_ms.pop((target.selector, target.effort), None)
 
     def clear(self) -> None:
         """Return the route to the primary WITHOUT announcing it.
@@ -1424,6 +1481,28 @@ async def stream_with_failover(
     # provider meant, or a bearer it rejected past rotation, gets no second ask:
     # the same bytes would get the same answer.
     pending = list(targets)
+    if route_state is not None:
+        # Fallbacks that exhausted their provider within the cooldown window
+        # sit out the first pass — re-paying their failure (one "provider
+        # failure" notice plus a serial timeout per dead target, on every
+        # message boundary) is the waterfall replay this bench exists to stop.
+        # Filtered HERE rather than skipped inside the walk so a benched
+        # target can never be the last pending item and starve the loop-back
+        # sweep below, which is what still owes every filtered target a visit
+        # (they are never added to `walked`): the bench delays a target, it
+        # never removes the last route to a served turn. Two exemptions: the
+        # primary, whose suppression is the route pin plus the preflight's
+        # metered probe and never this bench, and the pinned route itself,
+        # which is the target the session is actually running on — benching
+        # it would orphan the very route the trim above started the walk
+        # from. Either exemption also guarantees the first pass is non-empty.
+        pending = [
+            candidate
+            for candidate in pending
+            if candidate == primary_target
+            or candidate == route_state.active
+            or route_state.target_retry_due(candidate)
+        ]
     walked: set[tuple[str, str | None]] = set()
     recoverable: set[tuple[str, str | None]] = set()
     # Server-fault spend per target, carried ACROSS the sweeps: the per-turn
@@ -1440,8 +1519,8 @@ async def stream_with_failover(
 
         is_primary = selector == primary_selector
         provider, _model_id = parse_selector(selector)
-        spec = request.model if target == primary_target else spec_for_target(request.model, target)
         route_key = (selector, target.effort)
+        spec = request.model if target == primary_target else spec_for_target(request.model, target)
         walked.add(route_key)
         if (
             looped_back
@@ -1497,6 +1576,11 @@ async def stream_with_failover(
         # configured budget has already been handed back once rotation ran out.
         last_access: "OAuthAccess | None" = None
         exhausted_budget_restored = False
+        # The longest reset THIS target's own errors advertised, for sizing its
+        # bench below. Tracked per target rather than read from `reported`,
+        # which keeps the most diagnostic error of the WHOLE walk and would
+        # bench this target for another provider's quota reset.
+        target_retry_after_ms = 0
 
         while state.attempts <= AUTH_RETRY_MAX_ATTEMPTS:
             if signal is not None and signal.aborted:
@@ -1621,6 +1705,11 @@ async def stream_with_failover(
                     # again is exactly the edge its display needs. A no-op when
                     # nothing was pinned (see `clear_settled`).
                     await route_state.clear_settled("primary model recovered")
+                if route_state is not None:
+                    # Serving a request is the affirmative signal that ends a
+                    # bench: whatever exhausted this target's provider has
+                    # passed, so the next walk may ask it again immediately.
+                    route_state.clear_target(target)
                 # This credential just served a request, so whatever provider
                 # fault demoted it has passed. Without this the mark outlived
                 # the outage for the life of the process, contradicting the
@@ -1641,6 +1730,7 @@ async def stream_with_failover(
                 if forwarded_any:
                     raise  # partial output already reached the caller
                 record(exc, primary=is_primary)
+                target_retry_after_ms = max(target_retry_after_ms, exc.retry_after_ms or 0)
                 if is_server_side_failure(exc):
                     server_fault_requests += 1
                     server_faults_by_target[route_key] = server_fault_requests
@@ -1752,6 +1842,21 @@ async def stream_with_failover(
                 return
 
         # Provider exhausted — walk on to the next fallback selector.
+
+        if route_state is not None and target != primary_target:
+            # Bench the exhausted fallback so the next message boundary does
+            # not re-pay this failure. The bench floor is deliberately longer
+            # than any advertised short throttle — the annoyance this fixes is
+            # per-message replay, not per-second pacing — but a LONGER
+            # advertised quota reset extends it, because asking before the
+            # provider's own stated reset is guaranteed waste. The primary is
+            # never benched here: its suppression is the route pin plus
+            # `primary_retry_at_ms`, owned by the preflight, and the user's
+            # chosen model deserves the periodic probe that cooldown meters.
+            route_state.mark_target_failed(
+                target,
+                cooldown_ms=max(FALLBACK_FAILURE_COOLDOWN_MS, target_retry_after_ms),
+            )
 
         if pending or looped_back or not retry.enabled:
             continue

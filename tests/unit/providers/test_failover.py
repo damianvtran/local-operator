@@ -588,6 +588,164 @@ async def test_the_primary_cooldown_is_a_deadline_not_a_sliding_window(
     assert state.primary_retry_due(now_ms=now_ms + 10_001)
 
 
+async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> None:
+    """Message 2 must not re-pay message 1's failed fallback.
+
+    The reported annoyance: with the chain's head providers down, every user
+    message replayed the whole waterfall — one "provider failure" notice and
+    one serial timeout per dead target — before landing back on the one
+    provider that had been serving all along. A fallback that exhausted its
+    provider is benched for ``FALLBACK_FAILURE_COOLDOWN_MS``, so the next
+    walk goes straight from the failed primary to the working tail.
+    """
+    now_ms = 1_000_000
+    monkeypatch.setattr(
+        failover_module, "time", SimpleNamespace(time=lambda: now_ms / 1000), raising=True
+    )
+    specs_seen: list[str] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        if spec.provider in ("openai", "anthropic"):
+            return ScriptedClient(ProviderError(400, "model unavailable"))
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "fallbackChains": {"default": ["anthropic/claude-x", "groq/llama-x"]},
+        }
+    }
+    state = FailoverRouteState()
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"], "groq": ["k3"]})
+
+    async def run() -> None:
+        _ = [
+            event
+            async for event in stream_with_failover(
+                _request(), auth, settings, client_for, route_state=state
+            )
+        ]
+
+    await run()
+    assert specs_seen == ["openai/gpt-4o", "anthropic/claude-x", "groq/llama-x"]
+    # The dead fallback is benched; the one that served is not.
+    assert not state.target_retry_due(FallbackTarget("anthropic/claude-x"), now_ms=now_ms)
+    assert state.target_retry_due(FallbackTarget("groq/llama-x"), now_ms=now_ms)
+
+    # A preflight that believed the primary recovered clears the pin — which
+    # must NOT clear the bench, or the next walk replays the waterfall.
+    state.clear()
+    specs_seen.clear()
+    now_ms += 30_000  # well inside the cooldown
+    await run()
+    assert specs_seen == [
+        "openai/gpt-4o",
+        "groq/llama-x",
+    ], "the benched fallback was re-walked inside its cooldown"
+
+    # Past the cooldown the bench expires on its own and the target is asked
+    # again — the bench is a delay, not a removal.
+    state.clear()
+    specs_seen.clear()
+    now_ms += failover_module.FALLBACK_FAILURE_COOLDOWN_MS
+    await run()
+    assert specs_seen == ["openai/gpt-4o", "anthropic/claude-x", "groq/llama-x"]
+
+
+async def test_bench_never_strands_a_turn_when_every_fallback_is_benched(monkeypatch) -> None:
+    """An all-benched chain must still serve via the loop-back sweep.
+
+    The bench is advisory: it shapes the first pass, and the loop-back sweep
+    re-walks whatever the first pass never asked. A turn may be slower here,
+    but it must never die reporting exhaustion while a benched target would
+    have served.
+    """
+    now_ms = 1_000_000
+    monkeypatch.setattr(
+        failover_module, "time", SimpleNamespace(time=lambda: now_ms / 1000), raising=True
+    )
+    specs_seen: list[str] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        if spec.provider == "openai":
+            return ScriptedClient(ProviderError(400, "model unavailable"))
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["groq/llama-x"]}}}
+    state = FailoverRouteState()
+    state.mark_target_failed(
+        FallbackTarget("groq/llama-x"),
+        cooldown_ms=failover_module.FALLBACK_FAILURE_COOLDOWN_MS,
+        now_ms=now_ms,
+    )
+    got = [
+        event
+        async for event in stream_with_failover(
+            _request(),
+            FakeAuth({"openai": ["k1"], "groq": ["k3"]}),
+            settings,
+            client_for,
+            route_state=state,
+        )
+    ]
+    assert specs_seen == ["openai/gpt-4o", "groq/llama-x"]
+    assert any(isinstance(e, StreamEndEvent) for e in got)
+    # Serving cleared the bench mark.
+    assert state.target_retry_due(FallbackTarget("groq/llama-x"), now_ms=now_ms)
+
+
+async def test_pinned_route_is_exempt_from_its_own_bench(monkeypatch) -> None:
+    """The route the session is running on is never skipped by the bench.
+
+    A pinned fallback that hiccups gets benched like any other; the pin
+    exemption keeps the session's own route in the walk so the trim that
+    starts the walk from the pin cannot produce an empty first pass.
+    """
+    now_ms = 1_000_000
+    monkeypatch.setattr(
+        failover_module, "time", SimpleNamespace(time=lambda: now_ms / 1000), raising=True
+    )
+    specs_seen: list[str] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        return ScriptedClient([StreamEndEvent(stop_reason="stop")])
+
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["groq/llama-x"]}}}
+    state = FailoverRouteState()
+    target = FallbackTarget("groq/llama-x")
+    await state.activate(target, "provider failure", cooldown_ms=60_000)
+    state.mark_target_failed(
+        target,
+        cooldown_ms=failover_module.FALLBACK_FAILURE_COOLDOWN_MS,
+        now_ms=now_ms,
+    )
+    _ = [
+        event
+        async for event in stream_with_failover(
+            _request(),
+            FakeAuth({"openai": ["k1"], "groq": ["k3"]}),
+            settings,
+            client_for,
+            route_state=state,
+        )
+    ]
+    # The pin trim starts the walk at groq, and the bench must not skip it.
+    assert specs_seen == ["groq/llama-x"]
+
+
+async def test_bench_deadline_extends_but_never_shrinks(monkeypatch) -> None:
+    """A fresh short failure cannot shorten a longer advertised reset."""
+    state = FailoverRouteState()
+    target = FallbackTarget("groq/llama-x")
+    state.mark_target_failed(target, cooldown_ms=600_000, now_ms=1_000_000)
+    state.mark_target_failed(target, cooldown_ms=60_000, now_ms=1_000_000)
+    assert not state.target_retry_due(target, now_ms=1_000_000 + 599_999)
+    assert state.target_retry_due(target, now_ms=1_000_000 + 600_000)
+
+
 async def test_stream_exhaustion_raises_last_error() -> None:
     async def client_for(spec: ModelSpec) -> Any:
         return ScriptedClient(ProviderError(500, "still down", retryable=True))
