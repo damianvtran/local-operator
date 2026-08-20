@@ -9477,8 +9477,11 @@ class OperatorApp(App[None]):
             return [
                 ArgumentChoice("login", "Authorize an OAuth server (opens the browser)"),
                 ArgumentChoice("logout", "Forget a server's stored OAuth credential", alert=True),
+                # The differentiating clause leads: at narrow widths the tail
+                # truncates, and "forget, then authorize again" is the part
+                # login does not already say.
                 ArgumentChoice(
-                    "reauth", "Forget, then authorize again — account switch or scope change"
+                    "reauth", "Forget first, then authorize — for an account or scope change"
                 ),
             ]
         verb = sub.lower()
@@ -9501,14 +9504,40 @@ class OperatorApp(App[None]):
                 editor.picker.set_notice("credential store unreadable — cannot list logouts")
                 return []
             names = [name for name in names if self._mcp_server_url(name, manager) in stored]
+        # The verb→server swap is otherwise only inferable from the row
+        # shapes; a one-line notice names what this list is FOR while the
+        # server slot is open (it clears on the next slot change — the
+        # self-clearing rule every picker fill follows).
+        editor.picker.set_notice(
+            {
+                "login": "choose a server to authorize (opens the browser)",
+                "reauth": "choose a server to forget, then re-authorize",
+                "logout": "choose a credential to forget",
+            }[verb]
+        )
         choices: list[ArgumentChoice] = []
         for name in names:
             status = manager.get_connection_status(name) if manager is not None else ""
+            # Per-verb detail: a bare "connected" next to a login row reads as
+            # a contradiction (why log in when connected?), and on a logout
+            # row the danger column must name what is being REMOVED — the
+            # credential — not the connection that happens to be up.
+            if verb == "logout":
+                detail = "stored credential"
+                if status == "connected":
+                    detail += " · connected"
+            elif verb == "reauth":
+                detail = "connected — will re-authorize" if status == "connected" else status
+            else:
+                detail = "connected — will re-use" if status == "connected" else status
             choices.append(
                 ArgumentChoice(
                     f"{verb} {name}",
-                    f"{verb.capitalize()} OAuth server '{name}'",
-                    detail=status,
+                    # The name already says what the row does (`login linear`);
+                    # restating it as "Login OAuth server 'linear'" spends the
+                    # description cells saying nothing.
+                    "",
+                    detail=detail,
                     # Every row on a logout list destroys a credential, so the
                     # danger tint is a property of the verb, not of a row that
                     # went wrong — the same rule /logout applies to providers.

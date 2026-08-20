@@ -853,6 +853,14 @@ class CommandPicker(Static):
         detail_style = row_bg + Style(
             color=theme_mod.semantic_color("danger" if choice.alert else "muted")
         )
+        # The NAME carries the danger too: on `/logout`-style lists the detail
+        # column may hold an innocuous state word ("connected") or nothing at
+        # all, so tinting only the detail could leave a destructive row
+        # visually identical to a benign one — which is what happened on the
+        # `/mcp logout` list. The name is the cell every destructive row has.
+        name_style = s.name
+        if choice.alert and not s.selected:
+            name_style = row_bg + Style(color=theme_mod.semantic_color("danger"))
 
         span = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
         detail = choice.detail.strip()
@@ -879,7 +887,7 @@ class CommandPicker(Static):
         if description and width > DESCRIPTION_COLLAPSE_WIDTH:
             column = max(1, min(self._primary_column(), body))
             clipped = truncate_cells(name, max(1, column - _PRIMARY_COLUMN_GAP))
-            row.append(clipped, style=s.name)
+            row.append(clipped, style=name_style)
             used = cell_len(clipped)
             gap = max(_PRIMARY_COLUMN_GAP, column - used)
             remaining = body - used - gap
@@ -891,7 +899,7 @@ class CommandPicker(Static):
             # rebuild as a name-only row rather than ship a stub description.
             row = self._gutter(s)
 
-        row.append(truncate_cells(name, max(1, body)), style=s.name)
+        row.append(truncate_cells(name, max(1, body)), style=name_style)
         return self._append_detail(row, width, detail, column_cells, detail_style, row_bg)
 
     def _append_detail(
