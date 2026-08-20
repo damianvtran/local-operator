@@ -449,7 +449,8 @@ def main() -> int:
         retention = measure_retention(args.retention_sessions, args.retention_session_bytes)
         print(f"\n  generated {retention.generated} sessions and swept after each")
         print(f"    directories left : {retention.remaining} (every session kept)")
-        print(f"    transcripts      : {'all intact' if retention.transcripts_intact else 'DELETED'}")
+        intact = "all intact" if retention.transcripts_intact else "DELETED"
+        print(f"    transcripts      : {intact}")
         print(f"    empty dirs reaped: {retention.empties_reaped}")
         check(retention.transcripts_intact, "a sweep deleted a transcript")
     except CheckFailed as exc:
@@ -480,13 +481,10 @@ def main() -> int:
     print(f"    written per week      : {mb(weekly_before)} -> {mb(weekly_after)}")
     print(f"    sessions per week     : {sessions_per_week}")
     print(f"    RETAINED, before      : unbounded — {mb(weekly_before)}/week, forever")
-    # The count ceiling binds first for a normal user; the byte ceiling is the
-    # backstop for a session that dumps far more than the measured average.
-    by_count = DEFAULT_MAX_SESSIONS * per_turn_after * HEAVY_TURNS_PER_SESSION
-    print(
-        f"    RETAINED, after       : min(30 days, {DEFAULT_MAX_SESSIONS} sessions, "
-        f"{mb(DEFAULT_MAX_BYTES)}) = {mb(min(by_count, DEFAULT_MAX_BYTES))} steady state"
-    )
+    # Sessions are never deleted automatically now, so the projection is a
+    # growth rate, not a steady state — with the attachment store shaving the
+    # media payload off every week of it.
+    print(f"    RETAINED, after       : unbounded — {mb(weekly_after)}/week, forever")
 
     print()
     if failures:

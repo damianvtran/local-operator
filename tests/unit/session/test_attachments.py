@@ -37,7 +37,9 @@ def test_put_then_get_round_trips(tmp_path):
     ref = store.put(PNG_B64, "image/png")
 
     assert ref is not None
-    data, mime_type = store.get(ref.digest)
+    got = store.get(ref.digest)
+    assert got is not None
+    data, mime_type = got
     assert base64.b64decode(data) == PNG_BYTES
     assert mime_type == "image/png"
 
@@ -47,6 +49,7 @@ def test_put_dedups_identical_content(tmp_path):
     first = store.put(PNG_B64, "image/png")
     second = store.put(PNG_B64, "image/png")
 
+    assert first is not None and second is not None
     assert first.digest == second.digest
     assert len(list(tmp_path.glob("*.bin"))) == 1
 
@@ -158,7 +161,9 @@ async def test_inline_rows_from_older_builds_still_load(tmp_path):
 
     transcript = Transcript(session_dir)
     history = transcript.build_llm_history()
-    image = [b for b in history[0].content if isinstance(b, ImageContent)][0]
+    first = history[0]
+    assert isinstance(first, Message)
+    image = [b for b in first.content if isinstance(b, ImageContent)][0]
     assert base64.b64decode(image.data) == PNG_BYTES
 
 

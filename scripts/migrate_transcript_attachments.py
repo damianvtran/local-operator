@@ -101,7 +101,7 @@ def migrate_transcript(path: Path, store: AttachmentStore, *, dry_run: bool) -> 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument(
         "--sessions-dir",
         type=Path,
