@@ -7415,17 +7415,14 @@ class OperatorApp(App[None]):
             self._append_block(NoticeBlock("usage panel unavailable", "warning"))
             return
         if panel.accepts_request(generation):
-            if not reports and panel.has_reports:
-                # An empty result with cached rows on screen means the refresh
-                # came back with nothing while the user is looking at numbers:
-                # keep what is painted, and say the refresh failed — the mark
-                # silently vanishing is not an answer to a key they pressed.
-                panel.settle_refresh(failed=True)
-                return
-            # The age shown is the DATA's age, not the fetch's: a row served
-            # from the shared cache may be minutes old, and "just now" would
-            # overstate a number the user is deciding on. `r` forces a live
-            # fetch when fresher numbers are wanted.
+            # Paint whatever the controller returned. After the empty-over-data
+            # acceptance window, `[]` is a REAL answer ("this provider reports
+            # nothing") and must replace the stale numbers the cache just
+            # stopped serving — treating it as a failed refresh would undo that
+            # settlement and keep showing data the cache no longer stands
+            # behind. A true outage already comes back as the last-good list
+            # (not `[]`), so the exception branch above is the only path that
+            # should pin the failed-refresh note.
             panel.show_reports(reports, now_ms=self._usage_data_fetched_ms(reports))
 
     @staticmethod

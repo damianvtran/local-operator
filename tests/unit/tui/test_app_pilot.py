@@ -1429,6 +1429,31 @@ async def test_usage_opens_instantly_from_the_cache_when_a_row_is_warm() -> None
 
 
 @pytest.mark.asyncio
+async def test_an_empty_successful_fetch_replaces_cached_numbers() -> None:
+    """`[]` from the controller is a REAL answer after the empty-over-data
+    acceptance window ("this provider reports nothing"). Treating it as a
+    failed refresh would keep the stale numbers the cache just stopped serving
+    and pin a "refresh failed" note on the wrong arm."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    session = FakeSession()
+    ctrl = FakeProviderController()
+    ctrl.cached_reports = _usage_reports(used=5.0)
+    ctrl.usage_reports = []  # the fetch's answer: nothing to report
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        for _ in range(6):
+            await pilot.pause()
+        text = "\n".join(panel.render_lines_for_test())
+    assert "refresh failed" not in text
+    assert "Credits" not in text  # the stale numbers were replaced
+    assert "no usage" in text
+
+
+@pytest.mark.asyncio
 async def test_the_background_warmer_only_fetches_when_the_row_is_stale() -> None:
     """The warmer is an optimisation, not a fetch-per-interval: it must skip the
     network when the shared cache already holds a fresh row for the active
