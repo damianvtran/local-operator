@@ -703,13 +703,11 @@ def mobile_command(args: argparse.Namespace) -> int:
         for step in steps:
             print(f"  {step}")
         if result.get("ok"):
-            password = result.get("password")
             print("\nmobile daemon installed and healthy.")
             print("  open http://127.0.0.1:4098 and sign in with your portal password")
-            if password:
-                print(f"  password: {password}")
-                print("  (also in the login Keychain as 'lop-mobile';")
-                print("  `lop mobile password` rotates it)")
+            print("  the password is in the login Keychain (service lop-mobile).")
+            print("  retrieve it yourself with `lop mobile password` at a TTY —")
+            print("  it is never printed here, so it cannot leak into a transcript.")
             return 0
         print(f"\n\033[1;31m{result.get('error', 'install failed')}\033[0m")
         return -1
@@ -758,6 +756,15 @@ def mobile_command(args: argparse.Namespace) -> int:
             load_password,
             store_password,
         )
+
+        # A captured stdout (an agent tool result, a redirected log) is the
+        # context window. Refuse to print the secret unless a human is at a
+        # TTY. Rotation still works non-interactively via --rotate once we
+        # have a TTY confirmation; without a TTY we only say where it lives.
+        if not sys.stdout.isatty():
+            print("portal password is in the login Keychain (service lop-mobile).")
+            print("run `lop mobile password` in a terminal to view or rotate it.")
+            return 0
 
         current = load_password()
         if current:

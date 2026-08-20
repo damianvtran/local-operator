@@ -94,10 +94,12 @@ Match the choice from step 1 exactly:
 | Clipboard | `printf '%s' "$pw" \| pbcopy` (macOS). Confirm "it's on the clipboard", never the value. |
 | 0600 file | Write the path they named, `chmod 0600`, tell them the path. |
 
-`install` prints the password when it generated a new one. That line is
-already in the tool result — do **not** copy it into your reply. For
-clipboard/file, read it from the command result in the same turn and
-discard it; the next model call must not see the value.
+`install` never prints the password (it would land in the tool result,
+which is model-visible). For **clipboard** or **0600 file**, retrieve it
+out of band — `security find-generic-password -s lop-mobile -w` on macOS,
+piped straight into `pbcopy` or the file, never through a `print` or a
+tool argument the model will see. `lop mobile password` itself refuses
+to print when stdout is not a TTY, so an agent cannot slurp it.
 
 ### 5. What you tell them afterwards
 

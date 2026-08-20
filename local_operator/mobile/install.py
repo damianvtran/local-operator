@@ -142,7 +142,9 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
         while time.time() < deadline:
             if health(port) and gate_closed(port):
                 steps.append("health check passed and the auth gate is closed")
-                return {"ok": True, "steps": steps, "password": password}
+                # Never return the password: a `--json` dump or an agent
+                # capturing stdout would put it in the transcript.
+                return {"ok": True, "steps": steps}
             time.sleep(0.5)
         return {
             "ok": False,
@@ -150,7 +152,7 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
             "error": f"daemon did not come up healthy; see {log_path()}",
         }
     steps.append("dry run: skipped load and verification")
-    return {"ok": True, "steps": steps, "password": password}
+    return {"ok": True, "steps": steps}
 
 
 def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object]:
