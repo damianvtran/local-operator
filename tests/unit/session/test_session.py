@@ -385,6 +385,91 @@ def _persisted_wakes_payload(schedules) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+async def test_wake_delivery_mid_turn_waits_for_the_running_tool(tmp_path):
+    """A wake firing mid-turn is courtesy steering: the running tool completes
+    untouched, and the wake's text reaches the next model call carrying the
+    resume guidance (handle the wake, then continue the interrupted work)."""
+    from local_operator.harness.wake import DueWake, WakeSchedule
+
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    async def blocking_execute(tool_call_id, args, signal, on_update, context):
+        tool_started.set()
+        await release_tool.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="block",
+            content=[TextContent(text="finished")],
+        )
+
+    tool = AgentTool(
+        name="block",
+        parameters={"type": "object", "properties": {}},
+        interruptible=True,  # even an interruptible tool must survive a wake
+        execute=blocking_execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="block", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[tool])
+
+    prompt_task = asyncio.ensure_future(session.prompt("long task"))
+    await wait_for(lambda: tool_started.is_set())
+
+    schedule = WakeSchedule(id="w1", message="wake up", next_due_at=0, created_at=0)
+    due = DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+    await session._deliver_wake(due)
+    # The wake is queued; the tool must still be running uninterrupted.
+    assert not session._steering_queue.empty()
+    assert not session._has_urgent_steering()
+
+    release_tool.set()
+    await prompt_task
+
+    assert stream.requests[1].messages, "the wake must reach the follow-up model call"
+    wake_texts = [
+        m.text for m in stream.requests[1].messages if "(alarm) Scheduled wake w1" in m.text
+    ]
+    assert wake_texts, "the queued wake never reached the model"
+    assert "wake up" in wake_texts[0]
+    assert "resume the work" in wake_texts[0]
+    # The tool ran to completion — its real result, not a synthetic skip.
+    tool_messages = [
+        m for m in stream.requests[1].messages if isinstance(m, Message) and m.role == "tool"
+    ]
+    assert any("finished" in m.text for m in tool_messages)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_idle_wake_delivery_carries_no_resume_note(tmp_path):
+    """A wake that opens its OWN turn has no interrupted work to return to,
+    so the resume guidance stays out of its text."""
+    from local_operator.harness.wake import DueWake, WakeSchedule
+
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    schedule = WakeSchedule(id="w1", message="wake up", next_due_at=0, created_at=0)
+    due = DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+    await session._deliver_wake(due)
+    await wait_for(lambda: bool(stream.requests))
+
+    wake_texts = [
+        m.text for m in stream.requests[0].messages if "(alarm) Scheduled wake w1" in m.text
+    ]
+    assert wake_texts and "resume the work" not in wake_texts[0]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_resume_aggregates_overdue_wakes_into_one_catchup(tmp_path):
     """Close lop with overdue wakes, reopen: ONE aggregated catch-up prompt —
     not one turn per overdue schedule — and it names each missed schedule."""

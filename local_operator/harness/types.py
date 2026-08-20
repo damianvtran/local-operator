@@ -1207,6 +1207,17 @@ class LoopConfig(BaseModel):
         default=None, exclude=True
     )
 
+    # Urgency counterpart to ``has_steering_messages``: a peek that returns
+    # True only when queued steering may cancel a RUNNING tool. The plain
+    # peek feeds the immediate-interrupt poll, and courtesy injections (a
+    # scheduled wake riding the busy path) share the steering queue with user
+    # steers — without this split a wake's timer landing mid-`bash` would
+    # kill the tool, exactly the interruption wakes exist not to cause. User
+    # steers stay immediate; the session wires this to "a non-wake message is
+    # queued". ``None`` falls back to the plain peek so existing hosts keep
+    # immediate semantics for everything they queue.
+    has_urgent_steering_messages: Callable[[], bool] | None = Field(default=None, exclude=True)
+
     interrupt_mode: Literal["immediate", "wait"] = "wait"
     # Epoch-ms deadline for the whole run, if any.
     deadline: float | None = None
