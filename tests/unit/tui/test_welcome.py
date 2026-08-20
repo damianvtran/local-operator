@@ -284,6 +284,26 @@ def test_status_rows_shed_lowest_priority_first_and_the_warning_never() -> None:
     assert _warning_body(one)
 
 
+def test_a_harness_notice_sheds_before_the_credential_warning() -> None:
+    """A quota fallback is news; a missing login is an action. When the
+    box can hold only one of them, the action stays."""
+    info = WelcomeInfo(
+        version="0.15.10",
+        model_label="anthropic/claude-opus-5",
+        cwd="/tmp",
+        missing_credential="anthropic",
+        notice="anthropic quota low — falling back to zai/glm-5.3",
+    )
+    one = build_welcome_lines(info, ROOMY_W, 1)
+    assert len(one) == 1
+    assert _warning_body(one)
+    assert "quota low" not in plain(one)
+
+    two = build_welcome_lines(info, ROOMY_W, 2)
+    assert "quota low" in plain(two)
+    assert _warning_body(two)
+
+
 def _warning_body(lines: list[Text]) -> bool:
     return any("not logged in" in line.plain for line in lines)
 
@@ -727,6 +747,18 @@ async def test_no_credential_warning_appears() -> None:
         welcome._poll()  # the factory has resolved by now; force one read
         body = plain(build_welcome_lines(welcome._info, welcome.size.width, welcome.size.height))
         assert "! not logged in — /login openrouter" in body
+
+
+def test_a_harness_notice_is_drawn_on_the_splash() -> None:
+    """A quota fallback is a status row, same glyph as the login warning."""
+    info = WelcomeInfo(
+        version="0.15.10",
+        model_label="anthropic/claude-opus-5",
+        cwd="/tmp",
+        notice="anthropic quota low — falling back to zai/glm-5.3",
+    )
+    body = plain(build_welcome_lines(info, ROOMY_W, ROOMY_H))
+    assert "! anthropic quota low — falling back to zai/glm-5.3" in body
 
 
 @pytest.mark.asyncio

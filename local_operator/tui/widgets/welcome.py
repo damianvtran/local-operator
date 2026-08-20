@@ -14,6 +14,7 @@ BORDERLESS block resting on the input card:
     openrouter/deepseek/deepseek-chat
            ~/local-operator
       ! not logged in — /login openrouter
+      ! anthropic quota low — falling back to zai/glm-5.3
 
     /         command picker
     /help     all commands
@@ -35,7 +36,8 @@ Five things make this a design decision rather than a splash screen:
   of bright blocks.
 - **It degrades in a fixed order.** Terminals are not a fixed canvas, so the
   view sheds decoration before information: the logo goes first, the hints
-  second, the status rows last, and the credential warning never. See
+  second, the status rows last, and the credential warning never — a
+  harness notice (quota fallback) sheds just before it. See
   :func:`build_welcome_lines`.
 - **One thing glows, and it is the identity.** A slow swell lifts the mark's
   rows a third of a ramp step above their resting ``dim`` and lets them back
@@ -318,12 +320,16 @@ TIP_MIN_WIDTH = max(cell_len(f"{TIP_GLYPH} {tip}") for tip in TIPS)
 WARNING_SHORT = "not logged in"
 
 #: Drop priorities for the status rows. Rows are shed lowest-first when the
-#: terminal is too short for all of them, so the warning — the only row that
-#: changes what the user must DO next — is the last one standing.
+#: terminal is too short for all of them, so the credential warning — the
+#: only row that changes what the user must DO next — is the last one
+#: standing. A harness notice (quota fallback) is the same KIND of row but
+#: not the same urgency: you can still type, just on a different model, so
+#: it sheds one step before the login warning.
 _PRIORITY_VERSION = 0
 _PRIORITY_CWD = 1
 _PRIORITY_MODEL = 2
-_PRIORITY_WARNING = 3
+_PRIORITY_NOTICE = 3
+_PRIORITY_WARNING = 4
 
 
 @dataclass(frozen=True)
@@ -346,6 +352,13 @@ class WelcomeInfo:
     #: the answer is *known* to be "no credential" — see
     #: :func:`session_welcome_info`.
     missing_credential: str | None = None
+    #: A harness notice that arrived while the splash is still the empty
+    #: state — a quota fallback, a provider that is missing. The conversation
+    #: has not started, so this lives ON the splash rather than retiring it
+    #: for an empty message view. Latest one only: the splash is one row, and
+    #: stacking would shove the lockup the way a transcript notice already
+    #: does. ``None`` when nothing has been announced.
+    notice: str | None = None
 
 
 def app_version() -> str:
@@ -361,11 +374,19 @@ def app_version() -> str:
         return ""
 
 
-def session_welcome_info(session: Any | None, providers: Any | None) -> WelcomeInfo:
+def session_welcome_info(
+    session: Any | None,
+    providers: Any | None,
+    *,
+    notice: str | None = None,
+) -> WelcomeInfo:
     """Snapshot the facts the welcome view shows.
 
     Takes the session and provider facade rather than the app so the whole
-    gathering step lives here instead of leaking into ``app.py``.
+    gathering step lives here instead of leaking into ``app.py``. ``notice``
+    is the one fact that is NOT a session property — it is a harness
+    announcement the app is holding while the splash is still up — so it is
+    handed in rather than re-derived.
 
     The credential question is ``is_usable``, not ``has_any_credential``. A key in
     the ENVIRONMENT is what the stream-time cascade resolves, so a session started
@@ -406,6 +427,7 @@ def session_welcome_info(session: Any | None, providers: Any | None) -> WelcomeI
         model_name=name,
         cwd=os.getcwd(),
         missing_credential=missing,
+        notice=notice or None,
     )
 
 
@@ -559,6 +581,17 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     if info.cwd:
         shown = _fit_tail(_shorten_home(info.cwd), width)
         rows.append((_PRIORITY_CWD, Text(shown, style=dim, no_wrap=True)))
+    if info.notice:
+        # Same glyph and tint as the credential warning: both are "something
+        # about the harness you should know before you type". Truncated from
+        # the RIGHT — the head names the condition (`anthropic quota low`),
+        # the tail names the fallback, and a half-printed selector is still
+        # a selector. The login warning drops its remedy WHOLE because a
+        # half-printed `/logi…` is an instruction nobody can follow; a
+        # notice is a fact, not a command.
+        glyph = NOTICE_GLYPHS["warning"]
+        body = f"{glyph} {info.notice}"
+        rows.append((_PRIORITY_NOTICE, Text(body, style=warn, no_wrap=True)))
     if info.missing_credential:
         # The single most common first-run failure, so it is spelled as the
         # command that fixes it. `!` is the app's warning glyph (D14). When the
@@ -707,10 +740,11 @@ def build_welcome_lines(
         mark = []
 
     status_full = _status_rows(info, width)
-    # Version is the only status row in the visible ladder. Model, cwd and the
-    # credential warning are the facts the app needs to answer "can I start?";
-    # if even those do not fit, their existing priorities shed cwd then model,
-    # leaving the actionable warning last.
+    # Version is the only status row in the visible ladder. Model, cwd, a
+    # harness notice and the credential warning are the facts the app needs
+    # to answer "can I start?"; if even those do not fit, their existing
+    # priorities shed cwd then model then the notice, leaving the
+    # actionable login warning last.
     status_without_version = [row for row in status_full if row[0] != _PRIORITY_VERSION]
     status = list(status_without_version)
     hints = _hint_lines(width)
@@ -1008,9 +1042,19 @@ class WelcomeView(Static):
         self._sync_pulse_timer()
         self._sync_tip_timer()
         if visible:
-            self._poll()
+            self.refresh_info()
         else:
             self._sync_timer()
+
+    def refresh_info(self) -> None:
+        """Re-read the info source and repaint if anything changed.
+
+        Public because the poll timer retires once the model label lands, and
+        a harness notice can arrive after that — a quota fallback on a
+        session that already resolved its model. Without a push the notice
+        would sit in the source unseen until the next ``set_visible``.
+        """
+        self._poll()
 
     def _poll(self) -> None:
         info = self._info_source()
