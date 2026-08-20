@@ -1,15 +1,16 @@
-"""Retention sweep over the ephemeral session store.
+"""Retention over the ephemeral session store: nothing is ever deleted.
 
-The behaviour under test is a deletion, so the tests care as much about what
-survives as about what goes: the live session and the newest history must be
-there afterwards, on every path, including the ones that fail.
+A session transcript is the only durable record of a run, so the suite's
+central property is not what goes but what survives: every directory with a
+byte of content must still be there after a sweep, whatever ceiling-like
+arguments the caller passes, however old or large or numerous the sessions
+are. The only thing a sweep removes is a directory that contains NOTHING —
+no transcript, no content — which is definitionally not a session.
 """
 
 from __future__ import annotations
 
 import time
-
-import pytest
 
 from local_operator.session.retention import (
     DEFAULT_MAX_AGE_DAYS,
@@ -21,13 +22,13 @@ from local_operator.session.retention import (
 
 
 def _session(root, name: str, *, size: int = 1024, age_days: float = 0.0):
+    import os
+
     directory = root / name
     directory.mkdir(parents=True)
     (directory / "transcript.jsonl").write_text("x" * size)
     when = time.time() - age_days * 86400
     for path in (directory / "transcript.jsonl", directory):
-        import os
-
         os.utime(path, (when, when))
     return directory
 
@@ -39,115 +40,115 @@ def test_missing_directory_is_a_no_op(tmp_path):
     assert result.evicted == 0 and result.errors == 0
 
 
-def test_count_ceiling_evicts_oldest_first(tmp_path):
+def test_no_ceiling_combination_ever_deletes_a_transcript(tmp_path):
+    """The regression this module now exists to prevent.
+
+    Every one of these arguments used to doom the directories below:
+    10 directories over a count ceiling of 1, 10 MB over a byte ceiling of
+    1 KB, and mtimes two years past a 1-day age horizon. A heavy install
+    with several concurrent sessions hit exactly this, and the eviction
+    took out a running session's transcript — the run's next turn died on
+    FileNotFoundError and the session's work was gone. Under the current
+    policy every one of them survives.
+    """
     sessions = tmp_path / "sessions"
-    for i in range(10):
-        _session(sessions, f"s{i:02d}", age_days=10 - i)
+    made = [_session(sessions, f"s{i:02d}", size=1_000_000, age_days=700 - i) for i in range(10)]
 
-    result = sweep_sessions(sessions, max_sessions=4, max_bytes=0, max_age_days=0)
+    result = sweep_sessions(sessions, max_sessions=1, max_bytes=1024, max_age_days=1)
 
-    survivors = sorted(p.name for p in sessions.iterdir())
-    assert survivors == ["s06", "s07", "s08", "s09"]
-    assert result.evicted == 6
+    assert result.evicted == 0
+    for directory in made:
+        assert (directory / "transcript.jsonl").read_text() == "x" * 1_000_000
 
 
-def test_byte_ceiling_holds_even_when_count_does(tmp_path):
-    """One session that dumps megabytes must not be able to blow the budget
-    just because there are only a handful of directories."""
+def test_live_dir_is_never_reaped_even_when_empty(tmp_path):
+    """The caller just created this directory and has not written a turn.
+    It is empty by construction; ``live_dir`` is the belt that keeps the
+    sweep from rmtree'ing it in the same call that created it."""
     sessions = tmp_path / "sessions"
-    _session(sessions, "old", size=900_000, age_days=3)
-    _session(sessions, "mid", size=900_000, age_days=2)
-    live_survivor = _session(sessions, "new", size=900_000, age_days=1)
+    live = sessions / "live"
+    live.mkdir(parents=True)
+    other = sessions / "other"
+    other.mkdir(parents=True)
 
-    result = sweep_sessions(sessions, max_sessions=100, max_bytes=1_000_000, max_age_days=0)
-
-    assert result.bytes_remaining <= 1_000_000
-    assert live_survivor.exists()
-    assert not (sessions / "old").exists()
-
-
-def test_age_ceiling(tmp_path):
-    sessions = tmp_path / "sessions"
-    _session(sessions, "stale", age_days=45)
-    _session(sessions, "fresh", age_days=1)
-
-    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=30)
-
-    assert not (sessions / "stale").exists()
-    assert (sessions / "fresh").exists()
-
-
-def test_live_session_is_never_evicted(tmp_path):
-    """The live directory is both the oldest and, on its own, over every
-    ceiling — and still must survive, because evicting it takes out resume
-    and compaction replay for the run that is currently writing to it."""
-    sessions = tmp_path / "sessions"
-    live = _session(sessions, "live", size=5_000_000, age_days=400)
-    for i in range(5):
-        _session(sessions, f"other{i}", size=1000, age_days=1)
-
-    result = sweep_sessions(
-        sessions,
-        live_dir=live,
-        max_sessions=1,
-        max_bytes=1000,
-        max_age_days=1,
-    )
+    result = sweep_sessions(sessions, live_dir=live)
 
     assert live.exists()
-    assert (live / "transcript.jsonl").read_text().startswith("x")
-    assert result.evicted == 5
+    assert not other.exists()
+    assert result.evicted == 1
 
 
-def test_empty_directories_are_always_reaped(tmp_path):
+def test_empty_directories_are_reaped(tmp_path):
     """Left behind by runs that built a session and exited before writing a
-    turn; 23 of 147 directories on a real install were exactly this."""
+    turn; 23 of 147 directories on a real install were exactly this. A
+    directory that contains nothing holds nothing to lose."""
     sessions = tmp_path / "sessions"
     (sessions / "hollow").mkdir(parents=True)
     _session(sessions, "real")
 
-    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
+    result = sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
 
     assert not (sessions / "hollow").exists()
     assert (sessions / "real").exists()
+    assert result.evicted == 1
+
+
+def test_a_marker_alone_protects_the_directory(tmp_path):
+    """A session is stamped with its origin BEFORE its transcript exists.
+    Treating that marker as invisible made the directory look empty, and
+    a concurrent process's startup sweep rmtree'd it — the child's first
+    append then died on FileNotFoundError, the exact kill this module
+    exists to prevent. A marker is a claim: the directory stays."""
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+
+    sessions = tmp_path / "sessions"
+    hollow = sessions / "hollow"
+    hollow.mkdir(parents=True)
+    mark_session_origin(hollow, ORIGIN_SUBAGENT, label="review")
+
+    result = sweep_sessions(sessions)
+
+    assert hollow.exists()
+    assert result.evicted == 0
+
+
+def test_any_content_at_all_protects_the_directory(tmp_path):
+    """One byte of anything that is not bookkeeping is a session's work."""
+    sessions = tmp_path / "sessions"
+    directory = sessions / "almost-empty"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("x")
+
+    result = sweep_sessions(sessions, max_sessions=1, max_bytes=1, max_age_days=1)
+
+    assert result.evicted == 0
+    assert (directory / "transcript.jsonl").read_text() == "x"
 
 
 def test_sweep_is_idempotent(tmp_path):
     sessions = tmp_path / "sessions"
-    for i in range(8):
-        _session(sessions, f"s{i}", age_days=8 - i)
+    (sessions / "hollow").mkdir(parents=True)
+    _session(sessions, "real")
 
-    first = sweep_sessions(sessions, max_sessions=3, max_bytes=0, max_age_days=0)
-    second = sweep_sessions(sessions, max_sessions=3, max_bytes=0, max_age_days=0)
+    first = sweep_sessions(sessions)
+    second = sweep_sessions(sessions)
 
-    assert first.evicted == 5
+    assert first.evicted == 1
     assert second.evicted == 0
-    assert len(list(sessions.iterdir())) == 3
-
-
-def test_all_ceilings_disabled_keeps_everything_but_empties(tmp_path):
-    sessions = tmp_path / "sessions"
-    for i in range(6):
-        _session(sessions, f"s{i}", age_days=500)
-
-    sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
-
-    assert len(list(sessions.iterdir())) == 6
+    assert sorted(p.name for p in sessions.iterdir()) == ["real"]
 
 
 def test_sibling_stores_under_the_config_dir_are_untouched(tmp_path):
-    """Only ``sessions/`` is swept.
+    """Only ``sessions/`` is swept, and even there only empty directories.
 
     The spill store (``<config>/spill``) holds the full text of large tool
-    outputs behind the ``spill://`` handles the truncation footers advertise.
-    It runs its OWN LRU eviction under its own ceiling and protects the live
-    session's entries inside a grace window; a second sweeper racing it could
-    evict a handle whose footer is still sitting in the live transcript, and
-    the agent would be told to expand an output that no longer exists.
+    outputs behind the ``spill://`` handles the truncation footers
+    advertise; the named-agent store holds real conversations. Neither is
+    this module's business.
     """
     sessions = tmp_path / "sessions"
-    for i in range(6):
-        _session(sessions, f"s{i}", age_days=6 - i)
+    (sessions / "hollow").mkdir(parents=True)
+    _session(sessions, "real")
     spill = tmp_path / "spill"
     spill.mkdir()
     (spill / "deadbeef.txt").write_text("the full tool output")
@@ -159,7 +160,8 @@ def test_sibling_stores_under_the_config_dir_are_untouched(tmp_path):
 
     assert (spill / "deadbeef.txt").read_text() == "the full tool output"
     assert (agents / "an-agent" / "transcript.jsonl").exists()
-    assert len(list(sessions.iterdir())) == 1
+    assert (sessions / "real").exists()
+    assert not (sessions / "hollow").exists()
 
 
 class _Config:
@@ -170,102 +172,97 @@ class _Config:
         return self._values.get(key, default)
 
 
-def test_sweep_from_config_reads_the_settings(tmp_path):
+def test_sweep_from_config_never_deletes_even_with_aggressive_settings(tmp_path):
+    """A config still carrying the retired ceilings — 200/128MiB/30d were
+    the SHIPPED defaults, so most existing config files carry them — must
+    not delete anything. The settings are retired; the sweep reaps empties
+    and nothing more."""
     sessions = tmp_path / "sessions"
     for i in range(6):
-        _session(sessions, f"s{i}", age_days=6 - i)
+        _session(sessions, f"s{i}", size=5_000_000, age_days=500)
 
-    config = _Config({"session_retention_max_sessions": 2})
+    config = _Config(
+        {
+            "session_retention_max_sessions": 1,
+            "session_retention_max_bytes": 1,
+            "session_retention_max_age_days": 1,
+        }
+    )
     result = sweep_from_config(config, tmp_path, live_dir=None)
 
-    assert result.evicted == 4
-    assert len(list(sessions.iterdir())) == 2
+    assert result.evicted == 0
+    assert len(list(sessions.iterdir())) == 6
 
 
-def test_unparseable_setting_falls_back_to_the_default(tmp_path):
-    """A typo must not silently restore the unbounded behaviour."""
+def test_retired_ceilings_still_in_config_produce_one_honest_warning(tmp_path, caplog):
+    sessions = tmp_path / "sessions"
+    sessions.mkdir(parents=True)
+    config = _Config({"session_retention_max_sessions": 200})
+
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.retention"):
+        sweep_from_config(config, tmp_path, live_dir=None)
+
+    assert "session_retention_max_sessions" in caplog.text
+    assert "never deleted automatically" in caplog.text
+
+
+def test_unparseable_retired_setting_is_ignored_without_warning(tmp_path, caplog):
+    """A typo in a retired key changes nothing either way; it is not worth a
+    warning now that the value cannot cause a deletion."""
+    import logging
+
     sessions = tmp_path / "sessions"
     _session(sessions, "s0")
 
     config = _Config({"session_retention_max_sessions": "not-a-number"})
-    sweep_from_config(config, tmp_path, live_dir=None)
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.retention"):
+        result = sweep_from_config(config, tmp_path, live_dir=None)
 
     assert (sessions / "s0").exists()
-    assert DEFAULT_MAX_SESSIONS > 0
-    assert DEFAULT_MAX_BYTES > 0
-    assert DEFAULT_MAX_AGE_DAYS > 0
+    assert result.evicted == 0
+    assert "not-a-number" not in caplog.text
 
 
-def test_undeletable_directory_is_reported_not_raised(tmp_path, monkeypatch):
+def test_the_retired_defaults_are_all_zero(tmp_path):
+    """If any default ceiling were nonzero it would imply a sweep that still
+    evicts by policy. All three are 0 because the ceilings no longer exist."""
+    assert DEFAULT_MAX_SESSIONS == 0
+    assert DEFAULT_MAX_BYTES == 0
+    assert DEFAULT_MAX_AGE_DAYS == 0
+
+
+def test_undeletable_empty_directory_is_reported_not_raised(tmp_path, monkeypatch):
     """Reclaiming disk must never be the reason a session fails to start."""
     sessions = tmp_path / "sessions"
-    for i in range(4):
-        _session(sessions, f"s{i}", age_days=4 - i)
+    for i in range(3):
+        (sessions / f"hollow{i}").mkdir(parents=True)
+    _session(sessions, "real")
 
     def boom(_path):
         raise OSError("read-only file system")
 
     monkeypatch.setattr("local_operator.session.retention.shutil.rmtree", boom)
-    result = sweep_sessions(sessions, max_sessions=1, max_bytes=0, max_age_days=0)
+    result = sweep_sessions(sessions)
 
     assert result.errors == 3
     assert result.evicted == 0
     assert len(list(sessions.iterdir())) == 4
 
 
-@pytest.mark.parametrize("ceiling", [1, 5, 25])
-def test_directory_stays_under_budget_however_many_sessions_arrive(tmp_path, ceiling):
-    """The property the whole module exists for, exercised by exceeding it."""
+def test_a_transcript_is_never_deleted_even_when_a_failure_cascade_hits(tmp_path, monkeypatch):
+    """The worst case the old design could produce: a scan error, an
+    undeletable directory, AND every ceiling tripped at once. Content
+    survives regardless."""
     sessions = tmp_path / "sessions"
-    live = _session(sessions, "live", size=512)
-    for i in range(120):
-        _session(sessions, f"s{i:03d}", size=512, age_days=(120 - i) / 24)
-        sweep_sessions(sessions, live_dir=live, max_sessions=ceiling, max_bytes=0, max_age_days=0)
-        # +1 for the live directory, which is exempt from the ceiling.
-        assert len(list(sessions.iterdir())) <= ceiling + 1
-    assert live.exists()
+    real = _session(sessions, "real", size=100, age_days=900)
 
+    def boom(_path):
+        raise OSError("everything is broken")
 
-def test_an_aborted_child_leaves_nothing_worth_a_retention_slot(tmp_path):
-    """A session is stamped with its origin BEFORE its transcript exists, so a
-    run that aborts in between leaves a directory holding only the marker.
+    monkeypatch.setattr("local_operator.session.retention.shutil.rmtree", boom)
+    result = sweep_sessions(sessions, max_sessions=1, max_bytes=1, max_age_days=1)
 
-    Such a directory used to be empty, and empty directories are always reaped
-    regardless of the ceilings — they carry nothing to lose. Counting the
-    marker's 43 bytes turned each one into an ordinary keep candidate holding a
-    slot: measured with a count ceiling of 3, two aborted children evicted two
-    of the user's real transcripts to keep two empty markers.
-    """
-    import os
-
-    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
-
-    sessions = tmp_path / "sessions"
-    # The user's real work, older than the children that abort after it.
-    for i in range(3):
-        _session(sessions, f"user{i}", age_days=3 - i)
-    for i in range(2):
-        hollow = sessions / f"hollow{i}"
-        hollow.mkdir(parents=True)
-        mark_session_origin(hollow, ORIGIN_SUBAGENT, label="review")
-        now = time.time()
-        os.utime(hollow, (now, now))
-
-    sweep_sessions(sessions, max_sessions=3, max_bytes=0, max_age_days=0)
-
-    survivors = sorted(path.name for path in sessions.iterdir())
-    assert survivors == ["user0", "user1", "user2"], survivors
-
-
-def test_the_marker_is_not_charged_against_the_byte_ceiling(tmp_path):
-    """The marker is bookkeeping ABOUT a session, never session content, so it
-    is not what the ceilings are budgeting."""
-    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
-
-    sessions = tmp_path / "sessions"
-    directory = _session(sessions, "one", size=100)
-    before = sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
-    mark_session_origin(directory, ORIGIN_SUBAGENT, label="review")
-    after = sweep_sessions(sessions, max_sessions=0, max_bytes=0, max_age_days=0)
-
-    assert before.bytes_remaining == after.bytes_remaining == 100
+    assert (real / "transcript.jsonl").read_text() == "x" * 100
+    assert result.evicted == 0

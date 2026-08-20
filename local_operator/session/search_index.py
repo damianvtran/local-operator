@@ -23,14 +23,11 @@ compresses that to ~0.7 MB, which loads in ~1 ms and searches in microseconds.
 The bound is per session and applied at BUILD time, so a single pathological
 transcript (a pasted 80 MB file) costs its cap and not its size.
 
-**Why the cache lives outside the session directories.** A sidecar inside each
-session directory would be simpler to invalidate, but retention sweeps rank and
-expire directories by their mtime and charge their bytes against the store
-ceiling — so writing an index file into a session would reset its retention
-clock and make it look freshly used, which is precisely the class of bug that
-made sessions disappear in the first place (see ``mark_session_origin``'s note
-on preserving mtimes). One file under the cache directory touches nothing the
-sweep measures.
+**Why the cache lives outside the session directories.** A sidecar inside
+each session directory would be simpler to invalidate, but writing one
+would move the directory's mtime and make a listing that ranks by
+directory recency treat an index rebuild as user activity. One file
+under the cache directory touches nothing a session listing measures.
 
 **Freshness without a full rebuild.** Each entry records the transcript's size
 and mtime. A session whose transcript still matches its entry is reused as-is;

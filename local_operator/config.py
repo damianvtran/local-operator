@@ -180,13 +180,17 @@ DEFAULT_CONFIG = Config(
             # Set it when the machine or the models in use want a different
             # ceiling than the built-in one.
             "subagents": {},
-            # Ceilings on the ephemeral session store (see
-            # local_operator.session.retention). Any of the three set to 0
-            # disables that dimension; all three at 0 restores the unbounded
-            # behaviour, which is why none of them defaults there.
-            "session_retention_max_sessions": 200,
-            "session_retention_max_bytes": 128 * 1024 * 1024,
-            "session_retention_max_age_days": 30,
+            # RETIRED session-store ceilings (see
+            # local_operator.session.retention). Session transcripts are never
+            # deleted automatically — a running session whose transcript was
+            # evicted out from under it lost all of its work — so the only
+            # correct value for each of these is 0 ("disabled"). The keys stay
+            # readable so a config file carrying the old defaults gets an
+            # honest warning instead of a silent no-op; they no longer cause
+            # any eviction at any value.
+            "session_retention_max_sessions": 0,
+            "session_retention_max_bytes": 0,
+            "session_retention_max_age_days": 0,
         },
     }
 )
