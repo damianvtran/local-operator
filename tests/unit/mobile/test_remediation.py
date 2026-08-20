@@ -68,7 +68,7 @@ async def test_f3_fanout_never_drops_a_repaint() -> None:
     entry = SessionEntry(record)
     entry.projection = SessionProjection(session_id="s1", pid=1)
 
-    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=1)
     queue.put_nowait({"stale": True})  # exactly full at entry
     entry.subscribers.add(queue)
 

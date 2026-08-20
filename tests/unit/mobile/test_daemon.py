@@ -29,7 +29,7 @@ class FakeHandle:
             cwd="/tmp",
             model_label="anthropic/claude-opus-5",
         )
-        self.calls: list[tuple[str, tuple, dict]] = []
+        self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
 
     @property
     def session_projection_seed(self) -> SessionProjection:

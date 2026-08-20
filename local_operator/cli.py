@@ -698,7 +698,9 @@ def mobile_command(args: argparse.Namespace) -> int:
 
     if command == "install":
         result = mobile_install.install()
-        for step in result.get("steps", []):
+        steps = result.get("steps", [])
+        assert isinstance(steps, list)
+        for step in steps:
             print(f"  {step}")
         if result.get("ok"):
             password = result.get("password")
@@ -706,28 +708,29 @@ def mobile_command(args: argparse.Namespace) -> int:
             print("  open http://127.0.0.1:4098 and sign in with your portal password")
             if password:
                 print(f"  password: {password}")
-                print(
-                    "  (also in the login Keychain as 'lop-mobile'; `lop mobile password` rotates it)"
-                )
+                print("  (also in the login Keychain as 'lop-mobile';")
+                print("  `lop mobile password` rotates it)")
             return 0
         print(f"\n\033[1;31m{result.get('error', 'install failed')}\033[0m")
         return -1
 
     if command == "status":
         result = mobile_install.status()
+        assert isinstance(result, dict)
         print(f"installed:    {'yes' if result['installed'] else 'no'}")
         print(f"password set: {'yes' if result['password_set'] else 'no'}")
         print(f"healthy:      {'yes' if result['healthy'] else 'no'}")
-        print(
-            f"auth gate:    {'closed' if result['gate_closed'] else 'OPEN (this is a boundary failure)'}"
-        )
+        gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
+        print(f"auth gate:    {gate}")
         print(f"log:          {result['log']}")
         sessions = result.get("sessions", [])
+        assert isinstance(sessions, list)
         print(f"sessions:     {len(sessions)}")
         for session in sessions:
+            name = session["conversation_name"] or session["session_id"]
             print(
-                f"  [{session['state']}] pid {session['pid']} · {session['kind']} · "
-                f"{session['conversation_name'] or session['session_id']} · {session['model_label']}"
+                f"  [{session['state']}] pid {session['pid']} · "
+                f"{session['kind']} · {name} · {session['model_label']}"
             )
         return 0 if result["healthy"] else -1
 
@@ -770,7 +773,9 @@ def mobile_command(args: argparse.Namespace) -> int:
 
     if command == "uninstall":
         result = mobile_install.uninstall(purge=args.purge)
-        for step in result.get("steps", []):
+        steps = result.get("steps", [])
+        assert isinstance(steps, list)
+        for step in steps:
             print(f"  {step}")
         return 0
 

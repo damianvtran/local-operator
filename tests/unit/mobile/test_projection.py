@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from local_operator.harness.types import (
     AgentEndEvent,
+    AgentMessage,
     AgentStartEvent,
     Message,
     MessageEndEvent,
@@ -122,7 +123,7 @@ def test_subagent_roster_running_first_then_settled() -> None:
 def test_history_fold_pairs_tool_calls_with_results() -> None:
     fold = make_fold()
     call = ToolCall(id="c1", name="read", arguments={"path": "/x.py"})
-    history = [
+    history: list[AgentMessage] = [
         Message.user("look at x"),
         Message.assistant("reading it", tool_calls=[call]),
         Message.tool_result(ToolResult(tool_call_id="c1", content=[TextContent(text="file body")])),
