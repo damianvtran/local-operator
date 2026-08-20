@@ -881,6 +881,126 @@ class NoticeBlock(TranscriptBlock):
         return line
 
 
+class WakeBlock(TranscriptBlock):
+    """A scheduled-wake delivery receipt: one spine line, expandable to the
+    wake's message.
+
+    A wake fires with no user keystroke, so before this block the transcript
+    showed the agent simply starting to work — the cause (which wake, saying
+    what) existed only in the model's context. This is the tool-call-shaped
+    receipt that closes that gap: a collapsed line naming the schedule, with
+    the full delivered prompt one activate away (Enter / click), the same
+    affordance the tool ledger uses.
+    """
+
+    SPACING_KIND = "notice"
+
+    def __init__(self, text: str, *, catchup: bool = False) -> None:
+        super().__init__()
+        self.add_class("wake-block")
+        self._text = text
+        self._catchup = catchup
+        self._expanded = False
+        self.set_content(self._build())
+        self.finalize()
+
+    # -- expand affordance (the tool ledger's contract, minimal) --------------
+    def can_expand(self) -> bool:  # always: the collapsed line is a summary
+        return True
+
+    @property
+    def expanded(self) -> bool:
+        return self._expanded
+
+    def toggle_expanded(self) -> bool:
+        self._expanded = not self._expanded
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build())
+        finally:
+            self._finalized = was_finalized
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.refresh_gap_around(self)
+        return self._expanded
+
+    def activate(self) -> bool:
+        return self.toggle_expanded()
+
+    def on_click(self, event: object) -> None:  # type: ignore[no-untyped-def]
+        self.toggle_expanded()
+
+    def copy_gutter(self, index: int) -> int:
+        return NoticeBlock.GLYPH_COLS
+
+    def _build(self) -> RenderableType:
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        # Imported here, not at module scope: ``tool_card`` imports from this
+        # module, so a top-level import closes the cycle.
+        from local_operator.tui.widgets.tool_card import truncate_cells
+
+        indent = " " * SPINE_INDENT
+        hanging = " " * (SPINE_INDENT + 2)
+        width = max((self.size.width or 80) - 2, 12)
+        body = max(width - cell_len(hanging), 8)
+
+        first, rest, message = self._summary()
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append(indent, style=dim)
+        # The ◆ marks a delivery, not a notice tier: this block is clickable,
+        # and distinguishing it from a static receipt is what tells the user
+        # there is more behind it.
+        line.append("◆ ", style=muted)
+        line.append(truncate_cells(first, body), style=muted)
+        if self._expanded:
+            # The expansion is the MESSAGE, not the verbatim text re-dumped:
+            # the headline row already carries the envelope, so repeating it
+            # (cancel how-to included) reads as a second, louder wake. Just
+            # the delivered prompt, indented under the headline.
+            lines = [line]
+            for row in wrap_cells(message, body):
+                lines.append(Text(hanging + row, style=dim, no_wrap=True, overflow="ellipsis"))
+            return Text("\n").join(lines)
+        if rest:
+            line.append(f"  {rest}", style=dim)
+        return line
+
+    def _summary(self) -> tuple[str, str, str]:
+        """(headline, trailing meta, message body) for the block.
+
+        The delivered text is ``<envelope>\n\n<message>``; the headline is the
+        envelope with the noisy cancel-instruction stripped, the meta names
+        what the expansion holds, and the body is the verbatim prompt.
+        """
+        head, _, message = self._text.partition("\n\n")
+        head = " ".join(head.split())  # collapse any envelope whitespace
+        # Drop the cancel how-to — it is instructions for the model, and the
+        # user wants WHICH wake fired, not how to stop it.
+        head = head.split(" — cancel with wake(", 1)[0]
+        if self._catchup:
+            # The catch-up's first line is itself a model-facing preamble
+            # ("(alarm) The session resumed after being closed; the following
+            # scheduled wake(s) came due…"), not a wake's envelope — folding it
+            # into the headline leaks envelope noise. Name the folded wakes
+            # from the per-schedule lines instead (review round 3, m3).
+            # The folded lines look like "- w1 (due …): …" / "- w2 (every …):
+            # …", so the id is the token after the "- " marker.
+            ids = []
+            for line in message.splitlines():
+                stripped = line.lstrip()
+                if stripped.startswith("- "):
+                    ids.append(stripped[2:].split(" ", 1)[0].split("(", 1)[0].strip())
+            count = len(ids)
+            label = f"{count} missed wake{'s' if count != 1 else ''}"
+            headline = f"Wake catch-up — {label}"
+            if ids:
+                headline += f" ({', '.join(ids)})"
+            return headline, "details", message
+        return head, "message", message
+
+
 class RichBlock(TranscriptBlock):
     """A finalized block wrapping one pre-built rich renderable.
 
