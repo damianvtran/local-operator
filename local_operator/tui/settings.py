@@ -22,6 +22,12 @@ _DEFAULTS: dict[str, Any] = {
     # the sequence entirely, and the title is saved on start and restored on
     # exit, so the worst case for an unsupported terminal is no change at all.
     "display.terminal_title": True,
+    # Inline images on the transcript (tool-result screenshots, pasted
+    # attachments — `tui/images.py`). Defaults ON: the supported terminals
+    # degrade to half-cell pixels or a one-line receipt on their own, so OFF
+    # exists for the user who wants a text-only ledger, not for compatibility.
+    # The env override is `LOCAL_OPERATOR_IMAGES` (kitty|halfcell|text|off).
+    "display.images": True,
     # Desktop notifications for the two moments a user who is looking elsewhere
     # needs to know about: the parent agent finished, or it is waiting on them
     # (`tui/notify.py`). Defaults ON, and only ever fires while the terminal is
