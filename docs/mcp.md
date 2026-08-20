@@ -62,13 +62,37 @@ in a build script.
 HTTP/SSE servers with `auth.type: oauth` use the SDK's
 `OAuthClientProvider` (PKCE + RFC 7591 dynamic registration built in).
 Tokens and client registrations persist in the shared `auth.db` under
-provider `mcp-oauth`, one row per server URL. The headless flow prints the
-authorization URL and then asks you to paste the **full redirect URL** (or a
-`code state` pair); `state` (and `iss` when present) are parsed back out so
-the SDK's state validation passes. Supplying a `client_id` in config pins the
-client: the registration is pre-seeded and dynamic registration is skipped —
-required for providers whose redirect URI was registered against a fixed
-loopback port.
+provider `mcp-oauth`, one row per server URL. Supplying a `client_id` in
+config pins the client: the registration is pre-seeded and dynamic client
+registration is skipped — required for providers whose redirect URI was
+registered against a fixed loopback port.
+
+### Token refresh and the login popup
+
+An expired access token is refreshed **proactively before connecting**, not
+after a 401. The refresh targets the token endpoint resolved from the server's
+OAuth metadata (protected-resource + authorization-server discovery), which
+matters for providers whose token endpoint lives on a different host than the
+MCP endpoint (e.g. Datadog). The refresh is serialized across processes with a
+file lock and the stored token is re-read under it, so several sessions
+starting at once cannot spend a rotating refresh token twice and invalidate
+each other.
+
+Ordinary startup and auto-reconnect are **non-interactive**: they never open a
+browser. If the stored grant cannot be refreshed, the connect fails with an
+actionable message instead of popping a login tab. Re-authorize deliberately
+with:
+
+```
+/mcp login <name>          # inside the TUI
+local-operator mcp login <name>   # from a shell
+```
+
+Both run the full interactive grant (browser + loopback redirect capture, with
+a paste fallback when the browser cannot reach this machine). The headless
+variant prints the authorization URL and accepts the **full redirect URL** (or
+a `code state` pair) on stdin; `state` (and `iss` when present) are parsed
+back out so the SDK's state validation passes.
 
 ## Per-tool filters
 
