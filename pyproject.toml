@@ -147,6 +147,9 @@ local_operator = [
     # no UI and every authed GET answers 503 "bundle not built".
     "mobile/web/dist/*",
     "mobile/web/dist/assets/*",
+    # The login page's LO mark, served unauthenticated at /mark.png from
+    # mobile/static/. Missing it shows a broken image on sign-in.
+    "mobile/static/*",
 ]
 
 [project.urls]
