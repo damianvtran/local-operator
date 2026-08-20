@@ -28,21 +28,33 @@ function SlashSheet({
 	open,
 	onClose,
 	onPick,
+	query,
 }: {
 	open: boolean;
 	onClose: () => void;
 	/** fill: text to place in the composer; submit: send immediately. */
 	onPick: (fill: string, submit: boolean) => void;
+	/** The token after `/` in the composer — seeds the filter. */
+	query: string;
 }) {
 	const [commands, setCommands] = useState<SlashCommand[]>([]);
-	const [filter, setFilter] = useState("");
+	const [filter, setFilter] = useState(query);
+	const [loaded, setLoaded] = useState(false);
 
 	useEffect(() => {
 		if (!open) return;
+		setFilter(query);
+		setLoaded(false);
 		getCommands()
-			.then((r) => setCommands(r.commands))
-			.catch(() => setCommands([]));
-	}, [open]);
+			.then((r) => {
+				setCommands(r.commands);
+				setLoaded(true);
+			})
+			.catch(() => {
+				setCommands([]);
+				setLoaded(true);
+			});
+	}, [open, query]);
 
 	const filtered = useMemo(() => {
 		const q = filter.trim().toLowerCase();
@@ -65,7 +77,7 @@ function SlashSheet({
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="mb-1 min-h-9 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 				{filtered.map((c) => (
 					<button
@@ -79,7 +91,7 @@ function SlashSheet({
 							}
 							onClose();
 						}}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-3 text-left active:bg-surface"
+						className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 					>
 						<span className="shrink-0 font-mono text-mono-sm text-ink">
 							/{c.name}
@@ -92,7 +104,11 @@ function SlashSheet({
 						</span>
 					</button>
 				))}
-				{filtered.length === 0 ? (
+				{!loaded ? (
+					<p className="px-3 py-2 text-body-sm text-ink-dim">
+						loading…
+					</p>
+				) : filtered.length === 0 ? (
 					<p className="px-3 py-2 text-body-sm text-ink-dim">
 						no matching commands
 					</p>
@@ -105,15 +121,17 @@ function SlashSheet({
 function EffortSheet({
 	open,
 	onClose,
+	pid,
 	projection,
 }: {
 	open: boolean;
 	onClose: () => void;
+	pid: number;
 	projection: SessionProjection;
 }) {
 	const set = async (effort: string) => {
 		try {
-			await sendCommand(projection.pid, { op: "set_effort", effort });
+			await sendCommand(pid, { op: "set_effort", effort });
 		} catch {
 			/* The next repaint shows the truth; a failed set leaves it. */
 		}
@@ -127,7 +145,7 @@ function EffortSheet({
 						key={rung}
 						type="button"
 						onClick={() => set(rung)}
-						className="flex min-h-11 items-center gap-3 rounded-sm px-3 text-left active:bg-surface"
+						className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -151,19 +169,21 @@ function EffortSheet({
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 
 export function Composer({
+	pid,
 	projection,
 	onOpenModels,
 	onOpenEffort,
 	effortOpen,
 	onCloseEffort,
 }: {
+	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
+	pid: number;
 	projection: SessionProjection;
 	onOpenModels: () => void;
 	onOpenEffort: () => void;
 	effortOpen: boolean;
 	onCloseEffort: () => void;
 }) {
-	const pid = projection.pid;
 	const [text, setText] = useDraft(pid);
 	const [slashOpen, setSlashOpen] = useState(false);
 	const [sending, setSending] = useState(false);
@@ -242,12 +262,12 @@ export function Composer({
 	};
 
 	return (
-		<div className="flex flex-col gap-2 px-3 pt-2 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
+		<div className="flex flex-col gap-1.5 px-3 pt-1.5 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
 			{showResume && !projection.streaming && !disabled ? (
 				<button
 					type="button"
 					onClick={() => void send("continue", "prompt")}
-					className="flex min-h-11 items-center justify-center rounded-sm border border-hairline bg-surface text-body-sm text-ink-muted active:bg-elevated"
+					className="flex min-h-11 items-center justify-center rounded-sm border border-control bg-surface text-body-sm text-ink active:bg-elevated"
 				>
 					interrupted — tap to resume
 				</button>
@@ -256,7 +276,7 @@ export function Composer({
 			{error ? <p className="text-body-sm text-danger">{error}</p> : null}
 
 			<div className="flex items-end gap-2">
-				<div className="flex min-w-0 flex-1 items-end rounded-md border border-control bg-elevated px-3.5 py-2.5">
+				<div className="flex min-w-0 flex-1 items-end rounded-md border border-control bg-elevated px-3 py-2">
 					<textarea
 						ref={textareaRef}
 						value={text}
@@ -305,7 +325,7 @@ export function Composer({
 				</button>
 			</div>
 
-			<div className="flex items-center gap-3 px-1">
+			<div className="flex items-center gap-2 px-0.5">
 				{projection.queued_count > 0 ? (
 					<span className="font-mono text-mono-sm text-ink-dim">
 						{projection.queued_count} queued
@@ -315,7 +335,7 @@ export function Composer({
 				<button
 					type="button"
 					onClick={onOpenModels}
-					className="flex min-h-11 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
+					className="flex min-h-8 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
 				>
 					{projection.model_label || "model"}
 				</button>
@@ -323,7 +343,7 @@ export function Composer({
 					<button
 						type="button"
 						onClick={onOpenEffort}
-						className="flex min-h-11 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
+						className="flex min-h-8 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
 					>
 						{projection.effort || "effort"}
 					</button>
@@ -334,10 +354,12 @@ export function Composer({
 				open={slashOpen && !disabled}
 				onClose={() => setSlashOpen(false)}
 				onPick={onSlashPick}
+				query={slashQuery(text) ?? ""}
 			/>
 			<EffortSheet
 				open={effortOpen}
 				onClose={onCloseEffort}
+				pid={pid}
 				projection={projection}
 			/>
 		</div>

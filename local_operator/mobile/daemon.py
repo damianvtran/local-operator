@@ -158,7 +158,12 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
     frames until the connection dies. One task per session."""
     record = entry.record
     try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+        # Match the registrant's 1 MB line limit. The default 64 KB
+        # StreamReader cap is what made a transcript push raise
+        # ValueError and leave the session stuck on "connecting…".
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
     except OSError:
         entry.degraded = True
         entry.next_dial_at = time.monotonic() + REDIAL_BACKOFF_S
@@ -169,7 +174,14 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         writer.write(json.dumps({"key": record.control_key}).encode() + b"\n")
         await writer.drain()
         while True:
-            line = await reader.readline()
+            try:
+                line = await reader.readline()
+            except ValueError:
+                # A frame longer than the stream limit is not a reason to
+                # drop the session — a transcript push can outgrow 64 KB.
+                # Skip the oversized line and keep the connection.
+                logger.warning("mobile daemon: oversized control frame from pid %s", record.pid)
+                continue
             if not line:
                 break
             try:
@@ -228,6 +240,10 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
         if k in known and k not in ("transcript", "todos", "subagents", "pending")
     }
     projection = SessionProjection(**base)
+    # The fold stamps pid=0 (the registrant does not know its own listen
+    # pid until after the record is published). The discovery record is
+    # the source of truth, and the phone keys drafts and commands on it.
+    projection.pid = record.pid
     projection.transcript = build(TranscriptEntry, data.get("transcript", []))
     projection.todos = build(TodoItem, data.get("todos", []))
     projection.subagents = build(SubagentRow, data.get("subagents", []))
