@@ -232,6 +232,10 @@ class StructuralAuthStore(Protocol):
         """Return one row by integer id, or ``None``."""
         ...
 
+    def delete_credential(self, credential_id: int) -> None:
+        """Remove one row entirely (``/mcp logout`` / ``mcp logout``)."""
+        ...
+
 
 @runtime_checkable
 class ManagedAuthStore(StructuralAuthStore, Protocol):
@@ -334,6 +338,31 @@ class McpTokenStorage:
             logger.debug("MCP token write failed for %s", self.credential_id, exc_info=True)
 
     # --- SDK TokenStorage protocol ---------------------------------------
+
+    def clear(self) -> bool:
+        """Delete this server's credential row entirely (logout). Returns
+        ``True`` when a row existed and was removed.
+
+        The row carries BOTH the OAuth grant and any client registration
+        (``seed_client_info`` pins it via ``project_id``, DCR writes it via
+        ``set_client_info``), so removal is what makes the next login run a
+        genuinely fresh grant — new consent, new registration — instead of
+        silently reusing the stored client info. A pinned ``client_id`` from
+        config is re-seeded by ``wire_oauth_auth`` on the next connect, so
+        losing the row never strands a pinned-client server.
+        """
+        store = self._store
+        if store is None:
+            return False
+        row = self._read_row()
+        if row is None:
+            return False
+        try:
+            store.delete_credential(row.id)
+        except Exception:
+            logger.debug("MCP credential delete failed for %s", self.credential_id, exc_info=True)
+            return False
+        return True
 
     async def get_tokens(self) -> OAuthToken | None:
         """Stored access/refresh tokens as an ``OAuthToken``, or ``None``."""
@@ -489,6 +518,80 @@ class McpTokenStorage:
         creds = self._read() or {}
         creds["client_info"] = info.model_dump(mode="json")
         self._write(creds)
+
+
+def oauth_server_names(cwd: str | os.PathLike[str]) -> list[str]:
+    """Names of configured OAuth-enabled servers, in config order.
+
+    The ``/mcp login|reauth|logout`` argument lists are filled from this, so
+    they offer exactly the servers those commands can act on — a stdio or
+    API-key server has no OAuth grant to log into or out of, and offering it
+    would be a row whose only outcome is a warning notice.
+    """
+    from local_operator.mcp.config import load_all_mcp_configs
+
+    configs, _sources = load_all_mcp_configs(cwd)
+    return [
+        name
+        for name, cfg in configs.items()
+        if getattr(getattr(cfg, "auth", None), "type", None) == "oauth"
+    ]
+
+
+def mcp_logout_server(
+    name: str,
+    cwd: str | os.PathLike[str],
+    store: StructuralAuthStore | None = None,
+) -> str | None:
+    """Remove the stored OAuth credential for one configured server.
+
+    Returns an error string on failure, ``None`` on success — the two callers
+    (CLI and TUI) phrase their own output, so the helper reports outcomes,
+    not prose. Unknown names and non-OAuth configs are errors, not no-ops:
+    logging out of a server that holds no credential is a valid ask (the
+    store may still carry a stale row from a since-removed config write), but
+    a name the config does not know at all is a typo the user wants told
+    about.
+
+    The deletion goes through the REAL store (``_resolve_store(None)``), not
+    the session manager's possibly-injected one: logout must remove the
+    persisted row every future process will read, which is the shared
+    ``auth.db`` regardless of what one session was handed.
+    """
+    from local_operator.mcp.config import load_all_mcp_configs
+
+    configs, _sources = load_all_mcp_configs(cwd)
+    cfg = configs.get(name)
+    if cfg is None:
+        return f"MCP server {name!r} is not configured"
+    auth = getattr(cfg, "auth", None)
+    if auth is None or getattr(auth, "type", None) != "oauth":
+        return f"MCP server {name!r} does not use OAuth login"
+    storage = McpTokenStorage(cfg.url, store)
+    if not storage.clear():
+        return f"no stored credential for MCP server {name!r} — nothing to log out of"
+    return None
+
+
+def mcp_logged_out_servers(store: StructuralAuthStore | None = None) -> set[str]:
+    """Server URLs that still hold an ``mcp-oauth`` credential row.
+
+    Read-only companion to :func:`mcp_logout_server` so the ``/mcp logout``
+    picker can offer only servers that actually have something to remove
+    (mirroring how ``/logout`` offers only providers holding a credential).
+    An unreadable store degrades to the empty set: the list is then empty and
+    the picker's own notice says why, rather than offering rows whose removal
+    would fail.
+    """
+    store = _resolve_store(store)
+    if store is None:
+        return set()
+    try:
+        rows = store.list_credentials(MCP_OAUTH_PROVIDER)
+    except Exception:
+        logger.debug("MCP credential listing failed", exc_info=True)
+        return set()
+    return {row.identity_key for row in rows if row.identity_key}
 
 
 def parse_oauth_callback_input(raw: str) -> tuple[str, str | None, str | None]:

@@ -308,6 +308,12 @@ def test_mcp_subcommands(parser: argparse.ArgumentParser) -> None:
 
     login_args = parser.parse_args(["mcp", "login", "linear"])
     assert login_args.mcp_command == "login"
+    logout_args = parser.parse_args(["mcp", "logout", "linear"])
+    assert logout_args.mcp_command == "logout"
+    assert logout_args.name == "linear"
+    reauth_args = parser.parse_args(["mcp", "reauth", "linear"])
+    assert reauth_args.mcp_command == "reauth"
+    assert reauth_args.name == "linear"
     assert login_args.name == "linear"
 
     args = parser.parse_args(["mcp", "remove", "files", "--scope", "project"])
@@ -545,6 +551,64 @@ async def test_mcp_login_connects_and_disconnects_target(
     assert instances[0].cwd == tmp_path
     assert instances[0].disconnected is True
     assert "discovered 2 tools" in capsys.readouterr().out
+
+
+def test_mcp_logout_command_reports_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The CLI's logout is the module helper plus phrasing: success names the
+    server whose credential is gone, failure carries the helper's reason."""
+    monkeypatch.setattr(
+        "local_operator.mcp.auth.mcp_logout_server", lambda name, cwd: None
+    )
+    assert cli.mcp_command(types.SimpleNamespace(mcp_command="logout", name="linear")) == 0
+    assert "'linear'" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        "local_operator.mcp.auth.mcp_logout_server",
+        lambda name, cwd: "no stored credential for MCP server 'linear'",
+    )
+    assert cli.mcp_command(types.SimpleNamespace(mcp_command="logout", name="linear")) == 1
+    assert "nothing" not in capsys.readouterr().out  # reason goes to stderr
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_removes_then_logs_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reauth must delete BEFORE the grant starts — a login over a surviving
+    row would reuse the stored registration and never show the consent
+    screen, which is the entire reason reauth exists."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.mcp.auth.mcp_logout_server",
+        lambda name, cwd: calls.append("logout") or None,
+    )
+
+    async def fake_login(name: str, cwd: Path) -> int:
+        calls.append("login")
+        return 0
+
+    monkeypatch.setattr(cli, "_mcp_login_server", fake_login)
+    assert await cli._mcp_reauth_server("linear", tmp_path) == 0
+    assert calls == ["logout", "login"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_stops_when_removal_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        "local_operator.mcp.auth.mcp_logout_server",
+        lambda name, cwd: "MCP server 'linar' is not configured",
+    )
+
+    async def fake_login(name: str, cwd: Path) -> int:
+        raise AssertionError("login must not start when removal failed")
+
+    monkeypatch.setattr(cli, "_mcp_login_server", fake_login)
+    assert await cli._mcp_reauth_server("linar", tmp_path) == 1
+    assert "not configured" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

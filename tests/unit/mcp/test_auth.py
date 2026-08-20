@@ -20,7 +20,10 @@ from local_operator.mcp.auth import (
     MCP_OAUTH_PROVIDER,
     McpTokenStorage,
     StructuralAuthStore,
+    mcp_logged_out_servers,
+    mcp_logout_server,
     mcp_oauth_credential_id,
+    oauth_server_names,
     parse_oauth_callback_input,
     wire_oauth_auth,
 )
@@ -76,6 +79,10 @@ class FakeAuthStore:
             if row.id == credential_id:
                 return row
         return None
+
+    def delete_credential(self, credential_id: int) -> None:
+        # Mirrors the real store's logout path: the row is GONE, not disabled.
+        self.rows = [row for row in self.rows if row.id != credential_id]
 
 
 def test_fake_satisfies_structural_protocol() -> None:
@@ -222,6 +229,35 @@ class TestMcpTokenStorage:
         )
         assert await storage.get_tokens() is None
 
+    def test_clear_removes_the_row_and_reports_whether_one_existed(self) -> None:
+        """Logout is a deletion, not a disable: after clear() the SDK's next
+        ``get_tokens`` finds nothing and starts a genuinely fresh grant."""
+        store = FakeAuthStore()
+        storage = McpTokenStorage("https://srv.example/mcp", store)
+        storage._write({"tokens": {"access_token": "a"}})
+        assert store.list_credentials(MCP_OAUTH_PROVIDER)
+
+        assert storage.clear() is True
+        assert store.list_credentials(MCP_OAUTH_PROVIDER) == []
+        # A second clear is a reportable no-op, not an error: "nothing to log
+        # out of" is information the caller phrases, not a failure.
+        assert storage.clear() is False
+
+    def test_clear_removes_sibling_client_info(self) -> None:
+        """The row carries the client registration too; leaving it behind
+        would let the next login silently reuse it instead of re-registering."""
+        store = FakeAuthStore()
+        storage = McpTokenStorage("https://srv.example/mcp", store)
+        storage.seed_client_info("client-1")
+        assert storage._read() is not None
+        assert storage.clear() is True
+        assert storage._read() is None
+
+    def test_clear_with_no_store_degrades_to_false(self) -> None:
+        storage = McpTokenStorage("https://srv.example/mcp", store=None)
+        storage._store = None
+        assert storage.clear() is False
+
 
 class TestRealAuthStoreConformance:
     """MCP-03: the real providers AuthStore satisfies the MCP adapter."""
@@ -280,6 +316,93 @@ class TestRealAuthStoreConformance:
             assert second is not None and second.access_token == "acc-2"
         finally:
             store.close()
+
+    @pytest.mark.asyncio
+    async def test_clear_roundtrip_through_real_store(self, tmp_path) -> None:
+        """Logout deletes the real row, and a fresh storage instance (i.e. the
+        next process) finds nothing — the whole point of the command."""
+        from mcp.shared.auth import OAuthToken
+
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        try:
+            url = "https://mcp.example.com/sse"
+            storage = McpTokenStorage(url, store)
+            await storage.set_tokens(OAuthToken(access_token="acc", token_type="Bearer"))
+            assert storage.clear() is True
+            fresh = McpTokenStorage(url, store)
+            assert await fresh.get_tokens() is None
+            assert store.list_credentials("mcp-oauth") == []
+        finally:
+            store.close()
+
+
+class TestLogoutHelpers:
+    """``mcp_logout_server`` / ``oauth_server_names`` / ``mcp_logged_out_servers``."""
+
+    def _configs(self) -> dict[str, Any]:
+        return {
+            "linear": MCPHttpServerConfig(
+                url="https://mcp.linear.app/mcp", auth=MCPAuthConfig(type="oauth")
+            ),
+            "stdio": MCPHttpServerConfig(url="https://stdio.example/mcp"),
+        }
+
+    def test_oauth_server_names_offers_only_oauth_servers(self, monkeypatch) -> None:
+        """A stdio/API-key server has no grant to manage; offering it would be
+        a row whose only outcome is a warning notice."""
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: (self._configs(), {}),
+        )
+        assert oauth_server_names(Path("/anywhere")) == ["linear"]
+
+    def test_logout_removes_the_stored_credential(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: (self._configs(), {}),
+        )
+        store = FakeAuthStore()
+        McpTokenStorage("https://mcp.linear.app/mcp", store)._write(
+            {"tokens": {"access_token": "a"}}
+        )
+        assert mcp_logout_server("linear", Path("/anywhere"), store) is None
+        assert store.list_credentials(MCP_OAUTH_PROVIDER) == []
+
+    def test_logout_without_a_stored_credential_says_so(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: (self._configs(), {}),
+        )
+        error = mcp_logout_server("linear", Path("/anywhere"), FakeAuthStore())
+        assert error is not None and "nothing to log out of" in error
+
+    def test_logout_of_unknown_or_non_oauth_server_is_an_error(self, monkeypatch) -> None:
+        """A name the config does not know is a typo the user wants told
+        about — silently succeeding would claim a credential was removed."""
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: (self._configs(), {}),
+        )
+        assert "not configured" in (mcp_logout_server("linar", Path("/anywhere")) or "")
+        assert "does not use OAuth" in (mcp_logout_server("stdio", Path("/anywhere")) or "")
+
+    def test_logged_out_servers_keys_by_url(self) -> None:
+        """The picker list is keyed by server NAME but the store by URL; the
+        helper returns the store's keys so the caller can do the mapping."""
+        store = FakeAuthStore()
+        McpTokenStorage("https://mcp.linear.app/mcp", store)._write(
+            {"tokens": {"access_token": "a"}}
+        )
+        assert mcp_logged_out_servers(store) == {"https://mcp.linear.app/mcp"}
+
+    def test_logged_out_servers_degrades_to_empty(self) -> None:
+        class ExplodingStore(FakeAuthStore):
+            def list_credentials(self, provider=None, include_disabled=False):  # type: ignore[no-untyped-def]
+                raise RuntimeError("database is locked")
+
+        assert mcp_logged_out_servers(ExplodingStore()) == set()
 
 
 class TestCallbackInputParsing:

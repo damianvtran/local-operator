@@ -489,6 +489,9 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # and the space opens the ramp list with live preview.
         "theme": ArgumentMode.OPTIONAL,
         "approvals": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/approvals`: bare `/mcp` lists the servers, and the
+        # space opens the login/logout/reauth subcommand list.
+        "mcp": ArgumentMode.OPTIONAL,
         "login": ArgumentMode.REQUIRED,
         "logout": ArgumentMode.REQUIRED,
         # OPTIONAL like `/effort`: bare `/credential` lists the names in

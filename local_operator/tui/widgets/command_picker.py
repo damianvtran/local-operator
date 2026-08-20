@@ -11,7 +11,7 @@ highlight a different command than the one that gets run.
 Layout — a borderless two-column list, one row per suggestion (D4):
 
     ❯ /model  /models    Show or switch model (provider/id)
-      /mcp               List MCP servers (/mcp login <name> to re-authorize)
+      /mcp               List MCP servers (login/logout/reauth <name> to manage OAuth)
 
 * The 2-cell selection gutter lines up with ``#prompt-chevron``, so the
   highlighted ``❯`` sits directly under the prompt's own ``❯`` and every

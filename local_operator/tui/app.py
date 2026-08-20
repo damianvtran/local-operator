@@ -141,6 +141,7 @@ from local_operator.tui.widgets.editor import (
     EditorSubmitted,
     InterruptRequested,
     ModelQueryOpened,
+    RefreshArgumentChoices,
     StopRequested,
     resolve_markers,
 )
@@ -450,9 +451,16 @@ SLASH_COMMANDS: list[SlashCommand] = [
     ),
     # The listing is the receipt.
     SlashCommand("skills", "List loaded skills"),
-    # The listing is the receipt; `/mcp login <name>` re-authorizes an OAuth
-    # server whose grant expired (startup never opens a browser on its own).
-    SlashCommand("mcp", "List MCP servers (/mcp login <name> to re-authorize)"),
+    # The listing is the receipt; the subcommands re-authorize or forget an
+    # OAuth server whose grant expired (startup never opens a browser on its
+    # own). OPTIONAL: bare `/mcp` answers something (the listing), so Enter
+    # still sends it and the subcommand list is an offer for the next
+    # keystroke, matching `/approvals`.
+    SlashCommand(
+        "mcp",
+        "List MCP servers (login/logout/reauth <name> to manage OAuth)",
+        arguments=ArgumentMode.OPTIONAL,
+    ),
     # The flow narrates itself: URL block, progress notices, then success.
     # REQUIRED for both: bare, neither has anything to run — the provider list
     # IS the command, which is why completing the word opens it instead of
@@ -8501,6 +8509,10 @@ class OperatorApp(App[None]):
             picker.set_choices(self._approval_choices())
             picker.set_notice("")
             return
+        if message.command == "mcp":
+            picker.set_choices(self._mcp_argument_choices(editor))
+            picker.set_notice("")
+            return
         if message.command in ("theme", "themes"):
             # Seeded on the CURRENT theme's row (F2): the highlight previews
             # live, so opening the list must not flash the screen to whatever
@@ -8551,6 +8563,29 @@ class OperatorApp(App[None]):
         # picker it is in the user's eye-line, self-clearing, unrepeatable, and it
         # costs the transcript nothing.
         picker.set_notice(reason)
+
+    def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
+        """Refill an open argument list whose rows depend on a sub-slot.
+
+        Posted by the editor when the FIRST argument word of a two-level
+        command changes — ``/mcp login `` must stop offering verbs and start
+        offering the servers login can act on, and ArgumentQueryOpened never
+        fires for that because the command word stood still. Refilling through
+        the same builders the opening used keeps one implementation of what
+        each list offers.
+
+        Currently only ``/mcp`` is two-level; other commands never trigger the
+        editor's post, so a fall-through here is dead code rather than a
+        silent wrong list.
+        """
+        message.stop()
+        editor = self._editor()
+        if editor.argument_command != message.command:
+            # Same staleness guard as on_argument_query_opened: the buffer may
+            # have moved on in the tick the message spent queued.
+            return
+        if message.command == "mcp":
+            editor.picker.set_choices(self._mcp_argument_choices(editor))
 
     def _credential_choices(self) -> list[ArgumentChoice]:
         """The verbs ``/credential`` offers, plus each stored key to forget.
@@ -9271,15 +9306,18 @@ class OperatorApp(App[None]):
             return None
 
     def _cmd_mcp(self, arg: str, notice: NoticeFn) -> None:
-        """``/mcp`` lists servers; ``/mcp login <name>`` runs an OAuth grant.
+        """``/mcp`` lists servers; its subcommands manage OAuth grants.
 
-        The login subcommand is the in-TUI twin of ``local-operator mcp login``:
-        it exists because startup and auto-reconnect are deliberately
+        ``/mcp login <name>`` is the in-TUI twin of ``local-operator mcp
+        login``: it exists because startup and auto-reconnect are deliberately
         non-interactive (they never pop a browser tab), so an expired grant
         surfaces as an actionable failure and this command is the one place a
-        user can deliberately re-authorize without leaving the session. The
-        flow runs on a worker so the UI stays responsive while the browser
-        round trip completes.
+        user can deliberately re-authorize without leaving the session.
+        ``/mcp logout <name>`` forgets the stored credential and disconnects;
+        ``/mcp reauth <name>`` is the two composed — forget first, so the
+        fresh grant cannot be short-circuited by a stored registration or a
+        refreshable token. The browser flow runs on a worker so the UI stays
+        responsive while the round trip completes.
         """
         parts = arg.split()
         if not parts:
@@ -9290,13 +9328,14 @@ class OperatorApp(App[None]):
                 notice("no MCP servers configured.")
             return
         sub = parts[0].lower()
-        if sub != "login":
+        if sub not in ("login", "logout", "reauth"):
             self._system_notice(
-                f"unknown mcp subcommand: {parts[0]} — try /mcp login <name>", "warning"
+                f"unknown mcp subcommand: {parts[0]} — try /mcp login|logout|reauth <name>",
+                "warning",
             )
             return
         if len(parts) < 2:
-            self._system_notice("usage: /mcp login <name>", "warning")
+            self._system_notice(f"usage: /mcp {sub} <name>", "warning")
             return
         name = parts[1]
         manager = getattr(self._session, "mcp_manager", None)
@@ -9311,25 +9350,193 @@ class OperatorApp(App[None]):
         if auth is None or getattr(auth, "type", None) != "oauth":
             self._system_notice(f"MCP server {name!r} does not use OAuth login.", "warning")
             return
+        if sub == "logout":
+            self._mcp_logout(manager, name, cfg)
+            return
+        # ``reauth`` is logout + login run as ONE grant: plain login reuses a
+        # stored client registration and any refreshable token, which is wrong
+        # for an account switch or scope change — the consent screen has to
+        # come back up, and that only happens once the row is gone.
+        if sub == "reauth":
+            removed = self._mcp_logout(manager, name, cfg, verb="reauth", disconnect=False)
+            if not removed:
+                return
         notice(f"logging in to MCP server {name}…")
         # ``exclusive=True``: two concurrent logins would both bind the same
         # loopback redirect port and the second grant would fail mid-browser
-        # round trip; the newest request wins and cancels the stale one.
+        # round trip; the newest request wins and cancels the stale one. The
+        # group exclusivity is ALSO why reauth defers its disconnect into the
+        # worker instead of firing it here: a second worker posted to the same
+        # exclusive group would cancel whichever one came first.
         self.run_worker(
-            self._mcp_login_worker(manager, name),
+            self._mcp_login_worker(manager, name, disconnect_first=sub == "reauth"),
             thread=False,
             group="mcp-login",
             exclusive=True,
         )
 
-    async def _mcp_login_worker(self, manager: Any, name: str) -> None:
+    def _mcp_logout(
+        self,
+        manager: Any,
+        name: str,
+        cfg: Any,
+        *,
+        verb: str = "logout",
+        disconnect: bool = True,
+    ) -> bool:
+        """Remove the stored OAuth credential for ``name`` and disconnect it.
+
+        Returns whether the removal happened, so ``reauth`` can chain into the
+        login only when the old grant is actually gone. Deletion goes through
+        the module helper, which writes to the shared ``auth.db`` — the row
+        every future session will read — rather than any store this one
+        session was injected with.
+
+        The live connection is torn down too, deliberately AFTER the row is
+        deleted: the manager's auto-reconnect would otherwise read the stored
+        credential during the teardown's own reconnect window and quietly
+        re-authenticate the session the user just logged out of. ``reauth``
+        passes ``disconnect=False`` and lets the login worker do the teardown
+        itself instead — two workers posted back-to-back to the SAME
+        exclusive group would see the first cancelled by the second, and a
+        skipped disconnect is a reconnect racing a fresh grant. The session
+        ends up disconnected with no stored grant, which is the only state a
+        logout can honestly leave behind — the tools drop out on the next
+        tools-changed repaint.
+        """
+        from local_operator.mcp.auth import mcp_logout_server
+
+        try:
+            error = mcp_logout_server(name, os.getcwd())
+        except Exception as exc:  # noqa: BLE001 — a failed logout is a notice, not a crash
+            self._system_notice(f"MCP {verb} failed for {name!r}: {exc}", "error")
+            return False
+        if error is not None:
+            self._system_notice(f"MCP {verb} failed for {name!r}: {error}", "warning")
+            return False
+        if disconnect:
+            # run_worker takes a callable (a coroutine is not one and would
+            # never be awaited), so the disconnect is wrapped, not passed
+            # directly. Same exclusive group as the login worker: a logout
+            # immediately followed by a login must not leave this teardown
+            # racing the fresh grant.
+            async def _disconnect() -> None:
+                await manager.disconnect_server(name)
+
+            self.run_worker(
+                _disconnect,
+                thread=False,
+                group="mcp-login",
+                exclusive=True,
+            )
+        if verb == "logout":
+            self._system_notice(
+                f"logged out of MCP server {name!r} — its credential is removed and the "
+                "server will stay disconnected until /mcp login.",
+                "success",
+            )
+        self._refresh_mcp_status()
+        return True
+
+    def _mcp_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
+        """Rows for the ``/mcp <…>`` list: subcommands, then their servers.
+
+        Which list is showing is decided by the buffer, not by stored picker
+        state: with no subcommand typed yet the argument IS the subcommand
+        slot, so the verbs are offered; once one is there the argument is the
+        server slot, so OAuth-enabled servers are offered — exactly the ones
+        login/reauth/logout can act on, per the same rule ``/logout`` uses
+        (offering a server with no grant would be a row whose only outcome is
+        a warning).
+
+        The rows are complete-then-keep-typing shapes: choosing a verb leaves
+        ``/mcp login `` in the buffer with the cursor past the space, which
+        re-opens this same list in the server slot — one list, two turns of
+        the crank, no bespoke two-level picker. Because the matcher compares
+        against the WHOLE argument (``login n`` will not match the ``notion``
+        row), the server rows are offered as ``login notion``-style compound
+        names; completing one replaces the whole argument and lands as the
+        ready-to-run ``/mcp login notion``.
+        """
+        from local_operator.mcp.auth import mcp_logged_out_servers, oauth_server_names
+        from local_operator.tui.widgets.command_picker import slash_argument
+
+        argument = slash_argument(editor.text, editor._argument_commands)
+        if argument is None:
+            return []
+        sub, _space, _rest = argument.partition(" ")
+        if not _space:
+            return [
+                ArgumentChoice("login", "Authorize an OAuth server (opens the browser)"),
+                ArgumentChoice("logout", "Forget a server's stored OAuth credential", alert=True),
+                ArgumentChoice(
+                    "reauth", "Forget, then authorize again — account switch or scope change"
+                ),
+            ]
+        verb = sub.lower()
+        if verb not in ("login", "logout", "reauth"):
+            return []
+        try:
+            names = oauth_server_names(os.getcwd())
+        except Exception:
+            return []
+        manager = getattr(self._session, "mcp_manager", None)
+        if verb == "logout":
+            # Only what can actually be removed — the /logout rule. The store
+            # read degrades to the empty set when unreadable, and an empty
+            # list is then the honest answer to "what can I log out of". Rows
+            # are keyed by server NAME but the store is keyed by URL, so the
+            # config (via the manager) supplies the mapping.
+            stored = mcp_logged_out_servers()
+            names = [
+                name
+                for name in names
+                if self._mcp_server_url(name, manager) in stored
+            ]
+        choices: list[ArgumentChoice] = []
+        for name in names:
+            status = manager.get_connection_status(name) if manager is not None else ""
+            choices.append(
+                ArgumentChoice(
+                    f"{verb} {name}",
+                    f"{verb.capitalize()} OAuth server '{name}'",
+                    detail=status,
+                    # Every row on a logout list destroys a credential, so the
+                    # danger tint is a property of the verb, not of a row that
+                    # went wrong — the same rule /logout applies to providers.
+                    alert=verb == "logout",
+                )
+            )
+        return choices
+
+    def _mcp_server_url(self, name: str, manager: Any) -> str | None:
+        """The configured URL for one server, or ``None`` when unknown."""
+        if manager is None:
+            return None
+        cfg = manager.get_server_config(name)
+        return getattr(cfg, "url", None) if cfg is not None else None
+
+    async def _mcp_login_worker(
+        self, manager: Any, name: str, *, disconnect_first: bool = False
+    ) -> None:
         """Run one interactive MCP OAuth exchange, reporting into the transcript.
 
         The manager's ``connect_configured_server`` opens the browser
         (interactive=True) and waits for the loopback redirect. Success fires
         ``on_tools_changed``, which the session's wiring uses to merge the new
         tools in and repaint the band.
+
+        ``disconnect_first`` is the reauth shape: the stale connection is
+        torn down HERE, inside the worker, rather than by a separate one —
+        the group is exclusive, so a second worker would have cancelled this
+        one (or been cancelled by it), and either way the teardown could be
+        skipped while the grant proceeded.
         """
+        if disconnect_first:
+            try:
+                await manager.disconnect_server(name)
+            except Exception:  # noqa: BLE001 — a stuck teardown must not block the grant
+                logger.debug("MCP disconnect before reauth failed for %s", name, exc_info=True)
         try:
             conn = await manager.connect_configured_server(name, timeout_ms=600_000)
         except Exception as exc:  # noqa: BLE001 — report any failure, don't crash the app
