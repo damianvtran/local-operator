@@ -28,17 +28,22 @@ def all_palettes() -> list[ThemeSpec]:
     Order is the picker's row order: classics first because they are the
     names users arrive knowing, then the neon/retro set, then nature, then
     the light ramps at the end where a dark-terminal user scrolls past them.
+    The Radient brand ramp goes immediately AFTER neon's tron: it is the
+    same blue-black architecture wearing the Radient kit, so a user
+    comparing the two finds them adjacent.
     """
     from local_operator.tui.palettes import (  # local: cycle-free at call time
         classics,
         lights,
         nature,
         neon,
+        radient,
     )
 
     return [
         *classics.PALETTES,
         *neon.PALETTES,
+        *radient.PALETTES,
         *nature.PALETTES,
         *lights.PALETTES,
     ]
