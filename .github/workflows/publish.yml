@@ -33,6 +33,17 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Build the mobile web bundle
+        if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
+        run: |
+          # The phone UI ships inside the wheel; build it before python -m build
+          # so setuptools package-data picks up local_operator/mobile/web/dist.
+          corepack enable
+          corepack prepare pnpm@latest --activate
+          cd local_operator/mobile/web
+          pnpm install --frozen-lockfile
+          pnpm build
+
       - name: Build release distributions
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
         run: |
