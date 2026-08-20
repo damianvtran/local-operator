@@ -3067,7 +3067,7 @@ class OperatorApp(App[None]):
         membership FOLLOW the card rather than the moment the notice was
         written: a notice gains the class and the card's exact width while the
         card is up, and sheds both — back to the full-width spine — when it is
-        not. ``set_class`` only fires the block's re-centre (``on_class_change``)
+        not. ``set_class`` only fires the block's re-centre (``NoticeBlock.set_class``)
         on a real change, so an unchanged sync costs nothing.
         """
         transcript = self._transcript_view()
