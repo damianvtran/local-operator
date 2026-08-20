@@ -140,6 +140,16 @@ class FakeSession:
     def model(self) -> Any:
         return None
 
+    @property
+    def effective_model(self) -> Any:
+        """The fake never falls back, so selection and effective agree —
+        which is also what keeps the protocol's degrade honest."""
+        return self.model
+
+    @property
+    def effective_model_label(self) -> str:
+        return self.model_label
+
     def set_model(self, model: Any) -> None:
         pass
 
@@ -4499,3 +4509,62 @@ async def test_context_command_renders_wire_schema_breakdown() -> None:
         assert "Messages" in listing and "~10.9k" in listing
         assert "Total" in listing and "~20.1k / 200k (10.1%)" in listing
         assert "Last cache read (exact)" in listing and "12.8k" in listing
+
+
+@pytest.mark.asyncio
+async def test_effective_model_change_repaints_the_band() -> None:
+    """A fallback edge repaints the band's model segment with the model
+    actually serving, and the recovery edge paints the selection back.
+
+    The band is the composer's one account of "who is replying"; leaving it
+    on the selected model while every request goes to a fallback is the stale
+    frame this event exists to prevent.
+    """
+    from local_operator.tui.events import EffectiveModelChanged
+
+    class _Effective(FakeSession):
+        """A session whose effective surface follows the edge, the way the
+        real one's does — the handler re-reads name/effort/window through it."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            # Declared on the class so assigning it below is not an implicit
+            # attribute-creation (pyright), and so the property has a stable
+            # value before the first edge arrives.
+            self._eff: Any = None
+
+        @property
+        def effective_model(self):
+            return getattr(self, "_eff", None)
+
+        @property
+        def effective_model_label(self):
+            spec = getattr(self, "_eff", None)
+            return f"{spec.provider}/{spec.model_id}" if spec else "test/model"
+
+    session = _Effective()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        session._eff = SimpleNamespace(
+            provider="zai",
+            model_id="glm-5.3",
+            display_name="GLM 5.3",
+            context_window=200_000,
+            reasoning_effort=None,
+            reasoning_efforts=(),
+            reasoning=False,
+        )
+        app.post_message(EffectiveModelChanged("zai", "glm-5.3", None, "provider failure", True))
+        await pilot.pause()
+        assert app._status is not None
+        assert app._status._model_label == "zai/glm-5.3"
+        assert app._status._context_window == 200_000
+
+        # Recovery: the selection comes back, with its own metadata.
+        session._eff = None
+        app.post_message(
+            EffectiveModelChanged("test", "model", None, "primary model recovered", False)
+        )
+        await pilot.pause()
+        assert app._status._model_label == "test/model"
