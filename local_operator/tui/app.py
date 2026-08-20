@@ -9500,11 +9500,7 @@ class OperatorApp(App[None]):
                 # been rather than rendering a bare empty one.
                 editor.picker.set_notice("credential store unreadable — cannot list logouts")
                 return []
-            names = [
-                name
-                for name in names
-                if self._mcp_server_url(name, manager) in stored
-            ]
+            names = [name for name in names if self._mcp_server_url(name, manager) in stored]
         choices: list[ArgumentChoice] = []
         for name in names:
             status = manager.get_connection_status(name) if manager is not None else ""

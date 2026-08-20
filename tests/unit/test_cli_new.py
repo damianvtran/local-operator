@@ -558,9 +558,7 @@ def test_mcp_logout_command_reports_removal(
 ) -> None:
     """The CLI's logout is the module helper plus phrasing: success names the
     server whose credential is gone, failure carries the helper's reason."""
-    monkeypatch.setattr(
-        "local_operator.mcp.auth.mcp_logout_server", lambda name, cwd: None
-    )
+    monkeypatch.setattr("local_operator.mcp.auth.mcp_logout_server", lambda name, cwd: None)
     assert cli.mcp_command(argparse.Namespace(mcp_command="logout", name="linear")) == 0
     assert "'linear'" in capsys.readouterr().out
 
