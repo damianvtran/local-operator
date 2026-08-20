@@ -539,6 +539,90 @@ async def test_usage_preflight_exhausts_accounts_then_uses_provider_fallback(tmp
 
 
 @pytest.mark.asyncio
+async def test_preflight_fallback_selection_skips_benched_targets(tmp_path) -> None:
+    """Quota preflight must not re-pin a fallback the stream driver just
+    watched fail.
+
+    The reported annoyance: with the chain's head fallbacks down, every
+    message boundary re-selected the FIRST configured fallback, re-pinned it,
+    and the stream walk then replayed the whole waterfall — one "provider
+    failure" notice and one serial timeout per dead target — before landing
+    back on the provider that had been serving. A target benched by
+    ``mark_target_failed`` is passed over until its cooldown expires.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("zai", {"key": "sk-zai", "source": "login"})
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {"default": ["zai/glm-5.3", "openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    try:
+        # The stream driver benched zai after it exhausted its provider.
+        stream._route_state.mark_target_failed(FallbackTarget("zai/glm-5.3"), cooldown_ms=300_000)
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+        ):
+            await stream.preflight_usage(model)
+
+        # Preflight pinned the SECOND fallback, not the benched head.
+        assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_fallback_uses_a_benched_target_when_nothing_else_remains(
+    tmp_path,
+) -> None:
+    """An all-benched chain is still a chain — never "no configured fallback".
+
+    The bench is a preference between working candidates. When every authed
+    candidate is benched, the first is returned anyway: reporting a dead end
+    to a user who configured several fallbacks would turn a routing hint into
+    an outage, and the stream walk owns discovering which bench has expired.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("zai", {"key": "sk-zai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {"default": ["zai/glm-5.3"]},
+            }
+        },
+        session_id="session-a",
+    )
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+
+    try:
+        stream._route_state.mark_target_failed(FallbackTarget("zai/glm-5.3"), cooldown_ms=300_000)
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+        ):
+            await stream.preflight_usage(model)
+
+        assert stream._route_state.active == FallbackTarget("zai/glm-5.3")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_usage_reserve_can_reduce_effort_without_blocking_account(tmp_path) -> None:
     store = AuthStore(tmp_path / "auth.db")
     account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
