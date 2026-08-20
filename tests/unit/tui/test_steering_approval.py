@@ -629,7 +629,7 @@ async def test_ctrl_c_twice_exits_and_offers_the_resume_command(
         await pilot.pause(0.3)
         assert not app.is_running
 
-    assert app.resume_hint() == "local-operator --resume sess"
+    assert app.resume_hint() == "lop --resume sess"
 
 
 @pytest.mark.asyncio

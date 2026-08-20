@@ -783,6 +783,22 @@ Screen.boot.boot-card #input-shell {
     max-width: 100;
 }
 
+/* A system notice under the splash (an MCP server that failed to connect) is
+ * part of the centred boot composition, not the full-width spine: left at `1fr`
+ * it drew flush against the terminal's left edge while the splash and the card
+ * sat centred — one line visibly out of column on the first frame every user
+ * with a broken server sees. The app marks it `.boot-column` and writes the
+ * card's EXACT width onto it (OperatorApp._sync_boot_column_width) because the
+ * card's clamp is a percentage the sheet cannot ask for; `align-horizontal`
+ * here centres that block in the transcript so it shares the card's axis. The
+ * notice's TEXT is centred by the block itself (NoticeBlock._build), not by
+ * `text-align`: the block pins its own height and a stylesheet re-wrap would
+ * reflow the hanging indent it cannot see. Below the card threshold no width is
+ * written and the block keeps the spine, matching the bar the card degrades to. */
+Screen.boot .boot-column {
+    align-horizontal: center;
+}
+
 /* ── slash-command picker ────────────────────────────────────────────────
  *
  * The suggestion list under the editor, inside the input dock and above the

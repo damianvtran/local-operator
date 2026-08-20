@@ -204,6 +204,14 @@ TOOL_NAME_COL_MAX = 24
 #: before, and "what came before" is the entire spacing rule.
 GAP_CLASS = "gap-above"
 
+#: Class the app puts on a transcript block that joins the centred boot
+#: composition (a system notice under the splash). The app writes the card's
+#: width onto the block (``OperatorApp._sync_boot_column_width``); the block
+#: centres its own content on that axis (``NoticeBlock._build``). Defined here,
+#: with the block that reads it, because app.py already imports this module and
+#: the reverse would be a cycle.
+BOOT_COLUMN_CLASS = "boot-column"
+
 
 class TranscriptBlock(Static):
     """Base class for one transcript entry (assistant, tool, user, notice).
@@ -862,6 +870,19 @@ class NoticeBlock(TranscriptBlock):
         two that broke the spine. Wrapping here keeps every continuation row under
         the first character of the text, which is what makes a long notice read as
         one statement instead of as several.
+
+        A ``boot-column`` notice (one under the boot splash, an MCP server that
+        failed to connect) is CENTRED instead: it belongs to the same composition
+        as the centred card below it, whose width the app writes onto the block,
+        and the wordmark and the card's caret are centred masses, not left edges —
+        so the row is centred on that axis the same way the splash centres its own
+        lines. Left at the spine it drew flush against the terminal's left edge
+        beside a centred card. The centre is computed HERE, in the build, rather
+        than left to ``text-align``: this block pins its own height and a
+        stylesheet re-wrap would also reflow the hanging indent it cannot see.
+        Every wrapped row is centred on its own width, so a notice that folds to
+        two or three lines still reads as one centred block rather than a centred
+        first line with ragged continuations.
         """
         style = Style(color=theme_mod.semantic_color(self._token))
         indent = " " * SPINE_INDENT
@@ -869,13 +890,20 @@ class NoticeBlock(TranscriptBlock):
         width = max((self.size.width or 80) - 2, 12)
         body = max(width - cell_len(hanging), 8)
         rows = wrap_cells(self._text, body)
+        centred = self.has_class(BOOT_COLUMN_CLASS)
         line = Text(no_wrap=True, overflow="ellipsis")
         for index, row in enumerate(rows):
+            # First row reserves the glyph column; continuations the hanging one.
+            # Centring takes the pad out of the SLACK beside the text, so each
+            # row lands on the block's axis give or take the odd cell.
+            prefix = SPINE_INDENT + 2 if index == 0 else cell_len(hanging)
+            pad = max(0, (width - prefix - cell_len(row)) // 2) if centred else 0
             if index:
                 line.append("\n")
-                line.append(hanging, style=style)
+                line.append((" " * (prefix + pad)) if centred else hanging, style=style)
             else:
-                line.append(indent, style=style)
+                lead = indent if not centred else " " * (prefix - 2 + pad)
+                line.append(lead, style=style)
                 line.append(f"{self._glyph} ", style=style)
             line.append(row, style=style)
         return line

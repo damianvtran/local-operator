@@ -6296,8 +6296,7 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
         # rather than something to type.
         if row.resumable and row.session_id:
             lines.append(
-                f"    transcript {row.session_id} (read it with"
-                f" local-operator --resume {row.session_id})"
+                f"    transcript {row.session_id} (read it with lop --resume {row.session_id})"
             )
     if any(row.resumable for row in rows):
         lines.append("")
