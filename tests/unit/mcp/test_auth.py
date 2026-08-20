@@ -804,6 +804,75 @@ class TestLoopbackCallbackServer:
         page = await page_task
         assert "No authorization code" in page
 
+    @pytest.mark.asyncio
+    async def test_an_abandoned_grant_ends_as_an_explicit_cancel(self, monkeypatch) -> None:
+        """A browser that never comes back must end with a receipt, not a wait.
+
+        Closing the tab or abandoning the consent screen is indistinguishable
+        from a slow human at the protocol level, so the interactive grant
+        carries its own idle clock. When it fires the flow settles as
+        ``McpLoginCancelledError`` — the message that tells the user the login
+        is over and how to start another — instead of leaving "logging in…"
+        unanswered in the transcript.
+        """
+        import asyncio
+        import sys
+
+        from local_operator.mcp.auth import LoopbackAuthFlow, McpLoginCancelledError
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        # The inner redirect clock must OUTLIVE the guard for the guard to be
+        # the clock that fires — which is also their real-world relationship
+        # (300 s vs 600 s), shrunk.
+        monkeypatch.setattr("local_operator.mcp.auth.PASTE_INPUT_TIMEOUT_S", 10.0)
+        monkeypatch.setattr("local_operator.mcp.auth.INTERACTIVE_GRANT_TIMEOUT_S", 0.2)
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        await self._listening(flow)
+
+        with pytest.raises(McpLoginCancelledError, match="cancelled.*Run /mcp login again"):
+            await asyncio.wait_for(flow.callback_handler(), timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_login_releases_the_port_and_says_so(self, monkeypatch) -> None:
+        """Task cancellation is a cancel too: unwind, release the port, report.
+
+        The login worker can be cancelled out from under the flow — an
+        exclusive re-login, the TUI's stop-ladder. If the flow re-raised the
+        bare ``CancelledError``, the listener's teardown would be cancelled
+        along with it on any escalation, leaking the redirect port into the
+        next grant; and the caller would have an exception with no words in
+        it. The shielded teardown and the named error are the two halves of
+        the same receipt.
+        """
+        import asyncio
+        import socket
+        import sys
+
+        from local_operator.mcp.auth import LoopbackAuthFlow, McpLoginCancelledError
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr("webbrowser.open", lambda _url: False)
+        port = self._free_port()
+        flow = LoopbackAuthFlow(f"http://127.0.0.1:{port}/callback")
+        await self._listening(flow)
+
+        task = asyncio.ensure_future(flow.callback_handler())
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(McpLoginCancelledError, match="interrupted"):
+            await asyncio.wait_for(task, timeout=5)
+
+        # The redirect port must be free for the NEXT login, immediately.
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError as exc:  # pragma: no cover - the failure IS the test
+            pytest.fail(f"redirect port still held after cancellation: {exc}")
+        finally:
+            probe.close()
+
 
 class TestWireOauthAuth:
     def _cfg(self, **oauth_overrides: Any) -> MCPHttpServerConfig:

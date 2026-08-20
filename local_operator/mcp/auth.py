@@ -119,6 +119,22 @@ class McpAuthRequiredError(RuntimeError):
         self.server_url = server_url
 
 
+class McpLoginCancelledError(RuntimeError):
+    """An interactive MCP OAuth grant ended with no authorization arriving.
+
+    Two routes land here: the human route (the browser tab was closed or the
+    consent screen abandoned, surfaced once the idle guard fires) and the
+    structural one (the login task was cancelled — an exclusive re-login, the
+    TUI's stop-ladder, or a Ctrl+C at the CLI). The point of the dedicated
+    type is the MESSAGE: the login flows catch the SDK's ``OAuthFlowError``
+    and report ``str(exc)``, so the explanation has to live on the innermost
+    raise or it is lost. A bare ``CancelledError`` would surface either as an
+    empty ``MCP login failed for 'x':`` line or — worse inside the TUI — as
+    silence, because a Textual worker cancelled by its exclusive group never
+    runs the worker's exception handler at all.
+    """
+
+
 def mcp_oauth_credential_id(server_url: str) -> str:
     """Stable logical credential id for one MCP server's OAuth grant."""
     return f"{MCP_OAUTH_CREDENTIAL_PREFIX}{server_url}"
@@ -646,6 +662,16 @@ def parse_oauth_callback_input(raw: str) -> tuple[str, str | None, str | None]:
 #: forever.
 PASTE_INPUT_TIMEOUT_S = 300.0
 
+#: Idle bound on an INTERACTIVE grant: the longest a login waits for a browser
+#: round trip that will never complete. The usual reason nothing arrives is
+#: that the tab was closed or the consent screen abandoned — indistinguishable
+#: from a slow human at the protocol level, so the flow has to give up on a
+#: clock and say so. Sized to match the 10-minute budget both login callers
+#: already allow the whole connect (``/mcp login`` and ``local-operator mcp
+#: login``), so the grant now ends with an explicit "cancelled" receipt inside
+#: that window instead of outliving it as a silent "logging in…" line.
+INTERACTIVE_GRANT_TIMEOUT_S = 600.0
+
 #: Hosts a redirect URI can name that THIS process is able to answer.
 #:
 #: A redirect URI may legitimately point anywhere; only a loopback address is
@@ -792,13 +818,53 @@ class LoopbackAuthFlow:
             # safe precisely because nothing else is going to.
             return await self._await_pasted()
         try:
-            return await asyncio.wait_for(self._result, timeout=PASTE_INPUT_TIMEOUT_S)
+            # The inner clock is the 300 s redirect bound with its
+            # port-forwarding advice for the genuinely slow case; the outer
+            # coroutine adds the interactive idle guard AROUND it. They stay
+            # separate because ``wait_for`` makes a timeout indistinguishable
+            # from an outer one once nested — each clock must convert its own
+            # expiry before the next layer can see it.
+            # Captured once: a closure read of ``self._result`` types as
+            # optional (``_stop_server`` resets it), and it cannot change
+            # underneath the wait anyway — only ``_stop_server`` clears it,
+            # and that runs after the wait resolves.
+            result = self._result
+
+            async def _within_idle_guard() -> tuple[str, str | None, str | None]:
+                try:
+                    return await asyncio.wait_for(result, timeout=PASTE_INPUT_TIMEOUT_S)
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError(
+                        f"Timed out after {PASTE_INPUT_TIMEOUT_S:.0f}s waiting for the "
+                        f"OAuth redirect to {self.redirect_uri}. If you authorized in a "
+                        "browser on another machine it cannot reach this port — "
+                        f"forward it (ssh -L {self._port}:127.0.0.1:{self._port} …) "
+                        "and try again."
+                    ) from exc
+
+            return await asyncio.wait_for(_within_idle_guard(), timeout=INTERACTIVE_GRANT_TIMEOUT_S)
+        except asyncio.CancelledError:
+            # The login task itself was cancelled (an exclusive re-login, the
+            # TUI's stop-ladder, Ctrl+C at the CLI). The underlying result
+            # future is cancelled by the wait_for on the way out, and
+            # ``callback_handler``'s ``finally`` stops the listener — but only
+            # if we CO-OPERATE: shielding the teardown lets one stop-ladder
+            # escalation turn a cancelled login into a wedged listener holding
+            # the redirect port into the next grant.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._stop_server())
+            raise McpLoginCancelledError(
+                "the login was interrupted before the browser completed it"
+            ) from None
         except asyncio.TimeoutError as exc:
-            raise RuntimeError(
-                f"Timed out after {PASTE_INPUT_TIMEOUT_S:.0f}s waiting for the OAuth "
-                f"redirect to {self.redirect_uri}. If you authorized in a browser on "
-                "another machine it cannot reach this port — forward it "
-                f"(ssh -L {self._port}:127.0.0.1:{self._port} …) and try again."
+            # The idle guard, not the redirect clock: nothing arrived for the
+            # whole interactive budget, which in practice means the browser
+            # went away — tab closed, consent abandoned.
+            raise McpLoginCancelledError(
+                f"no redirect arrived within {INTERACTIVE_GRANT_TIMEOUT_S / 60:.0f} "
+                "minutes — the login was probably cancelled (browser tab closed, "
+                "or the authorization left unfinished). Run /mcp login again to "
+                "retry."
             ) from exc
 
     async def _await_pasted(self) -> tuple[str, str | None, str | None]:
@@ -825,6 +891,14 @@ class LoopbackAuthFlow:
                 asyncio.to_thread(lambda: input(prompt).strip()),
                 timeout=PASTE_INPUT_TIMEOUT_S,
             )
+        except asyncio.CancelledError:
+            # Same receipt as the listener path: an interrupted CLI login must
+            # not surface as a bare "MCP login failed for 'x':" with no reason.
+            # The to_thread reader itself cannot be cancelled (that is why
+            # paste is never raced), so no teardown is owed here.
+            raise McpLoginCancelledError(
+                "the login was interrupted before the redirect URL was pasted"
+            ) from None
         except asyncio.TimeoutError as exc:
             # TRANSLATE IT. Since 3.11 `asyncio.TimeoutError` IS `TimeoutError`
             # and `str(TimeoutError())` is the empty string, so letting it

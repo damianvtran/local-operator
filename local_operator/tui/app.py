@@ -9637,6 +9637,8 @@ class OperatorApp(App[None]):
         one (or been cancelled by it), and either way the teardown could be
         skipped while the grant proceeded.
         """
+        from local_operator.mcp.auth import McpLoginCancelledError
+
         if disconnect_first:
             try:
                 await manager.disconnect_server(name)
@@ -9644,6 +9646,23 @@ class OperatorApp(App[None]):
                 logger.debug("MCP disconnect before reauth failed for %s", name, exc_info=True)
         try:
             conn = await manager.connect_configured_server(name, timeout_ms=600_000)
+        except asyncio.CancelledError:
+            # The "logging in…" receipt must ALWAYS get an ending. A worker
+            # cancelled by its exclusive group (a second login/reauth request)
+            # or by the stop-ladder never runs this function's own failure
+            # reporting without this branch: the grant is quietly unwound and
+            # the transcript keeps a "logging in…" line nothing ever answers.
+            self._system_notice(
+                f"MCP login for {name!r} cancelled before the browser completed it.",
+                "warning",
+            )
+            raise
+        except McpLoginCancelledError as exc:
+            # The browser round trip ended without an authorization — the tab
+            # closed, the consent abandoned, or the idle guard fired. Not an
+            # error in the red sense: the user is the one who walked away.
+            self._system_notice(f"MCP login for {name!r} cancelled: {exc}", "warning")
+            return
         except Exception as exc:  # noqa: BLE001 — report any failure, don't crash the app
             self._system_notice(f"MCP login failed for {name!r}: {exc}", "error")
             return
