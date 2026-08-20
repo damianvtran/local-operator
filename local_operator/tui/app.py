@@ -163,7 +163,12 @@ from local_operator.tui.widgets.subagent_panel import (
     job_elapsed,
 )
 from local_operator.tui.widgets.subagent_view import SubagentView, SubagentViewDismissed
-from local_operator.tui.widgets.toast import Toast, format_mcp_startup
+from local_operator.tui.widgets.toast import (
+    TOAST_DEFAULT_MS,
+    TOAST_FAILURE_MS,
+    Toast,
+    format_mcp_startup,
+)
 from local_operator.tui.widgets.todo_panel import TodoPanel
 from local_operator.tui.widgets.tool_card import ToolCard, clean_intent
 from local_operator.tui.widgets.transcript import (
@@ -1011,6 +1016,13 @@ class OperatorApp(App[None]):
         #: `_reload_session` once the answer is settled, which is what still
         #: puts the splash up for a swap onto a genuinely empty session.
         self._welcome_pending = False
+        #: A harness notice held for the splash while the conversation has
+        #: not started — a quota fallback, a provider that is missing. The
+        #: splash is the empty state, and treating one of these as a
+        #: transcript block retired it for an empty message view. Latest
+        #: one only: the splash is one row. Cleared on a session swap
+        #: because it describes the session that just died.
+        self._splash_notice: str | None = None
         # Whatever held focus when the usage panel opened, so closing it returns
         # the user to the composer they were typing in rather than to nothing.
         # The approval card follows the same discipline for the same reason.
@@ -1278,7 +1290,11 @@ class OperatorApp(App[None]):
         # hidden the splash on mount.
         self._transcript = TranscriptView(id="transcript")
         with self._transcript:
-            yield WelcomeView(lambda: session_welcome_info(self._session, self._providers))
+            yield WelcomeView(
+                lambda: session_welcome_info(
+                    self._session, self._providers, notice=self._splash_notice
+                )
+            )
         # The dock band: subagent task list + todo list, sitting between the
         # transcript and the composer. It is a transparent POSITIONER (zero own
         # height when empty) holding one filled body per panel; the two panels
@@ -1542,8 +1558,9 @@ class OperatorApp(App[None]):
         """Warm the provider's quota reading once the app is already painted.
 
         Runs AFTER :meth:`_adopt_session`, which is subscribed and on screen, so
-        quota I/O cannot delay first paint and any warning lands in the
-        transcript. An optional session capability, so lightweight hosts need
+        quota I/O cannot delay first paint and any warning lands as a toast
+        and on the splash — not as a transcript row that would retire the
+        empty state. An optional session capability, so lightweight hosts need
         not fake network preflight; failure must never become another startup
         gate, hence the bare catch.
 
@@ -2245,6 +2262,9 @@ class OperatorApp(App[None]):
         # dead conversation's already-billed calls from its own turn total and
         # under-report that turn by exactly that much.
         self._turn_accrued_cost = 0.0
+        # The splash notice describes the session being replaced. Left
+        # standing, a `/new` would open on the dead session's quota warning.
+        self._splash_notice = None
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -6131,8 +6151,8 @@ class OperatorApp(App[None]):
         self, block, *, ends_empty_state: bool = True, pin_tail: bool = False
     ) -> None:
         """Append a block, retiring the welcome view — and the boot layout — on
-        the first one. That is the authoritative "the session has content" edge;
-        both layouts hang off it (see `_set_welcome_visible`).
+        the first conversation message. That is the authoritative "the session
+        has content" edge; both layouts hang off it (see `_set_welcome_visible`).
 
         ``ends_empty_state=False`` appends WITHOUT ending it, because the
         predicate is "the CONVERSATION has started", not "something got drawn". A
@@ -6142,6 +6162,14 @@ class OperatorApp(App[None]):
         centred prompt at all. The notice is still appended and still scrolls
         back; it simply lands under the splash, exactly as the ``/clear`` receipt
         does.
+
+        The default stays `True` for every block — a transcript row appended
+        deliberately IS conversation content, including a ``NoticeBlock`` the
+        caller wrote as a receipt. The boot-time exception lives one level up,
+        in :meth:`on_notice_posted`, which is the only path that fires on a
+        launch before anyone has typed; a gate here would swallow that
+        distinction and keep the splash up over a transcript that had
+        genuinely grown (the seam-stability suite pins exactly that).
 
         ``pin_tail=True`` also holds the block at the BOTTOM as later blocks
         arrive — see :meth:`TranscriptView.pin_tail`. Only the working line uses
@@ -9863,7 +9891,50 @@ class OperatorApp(App[None]):
         )
 
     def on_notice_posted(self, message: NoticePosted) -> None:
+        """Surface a session notice without starting the message view.
+
+        A quota fallback, a missing-credential warning — these fire on boot,
+        before anyone has typed. Routing them through the default
+        ``_append_block`` retired the splash for a single yellow line over
+        an empty screen, which is how a launch with a healthy session
+        looked like a conversation that had already started. While the
+        splash is up the notice is a toast (interruption) and a splash
+        row (durable for as long as the empty state lasts). Once a user
+        or assistant message has retired the splash, the same event is
+        just another transcript line.
+        """
+        # `_welcome_pending` is the same fact mid-swap: the replacement is
+        # empty and the splash is about to come back, so a preflight notice
+        # must not land as a transcript row that the splash then sits on.
+        if self._welcome_visible or self._welcome_pending:
+            self._announce_on_splash(message.text, message.kind)
+            return
         self._append_block(NoticeBlock(message.text, message.kind))
+
+    def _announce_on_splash(self, text: str, kind: NoticeKind) -> None:
+        """Hold ``text`` on the splash and raise a toast for it.
+
+        The splash is content-sized and rests on the input card, so a
+        second row of warning is a real cost — latest one only, same
+        rule as the toast slot. The toast is the interruption; the splash
+        row is what is still there after the toast dismisses, until a
+        real message starts the conversation.
+
+        The toast is a SHORT headline, not the same sentence. Repeating
+        the full line made a two-row card that sat on the mark's crown
+        (design round 1, D1) and read as a label stuck on the logo
+        rather than as a complementary alert (D2). The splash row keeps
+        the reason; the toast only has to say that something happened.
+        """
+        self._splash_notice = text
+        if self._welcome is not None:
+            self._welcome.refresh_info()
+        try:
+            toast = self.query_one(Toast)
+        except NoMatches:
+            return
+        duration = TOAST_FAILURE_MS if kind in ("warning", "error") else TOAST_DEFAULT_MS
+        toast.show(_splash_toast_headline(text), duration_ms=duration)
 
     def _settle_queued_steer_notices_unsent(self) -> None:
         """Retire queued-steer rows the turn that just ended did not deliver.
@@ -10347,6 +10418,33 @@ def _first_line(text: str) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def _splash_toast_headline(text: str) -> str:
+    """The toast half of a splash announcement: a glance, not the reason.
+
+    The splash row already carries the full sentence. Repeating it in the
+    toast made a two-row card that sat on the mark (design round 1, D1)
+    and printed the same 64 characters twice in one viewport (D2). A
+    fallback notice's useful glance is the TARGET — ``Fell back to
+    zai/glm-5.3`` — because that is the model the next prompt will hit.
+    Anything else stays one short clause, never the whole line.
+    """
+    body = " ".join(text.split())
+    if not body:
+        return "Notice"
+    marker = "falling back to "
+    index = body.lower().rfind(marker)
+    if index >= 0:
+        target = body[index + len(marker) :].strip()
+        if target:
+            return f"Fell back to {target}"
+    # One clause, no wrap: the toast sits over the lockup, and a second
+    # row is what buried the mark. 36 cells is comfortably inside the
+    # right-hand gutter of a 80-col boot frame.
+    if len(body) <= 36:
+        return body
+    return body[:35].rstrip() + "…"
 
 
 def _partial_text(partial_result) -> str:
