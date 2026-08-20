@@ -1082,8 +1082,12 @@ class OpenAICompatClient:
         # A refusal delta with a non-filter finish (OpenAI sends
         # ``finish_reason=stop`` for its own refusals; only third-party filters
         # send ``content_filter``) is still a refusal: the prose slot is the
-        # authoritative signal that no answer was produced.
-        if refusal_parts and stop_reason == "stop":
+        # authoritative signal that no answer was produced. ``length`` counts
+        # too — refusal prose truncated by the token cap is a refusal whose
+        # message got cut, and ending the turn as a bare "length" dropped the
+        # collected prose entirely (review R1-3). ``toolUse`` is left alone: a
+        # turn that produced executable calls is actionable output.
+        if refusal_parts and stop_reason in ("stop", "length"):
             stop_reason = "refusal"
         error: str | None = None
         if stop_reason == "refusal":
@@ -1209,9 +1213,19 @@ class OpenAICompatClient:
                             else incomplete
                         )
                         if reason in ("max_output_tokens", "max_output_chars"):
-                            # Length means the loop pairs placeholders and NEVER
-                            # executes a partial function call.
-                            terminal_stop = "length"
+                            if refusal_parts:
+                                # Refusal prose truncated by the output cap is
+                                # still a refusal; a bare "length" terminal
+                                # dropped the collected prose (review R1-3).
+                                terminal_stop = "refusal"
+                                terminal_error = _refusal_error(
+                                    f"incomplete_details.reason={reason}",
+                                    "".join(refusal_parts),
+                                )
+                            else:
+                                # Length means the loop pairs placeholders and
+                                # NEVER executes a partial function call.
+                                terminal_stop = "length"
                         elif reason == "content_filter":
                             # A filtered response is a refusal, not a transport
                             # fault: raising ProviderError here sent it into
@@ -1794,13 +1808,20 @@ class GoogleClient:
             headers["x-goog-api-key"] = api_key
         usage: Usage | None = None
         stop_reason = "stop"
-        # Gemini's non-STOP finish reasons (SAFETY, RECITATION,
-        # PROHIBITED_CONTENT, SPII, BLOCKLIST, IMAGE_SAFETY, OTHER…) are all
-        # refusals of one kind or another. They used to collapse into the
-        # "stop" fallback of the finishReason map below, which is the silent
-        # empty turn this field exists to prevent. The marker is kept verbatim
-        # so the visible line names WHICH classifier fired.
+        # Gemini's abnormal finish reasons split into two families, and the
+        # split decides the diagnosis the user reads (review R1-2). Content
+        # classifiers (the allowlist below) are REFUSALS — "rephrase or switch
+        # models" is the right advice. Model/tooling defects
+        # (MALFORMED_FUNCTION_CALL, UNEXPECTED_TOOL_CALL…) are ERRORS — a plain
+        # retry usually works, and calling them refusals steers the user away
+        # from it. Both used to collapse into the "stop" fallback of the
+        # finishReason map below: the silent empty turn this field exists to
+        # prevent. The marker is kept verbatim either way so the visible line
+        # names WHICH terminal fired. Unknown reasons land on the error side:
+        # "the model refused" is a strong claim to make about a marker we have
+        # never seen, while an error line with the verbatim marker stays true.
         refusal_marker: str | None = None
+        defect_marker: str | None = None
         # Gemini returns one complete functionCall per part with no ids and
         # no part indexes, so the harness must mint both. They must be UNIQUE
         # per response: the loop dedups tool calls by id (first-wins), and a
@@ -1839,9 +1860,23 @@ class GoogleClient:
                     if candidate.get("finishReason"):
                         reason = str(candidate["finishReason"])
                         normal = {"STOP": "stop", "MAX_TOKENS": "length", "TOOL_USE": "toolUse"}
-                        stop_reason = normal.get(reason, "refusal")
-                        if stop_reason == "refusal":
+                        refusals = (
+                            "SAFETY",
+                            "RECITATION",
+                            "PROHIBITED_CONTENT",
+                            "SPII",
+                            "BLOCKLIST",
+                            "IMAGE_SAFETY",
+                            "OTHER",
+                        )
+                        if reason in normal:
+                            stop_reason = normal[reason]
+                        elif reason in refusals:
+                            stop_reason = "refusal"
                             refusal_marker = f"finishReason={reason}"
+                        else:
+                            stop_reason = "error"
+                            defect_marker = f"finishReason={reason}"
                 # A prompt blocked outright never produces a candidate, only
                 # ``promptFeedback.blockReason`` — without this the stream ends
                 # on the "stop" default with nothing on screen.
@@ -1865,6 +1900,8 @@ class GoogleClient:
             # Gemini sends no refusal prose; any text it did stream has been
             # forwarded already, so the line names the classifier that fired.
             error = _refusal_error(refusal_marker or "finishReason=OTHER", "")
+        elif stop_reason == "error":
+            error = f"model call failed ({defect_marker or 'unknown finishReason'})"
         yield StreamEndEvent(stop_reason=stop_reason, usage=usage, error=error)
 
 
