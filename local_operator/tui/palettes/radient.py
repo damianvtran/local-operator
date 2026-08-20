@@ -35,20 +35,25 @@ PALETTES: list[ThemeSpec] = [
     ThemeSpec(
         name="radient",
         label="Radient",
-        description="One signal blue on a blue-tinted near-black, straight from radient.com",
+        description="One signal blue on a blue-tinted near-black (the Radient kit)",
         dark=True,
         tokens={
             # The site's ground ramp is four steps (void/canvas/surface/
             # elevated); the TUI speaks five. Mapping: void -> sunken (the
             # status band), canvas -> bg, surface -> surface, elevated ->
-            # raised. `overlay` (dialogs, active selection) takes the
-            # hairline value — the kit's own "one step above elevated"
-            # structural tone — which keeps the ladder monotonic without
-            # inventing a sixth site token.
+            # raised. `overlay` (dialogs, active selection) is the ONE
+            # interpolated value in this port: the midpoint of the kit's
+            # hairline/hairline-strong pair (#252b34/#343c46). The kit runs
+            # out of ramp at four ground steps, and the review caught that
+            # taking hairline verbatim made overlay byte-identical to
+            # `edge` — a dialog ground whose outline would be invisible.
+            # The midpoint keeps the ladder monotonic (1.26:1 over raised)
+            # and the border visible (1.12:1 against the hairline) while
+            # staying inside the kit's own structural tones.
             "bg": "#090d13",  # canvas
             "surface": "#12171d",  # surface
             "raised": "#1c2229",  # elevated
-            "overlay": "#252b34",  # hairline, as the fifth elevation step
+            "overlay": "#2c333d",  # hairline/hairline-strong midpoint (interpolated)
             "sunken": "#030509",  # void
             # Text ramp is verbatim: fg, fg-muted, fg-dim. `faint` (inert
             # hints) is fg-disabled — the kit's quietest ink, exempt from AA
