@@ -52,10 +52,7 @@ def test_no_ceiling_combination_ever_deletes_a_transcript(tmp_path):
     policy every one of them survives.
     """
     sessions = tmp_path / "sessions"
-    made = [
-        _session(sessions, f"s{i:02d}", size=1_000_000, age_days=700 - i)
-        for i in range(10)
-    ]
+    made = [_session(sessions, f"s{i:02d}", size=1_000_000, age_days=700 - i) for i in range(10)]
 
     result = sweep_sessions(sessions, max_sessions=1, max_bytes=1024, max_age_days=1)
 
@@ -71,9 +68,7 @@ def test_live_dir_is_redundant_but_harmless(tmp_path):
     live = _session(sessions, "live", size=5_000_000, age_days=400)
     other = _session(sessions, "other", size=1000, age_days=1)
 
-    result = sweep_sessions(
-        sessions, live_dir=live, max_sessions=1, max_bytes=1000, max_age_days=1
-    )
+    result = sweep_sessions(sessions, live_dir=live, max_sessions=1, max_bytes=1000, max_age_days=1)
 
     assert result.evicted == 0
     assert (live / "transcript.jsonl").exists()

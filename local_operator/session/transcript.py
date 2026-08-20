@@ -166,9 +166,7 @@ ATTACHMENT_KEY = "attachment"
 ATTACHMENT_MISSING = ""
 
 
-def _externalize_attachments(
-    payload: dict[str, Any], attachments: AttachmentStore | None
-) -> None:
+def _externalize_attachments(payload: dict[str, Any], attachments: AttachmentStore | None) -> None:
     """Move inline base64 image payloads out of ``payload`` into the store.
 
     In place, on the encoded payload dict. A block whose write fails keeps

@@ -40,9 +40,7 @@ from local_operator.session.attachments import AttachmentStore  # noqa: E402
 from local_operator.session.transcript import _ATTACHMENT_FLOOR_BYTES  # noqa: E402
 
 
-def migrate_transcript(
-    path: Path, store: AttachmentStore, *, dry_run: bool
-) -> tuple[int, int]:
+def migrate_transcript(path: Path, store: AttachmentStore, *, dry_run: bool) -> tuple[int, int]:
     """Externalize one transcript's inline images.
 
     Returns ``(bytes_before, bytes_after)``. Rewrites atomically; a
@@ -89,8 +87,12 @@ def migrate_transcript(
     # Same-directory temp + os.replace: an interrupted run leaves the
     # original transcript intact, exactly like Transcript.compact_file.
     with tempfile.NamedTemporaryFile(
-        mode="w", dir=path.parent, prefix=f".{path.name}.", suffix=".migrate",
-        delete=False, encoding="utf-8",
+        mode="w",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".migrate",
+        delete=False,
+        encoding="utf-8",
     ) as stream:
         tmp = Path(stream.name)
         stream.write(payload)
@@ -120,11 +122,11 @@ def main() -> int:
         total_after += after
         if after < before:
             touched += 1
-            print(
-                f"  {path.parent.name}: {before / 1e6:6.1f} MB -> {after / 1e6:6.1f} MB"
-            )
+            print(f"  {path.parent.name}: {before / 1e6:6.1f} MB -> {after / 1e6:6.1f} MB")
 
-    store_bytes = sum(f.stat().st_size for f in store.root.glob("*.bin")) if store.root.is_dir() else 0
+    store_bytes = (
+        sum(f.stat().st_size for f in store.root.glob("*.bin")) if store.root.is_dir() else 0
+    )
     print()
     print(f"transcripts scanned : {len(transcripts)}")
     print(f"transcripts changed : {touched}")

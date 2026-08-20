@@ -101,9 +101,7 @@ async def test_identical_images_across_sessions_share_one_store_entry(tmp_path, 
     unique images. Two sessions appending the same screenshot must leave ONE
     file under attachments/."""
     attachments = tmp_path / "attachments"
-    monkeypatch.setattr(
-        "local_operator.session.attachments.attachments_dir", lambda: attachments
-    )
+    monkeypatch.setattr("local_operator.session.attachments.attachments_dir", lambda: attachments)
     one = Transcript(tmp_path / "s1")
     two = Transcript(tmp_path / "s2")
     await one.append_message(_image_message("session one"))
