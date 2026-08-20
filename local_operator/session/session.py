@@ -1468,6 +1468,16 @@ class Session:
         return self._goal_state.set(text)
 
     @property
+    def variables(self) -> Any:
+        """The session's variable store, including memory-only credentials.
+
+        Exposed so a front end can store, list and forget session credentials
+        without reaching into ``_variables``. ``None`` on a session that was
+        built without a store (embedded SDK callers, some test doubles).
+        """
+        return self._variables
+
+    @property
     def conversation_name(self) -> str:
         """The conversation's title ("" until one is set or generated)."""
         return self._conversation_name.text
@@ -2274,6 +2284,13 @@ class Session:
                 get_aside_messages=self._drain_asides,
                 get_follow_up_messages=self._todo_continuation,
                 resolve_fallback_tool=self._fallback_tool_resolver,
+                # Redact stored credential values out of every tool result
+                # before the message lands in the transcript. The store is
+                # in-memory and session-scoped, so this is the one place a
+                # credential can be turned back into plain text for the model.
+                redact_tool_result=(
+                    self._variables.redact if self._variables is not None else None
+                ),
                 interrupt_mode="immediate",
                 on_turn_end=self._on_turn_end,
             )

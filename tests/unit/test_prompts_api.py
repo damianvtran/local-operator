@@ -358,3 +358,27 @@ def test_user_instructions_keep_the_head_stable_across_turns() -> None:
     )[0]
 
     assert first == second
+
+
+def test_credentials_ride_the_volatile_tail_as_names_only() -> None:
+    """A newly stored key must invalidate only the tail, and the value must
+    never appear in any block."""
+    blocks = build_system_blocks(
+        TOOLS, SKILLS, ENV, DATE, credentials=["GITHUB_TOKEN", "DEPLOY_KEY"]
+    )
+    assert len(blocks) == 4
+    tail = blocks[3]
+    assert "<session-credentials>" in tail
+    assert "`GITHUB_TOKEN`" in tail
+    assert "`DEPLOY_KEY`" in tail
+    for block in blocks[:3]:
+        assert "GITHUB_TOKEN" not in block
+    # Idle sessions pay nothing: no names means no block.
+    idle = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
+    assert "<session-credentials>" not in idle[3]
+    # Same names keep the head byte-stable.
+    again = build_system_blocks(
+        TOOLS, "other skills", "other env", "2027-01-01", credentials=["GITHUB_TOKEN", "DEPLOY_KEY"]
+    )
+    assert blocks[0] == again[0]
+    assert blocks[1] == again[1]

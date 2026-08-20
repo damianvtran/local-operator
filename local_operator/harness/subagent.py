@@ -846,6 +846,12 @@ async def _build_child_session(
         # not a reliable channel for a rule the operator meant to apply to
         # everything. Read once per call off the parent's live holder, so a
         # ``/goal`` edit reaches children spawned after it.
+        store = getattr(parent_session, "_variables", None)
+        names = (
+            store.credential_names()
+            if store is not None and hasattr(store, "credential_names")
+            else []
+        )
         return build_system_blocks(
             tools,
             mcp.catalogue() if mcp is not None else "",
@@ -853,6 +859,7 @@ async def _build_child_session(
             datetime.now().strftime("%Y-%m-%d"),
             goal=parent_session.goal,
             user_instructions=user_instructions,
+            credentials=names,
         )
 
     child = Session(

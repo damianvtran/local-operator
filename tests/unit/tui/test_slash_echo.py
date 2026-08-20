@@ -68,6 +68,9 @@ ECHO_POLICY = {
     "mcp": False,
     "login": False,
     "logout": False,
+    # The listing or the masked paste is the receipt; the argument is a key
+    # name, never the secret, so a user row would only restate the notice.
+    "credential": False,
 }
 
 
