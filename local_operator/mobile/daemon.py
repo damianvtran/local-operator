@@ -169,7 +169,14 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         writer.write(json.dumps({"key": record.control_key}).encode() + b"\n")
         await writer.drain()
         while True:
-            line = await reader.readline()
+            try:
+                line = await reader.readline()
+            except ValueError:
+                # A frame longer than the stream limit is not a reason to
+                # drop the session — a transcript push can outgrow 64 KB.
+                # Skip the oversized line and keep the connection.
+                logger.warning("mobile daemon: oversized control frame from pid %s", record.pid)
+                continue
             if not line:
                 break
             try:

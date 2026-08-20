@@ -71,6 +71,31 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["launchctl", *args], capture_output=True, text=True, timeout=15)
 
 
+def _our_daemon_listening(port: int) -> bool:
+    """True when the process bound to ``port`` is the one this plist starts.
+
+    Health alone cannot answer this: a stale foreground daemon on the same
+    port passes every check while the supervised one fails to bind. Ask
+    launchd which pid it is running, then ask lsof who owns the port.
+    """
+    import re
+
+    printed = _launchctl("print", f"{_domain()}/{LABEL}")
+    if printed.returncode != 0:
+        return False
+    match = re.search(r"pid = (\d+)", printed.stdout)
+    if not match:
+        return False
+    pid = match.group(1)
+    listeners = subprocess.run(
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return pid in listeners.stdout.split()
+
+
 def _domain() -> str:
     import os
 
@@ -138,9 +163,12 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
             return {"ok": False, "steps": steps, "error": result.stderr.strip()[:300]}
         steps.append("loaded the LaunchAgent")
 
-        deadline = time.time() + 15
+        # The daemon we just bootstrapped owns the port now; a health check
+        # that passed on a leftover foreground process would lie about the
+        # supervised one. Wait for OUR pid to be the listener before probing.
+        deadline = time.time() + 20
         while time.time() < deadline:
-            if health(port) and gate_closed(port):
+            if _our_daemon_listening(port) and health(port) and gate_closed(port):
                 steps.append("health check passed and the auth gate is closed")
                 # Never return the password: a `--json` dump or an agent
                 # capturing stdout would put it in the transcript.
@@ -171,7 +199,19 @@ def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object
 
 
 def service_action(action: str) -> dict[str, object]:
-    """start|stop|restart via launchctl kickstart/kill."""
+    """start|stop|restart via launchctl.
+
+    The kickstart family fails with "Could not find service" when the plist
+    exists but the agent was never bootstrapped (or was booted out and not
+    re-loaded). Bootstrap it on demand so the control commands work from
+    whatever state launchd is in, not just the state `install` left behind.
+    """
+    if action in ("start", "restart") and plist_path().exists():
+        printed = _launchctl("print", f"{_domain()}/{LABEL}")
+        if printed.returncode != 0:
+            bootstrap = _launchctl("bootstrap", _domain(), str(plist_path()))
+            if bootstrap.returncode != 0:
+                return {"ok": False, "error": bootstrap.stderr.strip()[:300]}
     if action == "start":
         result = _launchctl("kickstart", f"{_domain()}/{LABEL}")
     elif action == "stop":
