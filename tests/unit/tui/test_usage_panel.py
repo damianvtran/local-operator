@@ -792,3 +792,109 @@ async def test_a_scrolled_footer_keeps_the_affordance_over_the_tally() -> None:
     assert "esc close" in footer, footer
     # The tally is what yields, not the way out.
     assert "windows" not in footer, footer
+
+
+# -- cached-first open --------------------------------------------------------
+@pytest.mark.asyncio
+async def test_show_cached_paints_the_reports_with_their_age_and_a_refreshing_mark() -> None:
+    """When the shared cache already holds a row, `/usage` must not say
+    "fetching…" and hide an answer that is on hand — it paints the reports at
+    once, states their age, and marks that a refresh is running behind them."""
+    import time as _time
+
+    async with _panel_app() as panel:
+        panel.start_fetch("")
+        fetched_ms = _time.time() * 1000 - 120_000  # 2 minutes old
+        panel.show_cached(
+            [_report(_percent("a:5h", "5 hour", 5.0, shared=True))], now_ms=fetched_ms
+        )
+        text = "\n".join(panel.render_lines_for_test())
+        assert "fetching…" not in text
+        assert "refreshing…" in text
+        assert "2m ago" in text
+        assert "anthropic" in text
+
+
+@pytest.mark.asyncio
+async def test_show_reports_clears_the_refreshing_mark() -> None:
+    """The fetch's result replaces the cached view; the `refreshing…` mark goes."""
+    import time as _time
+
+    async with _panel_app() as panel:
+        panel.start_fetch("")
+        panel.show_cached(
+            [_report(_percent("a:5h", "5 hour", 5.0, shared=True))],
+            now_ms=_time.time() * 1000,
+        )
+        panel.show_reports([_report(_percent("a:5h", "5 hour", 50.0, shared=True))])
+        text = "\n".join(panel.render_lines_for_test())
+        assert "refreshing…" not in text
+        assert "50%" in text
+
+
+@pytest.mark.asyncio
+async def test_settle_refresh_keeps_the_cached_numbers_when_the_fetch_fails() -> None:
+    """A failed refresh must not blank the panel: the cached numbers stay, the
+    `refreshing…` mark goes, and the age in the title already says how stale
+    they are."""
+    import time as _time
+
+    async with _panel_app() as panel:
+        panel.start_fetch("")
+        panel.show_cached(
+            [_report(_percent("a:5h", "5 hour", 5.0, shared=True))],
+            now_ms=_time.time() * 1000,
+        )
+        panel.settle_refresh()
+        text = "\n".join(panel.render_lines_for_test())
+        assert "refreshing…" not in text
+        assert "anthropic" in text
+        assert "5%" in text
+
+
+@pytest.mark.asyncio
+async def test_a_cold_open_still_says_fetching() -> None:
+    """With nothing cached the panel shows its loading state — the cached-first
+    path must not accidentally render an empty report set."""
+    async with _panel_app() as panel:
+        panel.start_fetch("")
+        assert "fetching…" in "\n".join(panel.render_lines_for_test())
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refresh_says_so_instead_of_just_dropping_the_mark() -> None:
+    """`r` came back empty-handed: the numbers stay, and a pinned note says the
+    refresh failed — the mark silently vanishing is not an answer to a key the
+    user just pressed."""
+    import time as _time
+
+    async with _panel_app() as panel:
+        panel.start_fetch("")
+        panel.show_cached(
+            [_report(_percent("a:5h", "5 hour", 5.0, shared=True))],
+            now_ms=_time.time() * 1000,
+        )
+        panel.settle_refresh(failed=True)
+        text = "\n".join(panel.render_lines_for_test())
+        assert "refresh failed — showing last known numbers" in text
+        assert "refreshing…" not in text
+        assert "5 hour" in text  # the numbers survived
+
+
+@pytest.mark.asyncio
+async def test_the_title_row_truncates_instead_of_wrapping() -> None:
+    """The title gained suffixes (target, age, refreshing…) that can outrun a
+    narrow card. An untruncated Text WRAPS — an extra visual row the pinned
+    height never counted, which clipped the footer (and its `r refresh`
+    receipt) off the card exactly in the stale/narrow state where the refresh
+    key matters most."""
+    import time as _time
+
+    async with _panel_app(size=(36, 24)) as panel:
+        panel.start_fetch("openrouter")
+        panel.show_cached(
+            [_report(_percent("a:5h", "5 hour", 5.0, shared=True), provider="openrouter")],
+            now_ms=_time.time() * 1000 - 12 * 3600_000,  # "12h ago"
+        )
+        title = panel._compose_rows()[0]
+        assert cell_len(title.plain) <= panel.panel_width(), title.plain

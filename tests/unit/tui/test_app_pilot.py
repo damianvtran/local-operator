@@ -1047,6 +1047,12 @@ class FakeProviderController:
         self.usage_error: Exception | None = None
         self.logins: list[str] = []
         self.logouts: list[str] = []
+        #: Staged cache rows for the instant-open path. Empty by default so
+        #: existing tests exercise the cold (fetching…) open.
+        self.cached_reports: list[Any] = []
+        #: Age in ms of the staged cache row, or None when there is none.
+        #: The warmer reads this to decide whether to fetch.
+        self.usage_cache_age: int | None = None
 
     def login_providers(self) -> list[Any]:
         return [
@@ -1109,6 +1115,10 @@ class FakeProviderController:
         # can reach it"; `/provider` renders this one, not the wider list.
         return [p for p in self.usage_enabled_providers() if self.has_any_credential(p)]
 
+    def can_report_usage(self, provider):
+        # The warmer's gate: "has an endpoint AND a credential to reach it".
+        return provider in self.usage_reportable_providers()
+
     def resolve_model(self, provider, model_id):
         return FakeModel(provider, model_id)
 
@@ -1126,11 +1136,21 @@ class FakeProviderController:
         self.logouts.append(provider)
         return f"removed {provider}"
 
-    async def fetch_usage(self, provider_ids=None):
+    async def fetch_usage(self, provider_ids=None, *, force_refresh: bool = False):
         self.usage_calls.append(provider_ids)
         if self.usage_error is not None:
             raise self.usage_error
         return self.usage_reports
+
+    def cached_usage_reports(self, provider=None):
+        # The shared-cache fast path. Empty by default so the existing pilot
+        # tests exercise the cold (fetching…) open; a test that wants the
+        # instant-paint path stages rows here.
+        return list(getattr(self, "cached_reports", []))
+
+    def usage_cache_age_ms(self, provider):
+        # Settable so a test can simulate a warm row (0) or a cold one (None).
+        return getattr(self, "usage_cache_age", None)
 
 
 class _FakeDef:
@@ -1341,7 +1361,7 @@ class _ControlledUsageController(FakeProviderController):
         self.first_started = asyncio.Event()
         self.first_cancelled = False
 
-    async def fetch_usage(self, provider_ids=None):
+    async def fetch_usage(self, provider_ids=None, *, force_refresh: bool = False):
         self.usage_calls.append(provider_ids)
         if len(self.usage_calls) == 1:
             self.first_started.set()
@@ -1387,6 +1407,91 @@ async def test_usage_command_opens_the_panel_with_the_report() -> None:
         assert app.focused is panel
     assert "openrouter" in text
     assert "Credits" in text
+
+
+@pytest.mark.asyncio
+async def test_usage_opens_instantly_from_the_cache_when_a_row_is_warm() -> None:
+    """The whole point of the shared cache: when a row is on hand, `/usage`
+    paints it immediately (with its age) rather than showing "fetching…" and
+    making the user wait for a network round they did not need."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    session = FakeSession()
+    ctrl = FakeProviderController()
+    ctrl.usage_reports = _usage_reports()
+    # Stage a warm cache row: the panel must paint THIS before the fetch lands.
+    ctrl.cached_reports = _usage_reports(used=5.0)
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        assert panel.is_open
+        text = "\n".join(panel.render_lines_for_test())
+    # The cached row painted immediately: no "fetching…", the report is there.
+    assert "fetching…" not in text
+    assert "openrouter" in text
+    assert "Credits" in text
+
+
+@pytest.mark.asyncio
+async def test_an_empty_successful_fetch_replaces_cached_numbers() -> None:
+    """`[]` from the controller is a REAL answer after the empty-over-data
+    acceptance window ("this provider reports nothing"). Treating it as a
+    failed refresh would keep the stale numbers the cache just stopped serving
+    and pin a "refresh failed" note on the wrong arm."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    session = FakeSession()
+    ctrl = FakeProviderController()
+    ctrl.cached_reports = _usage_reports(used=5.0)
+    ctrl.usage_reports = []  # the fetch's answer: nothing to report
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        for _ in range(6):
+            await pilot.pause()
+        text = "\n".join(panel.render_lines_for_test())
+    assert "refresh failed" not in text
+    assert "Credits" not in text  # the stale numbers were replaced
+    assert "no usage" in text
+
+
+@pytest.mark.asyncio
+async def test_the_background_warmer_only_fetches_when_the_row_is_stale() -> None:
+    """The warmer is an optimisation, not a fetch-per-interval: it must skip the
+    network when the shared cache already holds a fresh row for the active
+    provider, and only fire when that row is missing or going stale."""
+
+    class _SessionWithModel(FakeSession):
+        @property
+        def model(self):
+            return FakeModel("openrouter", "deepseek/deepseek-chat")
+
+    session = _SessionWithModel()
+    ctrl = FakeProviderController()
+    ctrl.usage_reports = _usage_reports()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        # No cached row yet (the fake's `usage_cache_age_ms` returns None), so
+        # the warmer must fire a background fetch for the active provider.
+        before = len(ctrl.usage_calls)
+        app._warm_usage_background()
+        for _ in range(4):
+            await pilot.pause()
+        assert len(ctrl.usage_calls) == before + 1
+        assert ctrl.usage_calls[-1] == ["openrouter"]
+
+        # Now the row is warm: a second warm tick must NOT fetch again.
+        ctrl.usage_cache_age = 0  # pretend the row is fresh
+        before = len(ctrl.usage_calls)
+        app._warm_usage_background()
+        for _ in range(4):
+            await pilot.pause()
+        assert len(ctrl.usage_calls) == before
 
 
 @pytest.mark.asyncio
