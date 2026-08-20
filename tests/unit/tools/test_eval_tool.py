@@ -541,6 +541,72 @@ def test_a_caught_error_is_an_explicit_disclosure_and_untouched(
     assert secret in payload["stdout"]
 
 
+def test_a_context_chain_also_redacts_the_inner_process_error(_fresh_argv_ledger, tmp_path) -> None:
+    """format_exception renders the WHOLE __context__/__cause__ chain, so
+    redacting only the outermost exception leaks the secret in the inner one.
+    A bare ``raise`` inside ``except`` is the common shape."""
+    secret = "context-chain-secret"
+    sf = tmp_path / "s.txt"
+    sf.write_text(secret)
+    payload = _run_cell(
+        "import subprocess\n"
+        f"tok = open({str(sf)!r}).read()\n"
+        "try:\n"
+        "    subprocess.run(['false', 'h', tok], check=True)\n"
+        "except subprocess.CalledProcessError:\n"
+        "    raise ValueError('wrapper')\n"
+    )
+    assert secret not in payload["error"]
+    # The wrapper and the inner error are both rendered, but the secret is not.
+    assert "ValueError" in payload["error"] and "CalledProcessError" in payload["error"]
+
+
+def test_raise_from_redacts_the_cause_chain(_fresh_argv_ledger, tmp_path) -> None:
+    """``raise ... from e`` names the cause explicitly; its argv is redacted."""
+    secret = "raise-from-secret"
+    sf = tmp_path / "s.txt"
+    sf.write_text(secret)
+    payload = _run_cell(
+        "import subprocess\n"
+        f"tok = open({str(sf)!r}).read()\n"
+        "try:\n"
+        "    subprocess.run(['false', 'h', tok], check=True)\n"
+        "except subprocess.CalledProcessError as e:\n"
+        "    raise KeyError('k') from e\n"
+    )
+    assert secret not in payload["error"]
+
+
+def test_an_unparseable_string_cmd_is_ledger_gated_not_passed_through(
+    _fresh_argv_ledger,
+) -> None:
+    """A string cmd shlex cannot parse (one unbalanced quote) must not be
+    rendered verbatim with the secret inside: the whole string is disclosed or
+    collapsed to a length marker."""
+    import subprocess as sp
+
+    from local_operator.tools import eval_worker
+
+    undisclosed = "curl -H 'Authorization: Bearer unbalanced-secret"
+    exc = sp.CalledProcessError(1, undisclosed)
+    eval_worker._redact_process_exception(exc)
+    assert exc.cmd == "<redacted:%dc>" % len(undisclosed)
+
+    # ...but a string the model literally wrote stays readable.
+    eval_worker._ARGV_LEDGER.record(undisclosed)
+    exc2 = sp.CalledProcessError(1, undisclosed)
+    eval_worker._redact_process_exception(exc2)
+    assert exc2.cmd == undisclosed
+
+
+def test_a_plain_traceback_without_a_command_is_untouched(_fresh_argv_ledger) -> None:
+    """The guard must not mangle ordinary errors. A ValueError whose message is
+    prose (no process invocation) renders word for word."""
+    payload = _run_cell("raise ValueError('plain words with spaces and no command')\n")
+    assert "plain words with spaces and no command" in payload["error"]
+    assert "<redacted" not in payload["error"]
+
+
 def test_worker_caps_stdout_stderr_display_and_repr_before_json() -> None:
     """Containment is worker-side: huge output never reaches the parent or
     json.dumps unbounded, even before the eval tool's 8KiB spill layer."""

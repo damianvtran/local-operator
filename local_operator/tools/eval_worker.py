@@ -186,9 +186,11 @@ def _redact_cmd(cmd: Any) -> Any:
 
     A list is rebuilt element-wise; a string is split with ``shlex`` so a
     quoted argument stays one piece (quote awareness is fidelity, not safety:
-    without it ``sh -c 'exit 3'`` half-redacts an innocent line). Unparseable
-    input is returned unchanged — over-redaction of a string we cannot safely
-    split would mangle legitimate diagnostics.
+    without it ``sh -c 'exit 3'`` half-redacts an innocent line). A string
+    ``shlex`` cannot parse (one unbalanced quote from the normal case) is
+    ledger-gated whole: if its exact bytes appear in the model's source they
+    are already disclosed; otherwise it collapses to a single ``<redacted:Nc>``
+    rather than being rendered verbatim with the secret inside.
     """
     seen = [False]
     if isinstance(cmd, (list, tuple)):
@@ -197,34 +199,9 @@ def _redact_cmd(cmd: Any) -> Any:
         try:
             parts = shlex.split(cmd)
         except ValueError:
-            return cmd
+            return cmd if _ARGV_LEDGER.discloses(cmd) else _redacted_arg(cmd)
         return " ".join(_redact_cmd_arg(a, seen) for a in parts)
     return cmd
-
-
-def _redact_process_error_message(text: str) -> str:
-    """Redact an embedded ``Command '...'`` invocation in a rendered message.
-
-    The command line is rendered by the runtime inside the message, so we
-    recover it with the same ``shlex`` split and apply the disclosure gate
-    token by token. Only the first (argv[0]) token is preserved.
-    """
-    try:
-        tokens = shlex.split(text)
-    except ValueError:
-        return text
-    if not tokens:
-        return text
-    redacted = [_redact_cmd_arg(t, [False]) for t in tokens]
-    if redacted == tokens:
-        return text
-    # Replace longest-first so a redacted long token cannot be partially
-    # re-matched inside a shorter one it contains.
-    out = text
-    for original, masked in sorted(zip(tokens, redacted), key=lambda p: -len(p[0])):
-        if original != masked:
-            out = out.replace(original, masked)
-    return out
 
 
 def _redact_process_exception(exc: BaseException) -> None:
@@ -244,6 +221,30 @@ def _redact_process_exception(exc: BaseException) -> None:
         return
     with contextlib.suppress(Exception):
         exc.cmd = redacted  # type: ignore[attr-defined]
+
+
+def _redact_process_exception_chain(exc: BaseException) -> None:
+    """Redact argv in ``exc`` AND every process error in its context/cause chain.
+
+    ``format_exception`` renders the WHOLE ``__context__``/``__cause__`` chain,
+    so redacting only the outermost exception leaks a secret embedded in an
+    inner one — ``except CalledProcessError as e: raise RuntimeError(str(e))``
+    puts the undisclosed argv in the traceback twice. The walk is iterative
+    with a visited set so a cyclic chain (``raise ... from`` pointing back)
+    terminates instead of hanging.
+    """
+    visited: set[int] = set()
+    stack: list[BaseException | None] = [exc]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in visited:
+            continue
+        visited.add(id(current))
+        _redact_process_exception(current)
+        stack.append(current.__cause__)
+        # __context__ is the implicit chain (an exception raised while handling
+        # another); it is what a bare ``raise`` inside ``except`` produces.
+        stack.append(current.__context__)
 
 
 _REPR = reprlib.Repr()
@@ -389,14 +390,10 @@ def _format_error(exc: BaseException) -> str:
     # exception's ``__str__`` interpolates ``cmd`` at format time, so this is
     # the single choke point. ``CalledProcessError.__str__`` reads ``self.cmd``
     # fresh, and ``TimeoutExpired.__str__`` likewise, so rewriting the
-    # attribute is what the formatted output reflects.
-    _redact_process_exception(exc)
-    rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
-    # A chain (``raise ... from``) or a wrapper that rendered the command into
-    # its own message can still carry argv the attribute rewrite missed; the
-    # message-level pass is the backstop. It is gated on the same ledger, so it
-    # never touches a command the model actually wrote.
-    return _redact_process_error_message(rendered)
+    # attribute is what the formatted output reflects. The whole context/cause
+    # chain is walked because format_exception renders all of it.
+    _redact_process_exception_chain(exc)
+    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
 
 
 def _execute(namespace: dict[str, Any], code: str) -> str | None:
