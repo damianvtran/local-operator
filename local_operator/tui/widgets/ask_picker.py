@@ -1892,9 +1892,7 @@ class AskPickerScreen(Container):
                 rendered = SECRET_MASK * len(self.state.typed)
             else:
                 prefix = OTHER_PREFIX
-                rendered = _tail_cells(
-                    self.state.typed, max(1, budget - cell_len(OTHER_PREFIX))
-                )
+                rendered = _tail_cells(self.state.typed, max(1, budget - cell_len(OTHER_PREFIX)))
             row.append(prefix, style=accent if taken else ground + fg)
             row.append(
                 truncate_cells(rendered, max(1, budget - cell_len(prefix))),
