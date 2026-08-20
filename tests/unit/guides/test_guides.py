@@ -27,6 +27,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "configuration",
         "extensions",
         "mcp",
+        "mobile",
     ]
     assert all(guide.resource_type == "guide" for guide in guides)
     assert all(40 <= len(guide.description) <= 180 for guide in guides)
@@ -66,6 +67,7 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("set the default provider and model configuration", "configuration"),
         ("create a Local Operator skill or executable plugin", "extensions"),
         ("list available agents or spawn a subagent", "agents"),
+        ("set up phone access so I can drive lop from my mobile", "mobile"),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
@@ -162,6 +164,23 @@ async def test_custom_instructions_task_routes_to_the_configuration_guide(
     ):
         selected = {guide.name for guide in await index.select(query)}
         assert "configuration" in selected, query
+
+
+def test_mobile_guide_requires_a_password_delivery_ask() -> None:
+    """An agent that 'just prints the password' is the failure this guide exists
+    to prevent. The four channels and the ask-first rule have to be in the
+    body, not implied."""
+    body = make_guide_resolver({guide.name: guide for guide in discover_guides()})(
+        "guide://mobile"
+    )
+
+    assert body is not None
+    assert "ask" in body.lower()
+    assert "Keychain" in body
+    assert "pbcopy" in body
+    assert "0600" in body
+    assert "Never invent a fourth channel" in body
+    assert "lop mobile install" in body
 
 
 def test_configuration_guide_names_the_real_instructions_file() -> None:
