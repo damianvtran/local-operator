@@ -313,6 +313,10 @@ async def test_ripgrep_skipped_count_walk_stays_off_loop(
     Skipped (not failed) when rg is not installed: the path under test does
     not exist without it.
     """
+    # Pin the engine selector to 'auto' so the skip condition below is purely
+    # about the rg binary, not an ambient LOCAL_OPERATOR_GREP_ENGINE override
+    # (review N2).
+    monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
     if not builtin._use_ripgrep():
         pytest.skip("ripgrep not on PATH; the rg recount path cannot run")
     _wide_tree(tmp_path, dirs=10, files_per_dir=20)

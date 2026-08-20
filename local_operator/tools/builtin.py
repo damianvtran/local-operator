@@ -3521,14 +3521,25 @@ async def execute_grep(
         # rg applies --max-filesize silently; recover the count the footer
         # contract promises. The walk+stat pass is the same filesystem load
         # as the scan itself, so it rides a thread raced against abort.
-        skipped_count, aborted = await _run_with_abort(
-            asyncio.to_thread(_count_oversized_files, target),
-            signal,
-            lambda: None,
-        )
-        if aborted:
-            return _error(tool_call_id, "grep", "Search aborted.")
-        files_skipped = skipped_count or 0
+        # Skipped for a single named file: the engine gate above only keeps
+        # rg when that file is already under the cap, so the count is
+        # definitionally zero and a worker-thread hop to confirm it would be
+        # pure overhead on the most common grep shape (review F2).
+        if not target_is_file:
+            skipped_count, aborted = await _run_with_abort(
+                asyncio.to_thread(_count_oversized_files, target),
+                signal,
+                lambda: None,
+            )
+            if aborted:
+                return _error(tool_call_id, "grep", "Search aborted.")
+            # Non-None whenever aborted is False: _run_with_abort returns the
+            # coroutine's result on the non-abort arms, and the counter always
+            # returns an int. The assert states that contract for the type
+            # checker instead of an `or 0` that would silently launder a
+            # future internal failure into a zero (review N1).
+            assert skipped_count is not None
+            files_skipped = skipped_count
     else:
         if signal and signal.aborted:
             return _error(tool_call_id, "grep", "Search aborted.")
@@ -3548,8 +3559,14 @@ async def execute_grep(
             signal,
             lambda: None,
         )
-        if aborted or py_result is None:
+        if aborted:
             return _error(tool_call_id, "grep", "Search aborted.")
+        # Non-None whenever aborted is False (same contract as above): an
+        # exception inside the walk/scan propagates to _guard rather than
+        # returning None, so a None here could only mean a broken
+        # _run_with_abort — assert, never mislabel it "Search aborted."
+        # (review F1).
+        assert py_result is not None
         records, files_searched, files_skipped = py_result
 
     matches = [r for r in records if r[3] == "m"]
