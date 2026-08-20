@@ -190,6 +190,13 @@ def test_kitty_mode_transmits_once_and_replaces_on_resize(monkeypatch) -> None:
     block._repaint()
     assert sum("a=t,i=" in seq for seq in written) == 1
     assert sum("a=p,i=" in seq for seq in written) == 1
+    # A repaint at a CHANGED grid re-places — one short escape — and still
+    # never retransmits the pixels (review round 1, F6: the `_placed !=
+    # (cols, rows)` branch was untested).
+    block._placed = (10, 4)  # simulate a stale placement from another width
+    block._repaint()
+    assert sum("a=t,i=" in seq for seq in written) == 1
+    assert sum("a=p,i=" in seq for seq in written) == 2
 
 
 def test_kitty_without_writer_falls_back_to_halfcell(monkeypatch) -> None:
@@ -209,6 +216,90 @@ def test_kitty_demotion_keeps_the_picture(monkeypatch) -> None:
     block._demote_to_halfcell()
     assert "▀" in _plain(block)
     assert PLACEHOLDER not in _plain(block)
+
+
+def test_kitty_placement_failure_releases_the_store_entry(monkeypatch) -> None:
+    """A transmit that lands whose placement cannot be written must not
+    strand the image in the terminal store or a budget slot (F1)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "kitty")
+    written: list[str] = []
+
+    def writer(sequence: str) -> None:
+        if "a=p," in sequence:
+            raise OSError("driver gone")
+        written.append(sequence)
+
+    set_escape_writer(writer)
+    block = ImageBlock(_png(160, 100))
+    # Demoted to half-cells, id cleared, and the transmitted image deleted.
+    assert "◀".replace("◀", "▀") in _plain(block)
+    assert block._kitty_id is None
+    assert any("a=d,d=I" in seq for seq in written)
+
+
+def test_no_color_forces_text_mode(monkeypatch) -> None:
+    """NO_COLOR strips the fg color that carries the kitty image id, so the
+    honest mode is the receipt (F2)."""
+    monkeypatch.delenv("LOCAL_OPERATOR_IMAGES", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("TERM", "xterm-kitty")
+    images_mod.reset_for_tests()
+    assert images_mod.detect_mode() == "text"
+
+
+def test_receipt_truncates_to_one_row_with_ellipsis(monkeypatch) -> None:
+    """Receipts must be one row at ANY width, ellipsized in the string
+    itself: Content.from_rich_text drops Text's overflow flags, so a
+    wrapped receipt measures two rows while painting one (D1)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    block = ImageBlock(None)
+    row = block._receipt_row("image unavailable — no longer in the transcript")
+    # At the default 80-col guess the full reason fits.
+    assert "transcript" in row.plain
+    # Narrow: the row ends in an ellipsis and never carries a newline.
+    # `size` is a live property over the content region, so the narrow
+    # width is injected by patching it on the class (monkeypatch restores).
+    from textual.geometry import Size
+
+    narrow = ImageBlock(None)
+    monkeypatch.setattr(ImageBlock, "size", property(lambda self: Size(44, 1)))
+    clipped = narrow._receipt_row("image unavailable — no longer in the transcript")
+    assert "\n" not in clipped.plain
+    assert clipped.plain.rstrip().endswith("…")
+
+
+def test_halfcell_letterboxes_small_images(monkeypatch) -> None:
+    """A 2:1 icon must paint a 2:1 footprint, not stretch to fill its grid
+    (D2). Asserted from the PAINTED spans: a solid red 48x24 source in a
+    6x2-cell grid (6x4 half-rows) must leave at least one half-row as pure
+    theme background — the letterbox bar. The old stretch-to-fill code
+    painted red into every half-row, so this fails on it by construction.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    from local_operator.tui import theme as theme_mod
+
+    block = ImageBlock(_png(48, 24, color=(255, 0, 0)))
+    cols, rows = block._grid()
+    assert (cols, rows) == (6, 2)  # the fit at 8x16 cells
+    frame = block._build_halfcell(cols, rows)
+    background = theme_mod.semantic_color("bg").lstrip("#")
+    bg = f"rgb({int(background[0:2], 16)},{int(background[2:4], 16)},{int(background[4:6], 16)})"
+    # Walk the styled segments: each carries "<top> on <bottom>". 48x24 at
+    # 8x16 cells occupies 3 of the grid's 4 half-rows, so SOME cell must
+    # pair red pixels with a background half — the bar's edge. Stretch-to-
+    # fill paints red into all 4 half-rows and has no such pair.
+    pairs: list[tuple[str, str]] = []
+    for span in frame.spans:
+        style = str(span.style)
+        if " on " not in style:
+            continue
+        top, _, bottom = style.partition(" on ")
+        pairs.append((top.strip(), bottom.strip()))
+    assert pairs, "no styled half-cell spans painted"
+    assert any("255,0,0" in top for top, _ in pairs), "icon pixels missing"
+    assert any(
+        "255,0,0" in top and bottom == bg for top, bottom in pairs
+    ), "no letterbox bar: the icon was stretched to fill its grid"
 
 
 def test_unavailable_receipt_for_missing_bytes(monkeypatch) -> None:

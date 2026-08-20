@@ -52,6 +52,12 @@ _HALF = "▀"
 #: Glyph leading the unavailable receipt. WGL4-safe (no Nerd Font needed).
 _UNAVAILABLE_GLYPH = "▨"
 
+#: Glyph leading the HEALTHY text-mode receipt — the prompt's own attachment
+#: row already uses ``↑`` for "attached", so the receipt speaks the same
+#: grammar and a glyph scan can tell fine-but-not-shown from broken (design
+#: round 1, D3). ``▨`` stays exclusively the unavailable mark.
+_ATTACHED_GLYPH = "↑"
+
 
 def _decode(data_b64: str, mime_type: str) -> "PILImage | None":
     """Decode base64 image bytes to a PIL image, or ``None``.
@@ -227,6 +233,14 @@ class ImageBlock(TranscriptBlock):
             images_mod.register_live(image_id, self._demote_to_halfcell)
         if self._placed != (cols, rows):
             if not images_mod.write_escape(images_mod.encode_placement(self._kitty_id, cols, rows)):
+                # The transmit landed but the placement could not be written:
+                # without this release the terminal would keep an image that
+                # will never be placed, parked in one of the 8 budget slots
+                # until unmount (review round 1, F1). Reclaim it and let the
+                # caller demote.
+                images_mod.release_live(self._kitty_id)
+                self._kitty_id = None
+                self._placed = None
                 return None
             self._placed = (cols, rows)
         grid = images_mod.placeholder_grid(rows, cols)
@@ -244,16 +258,37 @@ class ImageBlock(TranscriptBlock):
         return text
 
     def _transmit_frame(self) -> "PILImage":
-        """The pixels sent to the terminal.
+        """The pixels sent to the terminal, LETTERBOXED to the cap grid.
 
         `_shrink` already sized the retained copy to the CAP grid rather than
         the current one, so a later resize to a wider terminal re-places
         against pixels that were never smaller than any placement can be —
         placements only ever downscale, which is what keeps one transmit
         sharp at every width without ever retransmitting.
+
+        The letterbox exists because a kitty placement STRETCHES the image to
+        fill its ``c=`` x ``r=`` cell rectangle, and the rectangle's aspect
+        only approximates the image's (cells are integers). For a 12-row
+        screenshot the rounding error is invisible; for a 2-row icon it was a
+        measured 25% vertical stretch (design round 1, D2). Padding the frame
+        to exactly the grid rectangle's pixel aspect with TRANSPARENT bars
+        makes the stretch-to-fill aspect-true — the bars render as the
+        terminal's own background.
         """
         assert self._pil is not None
-        return self._pil
+        from PIL import Image as PIL_Image
+
+        cell = images_mod.cell_size()
+        cols, rows = images_mod.fit_cells(
+            self._px_width, self._px_height, images_mod.MAX_COLS, images_mod.MAX_ROWS
+        )
+        box = (cols * cell.width, rows * cell.height)
+        frame = self._pil if self._pil.mode == "RGBA" else self._pil.convert("RGBA")
+        if (frame.width, frame.height) == box:
+            return frame
+        canvas = PIL_Image.new("RGBA", box, (0, 0, 0, 0))
+        canvas.paste(frame, ((box[0] - frame.width) // 2, (box[1] - frame.height) // 2))
+        return canvas
 
     def _build_halfcell(self, cols: int, rows: int) -> Text:
         """The image as ``▀`` cells: top pixel in fg ink, bottom in bg.
@@ -268,11 +303,29 @@ class ImageBlock(TranscriptBlock):
             return self._halfcell_cache[1]
         from PIL import Image as PIL_Image
 
-        frame = self._pil.convert("RGBA").resize((cols, rows * 2), PIL_Image.Resampling.LANCZOS)
+        # LETTERBOX, never stretch-to-fill (design round 1, D2): the grid's
+        # display aspect only approximates the image's, and at small grids the
+        # rounding error is gross. The image is scaled to the largest
+        # half-cell-pixel rectangle that fits INSIDE the grid at its true
+        # display aspect (a half-cell pixel measures cell.width x
+        # cell.height/2 real pixels), then centered; the bars are theme
+        # background, i.e. invisible.
+        cell = images_mod.cell_size()
+        grid_w, grid_h = cols, rows * 2
+        # Clamped at 1.0: grid quantization can hand a tiny image a grid a
+        # shade larger than its pixels, and filling it would upscale.
+        scale = min(
+            (cols * cell.width) / max(1, self._px_width),
+            (rows * cell.height) / max(1, self._px_height),
+            1.0,
+        )
+        inner_w = min(grid_w, max(1, round(self._px_width * scale / cell.width)))
+        inner_h = min(grid_h, max(1, round(2 * self._px_height * scale / cell.height)))
+        frame = self._pil.convert("RGBA").resize((inner_w, inner_h), PIL_Image.Resampling.LANCZOS)
         background = theme_mod.semantic_color("bg").lstrip("#")
         bg_rgb = tuple(int(background[i : i + 2], 16) for i in (0, 2, 4))
-        canvas = PIL_Image.new("RGBA", frame.size, (*bg_rgb, 255))
-        canvas.alpha_composite(frame)
+        canvas = PIL_Image.new("RGBA", (grid_w, grid_h), (*bg_rgb, 255))
+        canvas.alpha_composite(frame, ((grid_w - inner_w) // 2, (grid_h - inner_h) // 2))
         pixels = canvas.load()
         assert pixels is not None
         indent = " " * SPINE_INDENT
@@ -307,21 +360,42 @@ class ImageBlock(TranscriptBlock):
         self.styles.height = 1
         detail = f"{self._px_width}x{self._px_height}"
         if self._label:
-            detail = f"{self._label}, {detail}"
-        return self._receipt_row(f"image attached ({detail})")
+            detail = f"'{self._label}', {detail}"
+        return self._receipt_row(f"image attached ({detail})", glyph=_ATTACHED_GLYPH)
 
     def _build_unavailable(self) -> Text:
         """The missing-image receipt: what was here, and why it is not."""
         self.styles.height = 1
         reason = self._unavailable or "unavailable"
-        name = f" {self._label}" if self._label else ""
+        # Quoted: an unquoted filename spliced into the sentence reads as a
+        # typo (`image dashboard.png unavailable`) — design round 1, D4.
+        name = f" '{self._label}'" if self._label else ""
         return self._receipt_row(f"image{name} unavailable — {reason}")
 
-    def _receipt_row(self, message: str) -> Text:
+    def _receipt_row(self, message: str, glyph: str = _UNAVAILABLE_GLYPH) -> Text:
+        """One receipt row, truncated to the block's width with a real ``…``.
+
+        Truncated HERE, in the string, not via ``Text(no_wrap=True,
+        overflow="ellipsis")``: ``set_content`` promotes a ``Text`` through
+        ``Content.from_rich_text``, which drops both flags — so the flagged
+        version WRAPPED in measurement (2 rows at 44 columns) while
+        ``styles.height = 1`` clipped the second row invisibly, losing the
+        reason mid-phrase and opening a phantom spacing gap from the 2-row
+        measurement (design round 1, D1). A pre-truncated string measures one
+        row at every width, so the frame and the measurement cannot disagree.
+        """
+        from rich.cells import cell_len
+
         style = Style(color=theme_mod.semantic_color("muted"))
-        text = Text(no_wrap=True, overflow="ellipsis")
+        lead = f"{glyph} "
+        room = max(8, (self.size.width or 80) - SPINE_INDENT - cell_len(lead))
+        if cell_len(message) > room:
+            from rich.cells import set_cell_size
+
+            message = set_cell_size(message, room - 1) + "…"
+        text = Text(no_wrap=True)
         text.append(" " * SPINE_INDENT, style=style)
-        text.append(f"{_UNAVAILABLE_GLYPH} ", style=style)
+        text.append(lead, style=style)
         text.append(message, style=style)
         return text
 
@@ -341,9 +415,12 @@ class ImageBlock(TranscriptBlock):
         self._repaint()
 
     def on_resize(self, event: object) -> None:
-        """Re-fit at the new width; a changed grid is a height change."""
-        if self._pil is None:
-            return
+        """Re-fit at the new width; a changed grid is a height change.
+
+        Receipts repaint too: their truncation point is a function of the
+        width (see :meth:`_receipt_row`), so a receipt built at 100 columns
+        and left alone would clip rather than ellipsize at 44.
+        """
         self._repaint()
         parent = self.parent
         refresh = getattr(parent, "refresh_gap_around", None)

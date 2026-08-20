@@ -38,7 +38,7 @@ import io
 import struct
 import sys
 from collections import OrderedDict
-from typing import Callable
+from typing import Callable, Literal
 
 from local_operator.tui.settings import settings_get
 
@@ -402,7 +402,7 @@ _CHUNK = 4096
 # Mode detection and cell geometry
 # ---------------------------------------------------------------------------
 
-ImageMode = str  # "kitty" | "halfcell" | "text"
+ImageMode = Literal["kitty", "halfcell", "text"]
 
 #: Memoized answers. Detection reads the environment and (for cell size) an
 #: ioctl; both are stable for the life of the process, and re-running them
@@ -479,8 +479,15 @@ def _detect_mode() -> ImageMode:
 
     forced = (os.environ.get(_ENV_MODE) or "").strip().lower()
     if forced in ("kitty", "halfcell", "text"):
-        return forced
+        return forced  # type: ignore[return-value]  # narrowed by the check
     if forced == "off":
+        return "text"
+    # NO_COLOR strips foreground colors from Textual's output — and the kitty
+    # placeholder grid carries the image id IN the foreground color, so under
+    # NO_COLOR it would render as bare U+10EEEE tofu; half-cells degrade to
+    # monochrome soup the same way. The honest mode there is the receipt.
+    # (review round 1, F2)
+    if os.environ.get("NO_COLOR"):
         return "text"
     if not settings_get("display.images", True):
         return "text"
@@ -497,10 +504,11 @@ def _detect_mode() -> ImageMode:
 
 def reset_for_tests() -> None:
     """Drop every module-level memo and registry (test isolation hook)."""
-    global _mode_cache, _cell_cache, _writer
+    global _mode_cache, _cell_cache, _writer, _next_id
     _mode_cache = None
     _cell_cache = None
     _writer = None
+    _next_id = None
     _live.clear()
 
 

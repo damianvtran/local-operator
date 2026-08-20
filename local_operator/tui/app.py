@@ -6017,10 +6017,18 @@ class OperatorApp(App[None]):
         whose bytes will not decode still mounts (as its unavailable
         receipt), but a failure CONSTRUCTING one must not take down the
         message dispatch that carried a perfectly good tool result.
+
+        Labels are positional (``#1``, ``#2``) and only when the batch has
+        more than one image: a receipt for a batch of one names nothing the
+        row above it has not already said, while `image '#2' unavailable`
+        tells the reader WHICH of several pictures is gone — the number is
+        the same one the prompt's ``[Image #N]`` markers use (review round
+        1, F4).
         """
-        for image in images:
+        for index, image in enumerate(images):
+            label = f"#{index + 1}" if len(images) > 1 else ""
             try:
-                block = ImageBlock(image.data or None, image.mime_type)
+                block = ImageBlock(image.data or None, image.mime_type, label=label)
             except Exception:
                 logger.debug("image block construction failed", exc_info=True)
                 continue
