@@ -860,15 +860,15 @@ _LOGIN_HTML = """<!doctype html>
     width: 72px;
     height: 72px;
     display: block;
-    /* The source PNG is white-on-transparent; dim it to the TUI mark's
-       resting ink so a boot frame is not a wall of bright white. */
-    opacity: 0.72;
+    /* The PNG is already tinted to TUI dim (#837c6d); do not fade it
+       further — opacity on a white glyph is what made it read cooler
+       and brighter than the TUI rest colour. */
   }
   h1 {
     margin: 20px 0 0;
     font-size: 13px;
     font-weight: 500;
-    letter-spacing: 0.22em;
+    letter-spacing: 0.18em;
     text-transform: lowercase;
     color: #e9e5db;                                /* fg — the brightest row */
     text-align: center;
@@ -898,21 +898,21 @@ _LOGIN_HTML = """<!doctype html>
     border-color: transparent;
   }
   button {
-    margin-top: 16px;
+    margin-top: 20px;
     font-size: 15px;
     font-weight: 500;
     letter-spacing: 0.01em;
     padding: 14px 16px;
     min-height: 48px;
-    border: 0;
+    border: 1px solid #3b3527;                     /* edge — not a filled bar */
     border-radius: 10px;
-    background: #38c96a;                           /* accent */
-    color: #14110c;                                /* on-accent = island ground */
+    background: #1e1a14;                           /* surface */
+    color: #e9e5db;                                /* fg */
     cursor: pointer;
     -webkit-appearance: none;
     appearance: none;
   }
-  button:active { background: #2fb05c; }           /* a step down, not opacity */
+  button:active { background: #272219; }           /* raised */
   .error {
     color: #ef8078;                                /* danger */
     text-align: center;

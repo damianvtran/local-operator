@@ -31,7 +31,7 @@ export function PastSessionsScreen() {
 	};
 
 	return (
-		<div className="flex min-h-full flex-col">
+		<div className="mx-auto flex min-h-full w-full max-w-md flex-col">
 			<header className="flex items-center gap-2 px-2 pt-[max(env(safe-area-inset-top),0.75rem)] pb-3">
 				<button
 					type="button"

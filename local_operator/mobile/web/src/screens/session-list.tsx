@@ -152,14 +152,13 @@ export function SessionListScreen() {
 	}, []);
 
 	return (
-		<div className="flex min-h-full flex-col">
+		<div className="mx-auto flex min-h-full w-full max-w-md flex-col">
 			<header className="flex items-center gap-3 px-4 pt-[max(env(safe-area-inset-top),1.25rem)] pb-4">
 				<img
 					src="/mark.png"
 					alt=""
 					width={28}
 					height={28}
-					className="opacity-70"
 				/>
 				<h1 className="text-meta font-medium tracking-[0.18em] text-ink">
 					local operator
@@ -189,7 +188,7 @@ export function SessionListScreen() {
 				<button
 					type="button"
 					onClick={() => navigate("/new")}
-					className="flex min-h-11 flex-1 items-center justify-center rounded-md bg-accent text-body-sm font-medium text-on-accent select-none active:bg-accent-active"
+					className="flex min-h-11 flex-1 items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium text-ink select-none active:bg-elevated"
 				>
 					new session
 				</button>
