@@ -11,10 +11,15 @@ Ported semantics:
   sync or async, and one raising never breaks the others (isolated with a
   warning).
 - Steering messages interrupt tool batches (``interrupt_mode="immediate"``);
-  ``steer()`` is the public injection point.
+  ``steer()`` is the public injection point. Courtesy injections — a wake
+  that fires mid-turn — are the exception: they ride the queue but are
+  excluded from the interrupt poll (``_has_urgent_steering``), so they join
+  at the next successful tool boundary instead of killing the running call.
 - Wakes persist as a ``wake_schedules`` custom transcript entry (newest wins)
   and deliver through the prompt path as a user-attributed
-  ``wake_prompt`` custom message.
+  ``wake_prompt`` custom message. A wake delivered into an ongoing turn
+  carries resume guidance in its text (``_append_busy_resume_note``): handle
+  the wake's task, then continue the work it landed in.
 - Compaction is checked after each turn via a LAZY import of
   ``local_operator.compaction.api`` — a missing module degrades to
   no-compaction. Binding wiring: prune tool outputs BEFORE the trigger math,
@@ -870,6 +875,16 @@ class Session:
         )
         self._handlers: list[EventHandler] = []
         self._steering_queue: asyncio.Queue[AgentMessage] = asyncio.Queue()
+        # Count of courtesy wake_prompt messages sitting in the steering
+        # queue. The immediate-interrupt poll may cancel a RUNNING tool only
+        # for steering the user actually typed (see ``_has_urgent_steering``):
+        # a scheduled wake's timer landing mid-`bash` must ride the next
+        # boundary instead of killing work it has no right to interrupt. A
+        # count, not message ids: ``queue._queue`` is asyncio-private, and the
+        # only producer/consumer ordering question a count cannot answer is
+        # settled by the decrement happening at the same drain the delivery
+        # does.
+        self._courtesy_wake_count = 0
         # Host-registered teardown (see add_dispose_hook): resources the
         # composition root owns but the session's lifetime governs.
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
@@ -1781,6 +1796,20 @@ class Session:
             # M2). One turn, user message LAST, so the model reads the folded
             # wakes first and the reply still answers the user.
             catchup = self._take_resume_catchup()
+            if catchup is not None:
+                # Folded ahead of a real user prompt, the catch-up precedes
+                # the work it shares the turn with — the same busy-path
+                # obligation applies, so the text carries the guidance here
+                # too. On a FRESH session this prompt starts the work rather
+                # than resuming it, so the note names that instead of
+                # claiming work was already under way.
+                fresh = not self._context.messages
+                catchup.details["text"] = self._append_busy_resume_note(
+                    str(catchup.details["text"]),
+                    continue_what=(
+                        "continue with the user's request that follows" if fresh else None
+                    ),
+                )
             initial: list[AgentMessage] = (
                 [catchup, Message.user(text, images)]
                 if catchup is not None
@@ -2337,6 +2366,7 @@ class Session:
                 stream_fn=self._stream_fn,
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
+                has_urgent_steering_messages=self._has_urgent_steering,
                 get_aside_messages=self._drain_asides,
                 get_follow_up_messages=self._todo_continuation,
                 resolve_fallback_tool=self._fallback_tool_resolver,
@@ -2693,12 +2723,25 @@ class Session:
             message = self._steering_queue.get_nowait()
             await self._transcript.append_message(message)
             messages.append(message)
+        # The drain is the ONLY consumer, so every courtesy message queued
+        # before this boundary just left with it; anything queued after is a
+        # fresh count.
+        self._courtesy_wake_count = 0
         if messages:
             # After persistence, not before: the receipt says the message is in
             # the conversation, and it is only in the conversation once it is on
             # disk and in the list being handed back to the loop.
             await self._emit(SteeringDeliveredEvent(count=len(messages)))
         return messages
+
+    def _has_urgent_steering(self) -> bool:
+        """The interrupt poll's peek: True only when queued steering may cancel
+        a RUNNING tool. Wakes queued while a turn streamed are counted as
+        courtesy (``_courtesy_wake_count``) and excluded — they wait for the
+        next successful tool boundary, delivered by ``_drain_steering`` like
+        any other steering. A queue holding nothing but courtesy wakes answers
+        False, so their timers can never kill an in-flight `bash`."""
+        return self._steering_queue.qsize() > self._courtesy_wake_count
 
     async def _drain_asides(self) -> list[Aside]:
         """Drain queued aside thunks (the loop materializes them at the
@@ -3797,6 +3840,11 @@ class Session:
         receipt event was already emitted by ``_take_resume_catchup``.
         """
         if self._is_streaming:
+            # Same courtesy as a live wake delivery: never a reason to cancel
+            # the running tool, and the text must carry the resume guidance
+            # because the turn the catch-up lands in has work to return to.
+            catchup.details["text"] = self._append_busy_resume_note(str(catchup.details["text"]))
+            self._courtesy_wake_count += 1
             self._steering_queue.put_nowait(catchup)
             return
         self._spawn_background(self._prompt_messages([catchup]))
@@ -3953,6 +4001,14 @@ class Session:
         missed_note = self._missed_delivery_note(due)
         if missed_note:
             text = f"{missed_note}\n\n{text}"
+        busy = self._is_streaming
+        if busy:
+            # The resume guidance rides the text itself: the wake reached a
+            # turn that was already working, and the message is the only
+            # channel that can tell the agent to fold the wake in and then
+            # CONTINUE that work. Idle-path deliveries stay clean — they open
+            # their own turn, so there is no prior work to resume.
+            text = self._append_busy_resume_note(text)
         wake_message = CustomMessage(
             custom_type=WAKE_PROMPT_MESSAGE_TYPE,
             attribution="user",
@@ -3970,11 +4026,40 @@ class Session:
                 occurrence=due.occurrence,
             )
         )
-        if self._is_streaming:
-            # Busy: ride the next steering boundary instead of racing the turn.
+        if busy:
+            # Busy: ride the next successful tool boundary instead of racing
+            # the turn — and mark the message COURTESY so the immediate-
+            # interrupt poll does not cancel the tool it landed in the middle
+            # of (see _has_urgent_steering).
+            self._courtesy_wake_count += 1
             self._steering_queue.put_nowait(wake_message)
             return
         self._spawn_background(self._prompt_messages([wake_message]))
+
+    @staticmethod
+    def _append_busy_resume_note(text: str, *, continue_what: str | None = None) -> str:
+        """The busy-path suffix: what to do after the wake's task is handled.
+
+        A wake that lands mid-turn interrupts NOTHING (courtesy delivery), so
+        the turn's own work is still owed when the wake is done — the note
+        names that obligation, because the alarm envelope alone reads as a
+        fresh instruction and 'do the wake task, then go back' is exactly the
+        behaviour a wake firing mid-task used to lose. Idle-path deliveries
+        stay clean: they open their own turn, so there is no prior work to
+        resume.
+
+        ``continue_what`` names the interrupted work when "the work you were
+        doing" is not literally true — a catch-up folded ahead of a FRESH
+        session's first prompt interrupts nothing yet, so it continues with
+        the user's request instead of resuming anything."""
+        continuation = continue_what or "resume the work you were doing when it fired"
+        return (
+            f"{text}\n\n"
+            "(This wake fired while you were already working. It was held for a "
+            "tool boundary so nothing in flight was interrupted: handle the "
+            f"wake's task now, then {continuation} unless this wake makes it "
+            "obsolete.)"
+        )
 
     def _missed_delivery_note(self, due: DueWake) -> str | None:
         """The 'this wake fired late' prefix, or None for a punctual fire.
@@ -4079,6 +4164,9 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
+        # A courtesy wake still queued here was never delivered, so its count
+        # must not survive to misclassify a later enqueue on a reused Session.
+        self._courtesy_wake_count = 0
         try:
             # HC-14: abort the in-flight turn and await its completion (bounded)
             # before flushing — its persistence must land on a live transcript.
