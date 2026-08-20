@@ -35,10 +35,7 @@ from local_operator.tui import theme as theme_mod  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.tool_card import ToolCard  # noqa: E402
-from local_operator.tui.widgets.transcript import (  # noqa: E402
-    NoticeBlock,
-    UserBlock,
-)
+from local_operator.tui.widgets.transcript import NoticeBlock, UserBlock  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
 #: Markdown exercising the inks a theme must keep distinct: prose, bold,
