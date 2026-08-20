@@ -360,6 +360,17 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             if event.get("fallback_model"):
                 body += f" → falling back to {event.get('fallback_model')}"
             note(index, body, "warning")
+        elif etype == "model_change":
+            # The child's route moved (fallback pinned or primary recovered).
+            # One line either way: the page is a trajectory, and which model
+            # answered from this point on is part of what happened.
+            fell = bool(event.get("is_fallback"))
+            selector = f"{event.get('provider', '')}/{event.get('model_id', '')}"
+            note(
+                index,
+                (f"now serving from {selector}" if fell else f"back on {selector}"),
+                "warning" if fell else "info",
+            )
         elif etype == "agent_end":
             # The child's own failure, in the wording `on_turn_ended` uses for
             # the parent's. Without it a failed subagent's page simply stopped,

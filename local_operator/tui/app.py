@@ -91,6 +91,7 @@ from local_operator.tui.events import (
     CompactionEnded,
     CompactionStarted,
     ContextUsageReported,
+    EffectiveModelChanged,
     EventController,
     NoticePosted,
     RetryEnded,
@@ -1502,7 +1503,11 @@ class OperatorApp(App[None]):
         self._controller.subscribe()
         assert self._status is not None
         self._status.update(
-            model_label=session.model_label,
+            # The EFFECTIVE label: a resumed session that was serving from a
+            # provider fallback when it closed boots back onto that fallback
+            # (Session._restore_active_route), and painting the selection here
+            # would open the band on a model that is not answering.
+            model_label=_effective_label(session),
             model_name=_model_name(session),
             effort=_effort_label(session),
             context_window=_context_window(session),
@@ -6509,8 +6514,11 @@ class OperatorApp(App[None]):
             # The window and the effort belong to the SPEC, not the session:
             # a switch that repainted only the label would leave the context
             # percentage measured against the previous model's window.
+            # `_effective_label`, though after an explicit switch it equals
+            # `model_label` — `set_model` clears any pinned fallback — so this
+            # is one vocabulary for every model paint, not a second opinion.
             self._status.update(
-                model_label=session.model_label,
+                model_label=_effective_label(session),
                 model_name=_model_name(session),
                 effort=_effort_label(session),
                 context_window=_context_window(session),
@@ -9472,7 +9480,10 @@ class OperatorApp(App[None]):
         """
         if self._session is None:
             return None
-        return turn_cost(self._session.model_label, usage)
+        # The EFFECTIVE model: while a fallback serves, the tokens were billed
+        # at ITS rates, and pricing them off the selected model is a wrong
+        # number wearing the band's authority.
+        return turn_cost(_effective_label(self._session), usage)
 
     def _harvest_subagent_costs(self) -> None:
         """Record what each child has spent, keyed by job id.
@@ -9970,6 +9981,35 @@ class OperatorApp(App[None]):
         if held or held_images:
             self._start_turn(held, resolve_markers(held, held_images))
 
+    def on_effective_model_changed(self, message: EffectiveModelChanged) -> None:
+        """Repaint the model segment with the model actually serving requests.
+
+        The fallback NOTICE narrates the moment; this keeps the band truthful
+        for the fallback's whole lifetime, in both directions — pinned and
+        recovered. The window and effort ride along because they are properties
+        of the model being displayed: a band naming the fallback while dividing
+        context usage by the primary's window misreports both at once.
+
+        No transcript line of its own: the route-change notice (or the
+        ``/model`` receipt) has already said what happened, and a second line
+        for the same edge is the two-notices-for-one-event defect the
+        compaction handlers document.
+        """
+        if self._status is None:
+            return
+        session = self._session
+        self._status.update(
+            model_label=f"{message.provider}/{message.model_id}",
+            # Re-read through the session helpers rather than trusting the
+            # event alone: they already answer "what name / window does the
+            # EFFECTIVE model have", and the session updated its effective spec
+            # before emitting. A host without the tracking degrades to the
+            # selected model's values, which is then also what the label says.
+            model_name=_model_name(session) if session is not None else "",
+            effort=_effort_label(session) if session is not None else "",
+            context_window=_context_window(session) if session is not None else 0,
+        )
+
     def on_retry_started(self, message: RetryStarted) -> None:
         body = f"retry {message.attempt}: {message.error}"
         if message.fallback_model:
@@ -10079,13 +10119,39 @@ def slot_rows(slot: Any) -> int:
 
 
 def _model_spec(session) -> Any | None:
-    """The session's active ``ModelSpec``, or ``None`` when it has none.
+    """The session's SELECTED ``ModelSpec``, or ``None`` when it has none.
 
     Defensive because the TUI also runs against reduced hosts — embedders
     and the pilot fakes supply a session without the spec accessor — and a
     status segment must degrade to "unknown" rather than take the app down.
+
+    This is the spec the MUTATION paths read (``/effort`` validates against
+    it, ``/model default`` persists it); what the band DISPLAYS is
+    :func:`_effective_spec`, which differs while a provider fallback serves.
     """
     return getattr(session, "model", None)
+
+
+def _effective_spec(session) -> Any | None:
+    """The spec of the model ACTUALLY serving requests, or ``None``.
+
+    Falls back to the selected spec on hosts that predate the fallback
+    tracking (the pilot fakes, embedders): for them the two are the same
+    claim, so degrading is honest rather than approximate.
+    """
+    return getattr(session, "effective_model", None) or getattr(session, "model", None)
+
+
+def _effective_label(session) -> str:
+    """``provider/model`` of the model actually serving requests.
+
+    What every band paint uses for the model segment: while a provider
+    fallback is pinned, painting ``session.model_label`` (the selection)
+    asserts a model that is not answering — the exact stale frame the
+    fallback display work exists to prevent.
+    """
+    label = str(getattr(session, "effective_model_label", "") or "")
+    return label or str(getattr(session, "model_label", "") or "")
 
 
 def _model_name(session) -> str:
@@ -10099,17 +10165,26 @@ def _model_name(session) -> str:
     ``getattr`` for the same reason :func:`_model_spec` uses it: the pilot fakes
     and embedding hosts supply specs of their own shape, and a missing name is a
     segment that falls back to the selector, not a crash.
+
+    Off the EFFECTIVE spec: while a fallback serves, the band's label names the
+    fallback, and a human name resolved from the selected model beside it would
+    caption one model with another's name.
     """
-    return str(getattr(_model_spec(session), "display_name", "") or "")
+    return str(getattr(_effective_spec(session), "display_name", "") or "")
 
 
 def _context_window(session) -> int:
-    """The active model's context window, or 0 when it is unknown.
+    """The context window of the model actually serving, or 0 when unknown.
 
     Zero is meaningful downstream: the usage segment renders ``12.4k/—``
     rather than inventing a denominator to divide by.
+
+    The EFFECTIVE spec, deliberately: the usage percentage predicts when the
+    NEXT request overflows, and the next request goes to the fallback — a
+    denominator borrowed from the selected model misstates exactly the number
+    the segment exists to report.
     """
-    window = getattr(_model_spec(session), "context_window", 0) or 0
+    window = getattr(_effective_spec(session), "context_window", 0) or 0
     return int(window) if window > 0 else 0
 
 
@@ -10193,8 +10268,12 @@ def _effort_label(session) -> str:
 
     Non-reasoning models render nothing, which is what makes the segment's
     presence informative.
+
+    The EFFECTIVE spec, like the label and window: a fallback target may clamp
+    the chosen level to its own ladder (see ``spec_for_target``), and the
+    segment's one job is to name the level in force on the model answering.
     """
-    spec = _model_spec(session)
+    spec = _effective_spec(session)
     if spec is None:
         return ""
     explicit = getattr(spec, "reasoning_effort", None)
