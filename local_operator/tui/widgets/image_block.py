@@ -164,6 +164,10 @@ class ImageBlock(TranscriptBlock):
         #: grid the current placement was made for (re-place only on change).
         self._kitty_id: int | None = None
         self._placed: tuple[int, int] | None = None
+        #: Pixel aspect of the letterboxed frame actually transmitted — what
+        #: :meth:`_build_kitty` compares a new grid against to decide between
+        #: a free re-place and a retransmit (review round 2, F8).
+        self._transmit_aspect: float | None = None
         #: The mode this block actually painted with. Resolved at first paint
         #: (not construction) so the escape writer installed at app mount is
         #: visible; pinned afterwards except for demotion.
@@ -224,12 +228,29 @@ class ImageBlock(TranscriptBlock):
         so they cannot interleave with a frame Textual is writing.
         """
         assert self._pil is not None
+        cell = images_mod.cell_size()
+        box_aspect = (cols * cell.width) / max(1, rows * cell.height)
+        if self._kitty_id is not None and self._placed != (cols, rows):
+            # The transmitted frame was letterboxed for the aspect of the grid
+            # it was transmitted for. A resize that lands on a grid of the
+            # SAME aspect (the common case: width changes rarely move the
+            # fit's shape) just re-places; one whose aspect materially moved
+            # would stretch the old bars into the picture (review round 2,
+            # F8), so the image is retransmitted padded for the new grid.
+            # Bounded: only an actual grid-aspect change pays it, and the
+            # pixels come from the retained capped copy — tens of KB.
+            if abs(box_aspect - (self._transmit_aspect or box_aspect)) > 0.01:
+                images_mod.release_live(self._kitty_id)
+                self._kitty_id = None
+                self._placed = None
         if self._kitty_id is None:
             image_id = images_mod.next_image_id()
-            payload = images_mod.encode_png_base64(images_mod.to_png(self._transmit_frame()))
+            frame = self._transmit_frame(cols, rows)
+            payload = images_mod.encode_png_base64(images_mod.to_png(frame))
             if not images_mod.write_escape(images_mod.encode_transmit(image_id, payload)):
                 return None
             self._kitty_id = image_id
+            self._transmit_aspect = frame.width / max(1, frame.height)
             images_mod.register_live(image_id, self._demote_to_halfcell)
         if self._placed != (cols, rows):
             if not images_mod.write_escape(images_mod.encode_placement(self._kitty_id, cols, rows)):
@@ -241,6 +262,7 @@ class ImageBlock(TranscriptBlock):
                 images_mod.release_live(self._kitty_id)
                 self._kitty_id = None
                 self._placed = None
+                self._transmit_aspect = None
                 return None
             self._placed = (cols, rows)
         grid = images_mod.placeholder_grid(rows, cols)
@@ -257,14 +279,8 @@ class ImageBlock(TranscriptBlock):
             text.append(row, style=style)
         return text
 
-    def _transmit_frame(self) -> "PILImage":
-        """The pixels sent to the terminal, LETTERBOXED to the cap grid.
-
-        `_shrink` already sized the retained copy to the CAP grid rather than
-        the current one, so a later resize to a wider terminal re-places
-        against pixels that were never smaller than any placement can be —
-        placements only ever downscale, which is what keeps one transmit
-        sharp at every width without ever retransmitting.
+    def _transmit_frame(self, cols: int, rows: int) -> "PILImage":
+        """The pixels sent to the terminal, letterboxed to the PLACEMENT grid.
 
         The letterbox exists because a kitty placement STRETCHES the image to
         fill its ``c=`` x ``r=`` cell rectangle, and the rectangle's aspect
@@ -274,16 +290,30 @@ class ImageBlock(TranscriptBlock):
         to exactly the grid rectangle's pixel aspect with TRANSPARENT bars
         makes the stretch-to-fill aspect-true — the bars render as the
         terminal's own background.
+
+        Padded for the grid the placement will actually use, NOT the cap
+        grid: padding for the cap while placing into the current-width grid
+        compounds the two rectangles' aspect errors — measured 22% off for a
+        wide image in a 44-column terminal (review round 2, F8). The pixels
+        INSIDE the bars still come from the retained cap-sized copy, scaled
+        down to fit the grid box at their true aspect, so nothing upscales.
+        A later resize whose grid keeps this aspect re-places for free;
+        :meth:`_build_kitty` retransmits when the aspect itself moves.
         """
         assert self._pil is not None
         from PIL import Image as PIL_Image
 
         cell = images_mod.cell_size()
-        cols, rows = images_mod.fit_cells(
-            self._px_width, self._px_height, images_mod.MAX_COLS, images_mod.MAX_ROWS
-        )
-        box = (cols * cell.width, rows * cell.height)
+        box = (max(1, cols * cell.width), max(1, rows * cell.height))
         frame = self._pil if self._pil.mode == "RGBA" else self._pil.convert("RGBA")
+        # Scale the retained pixels down to fit inside the box at their true
+        # aspect (never up — the retained copy is already cap-bounded).
+        scale = min(box[0] / frame.width, box[1] / frame.height, 1.0)
+        if scale < 1.0:
+            frame = frame.resize(
+                (max(1, round(frame.width * scale)), max(1, round(frame.height * scale))),
+                PIL_Image.Resampling.LANCZOS,
+            )
         if (frame.width, frame.height) == box:
             return frame
         canvas = PIL_Image.new("RGBA", box, (0, 0, 0, 0))
@@ -433,6 +463,7 @@ class ImageBlock(TranscriptBlock):
             images_mod.release_live(self._kitty_id)
             self._kitty_id = None
             self._placed = None
+            self._transmit_aspect = None
 
     def _demote_to_halfcell(self) -> None:
         """Budget eviction: keep the picture, drop the terminal store entry.
@@ -444,6 +475,7 @@ class ImageBlock(TranscriptBlock):
         """
         self._kitty_id = None
         self._placed = None
+        self._transmit_aspect = None
         self._mode = "halfcell"
         self._repaint()
 

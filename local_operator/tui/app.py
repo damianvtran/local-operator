@@ -1776,7 +1776,7 @@ class OperatorApp(App[None]):
                     ]
                     if text or replay_images:
                         self._append_block(UserBlock(text, len(replay_images)))
-                        self._append_image_blocks(replay_images)
+                        self._append_image_blocks(replay_images, marker_text=text)
                         appended = True
                     continue
                 if role != "assistant":
@@ -4940,8 +4940,9 @@ class OperatorApp(App[None]):
         # is the difference between "1 image attached" and knowing you pasted
         # the right screenshot. Markers stay in the prompt text (they are what
         # the user typed around); the images render in citation order, the
-        # same order `resolve_markers` sent them in.
-        self._append_image_blocks(images)
+        # same order `resolve_markers` sent them in, labeled by the text's own
+        # marker numbers.
+        self._append_image_blocks(images, marker_text=text)
         if self._session is None:
             self._append_block(NoticeBlock("session is still starting…", "warning"))
             return
@@ -6007,7 +6008,9 @@ class OperatorApp(App[None]):
         if not ends_empty_state:
             self._sync_boot_layout()
 
-    def _append_image_blocks(self, images: list[ImageContent]) -> None:
+    def _append_image_blocks(
+        self, images: list[ImageContent], *, marker_text: str | None = None
+    ) -> None:
         """Mount one :class:`ImageBlock` per image, in order.
 
         The single entry point for putting pictures on the transcript — the
@@ -6018,15 +6021,30 @@ class OperatorApp(App[None]):
         receipt), but a failure CONSTRUCTING one must not take down the
         message dispatch that carried a perfectly good tool result.
 
-        Labels are positional (``#1``, ``#2``) and only when the batch has
-        more than one image: a receipt for a batch of one names nothing the
-        row above it has not already said, while `image '#2' unavailable`
-        tells the reader WHICH of several pictures is gone — the number is
-        the same one the prompt's ``[Image #N]`` markers use (review round
-        1, F4).
+        Labels name WHICH of several images a receipt is about, and only
+        when the batch has more than one — a receipt for a batch of one
+        names nothing the row above it has not already said (review round
+        1, F4). Where ``marker_text`` is given (the prompt paths), the
+        numbers are read from the text's own ``[Image #N]`` citations, in
+        citation order — the same walk ``resolve_markers`` built ``images``
+        from — because marker numbers are not positional: delete #1 and
+        paste again and the draft reads ``[Image #2] [Image #3]``, so a
+        positional ``#1`` would name a marker the prompt does not contain
+        (review round 2, F9). Tool results have no markers and fall back to
+        positions.
         """
+        indices: list[int] = []
+        if marker_text:
+            from local_operator.tui.widgets.editor import IMAGE_MARKER
+
+            indices = [int(match.group(1)) for match in IMAGE_MARKER.finditer(marker_text)]
         for index, image in enumerate(images):
-            label = f"#{index + 1}" if len(images) > 1 else ""
+            if len(images) <= 1:
+                label = ""
+            elif index < len(indices):
+                label = f"#{indices[index]}"
+            else:
+                label = f"#{index + 1}"
             try:
                 block = ImageBlock(image.data or None, image.mime_type, label=label)
             except Exception:

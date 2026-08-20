@@ -190,13 +190,50 @@ def test_kitty_mode_transmits_once_and_replaces_on_resize(monkeypatch) -> None:
     block._repaint()
     assert sum("a=t,i=" in seq for seq in written) == 1
     assert sum("a=p,i=" in seq for seq in written) == 1
-    # A repaint at a CHANGED grid re-places — one short escape — and still
-    # never retransmits the pixels (review round 1, F6: the `_placed !=
-    # (cols, rows)` branch was untested).
-    block._placed = (10, 4)  # simulate a stale placement from another width
+    # A repaint at a CHANGED grid of the SAME aspect re-places — one short
+    # escape — without retransmitting (review round 1, F6). The stale grid
+    # here keeps the real grid's aspect so only the placement is stale.
+    real = block._placed
+    assert real is not None
+    block._placed = (real[0] // 2, real[1] // 2)  # same aspect, wrong size
     block._repaint()
     assert sum("a=t,i=" in seq for seq in written) == 1
     assert sum("a=p,i=" in seq for seq in written) == 2
+
+
+def test_kitty_retransmits_when_the_grid_aspect_moves(monkeypatch) -> None:
+    """A placement grid whose ASPECT differs from the transmitted frame's
+    letterbox would stretch the old bars into the picture — measured 22%
+    aspect error for a wide image in a 44-column terminal (round 2, F8).
+    The block must retransmit padded for the new grid, and release the old
+    terminal-store image."""
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "kitty")
+    written: list[str] = []
+    set_escape_writer(written.append)
+    block = ImageBlock(_png(3200, 400))  # 8:1, the shape that exposed F8
+    first_id = block._kitty_id
+    assert sum("a=t,i=" in seq for seq in written) == 1
+    # Simulate the fit at a much narrower terminal: half the columns, same
+    # rows — a materially different grid aspect.
+    placed = block._placed
+    assert placed is not None
+    monkeypatch.setattr(block, "_grid", lambda: (placed[0] // 2, placed[1]))
+    block._repaint()
+    assert sum("a=t,i=" in seq for seq in written) == 2  # retransmitted
+    assert any(f"a=d,d=I,i={first_id}," in seq for seq in written)  # old freed
+    assert block._kitty_id != first_id
+
+
+def test_transmit_frame_matches_the_placement_grid_aspect(monkeypatch) -> None:
+    """The letterboxed frame's pixel box must equal the placement grid's
+    pixel rectangle — the property whose violation was F8."""
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "kitty")
+    set_escape_writer(lambda s: None)
+    block = ImageBlock(_png(3200, 400))
+    cell = images_mod.cell_size()
+    for cols, rows in ((20, 12), (38, 12), (6, 2)):
+        frame = block._transmit_frame(cols, rows)
+        assert (frame.width, frame.height) == (cols * cell.width, rows * cell.height)
 
 
 def test_kitty_without_writer_falls_back_to_halfcell(monkeypatch) -> None:
@@ -232,7 +269,7 @@ def test_kitty_placement_failure_releases_the_store_entry(monkeypatch) -> None:
     set_escape_writer(writer)
     block = ImageBlock(_png(160, 100))
     # Demoted to half-cells, id cleared, and the transmitted image deleted.
-    assert "◀".replace("◀", "▀") in _plain(block)
+    assert "▀" in _plain(block)
     assert block._kitty_id is None
     assert any("a=d,d=I" in seq for seq in written)
 
@@ -360,6 +397,27 @@ async def test_prompt_images_render_under_the_user_block(monkeypatch) -> None:
         blocks = list(app.query(ImageBlock))
         assert len(blocks) == 1
         assert "▀" in _plain(blocks[0])
+
+
+@pytest.mark.asyncio
+async def test_prompt_labels_follow_marker_numbers_not_positions(monkeypatch) -> None:
+    """Marker numbers are max-derived, not positional: delete #1 and paste
+    twice and the prompt reads [Image #2] [Image #3]. Receipts must name the
+    text's own numbers (round 2, F9)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    app, _ = await _pilot_app()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        missing = ImageContent(data="", mime_type="image/png")
+        corrupt = ImageContent(
+            data=base64.b64encode(b"junk").decode("ascii"), mime_type="image/png"
+        )
+        app._submit_prompt("renumbered [Image #2] [Image #3]", [missing, corrupt])
+        await pilot.pause()
+        blocks = list(app.query(ImageBlock))
+        assert len(blocks) == 2
+        assert "'#2'" in _plain(blocks[0])
+        assert "'#3'" in _plain(blocks[1])
 
 
 @pytest.mark.asyncio
