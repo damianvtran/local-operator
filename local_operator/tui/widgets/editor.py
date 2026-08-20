@@ -443,6 +443,24 @@ class ArgumentQueryOpened(Message):
         self.command = command
 
 
+class ArgumentHighlightChanged(Message):
+    """Posted when the row the user's eye is on in an ARGUMENT list changes.
+
+    Carries the command word and the highlighted value name (``None`` when the
+    list closed or emptied). The one consumer is live preview: ``/theme``
+    applies the highlighted theme as the user arrows or hovers through the
+    rows, and restores the real one when the list goes away. Every other
+    command ignores it — previewing is an explicit opt-in on the app side,
+    because most argument rows (a credential to remove, a provider to log
+    into) have no meaningful "try it on" semantics.
+    """
+
+    def __init__(self, command: str, name: str | None) -> None:
+        super().__init__()
+        self.command = command
+        self.name = name
+
+
 #: The composer's resting prose. Named rather than inlined because the app
 #: swaps it for :data:`READ_ONLY_PLACEHOLDER` while the full-page subagent
 #: view is open and has to be able to put this one back.
@@ -501,7 +519,7 @@ class Editor(TextArea):
         # Built BEFORE super().__init__: TextArea's constructor loads its
         # initial document, which funnels through load_text() and therefore
         # through _sync_picker().
-        self._picker = CommandPicker(self._apply_command)
+        self._picker = CommandPicker(self._apply_command, self._on_picker_highlight)
         self._model_picker = ModelPicker(self._apply_model)
         # Which list-taking command the argument list is currently open for, or
         # None when the buffer is not in one. This is the transition edge the
@@ -1960,6 +1978,17 @@ class Editor(TextArea):
             # Transition only. Posting per keystroke would re-fetch every provider
             # for each character the user types into the query.
             self.post_message(ModelQueryOpened())
+
+    def _on_picker_highlight(self, name: str | None) -> None:
+        """Relay the picker's highlight to the app (see ArgumentHighlightChanged).
+
+        The picker reports a display NAME with no idea which command's list it
+        is; the buffer knows, and this widget owns the buffer, so the pairing
+        happens here. A ``None`` command (the word was deleted under the open
+        list) is reported as a close — the preview must not outlive its list.
+        """
+        command = self._argument_command
+        self.post_message(ArgumentHighlightChanged(command or "", name if command else None))
 
     def _command_word(self) -> str | None:
         """The lower-cased command word on the buffer's first non-blank line."""
