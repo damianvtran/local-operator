@@ -68,16 +68,25 @@ function DiffBlock({ diff }: { diff: string | string[] }) {
 	);
 }
 
+/** Tools whose expansion is the rendered diff, mirroring the TUI: a
+    write/edit carries its whole new content in args, and showing that
+    payload next to the diff says the same thing twice. For these the args
+    block is dropped and only the diff (+ any output) shows. */
+const DIFF_FIRST_TOOLS = new Set(["write", "edit", "apply_patch", "patch"]);
+
 export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 	const [open, setOpen] = useState(false);
 	const running =
 		entry.tool_state === "running" || entry.tool_state === "composing";
+	const isDiffFirst =
+		DIFF_FIRST_TOOLS.has(entry.tool_name.toLowerCase()) &&
+		entry.details.diff != null;
 	const hasDetails =
 		entry.intent ||
-		entry.details.args ||
 		entry.details.output ||
 		entry.details.diff ||
-		entry.error;
+		entry.error ||
+		(!isDiffFirst && entry.details.args);
 
 	return (
 		<div
@@ -153,12 +162,12 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 							{entry.error}
 						</p>
 					) : null}
-					{entry.details.args ? (
-						/* max-h + scroll like the diff and output blocks: an UNBOUNDED
-						   args block renders its full height, and a big payload
-						   (a long command, a large write) fills the screen with
-						   the sunken ground — the "solid background" the tap
-						   produced. */
+					{entry.details.args && !isDiffFirst ? (
+						/* Hidden for write/edit: their args ARE the content the diff
+						   already shows, so the payload would be redundant (the
+						   TUI expands these to the diff alone). max-h + scroll:
+						   an UNBOUNDED args block renders its full height and
+						   fills the screen with the sunken ground. */
 						<div className="lo-scroll max-h-40 overflow-y-auto rounded-sm bg-sunken p-2">
 							{toLines(entry.details.args).map((line, i) => {
 								const sep = line.indexOf(":");
