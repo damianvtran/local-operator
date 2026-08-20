@@ -611,6 +611,10 @@ async def test_a_notice_under_the_splash_sits_on_the_card_not_the_spine() -> Non
         notice = app.query_one(NoticeBlock).region
         assert card.width == _expected_card_width(120) < 120 - 2
         assert notice.width == card.width, (notice.width, card.width)
+        # The BLOCK shares the card's column, not only its width: an offset the
+        # test below cannot see (it measures slack within the block) would leave
+        # the block left of the card with its text centred in the wrong place.
+        assert notice.x == card.x, (notice.x, card.x)
         # The text is centred in the card-wide block: the slack left and right of
         # the row's ink, measured WITHIN the block's own span, differs by at most
         # the odd cell a centred row leaves.
@@ -647,12 +651,19 @@ async def test_the_boot_column_follows_the_card_not_the_moment_it_was_written() 
         assert not app.screen.has_class(BOOT_LAYOUT_CLASS)
         assert not app.screen.has_class(BOOT_CARD_CLASS)
         assert not notice_block.has_class(BOOT_COLUMN_CLASS)
+        # The width written for the card goes WITH it: left set, the notice would
+        # stay boot-card narrow (82) with dead space to its right for the
+        # session. It reflows to the full transcript — far wider than the card.
+        await pilot.pause()
+        assert notice_block.region.width > _expected_card_width(120), notice_block.region.width
         # And a resize while the transcript is populated does not bring the card
-        # — or the centring — back: a wide terminal with content is a bar.
+        # — or the centring, or the narrow width — back: a wide terminal with
+        # content is a bar.
         await pilot.resize_terminal(140, 40)
         await _settle(pilot)
         assert not app.screen.has_class(BOOT_CARD_CLASS)
         assert not notice_block.has_class(BOOT_COLUMN_CLASS)
+        assert notice_block.region.width > _expected_card_width(140), notice_block.region.width
 
 
 @pytest.mark.asyncio
