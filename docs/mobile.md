@@ -93,7 +93,7 @@ session is shown as ended (its history stays resumable).
 
 - **Web server** (Starlette app mounted in the same process; uvicorn): serves
   the built SPA from `local_operator/mobile/web/dist/`, the REST API, and the
-  SSE stream. Port from `~/.local-operator/mobile.json` (default `4097`),
+  SSE stream. Port from `~/.local-operator/mobile.json` (default `4098`),
   loopback only.
 - **Registry watcher**: scans the record directory, dials new sessions,
   reaps dead ones.

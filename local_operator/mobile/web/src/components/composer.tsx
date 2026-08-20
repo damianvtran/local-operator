@@ -170,17 +170,10 @@ export function Composer({
 	const [error, setError] = useState("");
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-	/* The resume affordance appears after an abort: streaming just stopped
-	   while work was visibly in flight. It clears on any new activity. */
-	const [showResume, setShowResume] = useState(false);
-	const prevStreaming = useRef(projection.streaming);
-	useEffect(() => {
-		if (prevStreaming.current && !projection.streaming) {
-			setShowResume(true);
-		}
-		if (projection.streaming) setShowResume(false);
-		prevStreaming.current = projection.streaming;
-	}, [projection.streaming]);
+	/* The resume affordance is driven by the WIRE fact (stop_reason), not an
+	   inference from the streaming flag: a turn that completes also flips
+	   streaming off, and only an aborted turn should offer "resume". */
+	const showResume = projection.stop_reason === "aborted";
 
 	/* Auto-grow: reset to auto so shrink works, then clamp at six lines. */
 	useEffect(() => {
@@ -211,7 +204,6 @@ export function Composer({
 				await sendCommand(pid, { op: chosen, text: trimmed });
 			}
 			setText("");
-			setShowResume(false);
 		} catch (e) {
 			setError(String((e as Error).message ?? e));
 		} finally {
@@ -229,10 +221,16 @@ export function Composer({
 
 	const onChange = (value: string) => {
 		setText(value);
-		/* "/" at position 0 opens the slash sheet; typing on closes it. */
-		const q = slashQuery(value);
-		setSlashOpen(q !== null);
+		setSlashOpen(slashQuery(value) !== null);
 	};
+
+	/* The sheet ALSO watches the value: the driver/IME paths that set it
+	   without an onChange still open the sheet a frame later. The onChange
+	   call above is the zero-latency path for real typing. */
+	useEffect(() => {
+		setSlashOpen(slashQuery(text) !== null);
+	}, [text]);
+
 
 	const onSlashPick = (fill: string, submit: boolean) => {
 		setText(fill);

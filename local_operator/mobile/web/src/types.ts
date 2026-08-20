@@ -101,6 +101,10 @@ export interface SessionProjection {
 	effort: string;
 	effort_ladder: string[];
 	streaming: boolean;
+	/** Why streaming last stopped — "completed" | "aborted" | "" before the
+	    first turn ends. The resume affordance reads this, never an inference
+	    from the streaming flag flipping. */
+	stop_reason: string;
 	/** User messages waiting for the turn boundary. */
 	queued_count: number;
 	/** Process gone; history still resumable. */

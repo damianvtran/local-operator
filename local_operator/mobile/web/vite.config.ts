@@ -16,10 +16,15 @@ export default defineConfig({
   },
   server: {
     // Dev mode proxies the API at a running daemon so the phone UI can be
-    // developed against live sessions: `lop mobile serve` on 4097.
+    // developed against live sessions: `lop mobile serve` on 4098.
     proxy: {
-      "/api": "http://127.0.0.1:4097",
-      "/healthz": "http://127.0.0.1:4097",
+      "/api": "http://127.0.0.1:4098",
+      "/healthz": "http://127.0.0.1:4098",
+      // The auth gate lives on the daemon: without these, dev-mode browsers
+      // can never log in (the SPA has no login page of its own) and the
+      // 401 → reload loop never lands anywhere useful.
+      "/login": "http://127.0.0.1:4098",
+      "/logout": "http://127.0.0.1:4098",
     },
   },
 });

@@ -65,7 +65,7 @@ REDIAL_BACKOFF_S = 5.0
 SSE_KEEPALIVE_S = 25.0
 
 #: Default daemon port. Loopback only; remote access is a tunnel's job.
-DEFAULT_PORT = 4097
+DEFAULT_PORT = 4098
 
 _WEB_DIR = Path(__file__).parent / "web"
 _DIST_DIR = _WEB_DIR / "dist"
@@ -727,18 +727,39 @@ def _recent_directories(limit: int = 8) -> list[str]:
 def _list_models() -> list[dict[str, Any]]:
     """The model sheet's rows: every model of every provider the owner can
     actually call — a provider with no stored credential is clutter in a
-    picker, so the catalogue is filtered through the credential store, the
-    same gate the stream-time credential cascade applies. Runs in a thread:
-    catalogue reads are file I/O."""
+    picker. Credential detection consults BOTH stores, because the two
+    sanctioned flows write different ones: ``lop credential update`` writes
+    the legacy CredentialManager file, and ``/login`` writes the providers
+    AuthStore (auth.db) — a picker reading only the first would hide every
+    OAuth-logged-in provider, which on a current install is most of them.
+    Runs in a thread: catalogue reads are file I/O."""
     from local_operator.credentials import CredentialManager
     from local_operator.model.registry import SupportedHostingProviders, static_models
     from local_operator.paths import config_dir
+    from local_operator.providers.auth_store import AuthStore
 
     credential_manager = CredentialManager(config_dir=config_dir())
+    store = AuthStore()
+    try:
+        authed_providers = {c.provider for c in store.list_credentials()}
+    finally:
+        store.close()
+
     rows: list[dict[str, Any]] = []
     for provider in SupportedHostingProviders:
         required = provider.requiredCredentials
-        if required and not any(credential_manager.get_credential(key) for key in required):
+        has_key = bool(required) and any(
+            credential_manager.get_credential(key).get_secret_value() for key in required
+        )
+        # AuthStore login aliases: the oauth flavour of a provider logs in
+        # under its own id (e.g. ``alibaba-token-plan-oauth``); the catalogue
+        # key is the base id, so prefix matching covers both spellings.
+        has_login = provider.id in authed_providers or any(
+            p.startswith(f"{provider.id}-") for p in authed_providers
+        )
+        if required and not has_key and not has_login:
+            continue
+        if not required and not has_login:
             continue
         for model_id, info in static_models(provider.id).items():
             rows.append(

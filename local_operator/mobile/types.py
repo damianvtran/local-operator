@@ -231,6 +231,11 @@ class SessionProjection:
     effort: str = ""  # current rung; "" when the model has no ladder
     effort_ladder: list[str] = field(default_factory=list)
     streaming: bool = False
+    # Why streaming last stopped: "completed" (turn finished) or "aborted"
+    # (the user/agent stopped it) — the phone's "interrupted — tap to resume"
+    # affordance reads THIS, never an inference from streaming flipping,
+    # because a finished turn also flips it. Empty until the first turn ends.
+    stop_reason: str = ""
     queued_count: int = 0  # user messages waiting for the turn boundary
     ended: bool = False  # process gone; history still resumable
     degraded: bool = False  # record fresh but socket unreachable

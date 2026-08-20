@@ -358,7 +358,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     uninstall_parser = mobile_subparsers.add_parser("uninstall", help="Remove the LaunchAgent")
     uninstall_parser.add_argument("--purge", action="store_true", help="Also delete the password")
     serve_mobile_parser = mobile_subparsers.add_parser("serve", help="Run the daemon (foreground)")
-    serve_mobile_parser.add_argument("--port", type=int, default=4097)
+    serve_mobile_parser.add_argument("--port", type=int, default=4098)
 
     # Exec command for single execution mode
     exec_parser = subparsers.add_parser(
@@ -703,7 +703,7 @@ def mobile_command(args: argparse.Namespace) -> int:
         if result.get("ok"):
             password = result.get("password")
             print("\nmobile daemon installed and healthy.")
-            print("  open http://127.0.0.1:4097 and sign in with your portal password")
+            print("  open http://127.0.0.1:4098 and sign in with your portal password")
             if password:
                 print(f"  password: {password}")
                 print(

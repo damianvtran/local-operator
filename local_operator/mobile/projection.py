@@ -202,6 +202,7 @@ class ProjectionFold:
         elif isinstance(event, AgentEndEvent):
             p.streaming = False
             p.queued_count = 0
+            p.stop_reason = "aborted" if event.aborted else "completed"
             self._close_open_message()
             if event.error:
                 self._append(
