@@ -6157,18 +6157,19 @@ class OperatorApp(App[None]):
         ``ends_empty_state=False`` appends WITHOUT ending it, because the
         predicate is "the CONVERSATION has started", not "something got drawn". A
         system notice about infrastructure — an MCP server that failed to
-        connect, a quota fallback — is not a user or assistant message, and
-        letting one collapse the boot composition would mean anyone with a
-        single broken server (or a low quota) never saw the centred prompt at
-        all. The notice is still appended and still scrolls back; it simply
-        lands under the splash, exactly as the ``/clear`` receipt does.
+        connect — is not conversation content, and letting one collapse the boot
+        composition would mean anyone with a single broken server never saw the
+        centred prompt at all. The notice is still appended and still scrolls
+        back; it simply lands under the splash, exactly as the ``/clear`` receipt
+        does.
 
-        A :class:`NoticeBlock` never ends the empty state on its own, even
-        when the caller left the default. Session-originated notices used to
-        take the default and retire the splash for an empty message view —
-        the quota-fallback line on a fresh launch. The conversation starts
-        when a user or assistant row lands, not when the harness has
-        something to say.
+        The default stays `True` for every block — a transcript row appended
+        deliberately IS conversation content, including a ``NoticeBlock`` the
+        caller wrote as a receipt. The boot-time exception lives one level up,
+        in :meth:`on_notice_posted`, which is the only path that fires on a
+        launch before anyone has typed; a gate here would swallow that
+        distinction and keep the splash up over a transcript that had
+        genuinely grown (the seam-stability suite pins exactly that).
 
         ``pin_tail=True`` also holds the block at the BOTTOM as later blocks
         arrive — see :meth:`TranscriptView.pin_tail`. Only the working line uses
@@ -6178,10 +6179,6 @@ class OperatorApp(App[None]):
         composition is measured against, so the reserve is recomputed here rather
         than left centred for a region that no longer exists.
         """
-        if isinstance(block, NoticeBlock):
-            # Defence in depth for every notice path, not just the ones that
-            # remembered to pass ``ends_empty_state=False``. See the docstring.
-            ends_empty_state = False
         if ends_empty_state:
             self._set_welcome_visible(False)
         transcript = self._transcript_view()
