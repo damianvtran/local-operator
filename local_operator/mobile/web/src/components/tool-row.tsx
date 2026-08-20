@@ -120,7 +120,10 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 				) : null}
 			</button>
 			{open && hasDetails ? (
-				<div className="flex flex-col gap-1.5 pb-1 pl-6">
+				/* Cap the WHOLE expansion, not just its blocks: intent + error +
+				   args + diff + output stack, and unbounded they could still
+				   fill the viewport. The expansion scrolls as one region. */
+				<div className="lo-scroll flex max-h-96 flex-col gap-1.5 overflow-y-auto pb-1 pl-6">
 					{entry.intent ? (
 						<p className="text-body-sm text-ink-muted">
 							{entry.intent}
@@ -132,7 +135,12 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 						</p>
 					) : null}
 					{entry.details.args ? (
-						<div className="rounded-sm bg-sunken p-2">
+						/* max-h + scroll like the diff and output blocks: an UNBOUNDED
+						   args block renders its full height, and a big payload
+						   (a long command, a large write) fills the screen with
+						   the sunken ground — the "solid background" the tap
+						   produced. */
+						<div className="lo-scroll max-h-40 overflow-y-auto rounded-sm bg-sunken p-2">
 							{entry.details.args.split("\n").map((line, i) => {
 								const sep = line.indexOf(":");
 								return (
