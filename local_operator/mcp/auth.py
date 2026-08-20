@@ -479,12 +479,25 @@ class McpTokenStorage:
         finds it via ``get_client_info`` and skips dynamic client
         registration entirely — required for providers whose redirect URI was
         registered against a fixed loopback port (pinned-redirect providers).
+
+        ``token_endpoint_auth_method`` must be stamped here, not left at its
+        ``None`` default: the SDK's ``prepare_token_auth`` only sends the
+        ``client_secret`` when the method names a secret-based scheme, so a
+        seed that omits it reaches the token endpoint with no secret at all
+        and the provider rejects the exchange (HubSpot: ``BAD_CLIENT_SECRET``).
+        Because :func:`wire_oauth_auth` re-seeds on EVERY login, a value
+        hand-patched into the store is overwritten before it can be used —
+        the method has to be correct at the source. ``client_secret_post``
+        matches the providers that pin a client (and HubSpot's advertised
+        ``token_endpoint_auth_methods_supported``); with no secret the method
+        is ``none``.
         """
         from mcp.shared.auth import OAuthClientInformationFull
 
         info = OAuthClientInformationFull(
             client_id=client_id,
             client_secret=client_secret,
+            token_endpoint_auth_method="client_secret_post" if client_secret else "none",
         )
         creds = self._read() or {}
         creds["client_info"] = info.model_dump(mode="json")

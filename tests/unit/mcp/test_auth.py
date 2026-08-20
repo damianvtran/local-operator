@@ -739,6 +739,31 @@ class TestWireOauthAuth:
         assert rows[0].data["client_info"]["client_id"] == "pinned-cid"
         assert rows[0].data["client_info"]["client_secret"] == "sec"
 
+    def test_seeded_client_info_stamps_token_endpoint_auth_method(self) -> None:
+        """A pinned seed must name a secret-based auth method, or the secret
+        is never sent and the provider rejects the token exchange (HubSpot's
+        ``BAD_CLIENT_SECRET``). The method has to be correct at the source
+        because ``wire_oauth_auth`` re-seeds on every login, overwriting any
+        hand-patched store value."""
+        cfg = MCPHttpServerConfig(
+            url="https://srv.example/mcp",
+            auth=MCPAuthConfig(type="oauth", client_id="pinned-cid", client_secret="sec"),
+        )
+        store = FakeAuthStore()
+        wire_oauth_auth("https://srv.example/mcp", cfg, store)
+        rows = store.list_credentials(MCP_OAUTH_PROVIDER)
+        assert rows[0].data["client_info"]["token_endpoint_auth_method"] == "client_secret_post"
+
+    def test_seeded_client_info_without_secret_uses_no_auth(self) -> None:
+        cfg = MCPHttpServerConfig(
+            url="https://srv.example/mcp",
+            auth=MCPAuthConfig(type="oauth", client_id="pinned-cid"),
+        )
+        store = FakeAuthStore()
+        wire_oauth_auth("https://srv.example/mcp", cfg, store)
+        rows = store.list_credentials(MCP_OAUTH_PROVIDER)
+        assert rows[0].data["client_info"]["token_endpoint_auth_method"] == "none"
+
     @pytest.mark.asyncio
     async def test_preseeded_client_info_visible_to_sdk(self) -> None:
         cfg = MCPHttpServerConfig(
