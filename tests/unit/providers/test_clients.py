@@ -2393,6 +2393,8 @@ class TestRefusalsAreSurfacedNotSwallowed:
         assert end.error is not None
         assert "cut the reply short" in end.error
         assert "sent no message" not in end.error
+
+
 # Empty assistant turns (errored/aborted model turns) must not reach the wire
 # ---------------------------------------------------------------------------
 
