@@ -456,7 +456,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # notice that already names what was stored or forgotten.
     SlashCommand(
         "credential",
-        "Hand the agent a secret it can use but never read",
+        "Hand the agent a secret it can use but never read; paste is masked",
         aliases=("cred",),
         arguments=ArgumentMode.OPTIONAL,
     ),

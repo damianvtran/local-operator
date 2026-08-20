@@ -1887,9 +1887,17 @@ class AskPickerScreen(Container):
             # would hide the characters being typed, which is the only part of
             # it the user is looking at.
             budget -= cell_len(FIELD_CARET)
-            row.append(OTHER_PREFIX, style=accent if taken else ground + fg)
+            if self.question.secret:
+                prefix = SECRET_PREFIX
+                rendered = SECRET_MASK * len(self.state.typed)
+            else:
+                prefix = OTHER_PREFIX
+                rendered = _tail_cells(
+                    self.state.typed, max(1, budget - cell_len(OTHER_PREFIX))
+                )
+            row.append(prefix, style=accent if taken else ground + fg)
             row.append(
-                _tail_cells(self.state.typed, max(1, budget - cell_len(OTHER_PREFIX))),
+                truncate_cells(rendered, max(1, budget - cell_len(prefix))),
                 style=ground + fg,
             )
             row.append(FIELD_CARET, style=accent if taken else ground + dim)

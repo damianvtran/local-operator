@@ -1089,7 +1089,11 @@ class BashParams(BaseModel):
     )
 
 
-def _bash_progress_line(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) -> str:
+def _bash_progress_line(
+    stdout_chunks: list[bytes],
+    stderr_chunks: list[bytes],
+    context: ToolContext | None = None,
+) -> str:
     """One short status line for a running background command.
 
     Reports the LAST non-empty line the command printed, which for the work
@@ -1101,16 +1105,18 @@ def _bash_progress_line(stdout_chunks: list[bytes], stderr_chunks: list[bytes]) 
     tail = b"".join(stdout_chunks[-4:] + stderr_chunks[-4:]).decode("utf-8", errors="replace")
     for line in reversed(tail.splitlines()):
         if line.strip():
-            return line.strip()[:200]
+            return _redact_tool_text(line.strip()[:200], context)
     return "running"
 
 
 def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     """Strip stored session-credential values out of tool output.
 
-    A command that ``echo``s ``$GITHUB_TOKEN`` would otherwise put the secret
-    in the transcript, the provider request, and every later compaction.
-    Applied at every site that turns captured bytes into model-visible text.
+    The LOOP's ``redact_tool_result`` hook is the model-visible choke point;
+    this stays for the UIs that read live output BEFORE the result exists
+    (bash stream updates, background-job peek, the abort receipt). A command
+    that ``echo``s ``$GITHUB_TOKEN`` would otherwise paint the secret while
+    the command is still running.
     """
     store = context.variables if context is not None else None
     redact = getattr(store, "redact", None)
@@ -1370,7 +1376,7 @@ async def execute_bash(
                     # the OUTPUT has a dedicated bounded channel (the peek
                     # tail), and mirroring it into a field every renderer
                     # repaints per frame would pay for it many times over.
-                    report_progress(_bash_progress_line(stdout_chunks, stderr_chunks))
+                    report_progress(_bash_progress_line(stdout_chunks, stderr_chunks, context))
                 await cleanup(kill=cancelled_bg or timed_out_bg)
             except asyncio.CancelledError:
                 # Manager cancellation is deliberately immediate. Convert it

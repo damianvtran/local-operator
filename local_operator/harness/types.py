@@ -1138,6 +1138,14 @@ class LoopConfig(BaseModel):
         Callable[[list[AgentMessage]], Awaitable[list[AgentMessage]] | list[AgentMessage]] | None
     ) = Field(default=None, exclude=True)
 
+    # Redact stored session-credential values out of tool RESULTS before the
+    # message enters the transcript. A tool can legally echo a secret it was
+    # handed (``cat key.pem`` after a bash `echo $TOKEN > key.pem`), and bash
+    # alone redacting left ``read``/``grep``/fetch as open exfiltration paths.
+    # One hook here covers every tool at the single choke point where a result
+    # becomes a message. ``None`` means no credentials are stored.
+    redact_tool_result: Callable[[str], str] | None = Field(default=None, exclude=True)
+
     # Steering (CONSUMING) interrupts tool batches; peek (non-consuming) is
     # polled between calls. Asides never interrupt.
     get_steering_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = Field(

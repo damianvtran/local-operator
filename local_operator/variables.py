@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import os
 import re
-import time
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -78,7 +77,6 @@ class SessionCredential:
 
     key: str
     source: CredentialSource
-    stored_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,8 +123,10 @@ class CredentialCommand:
 
 
 CREDENTIAL_USAGE = (
-    "Usage: /credential <KEY> | /credential | /credential --forget <KEY> | "
-    "/credential --forget-all"
+    "Usage: /credential <KEY>\n"
+    "       /credential                # list\n"
+    "       /credential --forget <KEY>\n"
+    "       /credential --forget-all"
 )
 
 
@@ -321,7 +321,7 @@ class VariableStore:
             return CredentialStoreResult(ok=False, reason="empty-value")
         replaced = key in self._credentials
         self._credentials[key] = trimmed
-        meta = SessionCredential(key=key, source=source, stored_at=time.time())
+        meta = SessionCredential(key=key, source=source)
         self._credential_meta[key] = meta
         return CredentialStoreResult(ok=True, credential=meta, replaced=replaced)
 

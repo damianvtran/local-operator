@@ -105,6 +105,22 @@ async def test_a_secret_question_masks_the_typed_value_and_returns_it() -> None:
         labels = card.visible_rows
         assert secret not in "".join(labels)
         assert SECRET_MASK * len(secret) in "".join(labels)
+        # The PAINTED row, not the label alone: `_row_text` re-renders the
+        # selected field with the typed tail, and that second path is where a
+        # secret leaked to the screen.
+        from rich.style import Style
+
+        painted = card._row_text(
+            0,
+            card._card_width(),
+            Style(),
+            Style(),
+            Style(),
+            Style(),
+            card._layout(),
+        ).plain
+        assert secret not in painted
+        assert SECRET_MASK * len(secret) in painted
         await pilot.press("enter")
         await pilot.pause()
     assert app.answered == [{"GITHUB_TOKEN": [secret]}]
