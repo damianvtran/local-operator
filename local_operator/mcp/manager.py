@@ -1315,7 +1315,10 @@ class McpManager:
             # cancellation's priority, so a recorded abandonment here can be
             # re-voiced as the receipt the user reads.
             if isinstance(exc, asyncio.CancelledError):
-                from local_operator.mcp.auth import ABANDONED_GRANTS, McpLoginCancelledError
+                from local_operator.mcp.auth import (
+                    ABANDONED_GRANTS,
+                    McpLoginCancelledError,
+                )
 
                 url = getattr(cfg, "url", None)
                 flow = self._oauth_flows.pop(url, None) if isinstance(url, str) else None

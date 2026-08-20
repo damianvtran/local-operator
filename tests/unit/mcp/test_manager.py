@@ -1158,7 +1158,11 @@ class TestAuthRequiredHandling:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         from local_operator.mcp.auth import McpLoginCancelledError
-        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig, MCPOAuthConfig
+        from local_operator.mcp.config import (
+            MCPAuthConfig,
+            MCPHttpServerConfig,
+            MCPOAuthConfig,
+        )
 
         class StubOAuthServer(BaseHTTPRequestHandler):
             """Just enough of an OAuth AS + MCP endpoint to reach the grant."""
