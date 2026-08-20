@@ -152,3 +152,28 @@ def test_a_truncated_table_cell_still_anchors() -> None:
     assert body, "no truncated row found to test"
     copied = slice_markdown(source, mapping, body[0], body[-1])
     assert long_cell in copied
+
+
+# -- review-round-2 regressions (G1–G3) ---------------------------------------
+def test_a_number_led_paragraph_is_not_read_as_a_list_marker() -> None:
+    """G1: ``2026 roadmap`` glues the digits to the content (no marker space),
+    so the paragraph anchors and copies — it is not an ordered-list marker."""
+    assert _full_slice("2026 roadmap items are here", 40) == "2026 roadmap items are here"
+
+
+def test_an_item_whose_content_starts_with_a_number_copies() -> None:
+    """G2: ``- 3 ways`` / ``> 3 ways`` begin their content with a number; the
+    number is content, not a marker, so the items anchor and copy."""
+    assert _full_slice("- 3 ways to fix it\n- 4 more things", 40) == (
+        "- 3 ways to fix it\n- 4 more things"
+    )
+    copied = _full_slice("> 3 ways forward\n> 5 steps back", 40)
+    assert "3 ways forward" in copied and "5 steps back" in copied
+
+
+def test_a_nested_quote_keeps_its_levels() -> None:
+    """G3: each quote line keeps its own ``>``/``>>`` prefix from the source —
+    re-applying a single prefix would flatten the nesting."""
+    assert _full_slice("> outer\n>> inner\n> outer again", 40) == (
+        "> outer\n>> inner\n> outer again"
+    )

@@ -110,9 +110,20 @@ def _row_word(rendered_row: str) -> str:
     leaves the bare number as the "word", which is why an ordered list anchored
     to nothing (the F3 review finding).
     """
-    for token in rendered_row.split():
+    tokens = rendered_row.split()
+    for index, token in enumerate(tokens):
         if _MARKER_TOKEN_RE.fullmatch(token):
-            continue  # a bullet, bar or ordered marker, not content
+            if not token.isdigit():
+                continue  # a bullet, bar, or ordered marker-with-dot: structure
+            # A BARE number is an ordered-list marker only when it is a short
+            # list number followed by the item's text (`` 1 alpha``). A long
+            # number (``2026 roadmap``) or a number that begins an item's content
+            # (``- 3 ways``) is CONTENT and must be returned as the anchor —
+            # skipping it dropped every such line from the copy (G1/G2).
+            preceded_by_marker = index > 0 and bool(_MARKER_TOKEN_RE.fullmatch(tokens[index - 1]))
+            if len(token) <= 2 and index + 1 < len(tokens) and not preceded_by_marker:
+                continue  # standalone ordered marker
+            # number-led content: fall through and return it
         return _first_word(token)
     return ""
 
@@ -349,18 +360,6 @@ def slice_markdown(source: str, mapping: list[int | None], first_row: int, last_
                 fence_lang = lines[i].strip()[len(fence_marker) :]
                 open_marker_line = i
                 break
-    # The quote prefix to re-apply to a mid-quote slice. It is derived from the
-    # first QUOTE line in the slice and applied only to lines that are themselves
-    # quotes — a trailing heading or paragraph after the quote run keeps its own
-    # form (the F1c review finding, where every non-covered line was re-quoted).
-    quote_prefix = ""
-    for i in sorted(picked):
-        if i not in covered:
-            qm = _QUOTE_RE.match(lines[i])
-            if qm is not None:
-                quote_prefix = qm.group(0)
-                break
-
     # Prepend the opener only when the slice does not already include the
     # fence's own opening marker line; append the closer only when it does not
     # include the closing marker. Without the symmetric end check a fence whose
@@ -373,16 +372,11 @@ def slice_markdown(source: str, mapping: list[int | None], first_row: int, last_
     out: list[str] = []
     if in_fence_at_start and fence_marker and not includes_open:
         out.append(fence_marker + fence_lang)
+    # Every picked line is emitted AS WRITTEN. Quote lines already carry their
+    # own ``>``/``>>`` prefix in the source, so nested levels survive the copy
+    # (the G3 review finding, where re-applying a single prefix flattened them).
     for i in sorted(picked):
-        text = lines[i]
-        # Re-apply the quote prefix only to lines that are quotes in the source;
-        # everything else (headings, paragraphs, blanks, fence lines) is emitted
-        # as written.
-        if quote_prefix and i not in covered and _QUOTE_RE.match(text):
-            body = _QUOTE_RE.sub("", text)
-            out.append((quote_prefix + body) if body else quote_prefix.rstrip())
-        else:
-            out.append(text)
+        out.append(lines[i])
     if in_fence_at_start and fence_marker and not includes_close:
         out.append(fence_marker)
     return "\n".join(out).strip("\n")
