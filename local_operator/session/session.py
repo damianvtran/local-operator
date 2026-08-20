@@ -45,6 +45,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
@@ -84,13 +85,18 @@ from local_operator.harness.types import (
     TextContent,
     ToolContext,
     Usage,
+    WakeDeliveredEvent,
 )
 from local_operator.harness.wake import (
+    LOAD_GRACE_MS,
+    MAX_ARM_MS,
     WAKE_PROMPT_MESSAGE_TYPE,
     WAKE_SCHEDULES_CUSTOM_TYPE,
     DueWake,
+    MissedWakeOccurrence,
     WakeSchedule,
     WakeScheduler,
+    format_duration,
     format_wake_delivery_text,
 )
 from local_operator.imaging import rebound_oversize_image
@@ -956,10 +962,28 @@ class Session:
         )
         self._wake = WakeScheduler(
             now=lambda: int(time.time() * 1000),
-            deliver=self._deliver_wake,
+            # Deliveries route through the indirection hook: at resume the
+            # session swaps in a catch-up shim that folds N overdue per-schedule
+            # fires into one aggregated prompt (see _handle_missed_wakes).
+            deliver=lambda due: self._wake_deliver_via_hook(due),
             persist=self._persist_wake_schedules,
         )
+        self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
+        # Catch-up state for the wake deliveries the process was DOWN for:
+        # (occurrences skipped while down, grace re-arm from the just-run
+        # load(), text of the aggregated catch-up prompt, and whether that
+        # prompt already went out). All four move together through
+        # _handle_missed_wakes, which owns the lifecycle.
+        self._missed_wake_occurrences: dict[str, int] = {}
+        self._resume_grace_ends_ms: float = float("inf")
+        self._resume_catchup_text: str | None = None
+        self._resume_catchup_sent = False
+        #: Ids of the overdue schedules the catch-up text folds. The shim
+        #: swallows only these (see _deliver_wake_catchup); empty when there
+        #: is no catch-up pending, so the shim is then a pure passthrough.
+        self._resume_catchup_ids: set[str] = set()
         self._load_wake_schedules()
+        self._prepare_missed_wake_catchup()
         # The conversation's title is restored from the SAME transcript the
         # history came from, and for the same reason: a resumed session is the
         # same conversation, so the band and the terminal tab must name it the
@@ -1225,8 +1249,11 @@ class Session:
         Opens the session-scoped task group and re-arms the wake scheduler:
         a scheduler armed during sync ``__init__`` (no running loop yet)
         could not create its timer — one ``pump()`` here fires overdue wakes
-        and arms properly (see ``WakeScheduler.needs_rearm``). Safe to call
-        more than once; sessions that skip it degrade to ``ensure_future``
+        and arms properly (see ``WakeScheduler.needs_rearm``). Overdue wakes
+        adopted from a previous session are first folded into a single
+        catch-up prompt (``_handle_missed_wakes``) so a resume costs one
+        wake turn, not one per overdue schedule. Safe to call more than
+        once; sessions that skip it degrade to ``ensure_future``
         for background work.
         """
         if self._tg_stack is None and not self._disposed:
@@ -1238,6 +1265,7 @@ class Session:
                 await stack.aclose()
                 raise
             self._tg_stack = stack
+        self._handle_missed_wakes()
         await self._wake.pump()
 
     # -- identity / state (SessionProtocol) ----------------------------------
@@ -1746,7 +1774,19 @@ class Session:
             self._abort_requested = False
             if self._is_streaming:
                 raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
-            await self._run_turn_pipeline([Message.user(text, images)])
+            # INLINE a pending wake catch-up ahead of the user's message, in
+            # the SAME turn: the missed wakes belong before the work they were
+            # meant to start, and spawning the catch-up as a competing
+            # ``_prompt_messages`` would queue it behind this one (round 3,
+            # M2). One turn, user message LAST, so the model reads the folded
+            # wakes first and the reply still answers the user.
+            catchup = self._take_resume_catchup()
+            initial: list[AgentMessage] = (
+                [catchup, Message.user(text, images)]
+                if catchup is not None
+                else [Message.user(text, images)]
+            )
+            await self._run_turn_pipeline(initial)
         finally:
             self._turn_lock.release()
 
@@ -2191,6 +2231,18 @@ class Session:
             except Exception:
                 logger.warning("event handler failed for %s", event.type, exc_info=True)
 
+    def _emit_nowait(self, event: AgentEvent) -> None:
+        """Fire-and-forget ``_emit`` for a caller that cannot await.
+
+        The resume catch-up send (``_handle_missed_wakes``) is synchronous —
+        it runs at the head of the boot pump — but a front end still needs the
+        delivery receipt to paint its wake line. Handlers here are the event
+        controller's ``_post`` (a sync queue push), so routing the coroutine
+        through the background-task machinery delivers it on the next loop
+        pass, ahead of the turn the same method spawns.
+        """
+        self._spawn_background(self._emit(event))
+
     # -- turn machinery --------------------------------------------------------
 
     async def _prompt_messages(self, initial: list[AgentMessage]) -> None:
@@ -2199,6 +2251,9 @@ class Session:
         if self._disposed:
             raise RuntimeError("session is disposed")
         async with self._turn_lock:
+            # Same flush as prompt(): a wake-delivery turn is still a prompt
+            # path, and the catch-up must not be stranded behind it.
+            self._handle_missed_wakes()
             await self._run_turn_pipeline(initial)
 
     async def _run_turn_pipeline(self, initial: list[AgentMessage]) -> None:
@@ -2250,6 +2305,7 @@ class Session:
         if self._wake.needs_rearm:
             # HC-20: the scheduler could not arm without a running loop at
             # construction; the first turn (with a loop) re-arms via pump().
+            self._handle_missed_wakes()
             await self._wake.pump()
         self._is_streaming = True
         self._generation += 1  # monotonic; stamped on start AND end events
@@ -3645,6 +3701,161 @@ class Session:
                 logger.warning("dropping malformed persisted wake schedule: %r", raw)
         self._wake.load(schedules)
 
+    async def _wake_deliver_via_hook(self, due: DueWake) -> None:
+        """Scheduler-facing deliver trampoline: reads the CURRENT hook at fire
+        time, so swapping the hook (resume catch-up shim) takes effect without
+        rebuilding the scheduler."""
+        await self._wake_deliver_hook(due)
+
+    def _prepare_missed_wake_catchup(self) -> None:
+        """Snapshot the overdue schedules load() just adopted and compose the
+        single aggregated catch-up prompt for them. Runs in ``__init__`` so the
+        state exists even when no host ever calls async_init — a session that
+        only runs one prompt() still owes its catch-up."""
+        missed = self._wake.take_missed()
+        if not missed:
+            return
+        now = int(time.time() * 1000)
+        # An overdue schedule has just been re-armed to now + LOAD_GRACE_MS,
+        # so any overdue wake is still in grace until that deadline. Wall time
+        # is good enough here: grace comparisons happen against the same clock
+        # the scheduler reads (``now=lambda: int(time.time() * 1000)``).
+        self._resume_grace_ends_ms = float(now + LOAD_GRACE_MS)
+        # The delivery note shows the DUE-while-down count (how often the wake
+        # actually came due), not the budget-clamped delivered-miss count —
+        # for a limit-bounded recurring wake the clamped figure understates
+        # the downtime (review round 2, M2).
+        self._missed_wake_occurrences = {m["schedule"].id: m["due"] for m in missed}
+        # The ids the catch-up text AGGREGATES. The shim uses this to swallow
+        # only these schedules' fires — a wake that comes due later is NOT in
+        # the folded text, so swallowing it would lose its message entirely
+        # (review round 3, M1).
+        self._resume_catchup_ids = {m["schedule"].id for m in missed}
+        self._resume_catchup_text = self._format_missed_wake_catchup(missed, now)
+        # Install the suppression shim NOW, not at first trigger: installing it
+        # late is what let the scheduler's own tick swallow a per-schedule
+        # delivery before any trigger had run (review round 2, M1).
+        self._wake_deliver_hook = self._deliver_wake_catchup
+
+    def _handle_missed_wakes(self) -> None:
+        """Send the aggregated catch-up for the overdue wakes adopted at load.
+
+        Reachable from every path that can fire a wake, because the session
+        cannot know which one a host uses: ``async_init`` (the off-loop boot),
+        the ``needs_rearm`` first-turn re-arm, and the head of EVERY
+        ``prompt``/``_prompt_messages`` (the only trigger guaranteed to exist
+        on a session built inside a running loop, where the TUI lives — the
+        gap that let a resumed TUI session fire N separate wake turns and
+        never aggregate, review round 2 M1). Sends once, the moment grace has
+        expired, so a fresh session shows the wake LIVE rather than inside
+        the boot path; the shim installed at prepare swallows the scheduler's
+        per-schedule fires until then, so a resume with three overdue wakes
+        costs one turn, not three."""
+        catchup = self._take_resume_catchup()
+        if catchup is not None:
+            self._deliver_resume_catchup(catchup)
+
+    def _take_resume_catchup(self) -> CustomMessage | None:
+        """Build the catch-up message once grace has passed, else None.
+
+        Side-effecting even when it returns None-for-now: a send that IS due
+        flips ``_resume_catchup_sent`` and clears the per-schedule missed-count
+        map (so a recurring wake's later punctual fires are not re-annotated
+        with a stale count — review round 3, m2). Split from the delivery so a
+        caller about to run a turn can take the message and INLINE it ahead of
+        its own (see ``prompt``) instead of spawning a turn that would land
+        behind it (review round 3, M2).
+        """
+        if self._resume_catchup_sent or self._resume_catchup_text is None:
+            return None
+        if int(time.time() * 1000) < self._resume_grace_ends_ms:
+            return None
+        text, self._resume_catchup_text = self._resume_catchup_text, None
+        self._resume_catchup_sent = True
+        self._missed_wake_occurrences = {}
+        # Clear the fold set too, so the post-send shim is a passthrough by
+        # STRUCTURE (empty set), not only by the _resume_catchup_sent guard.
+        self._resume_catchup_ids = set()
+        # The receipt event fires HERE, at take time, so both delivery modes
+        # (own turn via ``_deliver_resume_catchup``, or inlined ahead of a user
+        # turn in ``prompt``) paint the expandable catch-up line. It is a
+        # CATCH-UP marker: the front end folds the whole set into one line, and
+        # the replay loop skips re-adding the user-attributed message
+        # (``wake_catchup``), so this event is the only place the missed wakes
+        # are surfaced.
+        self._emit_nowait(WakeDeliveredEvent(text=text, catchup=True))
+        return CustomMessage(
+            custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+            attribution="user",
+            details={"wake_catchup": True, "text": text},
+        )
+
+    def _deliver_resume_catchup(self, catchup: CustomMessage) -> None:
+        """Deliver the catch-up as its own turn (or a steering message mid-turn).
+
+        Used when the catch-up fires with no user turn already in flight; the
+        receipt event was already emitted by ``_take_resume_catchup``.
+        """
+        if self._is_streaming:
+            self._steering_queue.put_nowait(catchup)
+            return
+        self._spawn_background(self._prompt_messages([catchup]))
+
+    async def _deliver_wake_catchup(self, due: DueWake) -> None:
+        """Deliver hook while the resume catch-up is pending.
+
+        Swallows ONLY the fires the catch-up text aggregates (``due.schedule.id
+        in _resume_catchup_ids``): those are covered by the folded prompt, and
+        the schedule is still advanced + persisted by pump, so nothing
+        re-fires. Any OTHER fire — one that came due after load, so its message
+        is not in the folded text — falls through to a normal delivery;
+        swallowing it would lose the message entirely (review round 3, M1).
+        After the catch-up is sent the hook is a plain passthrough.
+        """
+        if not self._resume_catchup_sent and due.schedule.id in self._resume_catchup_ids:
+            return  # folded into the pending catch-up; pump already advanced it
+        await self._deliver_wake(due)
+
+    @staticmethod
+    def _format_missed_wake_catchup(missed: list[MissedWakeOccurrence], now_ms: int) -> str:
+        """One wake_prompt text aggregating every schedule that came due while
+        the process was down. Dedup is structural, not textual: the scheduler
+        collapses a recurring wake's skipped occurrences to a count (the 5
+        identical "check the build" prompts from a 5-hour sleep arrive as
+        ONE entry reading "5 occurrences were missed"), and each remaining
+        schedule contributes its verbatim message exactly once."""
+
+        def _due_label(schedule: WakeSchedule) -> str:
+            due = datetime.fromtimestamp(schedule.next_due_at / 1000).astimezone()
+            return due.strftime("%Y-%m-%d %H:%M")
+
+        lines = []
+        for entry in missed:
+            schedule = entry["schedule"]
+            # The DUE-while-down count is what the agent should read (M2).
+            occurrences = entry["due"]
+            if occurrences > 1:
+                # occurrences > 1 implies a repeating schedule, so every_ms is
+                # set; the assert turns that reasoning into a type narrowing.
+                assert schedule.every_ms is not None
+                header = (
+                    f"- {schedule.id} (every {format_duration(schedule.every_ms)}, "
+                    f"first missed at {_due_label(schedule)}): "
+                    f"{occurrences} occurrences were missed while the session was down."
+                )
+            else:
+                header = (
+                    f"- {schedule.id} (due {_due_label(schedule)}): "
+                    "missed while the session was down."
+                )
+            lines.append(f"{header}\n  Message: {schedule.message}")
+        return (
+            "(alarm) The session resumed after being closed; the following scheduled wake(s) "
+            "came due while it was down. Each fires once now — handle them as missed wakes, "
+            "checking the CURRENT state rather than replaying each past occurrence.\n\n"
+            + "\n".join(lines)
+        )
+
     async def _persist_wake_schedules(self, schedules: list[WakeSchedule]) -> None:
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
@@ -3734,18 +3945,83 @@ class Session:
 
     async def _deliver_wake(self, due: DueWake) -> None:
         """Deliver one fired wake through the prompt path as a user-attributed
-        ``wake_prompt`` custom message."""
+        ``wake_prompt`` custom message. A wake resumed PAST its due time is
+        annotated as missed — the agent must not read it as punctual, and a
+        recurring one names the skipped occurrences (deduplicated to a count;
+        the identical message is NOT repeated per miss)."""
         text = format_wake_delivery_text(due)
+        missed_note = self._missed_delivery_note(due)
+        if missed_note:
+            text = f"{missed_note}\n\n{text}"
         wake_message = CustomMessage(
             custom_type=WAKE_PROMPT_MESSAGE_TYPE,
             attribution="user",
             details={"wake_id": due.schedule.id, "occurrence": due.occurrence, "text": text},
+        )
+        # The receipt event rides BEFORE the turn spawn so a front end can
+        # paint the expandable wake line ahead of the work it triggered —
+        # without it the transcript showed the agent starting to work with no
+        # record that a wake was the cause.
+        await self._emit(
+            WakeDeliveredEvent(
+                text=text,
+                catchup=False,
+                wake_id=due.schedule.id,
+                occurrence=due.occurrence,
+            )
         )
         if self._is_streaming:
             # Busy: ride the next steering boundary instead of racing the turn.
             self._steering_queue.put_nowait(wake_message)
             return
         self._spawn_background(self._prompt_messages([wake_message]))
+
+    def _missed_delivery_note(self, due: DueWake) -> str | None:
+        """The 'this wake fired late' prefix, or None for a punctual fire.
+
+        The two annotate-or-not gates are deliberately DIFFERENT, because they
+        answer different questions:
+
+        - Before the resume grace expires, an overdue wake is annotated from
+          ``_missed_wake_occurrences`` (the load-time snapshot), because its
+          catch-up has not gone out yet and the note is the only place the
+          skip is visible.
+        - After it, that map is zeroed — the aggregated catch-up prompt now
+          carries the count, so re-annotating would tell the agent the same
+          skip twice. A LATE one-shot (overdue beyond ``MAX_ARM_MS``, i.e.
+          missed while the process was down, not a timer tick late) still
+          self-annotates from its own due time, which needs no snapshot.
+
+        The boundary case the asymmetry produces — a one-shot only seconds
+        overdue gets a note pre-catch-up and none after — is intentional:
+        seconds-overdue is timer jitter, not a "missed while down", and the
+        catch-up it would double-report against has by then been delivered."""
+        now_ms = int(time.time() * 1000)
+        schedule = due.schedule
+        occurrences = self._missed_wake_occurrences.get(schedule.id, 0)
+        if occurrences and now_ms >= self._resume_grace_ends_ms:
+            occurrences = 0  # already aggregated into the catch-up prompt
+        if not occurrences:
+            # Live-skip detection needs the PRE-fire due time; post-fire it
+            # has advanced, so only the resume-time snapshot can say a
+            # recurring wake skipped occurrences. A one-shot overdue by more
+            # than the timer's resolution is still attributable directly.
+            if schedule.every_ms is None and now_ms - schedule.next_due_at > MAX_ARM_MS:
+                return (
+                    "(This wake was scheduled to fire earlier but is being delivered after "
+                    "the session resumed, so it was missed at its scheduled time.)"
+                )
+            return None
+        if occurrences == 1:
+            return (
+                "(This wake came due while the session was closed and is being delivered "
+                "after the resume — 1 occurrence was missed.)"
+            )
+        return (
+            f"(This recurring wake came due while the session was closed and is being "
+            f"delivered after the resume — {occurrences} occurrences were missed and have "
+            f"been deduplicated into this single delivery.)"
+        )
 
     # -- lifecycle ----------------------------------------------------------------
 

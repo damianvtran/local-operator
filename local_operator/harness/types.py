@@ -934,6 +934,29 @@ class NoticeEvent(AgentEvent[Literal["notice"]]):
     kind: Literal["info", "warning", "error"] = "info"
 
 
+class WakeDeliveredEvent(AgentEvent[Literal["wake_delivered"]]):
+    """A scheduled wake's prompt was handed to the session for delivery.
+
+    Carries the FULL formatted text so a front end can render an expandable
+    receipt (the collapsed line names the wake; the expansion is the message).
+    ``catchup`` marks the aggregated resume prompt — several overdue wakes
+    folded into one — which renders differently and, being user-attributed,
+    must not also replay as a user row.
+
+    Not a NoticeEvent: a wake delivery is expandable content (the delivered
+    prompt), not a one-line statement, and a notice has no body to expand.
+    """
+
+    type: Literal["wake_delivered"] = "wake_delivered"
+    text: str
+    catchup: bool = False
+    #: Identity of the delivery, so a front end can dedup its live receipt
+    #: against the persisted ``wake_prompt`` on a later history replay. Empty
+    #: for a catch-up (it folds several wakes and is never replayed).
+    wake_id: str = ""
+    occurrence: int = 0
+
+
 class SteeringDeliveredEvent(AgentEvent[Literal["steering_delivered"]]):
     """Queued steering messages have entered the model's context.
 

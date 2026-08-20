@@ -73,6 +73,7 @@ from local_operator.harness.types import (
     ImageContent,
     Message,
 )
+from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.logger import current_log_file
 
 # A leaf table (`re` and `dataclasses` only), so importing it here costs the
@@ -109,6 +110,7 @@ from local_operator.tui.events import (
     TurnBoundaryStart,
     TurnEnded,
     TurnStarted,
+    WakeDelivered,
 )
 from local_operator.tui.glyphs import display_name
 from local_operator.tui.markdown_theme import (
@@ -179,6 +181,7 @@ from local_operator.tui.widgets.transcript import (
     RichBlock,
     TranscriptView,
     UserBlock,
+    WakeBlock,
     WorkingBlock,
 )
 from local_operator.tui.widgets.usage_panel import (
@@ -186,6 +189,7 @@ from local_operator.tui.widgets.usage_panel import (
     UsagePanel,
     UsageRefreshRequested,
 )
+from local_operator.tui.widgets.wake_panel import WakePanel
 from local_operator.tui.widgets.welcome import (
     MODEL_PENDING,
     WelcomeView,
@@ -1097,6 +1101,13 @@ class OperatorApp(App[None]):
         #: The two together are the FIFO the engine drains: these rows were
         #: queued first, so they settle first (see `on_steering_delivered`).
         self._deferred_steer_notices: list[NoticeBlock] = []
+        #: Wake receipts painted LIVE this session, as ``(wake_id, occurrence)``
+        #: keys. ``on_wake_delivered`` records each; the history replay skips a
+        #: persisted ``wake_prompt`` whose key is already here — otherwise a
+        #: wake that fired mid-session and was then replayed (``/resume`` into
+        #: the same conversation) would paint its receipt twice (review round
+        #: 2, m2).
+        self._live_wake_receipts: set[tuple[str, object]] = set()
         #: What the CURRENT turn has already been billed for, per model call, by
         #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
         #: whole and is the authoritative figure, so it adds only the difference
@@ -1150,6 +1161,7 @@ class OperatorApp(App[None]):
         # opens through the same handle's on_open callback, which pushes the
         # child's retained event list as a modal.
         self._subagent_panel: SubagentPanel | None = None
+        self._wake_panel: WakePanel | None = None
         self._todo_panel: TodoPanel | None = None
         # Serializes interactive login flows so two /login commands can never
         # race the one suspended terminal.
@@ -1311,6 +1323,7 @@ class OperatorApp(App[None]):
         # neither has content. Holding a ref lets the 1 Hz poll and the
         # Subagent*/tool-end handlers repaint it without a relookup per tick.
         self._subagent_panel = SubagentPanel(on_open=self._open_subagent_view)
+        self._wake_panel = WakePanel()
         self._todo_panel = TodoPanel()
         # Two containers for one panel: the dock is the docked POSITIONER, and
         # the shell is the panel the user sees — the fill, the padding, and the
@@ -1350,6 +1363,7 @@ class OperatorApp(App[None]):
             # shell; it collapses to zero when both panels are hidden.
             with Container(id="band"):
                 yield self._subagent_panel
+                yield self._wake_panel
                 yield self._todo_panel
             with Container(id="input-shell"):
                 yield Band(id="status-band")
@@ -1859,6 +1873,26 @@ class OperatorApp(App[None]):
         # only looked at once — see `TranscriptView.batch_append`.
         with transcript.batch_append():
             for message in history:
+                # A wake delivery is a CustomMessage, so it has no ``role``
+                # and would fall through every branch below — which is exactly
+                # why a resumed session showed the agent answering a wake with
+                # no sign the wake ever fired. Replaying it as its own block
+                # keeps the receipt on screen. The catch-up prompt is
+                # user-attributed, so replaying it too would put a raw
+                # '(alarm) The session resumed…' line in the transcript as if
+                # the user had typed it.
+                if getattr(message, "custom_type", None) == WAKE_PROMPT_MESSAGE_TYPE:
+                    details = getattr(message, "details", None) or {}
+                    if not details.get("wake_catchup"):
+                        key = (str(details.get("wake_id", "")), details.get("occurrence"))
+                        # Skip a receipt this session already painted live —
+                        # replaying it would double the line (round 2, m2).
+                        if key not in self._live_wake_receipts:
+                            self._append_block(
+                                WakeBlock(str(details.get("text", "")), catchup=False)
+                            )
+                            appended = True
+                    continue
                 role = getattr(message, "role", None)
                 if role == "tool":
                     continue  # already rendered beside the call that asked for it
@@ -5575,7 +5609,7 @@ class OperatorApp(App[None]):
             return
         docked = any(
             panel is not None and panel.display
-            for panel in (self._subagent_panel, self._todo_panel)
+            for panel in (self._subagent_panel, self._wake_panel, self._todo_panel)
         )
         # DOCKED IS THE WHOLE CONDITION, and getting here took two wrong turns
         # worth recording, because both look like the careful choice.
@@ -5668,7 +5702,19 @@ class OperatorApp(App[None]):
             rows = len([job for job in jobs.list() if getattr(job, "type", "") == "task"])
         except Exception:  # unreadable ledger; nothing to protect against
             return True
-        return rows + _SUBAGENT_DOCK_ROWS < screen_height
+        # A displayed WakePanel spends up to ``MAX_WAKE_ROWS`` content rows the
+        # subagent budget does not know about; counting its settled prediction
+        # keeps the inset gate honest on a near-threshold screen where both
+        # panels are visible. Read off ``predicted_rows`` (a count, settled) for
+        # the same no-flip reason the job count is used over a measured height.
+        wake_rows = 0
+        wake_panel = self._wake_panel
+        if wake_panel is not None and wake_panel.display:
+            try:
+                wake_rows = int(wake_panel.predicted_rows())
+            except Exception:
+                wake_rows = 0
+        return rows + wake_rows + _SUBAGENT_DOCK_ROWS < screen_height
 
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
@@ -5714,6 +5760,8 @@ class OperatorApp(App[None]):
         for _ in range(_BAND_SETTLE_PASSES):
             if self._subagent_panel is not None:
                 self._subagent_panel.sync(session)
+            if self._wake_panel is not None:
+                self._wake_panel.sync(session)
             if self._todo_panel is not None:
                 self._todo_panel.sync(session)
             self._sync_band_inset()
@@ -10010,6 +10058,19 @@ class OperatorApp(App[None]):
             self._announce_on_splash(message.text, message.kind)
             return
         self._append_block(NoticeBlock(message.text, message.kind))
+
+    def on_wake_delivered(self, message: WakeDelivered) -> None:
+        """Paint the expandable wake receipt for the prompt just delivered.
+
+        The event carries the full formatted text, so the collapsed line can
+        name the wake and the expansion can show exactly what the model was
+        handed. A catch-up folds several missed wakes into one line; a live
+        fire gets its own. The receipt's ``(wake_id, occurrence)`` key is
+        recorded so the history replay does not mount a second copy of the
+        same delivery (see ``_live_wake_receipts``).
+        """
+        self._live_wake_receipts.add((message.wake_id, message.occurrence))
+        self._append_block(WakeBlock(message.text, catchup=message.catchup))
 
     def _announce_on_splash(self, text: str, kind: NoticeKind) -> None:
         """Hold ``text`` on the splash and raise a toast for it.
