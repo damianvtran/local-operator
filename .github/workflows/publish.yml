@@ -39,8 +39,10 @@ jobs:
           # The phone UI ships inside the wheel; build it before python -m build
           # so setuptools package-data picks up local_operator/mobile/web/dist.
           corepack enable
-          corepack prepare pnpm@latest --activate
+          # packageManager in local_operator/mobile/web/package.json pins the
+          # exact pnpm; corepack reads it, so no floating @latest here.
           cd local_operator/mobile/web
+          corepack install
           pnpm install --frozen-lockfile
           pnpm build
 
@@ -49,6 +51,12 @@ jobs:
         run: |
           python -m pip install build
           python -m build
+          # Fail the release loudly if the phone bundle regressed out of the
+          # wheel — a green build that ships UI-less is worse than no build.
+          unzip -l dist/local_operator-*.whl | grep -q "local_operator/mobile/web/dist/index.html" || {
+            echo "::error::mobile web bundle missing from the wheel"
+            exit 1
+          }
 
       - name: Upload distributions
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
