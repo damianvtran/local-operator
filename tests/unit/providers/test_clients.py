@@ -2393,3 +2393,114 @@ class TestRefusalsAreSurfacedNotSwallowed:
         assert end.error is not None
         assert "cut the reply short" in end.error
         assert "sent no message" not in end.error
+# Empty assistant turns (errored/aborted model turns) must not reach the wire
+# ---------------------------------------------------------------------------
+
+
+def _empty_assistant() -> Message:
+    """The message an errored model turn persists: no text, no tool calls.
+
+    `harness/loop.py` appends the assistant message to the context BEFORE the
+    stream finishes; a stream that dies without a single token leaves exactly
+    this shape in the transcript, and every later request replays it.
+    """
+    return Message(role="assistant", content=[], stop_reason="error")
+
+
+def test_openai_chat_drops_empty_assistant_turns() -> None:
+    """Moonshot/Kimi rejects the whole request over ONE empty assistant turn:
+    HTTP 400 "the message at position N with role 'assistant' must not be
+    empty" (observed live, 2026-08-19). The turn carries no information, so it
+    is dropped at body-build time — which also repairs existing transcripts
+    that already contain one."""
+    request = ChatRequest(
+        model=_spec(),
+        messages=[Message.user("hi"), _empty_assistant(), Message.user("continue")],
+    )
+    body = OpenAICompatClient("https://x")._build_body(request)
+    roles = [m["role"] for m in body["messages"]]
+    assert roles == ["user", "user"]
+
+
+def test_openai_chat_drops_whitespace_only_assistant_turns() -> None:
+    """Whitespace renders to content a strict provider may still reject, and
+    a model cannot read anything from it — same drop as truly empty."""
+    request = ChatRequest(
+        model=_spec(),
+        messages=[
+            Message.user("hi"),
+            Message(role="assistant", content=[TextContent(text="  \n")]),
+        ],
+    )
+    body = OpenAICompatClient("https://x")._build_body(request)
+    assert [m["role"] for m in body["messages"]] == ["user"]
+
+
+def test_openai_chat_keeps_assistant_turns_with_tool_calls_or_content() -> None:
+    """The drop must be surgical: a tool-call-only assistant turn is NOT empty
+    (the calls are the content, and a paired tool message references them), and
+    normal text turns pass through untouched."""
+    tool_turn = _assistant_with([ToolCall(id="t1", name="x", arguments={})])
+    request = ChatRequest(
+        model=_spec(),
+        messages=[
+            Message.user("hi"),
+            tool_turn,
+            Message(role="tool", tool_call_id="t1", content=[TextContent(text="done")]),
+            Message.assistant("all set"),
+        ],
+    )
+    body = OpenAICompatClient("https://x")._build_body(request)
+    roles = [m["role"] for m in body["messages"]]
+    assert roles == ["user", "assistant", "tool", "assistant"]
+
+
+def test_openai_responses_drops_empty_assistant_turns() -> None:
+    """Same normalization on the Responses route: an errored turn's empty
+    assistant message must not become an empty output_text item."""
+    from local_operator.providers.clients import _messages_to_openai_responses
+
+    items = _messages_to_openai_responses(
+        [Message.user("hi"), _empty_assistant(), Message.user("continue")]
+    )
+    assert [i.get("role") for i in items] == ["user", "user"]
+
+
+def test_anthropic_drops_empty_assistant_turns() -> None:
+    """Anthropic 400s on an assistant message with an empty content array —
+    the exact serialization of an errored model turn."""
+    request = ChatRequest(
+        model=_spec(provider="anthropic", model_id="claude-sonnet-4-5"),
+        messages=[Message.user("hi"), _empty_assistant(), Message.user("continue")],
+    )
+    body = AnthropicClient()._build_body(request)
+    assert [m["role"] for m in body["messages"]] == ["user", "user"]
+
+
+def test_google_drops_whitespace_only_assistant_turns() -> None:
+    """Google's builder already skipped no-part assistant turns; the shared
+    predicate extends that to whitespace-only text so all three clients agree
+    on what an empty assistant turn is."""
+    request = ChatRequest(
+        model=_spec(provider="google", model_id="gemini-2.0-flash"),
+        messages=[
+            Message.user("hi"),
+            Message(role="assistant", content=[TextContent(text=" ")]),
+            _empty_assistant(),
+        ],
+    )
+    body = GoogleClient()._build_body(request)
+    assert [c["role"] for c in body["contents"]] == ["user"]
+
+
+def test_empty_assistant_with_image_content_is_kept() -> None:
+    """An image block is content even with no text: dropping it would lose
+    information. (No current model emits assistant images, but the predicate
+    must not assume that.)"""
+    from local_operator.providers.clients import _is_empty_assistant
+
+    message = Message(
+        role="assistant",
+        content=[ImageContent(data="Zm9v", mime_type="image/png")],
+    )
+    assert not _is_empty_assistant(message)

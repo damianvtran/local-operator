@@ -488,6 +488,43 @@ def _replayable_tool_arguments_json(call: ToolCall) -> str:
     return json.dumps(_replayable_tool_arguments(call))
 
 
+def _is_empty_assistant(message: Message) -> bool:
+    """Is ``message`` an assistant turn with nothing on it a provider accepts?
+
+    The harness persists an assistant message for EVERY model turn, including
+    turns that died before producing a single token — an errored stream, an
+    abort during thinking, a rate-limited request (``harness/loop.py`` appends
+    the message and then sets ``stop_reason="error"/"aborted"``). Replayed
+    verbatim, that turn serializes as an assistant message with empty content,
+    and strict OpenAI-compatible providers reject the whole request: Moonshot/
+    Kimi answers HTTP 400 "the message at position N with role 'assistant'
+    must not be empty" (observed live 2026-08-19 switching a session from Qwen,
+    which tolerates the empty turn, to Kimi, which does not). Anthropic
+    likewise 400s on an empty content array.
+
+    So every wire client drops these turns at body-build time — the same
+    boundary where empty TOOL results are already backfilled (see
+    ``EMPTY_TOOL_RESULT_TEXT``). Dropped rather than backfilled because a
+    backfill would put words in the assistant's mouth that it never said, and
+    the turn carries zero information: no text, no images, and — decisive for
+    wire legality — no tool calls, so nothing downstream (a tool message, an
+    Anthropic ``tool_result`` pairing) references it. Fixing the render rather
+    than the transcript also repairs every EXISTING session that already
+    carries such a turn, which is the actual failure mode: the 400 appears
+    hundreds of messages deep, long after the errored turn was written.
+
+    Whitespace-only text counts as empty: it renders to content a strict
+    provider may still reject, and dropping it loses nothing a model could
+    read. Assistant turns with tool calls are NEVER empty in this sense —
+    the calls are the content.
+    """
+    if message.role != "assistant" or message.tool_calls:
+        return False
+    if any(isinstance(block, ImageContent) for block in message.content):
+        return False
+    return not message.text.strip()
+
+
 def _message_to_openai(message: Message) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
@@ -561,6 +598,10 @@ def _messages_to_openai_responses(messages: Sequence[Message]) -> list[dict[str,
     """Render harness history as Responses input items, including tool turns."""
     items: list[dict[str, Any]] = []
     for message in messages:
+        # Same normalization as chat/completions: an errored/aborted turn's
+        # empty assistant message is dead weight a strict provider rejects.
+        if _is_empty_assistant(message):
+            continue
         if message.role == "assistant" and message.tool_calls:
             if message.text:
                 items.append({"role": "assistant", "content": message.text})
@@ -849,7 +890,10 @@ class OpenAICompatClient:
     def _build_body(self, request: ChatRequest) -> dict[str, Any]:
         messages = [
             *self._system_messages(request),
-            *[_message_to_openai(m) for m in request.messages],
+            # Empty assistant turns (errored/aborted model turns the harness
+            # persists) are dropped, not sent: Moonshot/Kimi 400s on them.
+            # See `_is_empty_assistant`.
+            *[_message_to_openai(m) for m in request.messages if not _is_empty_assistant(m)],
         ]
         if request.model.supports_prompt_cache:
             self._message_cache_markers(messages)
@@ -1521,6 +1565,12 @@ class AnthropicClient:
     def _build_body(self, request: ChatRequest, *, oauth: bool = False) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
         for message in request.messages:
+            # Anthropic 400s on an assistant message whose content array is
+            # empty, which is exactly what an errored/aborted model turn
+            # replays as. Same drop as the OpenAI paths; see
+            # `_is_empty_assistant`.
+            if _is_empty_assistant(message):
+                continue
             if message.role == "assistant" and message.tool_calls:
                 content = self._message_blocks(message)
                 content.extend(
@@ -1737,6 +1787,13 @@ class GoogleClient:
     def _build_body(self, request: ChatRequest) -> dict[str, Any]:
         contents: list[dict[str, Any]] = []
         for message in request.messages:
+            # The `if parts or ...` guard below already skips an assistant
+            # turn with NO parts, but a whitespace-only text still renders
+            # one. Route through the shared predicate so all three clients
+            # agree on what an empty assistant turn is; see
+            # `_is_empty_assistant`.
+            if _is_empty_assistant(message):
+                continue
             role = "user" if message.role == "user" else "model"
             parts: list[dict[str, Any]] = [{"text": message.text}] if message.text else []
             for block in message.content:
